@@ -8,24 +8,23 @@ mod ppu;
 mod timer;
 
 use emulator::Emulator;
-use sdl2::audio::AudioSpecDesired;
-use sdl2::event::Event;
-use sdl2::keyboard::{Keycode, Scancode};
-use sdl2::pixels::PixelFormatEnum;
+use sdl3::audio::{AudioFormat, AudioSpec};
+use sdl3::event::Event;
+use sdl3::keyboard::{Keycode, Scancode};
+use sdl3::pixels::PixelFormat;
 use std::env;
 use std::fs;
 use std::time::{Duration, Instant};
 
-/// Display scale factor (160×144 → 480×432).
 const SCALE: u32 = 3;
 const WIDTH: u32 = 160 * SCALE;
 const HEIGHT: u32 = 144 * SCALE;
 /// Target frame time for ~59.73 fps.
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
 
-const AUDIO_SAMPLE_RATE: i32 = 44_100;
+const AUDIO_SAMPLE_RATE: u32 = 44_100;
 /// Max queued audio bytes before we stop pushing (~100 ms of stereo f32).
-const MAX_QUEUED_BYTES: u32 = (AUDIO_SAMPLE_RATE as u32 / 10) * 2 * 4;
+const MAX_QUEUED_BYTES: u32 = (AUDIO_SAMPLE_RATE / 10) * 2 * 4;
 
 fn main() {
     env_logger::init();
@@ -43,8 +42,8 @@ fn main() {
 
     let mut emu = Emulator::new(rom);
 
-    // ── SDL2 setup ────────────────────────────────────────────────────────────
-    let sdl = sdl2::init().unwrap();
+    // ── SDL3 init ─────────────────────────────────────────────────────────────
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let audio = sdl.audio().unwrap();
 
@@ -55,25 +54,23 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut canvas = window.into_canvas().accelerated().build().unwrap();
+    let mut canvas = window.into_canvas();
     let texture_creator = canvas.texture_creator();
 
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::ARGB8888, 160, 144)
+        .create_texture_streaming(PixelFormat::ARGB8888, 160, 144)
         .unwrap();
 
     let mut event_pump = sdl.event_pump().unwrap();
 
     // ── Audio ─────────────────────────────────────────────────────────────────
-    let audio_spec = AudioSpecDesired {
-        freq:     Some(AUDIO_SAMPLE_RATE),
-        channels: Some(2),    // stereo
-        samples:  Some(1024), // device buffer size (SDL internal)
+    let spec = AudioSpec {
+        freq:     Some(AUDIO_SAMPLE_RATE as i32),
+        channels: Some(2),
+        format:   Some(AudioFormat::F32LE),
     };
-    let audio_queue = audio
-        .open_queue::<f32, _>(None, &audio_spec)
-        .unwrap();
-    audio_queue.resume();
+    let audio_stream = audio.new_playback_stream(&spec, None).unwrap();
+    audio_stream.resume().unwrap();
 
     let mut frame_start = Instant::now();
 
@@ -93,18 +90,15 @@ fn main() {
         // ── Emulate one frame ─────────────────────────────────────────────────
         emu.step_frame();
 
-        // ── Audio: push samples if queue isn't too far ahead ─────────────────
-        if audio_queue.size() < MAX_QUEUED_BYTES {
-            let samples = emu.bus.apu.drain_samples();
-            if !samples.is_empty() {
-                let _ = audio_queue.queue_audio(&samples);
+        // ── Audio ─────────────────────────────────────────────────────────────
+        let samples = emu.bus.apu.drain_samples();
+        if !samples.is_empty() {
+            if audio_stream.queued_bytes().unwrap_or(0) < MAX_QUEUED_BYTES as i32 {
+                let _ = audio_stream.put_data_f32(&samples);
             }
-        } else {
-            // Discard this frame's samples to prevent latency buildup
-            let _ = emu.bus.apu.drain_samples();
         }
 
-        // ── Upload frame buffer to texture ────────────────────────────────────
+        // ── Render ────────────────────────────────────────────────────────────
         let src = emu.frame_buffer();
         texture
             .with_lock(None, |pixels: &mut [u8], pitch: usize| {
@@ -134,7 +128,7 @@ fn main() {
     }
 }
 
-fn handle_input(emu: &mut Emulator, ks: &sdl2::keyboard::KeyboardState) {
+fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {
     let map: &[(Scancode, u8)] = &[
         (Scancode::Z,      Emulator::BTN_A),
         (Scancode::X,      Emulator::BTN_B),

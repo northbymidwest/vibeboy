@@ -8,6 +8,6 @@ name = "gbcemu"
 path = "src/main.rs"
 
 [dependencies]
-sdl2 = "0.37"
+sdl3 = "0.17"
 log = "0.4"
 env_logger = "0.11"
