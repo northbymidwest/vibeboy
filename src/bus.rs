@@ -84,6 +84,8 @@ pub struct Bus {
     /// Serial registers (stub)
     sb: u8,
     sc: u8,
+    /// Buffer of serial output bytes (for test ROM detection)
+    pub serial_output: Vec<u8>,
 
     /// KEY1 — speed switch (0xFF4D)
     pub key1: u8,
@@ -146,6 +148,7 @@ impl Bus {
             ie: 0x00,
             sb: 0x00,
             sc: 0x7E,
+            serial_output: Vec::new(),
             key1: 0x00,
             double_speed: false,
             oam_dma: OamDma::new(),
@@ -316,6 +319,7 @@ impl Bus {
                 self.sc = val;
                 // Serial transfer start (bit7=1): print byte to stdout for test ROMs
                 if val & 0x80 != 0 {
+                    self.serial_output.push(self.sb);
                     print!("{}", self.sb as char);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
@@ -459,23 +463,26 @@ impl Bus {
         // Capture blocking state BEFORE advancing DMA so CPU accesses in this M-cycle
         // see the correct blocking state (e.g. last DMA copy still blocks OAM).
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
-        let cycles = if self.double_speed { 2 } else { 4 };
-        self.tick(cycles);
+        // Timer is clocked by the CPU, so always 4 T-cycles per M-cycle.
+        // PPU/APU run at fixed 4MHz, so 2 T-cycles per M-cycle in double-speed.
+        let bus_cycles = if self.double_speed { 2 } else { 4 };
+        self.tick(4, bus_cycles);
         self.step_oam_dma();
     }
 
-    /// Advance all bus components by `cycles` T-cycles (at normal 4MHz rate).
-    pub fn tick(&mut self, cycles: u32) {
-        self.timer.step(cycles);
+    /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
+    /// `bus_cycles` is 4MHz-rate T-cycles (4 normal, 2 double-speed).
+    pub fn tick(&mut self, timer_cycles: u32, bus_cycles: u32) {
+        self.timer.step(timer_cycles);
         if self.timer.interrupt {
             self.if_ |= 0x04;
             self.timer.clear_interrupt();
         }
 
-        let ppu_flags = self.ppu.step(cycles);
+        let ppu_flags = self.ppu.step(bus_cycles);
         self.if_ |= ppu_flags;
 
-        self.apu.step(cycles);
+        self.apu.step(bus_cycles);
 
         if self.joypad.interrupt {
             self.if_ |= 0x10;

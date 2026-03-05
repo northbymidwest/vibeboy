@@ -16,7 +16,7 @@ fn mooneye_passed(regs: [u8; 6]) -> bool {
     regs == [3, 5, 8, 13, 21, 34]
 }
 
-fn run_test(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static str {
+fn run_test_mooneye(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static str {
     let rom = match fs::read(path) {
         Ok(r) => r,
         Err(_) => return "ERR",
@@ -38,15 +38,38 @@ fn run_test(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static 
     }
 }
 
+fn run_test_blargg(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static str {
+    let rom = match fs::read(path) {
+        Ok(r) => r,
+        Err(_) => return "ERR",
+    };
+    let mut emu = Emulator::new(rom, boot_rom.clone(), None);
+    let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
+    if verbose && !output.is_empty() {
+        // Print serial output indented
+        for line in output.lines() {
+            eprintln!("  {}", line);
+        }
+    }
+    if output.contains("Passed") {
+        "PASS"
+    } else if output.contains("Failed") {
+        "FAIL"
+    } else {
+        "TIMEOUT"
+    }
+}
+
 fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: test_runner <dir_or_glob> [--boot-rom <path>]");
+        eprintln!("Usage: test_runner <dir_or_glob> [--boot-rom <path>] [--blargg]");
         std::process::exit(1);
     }
 
     let root = Path::new(&args[1]);
+    let blargg_mode = args.iter().any(|a| a == "--blargg");
 
     // Parse optional --boot-rom argument
     let boot_rom = if let Some(pos) = args.iter().position(|a| a == "--boot-rom") {
@@ -63,13 +86,20 @@ fn main() {
     if boot_rom.is_some() {
         eprintln!("Using GBC boot ROM");
     }
+    if blargg_mode {
+        eprintln!("Blargg mode (serial output detection)");
+    }
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut timeout = 0usize;
 
     for rom in &roms {
-        let result = run_test(rom, true, &boot_rom);
+        let result = if blargg_mode {
+            run_test_blargg(rom, true, &boot_rom)
+        } else {
+            run_test_mooneye(rom, true, &boot_rom)
+        };
         let label = rom.strip_prefix(root).unwrap_or(rom).display().to_string();
         println!("{:<12} {}", result, label);
         match result {
@@ -86,7 +116,8 @@ fn main() {
 
 fn collect_roms(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     if dir.is_file() {
-        if dir.extension().and_then(|e| e.to_str()) == Some("gb") {
+        let ext = dir.extension().and_then(|e| e.to_str());
+        if ext == Some("gb") || ext == Some("gbc") {
             out.push(dir.to_path_buf());
         }
         return;

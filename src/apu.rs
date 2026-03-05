@@ -512,9 +512,10 @@ impl Apu {
             0xFF13 => self.ch1.freq = (self.ch1.freq & 0x700) | val as u16,
             0xFF14 => {
                 self.ch1.freq = (self.ch1.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                let was_enabled = self.ch1.len_enable;
                 self.ch1.len_enable = val & 0x40 != 0;
-                // Extra length clock when enabling length on odd fs step
-                if val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                // Extra length clock on 0→1 transition of length enable on odd fs step
+                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
                     self.ch1.clock_length();
                 }
                 if val & 0x80 != 0 {
@@ -536,8 +537,9 @@ impl Apu {
             0xFF18 => self.ch2.freq = (self.ch2.freq & 0x700) | val as u16,
             0xFF19 => {
                 self.ch2.freq = (self.ch2.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                let was_enabled = self.ch2.len_enable;
                 self.ch2.len_enable = val & 0x40 != 0;
-                if val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
                     self.ch2.clock_length();
                 }
                 if val & 0x80 != 0 {
@@ -554,8 +556,9 @@ impl Apu {
             0xFF1D => self.ch3.freq = (self.ch3.freq & 0x700) | val as u16,
             0xFF1E => {
                 self.ch3.freq = (self.ch3.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                let was_enabled = self.ch3.len_enable;
                 self.ch3.len_enable = val & 0x40 != 0;
-                if val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
                     self.ch3.clock_length();
                 }
                 if val & 0x80 != 0 && self.ch3.dac_on {
@@ -577,8 +580,9 @@ impl Apu {
                 self.ch4.divisor_code = val & 0x07;
             }
             0xFF23 => {
+                let was_enabled = self.ch4.len_enable;
                 self.ch4.len_enable = val & 0x40 != 0;
-                if val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
                     self.ch4.clock_length();
                 }
                 if val & 0x80 != 0 && self.ch4.dac_on {

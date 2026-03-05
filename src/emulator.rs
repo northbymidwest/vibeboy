@@ -68,6 +68,38 @@ impl Emulator {
         }
     }
 
+    /// Run until serial output contains "Passed" or "Failed", or the Blargg
+    /// done loop (JR -2) is hit, or max_frames elapse.
+    /// Returns the serial output as a string.
+    pub fn run_until_serial_result(&mut self, max_frames: u32) -> String {
+        let cycles_per_frame = 70_224u32;
+        let mut cycles = 0u32;
+        let limit = cycles_per_frame * max_frames;
+        loop {
+            let pc = self.cpu.regs.pc;
+            self.cpu.step(&mut self.bus);
+            cycles += 4;
+
+            // Detect Blargg done loop: JR -2 (opcode 18 FE)
+            if self.bus.read_byte(pc) == 0x18 && self.bus.read_byte(pc.wrapping_add(1)) == 0xFE {
+                let result = self.bus.read_byte(0xA000);
+                if result == 0 {
+                    return "Passed".to_string();
+                } else {
+                    return format!("Failed #{}", result);
+                }
+            }
+
+            // Check serial output periodically
+            if cycles % 1024 == 0 || cycles >= limit {
+                let output = String::from_utf8_lossy(&self.bus.serial_output);
+                if output.contains("Passed") || output.contains("Failed") || cycles >= limit {
+                    return output.into_owned();
+                }
+            }
+        }
+    }
+
     /// Return the current frame buffer (160 × 144 pixels, 0x00RRGGBB).
     pub fn frame_buffer(&self) -> &[u32] {
         self.bus.ppu.frame_buffer()
