@@ -5,6 +5,7 @@ use crate::joypad::{
 };
 use crate::model::GbModel;
 use crate::sgb::Sgb;
+use crate::snes::SnesSys;
 use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
@@ -18,13 +19,21 @@ pub struct Emulator {
     border_buffer: Vec<u32>,
     /// Composited output buffer (256×224) for SGB
     sgb_output: Vec<u32>,
+    /// SNES subsystem for SGB LLE (None = HLE fallback)
+    snes: Option<SnesSys>,
 }
 
 impl Emulator {
     /// Create a new emulator. If `boot_rom` is Some, the CPU starts at PC=0x0000
     /// with hardware reset registers and executes the boot ROM. Otherwise the CPU
     /// starts at PC=0x0100 with post-boot register values for the given model.
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>, model: GbModel) -> Self {
+    pub fn new(
+        rom: Vec<u8>,
+        boot_rom: Option<Vec<u8>>,
+        rom_path: Option<&Path>,
+        model: GbModel,
+        snes_rom: Option<Vec<u8>>,
+    ) -> Self {
         let has_boot = boot_rom.is_some();
         let mut cpu = Cpu::new();
         if has_boot {
@@ -32,12 +41,27 @@ impl Emulator {
         } else {
             cpu.regs = Registers::post_boot(model);
         }
+        let mut bus = Bus::new(rom, boot_rom, rom_path, model);
+
+        // Enable LLE mode if we have a SNES program ROM
+        let snes = if model.is_sgb() && snes_rom.is_some() {
+            if let Some(ref mut sgb) = bus.sgb {
+                sgb.lle_mode = true;
+            }
+            let snes_sys = SnesSys::new(snes_rom.unwrap());
+            log::info!("SGB LLE: SNES CPU active (PC=${:04X})", snes_sys.cpu.pc);
+            Some(snes_sys)
+        } else {
+            None
+        };
+
         Emulator {
             cpu,
-            bus: Bus::new(rom, boot_rom, rom_path, model),
+            bus,
             model,
             border_buffer: vec![0u32; 256 * 224],
             sgb_output: vec![0u32; 256 * 224],
+            snes,
         }
     }
 
@@ -55,10 +79,76 @@ impl Emulator {
 
         // SGB post-processing
         if self.model.is_sgb() {
-            self.bus.apply_sgb_palettes();
-            self.bus.check_sgb_transfer();
-            self.bus.capture_sgb_freeze();
+            if self.snes.is_some() {
+                self.step_snes_frame();
+            } else {
+                self.bus.apply_sgb_palettes();
+                self.bus.check_sgb_transfer();
+                self.bus.capture_sgb_freeze();
+            }
         }
+    }
+
+    /// Run the SNES subsystem for one frame (LLE mode).
+    fn step_snes_frame(&mut self) {
+        let snes = self.snes.as_mut().unwrap();
+
+        // 1. Feed any pending SGB packet to SNES
+        if let Some(ref sgb) = self.bus.sgb {
+            if let Some(pkt) = sgb.pending_packet {
+                snes.feed_packet(&pkt);
+            }
+        }
+        if let Some(ref mut sgb) = self.bus.sgb {
+            sgb.pending_packet = None;
+        }
+
+        // 2. Feed shade buffer (GB LCD output) to SNES ICD2
+        snes.feed_scanlines(&self.bus.ppu.shade_buffer);
+
+        // 3. Run SNES CPU for one frame
+        snes.run_frame();
+
+        // 4. Extract palettes from SNES CGRAM and update SGB state
+        let lle_palettes = snes.extract_palettes();
+        // Check if SNES has non-zero palettes before overwriting
+        let has_pal_data = lle_palettes.iter().any(|p| p.iter().any(|&c| c != 0));
+        if has_pal_data {
+            if let Some(ref mut sgb) = self.bus.sgb {
+                sgb.palettes = lle_palettes;
+            }
+        }
+
+        // 5. Extract attribute map from SNES VRAM tilemap
+        if let Some(attr_map) = snes.extract_attr_map() {
+            // Only update if there's variation (not all zeros)
+            let has_variation = attr_map.iter().any(|row| row.iter().any(|&v| v != 0));
+            if has_variation {
+                if let Some(ref mut sgb) = self.bus.sgb {
+                    sgb.attr_map = attr_map;
+                }
+            }
+        }
+
+        // 6. Extract border data from SNES VRAM/CGRAM
+        let (tiles, tilemap, border_pals) = snes.extract_border();
+        let has_border = tiles.iter().any(|&b| b != 0);
+        if has_border {
+            if let Some(ref mut sgb) = self.bus.sgb {
+                let len = std::cmp::min(tiles.len(), sgb.border_tiles.len());
+                sgb.border_tiles[..len].copy_from_slice(&tiles[..len]);
+                let mlen = std::cmp::min(tilemap.len(), sgb.border_map.len());
+                sgb.border_map[..mlen].copy_from_slice(&tilemap[..mlen]);
+                sgb.border_palettes = border_pals;
+                sgb.border_dirty = true;
+            }
+        }
+
+        // 7. Apply palettes and handle masking (same as HLE path)
+        self.bus.apply_sgb_palettes();
+        // Also handle VRAM transfers for compatibility
+        self.bus.check_sgb_transfer();
+        self.bus.capture_sgb_freeze();
     }
 
     /// Execute one CPU instruction and advance bus components.

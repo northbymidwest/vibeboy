@@ -7,6 +7,7 @@ mod joypad;
 mod model;
 mod ppu;
 mod sgb;
+mod snes;
 mod timer;
 
 use emulator::Emulator;
@@ -49,7 +50,7 @@ fn run_test_mooneye(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &
     let model = detect_model(path);
     // Only use boot ROM for CGB tests; non-CGB tests use post_boot() state
     let br = if model.is_cgb() { boot_rom.clone() } else { None };
-    let mut emu = Emulator::new(rom, br, None, model);
+    let mut emu = Emulator::new(rom, br, None, model, None);
     match emu.run_until_breakpoint(300) {
         Some(regs) => {
             if mooneye_passed(regs) {
@@ -73,7 +74,7 @@ fn run_test_blargg(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'
     };
     let model = detect_model(path);
     let br = if model.is_cgb() { boot_rom.clone() } else { None };
-    let mut emu = Emulator::new(rom, br, None, model);
+    let mut emu = Emulator::new(rom, br, None, model, None);
     let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
     if verbose && !output.is_empty() {
         // Print serial output indented

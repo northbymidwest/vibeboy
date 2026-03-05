@@ -32,6 +32,12 @@ pub struct Sgb {
     /// Packets received so far
     packets_received: u8,
 
+    /// LLE mode: when true, packets are relayed to the SNES CPU instead of
+    /// being processed by the HLE command handlers.
+    pub lle_mode: bool,
+    /// Pending packet to relay to the SNES subsystem (set by finish_packet in LLE mode).
+    pub pending_packet: Option<[u8; 16]>,
+
     // ── Palettes ──
     /// 4 active SGB palettes (RGB555), color 0 is shared across all
     pub palettes: [[u16; 4]; 4],
@@ -87,6 +93,9 @@ impl Sgb {
             current_byte: 0,
             expected_packets: 0,
             packets_received: 0,
+
+            lle_mode: false,
+            pending_packet: None,
 
             palettes: [DEFAULT_PALETTE; 4],
 
@@ -214,7 +223,18 @@ impl Sgb {
         self.packets_received += 1;
 
         if self.packets_received >= self.expected_packets {
-            self.execute_command();
+            if self.lle_mode {
+                // In LLE mode, relay the first packet to the SNES subsystem.
+                // The SNES BIOS handles multi-packet commands internally.
+                let mut pkt = [0u8; 16];
+                let len = std::cmp::min(16, self.packet_buf.len());
+                pkt[..len].copy_from_slice(&self.packet_buf[..len]);
+                self.pending_packet = Some(pkt);
+                // Also run HLE for palette/mask commands to keep SGB state in sync
+                self.execute_command();
+            } else {
+                self.execute_command();
+            }
             self.packets_received = 0;
             self.expected_packets = 0;
             self.packet_buf.clear();
@@ -231,7 +251,7 @@ impl Sgb {
             return;
         }
         let cmd = (self.packet_buf[0] >> 3) & 0x1F;
-        log::debug!("SGB command 0x{:02X} ({} packets, {} bytes)", cmd, self.expected_packets, self.packet_buf.len());
+        log::trace!("SGB command 0x{:02X} ({} packets, {} bytes)", cmd, self.expected_packets, self.packet_buf.len());
 
         if cmd > 0x17 {
             // Invalid command — likely false positive from joypad polling
@@ -258,7 +278,6 @@ impl Sgb {
             0x08 | 0x09 | 0x0C | 0x0D | 0x0E | 0x0F | 0x19 => {
                 // OBJ_TRN, ICON_EN, ATRC_EN, TEST_EN, ICON_TRN, DATA_SND, SOUND
                 // These commands control SNES-side features we don't emulate
-                log::trace!("SGB: ignored command 0x{:02X}", cmd);
             }
             _ => {
                 log::debug!("SGB: unhandled command 0x{:02X}", cmd);
@@ -276,10 +295,6 @@ impl Sgb {
     /// PAL01: Set palettes 0 and 1
     fn cmd_pal01(&mut self) {
         let color0 = self.read_color(1);
-        log::debug!("SGB PAL01: color0={:04X} p0=[{:04X},{:04X},{:04X},{:04X}] p1=[{:04X},{:04X},{:04X},{:04X}]",
-            color0,
-            color0, self.read_color(3), self.read_color(5), self.read_color(7),
-            color0, self.read_color(9), self.read_color(11), self.read_color(13));
         self.palettes[0][0] = color0;
         self.palettes[0][1] = self.read_color(3);
         self.palettes[0][2] = self.read_color(5);

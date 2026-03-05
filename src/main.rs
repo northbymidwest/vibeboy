@@ -7,6 +7,7 @@ mod joypad;
 mod model;
 mod ppu;
 mod sgb;
+mod snes;
 mod timer;
 
 use clap::Parser;
@@ -41,6 +42,10 @@ struct Cli {
     /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc
     #[arg(long, default_value = "auto")]
     model: String,
+
+    /// Path to SNES program ROM for SGB LLE (auto-detected if not specified)
+    #[arg(long)]
+    snes_rom: Option<PathBuf>,
 }
 
 fn main() {
@@ -83,7 +88,30 @@ fn main() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
     }
 
-    let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model);
+    // Load SNES program ROM for SGB LLE
+    let snes_rom: Option<Vec<u8>> = if model.is_sgb() {
+        if let Some(ref p) = cli.snes_rom {
+            Some(fs::read(p).unwrap_or_else(|e| {
+                eprintln!("Failed to read SNES ROM '{}': {}", p.display(), e);
+                std::process::exit(1);
+            }))
+        } else {
+            // Auto-detect: try sgb1.program.rom, sgb2.program.rom, sgb.sfc, sgb2.sfc
+            let candidates = match model {
+                GbModel::Sgb2 => vec!["sgb2.program.rom", "sgb2.sfc"],
+                _ => vec!["sgb1.program.rom", "sgb.sfc"],
+            };
+            candidates.iter().find_map(|name| fs::read(name).ok())
+        }
+    } else {
+        None
+    };
+
+    if snes_rom.is_some() {
+        eprintln!("SNES program ROM loaded — SGB LLE mode active.");
+    }
+
+    let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model, snes_rom);
 
     let is_sgb = emu.is_sgb();
     let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
