@@ -3,6 +3,7 @@ use crate::cartridge::{make_cartridge, Cartridge};
 use crate::joypad::Joypad;
 use crate::model::GbModel;
 use crate::ppu::Ppu;
+use crate::sgb::Sgb;
 use crate::timer::Timer;
 
 use std::path::{Path, PathBuf};
@@ -106,6 +107,9 @@ pub struct Bus {
 
     /// Hardware model (DMG, CGB, etc.)
     model: GbModel,
+
+    /// SGB command processor (only present for SGB/SGB2 models)
+    pub sgb: Option<Sgb>,
 }
 
 impl Bus {
@@ -114,6 +118,10 @@ impl Bus {
 
         let mut ppu = Ppu::new();
         ppu.cgb_mode = model.is_cgb();
+        ppu.sgb_mode = model.is_sgb();
+        if model.is_sgb() {
+            ppu.cgb_mode = false;
+        }
         if boot_rom_active {
             ppu.reset();
         }
@@ -175,6 +183,15 @@ impl Bus {
             boot_rom_active,
             save_path,
             model,
+            sgb: if model.is_sgb() {
+                let mut sgb = Sgb::new();
+                if !boot_rom_active {
+                    sgb.protocol_active = true;
+                }
+                Some(sgb)
+            } else {
+                None
+            },
         }
     }
 
@@ -301,7 +318,18 @@ impl Bus {
 
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
-            0xFF00 => self.joypad.read(),
+            0xFF00 => {
+                if let Some(ref sgb) = self.sgb {
+                    if sgb.player_count > 1 {
+                        // When both select lines high, return player ID
+                        let p1_select = self.joypad.read() & 0x30;
+                        if p1_select == 0x30 {
+                            return 0xC0 | 0x30 | sgb.read_p1_id();
+                        }
+                    }
+                }
+                self.joypad.read()
+            }
             0xFF01 => self.sb,
             0xFF02 => self.sc | 0x7E,
             0xFF03 => 0xFF,
@@ -347,7 +375,12 @@ impl Bus {
 
     fn write_io(&mut self, addr: u16, val: u8) {
         match addr {
-            0xFF00 => self.joypad.write(val),
+            0xFF00 => {
+                self.joypad.write(val);
+                if let Some(ref mut sgb) = self.sgb {
+                    sgb.write_p1(val);
+                }
+            }
             0xFF01 => self.sb = val,
             0xFF02 => {
                 self.sc = val;
@@ -394,6 +427,10 @@ impl Bus {
                 // Writing any non-zero value permanently disables the boot ROM.
                 if val != 0 {
                     self.boot_rom_active = false;
+                    // Activate SGB protocol now that boot ROM is done
+                    if let Some(ref mut sgb) = self.sgb {
+                        sgb.protocol_active = true;
+                    }
                     // Detect DMG compat: CGB hardware running DMG game
                     let cgb_flag = self.cart.read_rom(0x0143);
                     if self.model.is_cgb() && cgb_flag != 0x80 && cgb_flag != 0xC0 {
@@ -562,5 +599,96 @@ impl Bus {
 
     pub fn clear_frame_ready(&mut self) {
         self.ppu.frame_ready = false;
+    }
+
+    // ── SGB ──────────────────────────────────────────────────────────────────
+
+    /// Apply SGB palettes to the frame buffer using the shade buffer.
+    /// Call after PPU renders a complete frame.
+    pub fn apply_sgb_palettes(&mut self) {
+        if let Some(ref sgb) = self.sgb {
+            match sgb.mask_mode {
+                0 => {
+                    // Normal: remap using shade buffer
+                    sgb.apply_palettes(&self.ppu.shade_buffer, &mut self.ppu.frame_buffer);
+                }
+                1 => {
+                    // Freeze: show frozen buffer
+                    // (frozen_buffer captured at mask time — nothing to do here,
+                    //  the emulator will use frozen_buffer directly)
+                }
+                2 => {
+                    // Black screen
+                    for p in self.ppu.frame_buffer.iter_mut() {
+                        *p = 0x00000000;
+                    }
+                }
+                3 => {
+                    // Color 0 of palette 0
+                    let c = Sgb::rgb555_to_rgb32(sgb.palettes[0][0]);
+                    for p in self.ppu.frame_buffer.iter_mut() {
+                        *p = c;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Check for pending SGB VRAM transfers and execute them.
+    /// Call after each frame.
+    pub fn check_sgb_transfer(&mut self) {
+        let has_transfer = self.sgb.as_ref().map_or(false, |s: &Sgb| s.has_pending_transfer());
+        if !has_transfer { return; }
+
+        // SGB VRAM transfers: the game writes 4KB of data as tiles at 0x8000-0x8FFF,
+        // sets up tilemap with tiles 0x00-0xFF in order, then sends the TRN command.
+        // The SGB SNES reads the screen output and reconstructs the data.
+        //
+        // We emulate this by reading the tilemap at 0x9800 and looking up each tile's
+        // data to reconstruct the linear 4096-byte stream, just like the real SGB hardware.
+        let lcdc = self.ppu.read(0xFF40);
+        let tile_data_base: usize = if lcdc & 0x10 != 0 { 0x0000 } else { 0x0800 };
+        let tile_map_base: usize = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
+        let signed_addr = lcdc & 0x10 == 0;
+
+        let mut vram_data = vec![0u8; 4096];
+        // Read 256 tiles (20 per row × 13 rows = 260 tiles, but we only need 256)
+        // from the tilemap and reconstruct the linear data
+        for tile_idx in 0..256usize {
+            let map_x = tile_idx % 20;
+            let map_y = tile_idx / 20;
+            let map_addr = tile_map_base + map_y * 32 + map_x;
+            let raw_tile = self.ppu.vram[0][map_addr];
+
+            let tile_offset = if signed_addr {
+                // Signed addressing: tile 0 = 0x9000, tile -128 = 0x8800, tile 127 = 0x8FF0
+                let signed_idx = raw_tile as i8 as i16;
+                ((0x1000 + signed_idx * 16) as usize) & 0x1FFF
+            } else {
+                // Unsigned addressing: tile 0 = 0x8000
+                raw_tile as usize * 16
+            };
+
+            let dst_base = tile_idx * 16;
+            for b in 0..16 {
+                if tile_offset + b < self.ppu.vram[0].len() && dst_base + b < 4096 {
+                    vram_data[dst_base + b] = self.ppu.vram[0][tile_offset + b];
+                }
+            }
+        }
+
+        if let Some(ref mut sgb) = self.sgb {
+            sgb.execute_transfer(&vram_data);
+        }
+    }
+
+    /// Capture the current frame for MASK_EN(1) freeze mode.
+    pub fn capture_sgb_freeze(&mut self) {
+        if let Some(ref mut sgb) = self.sgb {
+            if sgb.mask_mode == 1 {
+                sgb.frozen_buffer.copy_from_slice(&self.ppu.frame_buffer);
+            }
+        }
     }
 }

@@ -6,21 +6,21 @@ mod emulator;
 mod joypad;
 mod model;
 mod ppu;
+mod sgb;
 mod timer;
 
+use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
 use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::PixelFormat;
-use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const SCALE: u32 = 3;
-const WIDTH: u32 = 160 * SCALE;
-const HEIGHT: u32 = 144 * SCALE;
 /// Target frame time for ~59.73 fps.
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
 
@@ -28,50 +28,67 @@ const AUDIO_SAMPLE_RATE: u32 = 44_100;
 /// Max queued audio bytes before we stop pushing (~100 ms of stereo f32).
 const MAX_QUEUED_BYTES: u32 = (AUDIO_SAMPLE_RATE / 10) * 2 * 4;
 
+#[derive(Parser)]
+#[command(name = "gbcemu", about = "Game Boy / Game Boy Color emulator")]
+struct Cli {
+    /// Path to ROM file (.gb / .gbc)
+    rom: PathBuf,
+
+    /// Path to boot ROM file (auto-detected if not specified)
+    #[arg(long)]
+    bootrom: Option<PathBuf>,
+
+    /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc
+    #[arg(long, default_value = "auto")]
+    model: String,
+}
+
 fn main() {
     env_logger::init();
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <rom.gb> [--bootrom <bootrom.bin>]", args[0]);
-        std::process::exit(1);
-    }
+    let cli = Cli::parse();
 
-    let rom = fs::read(&args[1]).unwrap_or_else(|e| {
-        eprintln!("Failed to read ROM '{}': {}", args[1], e);
+    let rom = fs::read(&cli.rom).unwrap_or_else(|e| {
+        eprintln!("Failed to read ROM '{}': {}", cli.rom.display(), e);
         std::process::exit(1);
     });
 
-    // Optional boot ROM: --bootrom <path>, or auto-detect gbc_bios.bin
-    let boot_rom: Option<Vec<u8>> = {
-        let mut path = None;
-        let mut i = 2;
-        while i < args.len() {
-            if args[i] == "--bootrom" && i + 1 < args.len() {
-                path = Some(args[i + 1].clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-        if let Some(p) = path {
-            Some(fs::read(&p).unwrap_or_else(|e| {
-                eprintln!("Failed to read boot ROM '{}': {}", p, e);
-                std::process::exit(1);
-            }))
-        } else {
-            // Auto-detect boot ROM in crate root
-            fs::read("gbc_bios.bin").ok()
-        }
+    // Resolve hardware model
+    let model = if cli.model == "auto" {
+        GbModel::Cgb
+    } else {
+        cli.model.parse::<GbModel>().unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        })
+    };
+
+    // Resolve boot ROM: explicit path, or auto-detect by model
+    let boot_rom: Option<Vec<u8>> = if let Some(ref p) = cli.bootrom {
+        Some(fs::read(p).unwrap_or_else(|e| {
+            eprintln!("Failed to read boot ROM '{}': {}", p.display(), e);
+            std::process::exit(1);
+        }))
+    } else {
+        let default_name = match model {
+            GbModel::Dmg0 | GbModel::Dmg | GbModel::Mgb => "gb_bios.bin",
+            GbModel::Sgb => "sgb_bios.bin",
+            GbModel::Sgb2 => "sgb2_bios.bin",
+            GbModel::Cgb => "gbc_bios.bin",
+        };
+        fs::read(default_name).ok()
     };
 
     if boot_rom.is_some() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
     }
 
-    // We emulate CGB hardware — DMG games run in CGB compatibility mode
-    let rom_path = std::path::Path::new(&args[1]);
-    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path), GbModel::Cgb);
+    let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model);
+
+    let is_sgb = emu.is_sgb();
+    let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
+    let win_w = tex_w * SCALE;
+    let win_h = tex_h * SCALE;
 
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();
@@ -80,7 +97,7 @@ fn main() {
 
     // ── Video ─────────────────────────────────────────────────────────────────
     let window = video
-        .window("GBC Emulator", WIDTH, HEIGHT)
+        .window("GBC Emulator", win_w, win_h)
         .position_centered()
         .build()
         .unwrap();
@@ -89,7 +106,7 @@ fn main() {
     let texture_creator = canvas.texture_creator();
 
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormat::ARGB8888, 160, 144)
+        .create_texture_streaming(PixelFormat::ARGB8888, tex_w, tex_h)
         .unwrap();
 
     let mut event_pump = sdl.event_pump().unwrap();
@@ -134,21 +151,39 @@ fn main() {
         }
 
         // ── Render ────────────────────────────────────────────────────────────
-        let src = emu.frame_buffer();
-        texture
-            .with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                for y in 0..144usize {
-                    for x in 0..160usize {
-                        let argb = src[y * 160 + x];
-                        let off = y * pitch + x * 4;
-                        pixels[off]     =  argb        as u8; // B
-                        pixels[off + 1] = (argb >>  8) as u8; // G
-                        pixels[off + 2] = (argb >> 16) as u8; // R
-                        pixels[off + 3] = 0xFF;                // A
+        if is_sgb {
+            let src = emu.sgb_composited_frame();
+            texture
+                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                    for y in 0..224usize {
+                        for x in 0..256usize {
+                            let argb = src[y * 256 + x];
+                            let off = y * pitch + x * 4;
+                            pixels[off]     =  argb        as u8; // B
+                            pixels[off + 1] = (argb >>  8) as u8; // G
+                            pixels[off + 2] = (argb >> 16) as u8; // R
+                            pixels[off + 3] = 0xFF;                // A
+                        }
                     }
-                }
-            })
-            .unwrap();
+                })
+                .unwrap();
+        } else {
+            let src = emu.frame_buffer();
+            texture
+                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                    for y in 0..144usize {
+                        for x in 0..160usize {
+                            let argb = src[y * 160 + x];
+                            let off = y * pitch + x * 4;
+                            pixels[off]     =  argb        as u8; // B
+                            pixels[off + 1] = (argb >>  8) as u8; // G
+                            pixels[off + 2] = (argb >> 16) as u8; // R
+                            pixels[off + 3] = 0xFF;                // A
+                        }
+                    }
+                })
+                .unwrap();
+        }
 
         canvas.clear();
         canvas.copy(&texture, None, None).unwrap();

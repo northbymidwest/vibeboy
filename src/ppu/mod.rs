@@ -183,6 +183,11 @@ pub struct Ppu {
     /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
     pub cgb_mode: bool,
 
+    /// SGB mode: capture 2-bit shade indices for SGB palette remapping.
+    pub sgb_mode: bool,
+    /// Shade buffer: 160×144 of 2-bit shade indices (written during rendering).
+    pub shade_buffer: Vec<u8>,
+
     /// True = CGB hardware running a DMG game (DMG compatibility mode).
     /// Uses CGB palette RAM but with DMG-style palette selection.
     pub dmg_compat: bool,
@@ -274,6 +279,8 @@ impl Ppu {
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
             cgb_mode: true,
+            sgb_mode: false,
+            shade_buffer: vec![0u8; 160 * 144],
             dmg_compat: false,
             dmg_bg_ref: [0x7FFF; 4],
             dmg_obj_ref: [[0x7FFF; 4]; 2],
@@ -883,7 +890,35 @@ impl Ppu {
             }
         };
 
-        self.frame_buffer[ly * 160 + self.pixel_x as usize] = color32;
+        let fb_idx = ly * 160 + self.pixel_x as usize;
+
+        // SGB: capture 2-bit shade index for palette remapping
+        if self.sgb_mode {
+            let (pal_reg, cidx) = if pixel.is_sprite {
+                let bg_color_idx = pixel.bg_color_index;
+                let bg_is_zero = bg_color_idx == 0;
+                let sprite_wins = if self.lcdc & 0x01 == 0 {
+                    true
+                } else if pixel.sprite_bg_over && !bg_is_zero {
+                    false
+                } else if pixel.bg_priority && !bg_is_zero {
+                    false
+                } else {
+                    true
+                };
+                if sprite_wins {
+                    (pixel.sprite_dmg_palette, pixel.color_index)
+                } else {
+                    (self.bgp, bg_color_idx)
+                }
+            } else {
+                (self.bgp, pixel.color_index)
+            };
+            let shade = (pal_reg >> (cidx * 2)) & 0x03;
+            self.shade_buffer[fb_idx] = shade;
+        }
+
+        self.frame_buffer[fb_idx] = color32;
         self.pixel_x += 1;
     }
 

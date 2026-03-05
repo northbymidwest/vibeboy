@@ -4,6 +4,7 @@ use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
 };
 use crate::model::GbModel;
+use crate::sgb::Sgb;
 use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
@@ -12,6 +13,11 @@ pub const CYCLES_PER_FRAME: u32 = 70_224;
 pub struct Emulator {
     pub cpu: Cpu,
     pub bus: Bus,
+    model: GbModel,
+    /// Cached border buffer (256×224) for SGB
+    border_buffer: Vec<u32>,
+    /// Composited output buffer (256×224) for SGB
+    sgb_output: Vec<u32>,
 }
 
 impl Emulator {
@@ -29,6 +35,9 @@ impl Emulator {
         Emulator {
             cpu,
             bus: Bus::new(rom, boot_rom, rom_path, model),
+            model,
+            border_buffer: vec![0u32; 256 * 224],
+            sgb_output: vec![0u32; 256 * 224],
         }
     }
 
@@ -42,6 +51,13 @@ impl Emulator {
         self.bus.clear_frame_ready();
         while !self.bus.frame_ready() {
             self.step();
+        }
+
+        // SGB post-processing
+        if self.model.is_sgb() {
+            self.bus.apply_sgb_palettes();
+            self.bus.check_sgb_transfer();
+            self.bus.capture_sgb_freeze();
         }
     }
 
@@ -105,7 +121,47 @@ impl Emulator {
 
     /// Return the current frame buffer (160 × 144 pixels, 0x00RRGGBB).
     pub fn frame_buffer(&self) -> &[u32] {
+        // For SGB with freeze mask, return frozen buffer
+        if let Some(ref sgb) = self.bus.sgb {
+            if sgb.mask_mode == 1 {
+                return &sgb.frozen_buffer;
+            }
+        }
         self.bus.ppu.frame_buffer()
+    }
+
+    pub fn is_sgb(&self) -> bool {
+        self.model.is_sgb()
+    }
+
+    /// Get the composited 256×224 SGB frame (border + game).
+    pub fn sgb_composited_frame(&mut self) -> &[u32] {
+        if let Some(ref sgb) = self.bus.sgb {
+            if sgb.border_dirty {
+                sgb.render_border(&mut self.border_buffer);
+                // border_dirty will be cleared below
+            }
+        }
+        if let Some(ref mut sgb) = self.bus.sgb {
+            sgb.border_dirty = false;
+        }
+
+        // Copy border into output
+        self.sgb_output.copy_from_slice(&self.border_buffer);
+
+        // Composite game frame
+        let game_buf = if let Some(ref sgb) = self.bus.sgb {
+            if sgb.mask_mode == 1 {
+                &sgb.frozen_buffer
+            } else {
+                self.bus.ppu.frame_buffer()
+            }
+        } else {
+            self.bus.ppu.frame_buffer()
+        };
+        Sgb::composite_frame(&mut self.sgb_output, game_buf);
+
+        &self.sgb_output
     }
 
     // ── Input handling ────────────────────────────────────────────────────────

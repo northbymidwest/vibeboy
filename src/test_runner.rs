@@ -6,6 +6,7 @@ mod emulator;
 mod joypad;
 mod model;
 mod ppu;
+mod sgb;
 mod timer;
 
 use emulator::Emulator;
