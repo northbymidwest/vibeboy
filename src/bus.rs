@@ -4,6 +4,46 @@ use crate::joypad::Joypad;
 use crate::ppu::Ppu;
 use crate::timer::Timer;
 
+/// OAM DMA state.
+///
+/// Timing (from hardware):
+///   M=0: write to 0xFF46
+///   M=1: delay — OAM accessible for fresh start, still blocked for restart
+///   M=2..161: DMA copies 1 byte per M-cycle, OAM inaccessible
+///
+/// Blocking rule:
+///   - Before first byte is copied (progress==0): use `was_blocking`
+///     (false for fresh start → accessible; true for restart → still blocked)
+///   - After first byte (progress>0 while active): always blocking
+///   - After DMA finishes (active==false): never blocking
+struct OamDma {
+    active: bool,
+    source: u16,        // source base address (source_page << 8)
+    progress: u8,       // bytes copied so far (0–159)
+    delay: u8,          // M-cycles remaining before first byte copy
+    was_blocking: bool, // OAM was blocked when DMA was (re)started
+    /// Blocking state captured at the *start* of the current M-cycle (before step_oam_dma
+    /// runs). CPU reads/writes check this so that the M-cycle where DMA copies its last
+    /// byte still blocks OAM, even though `active` becomes false during that same step.
+    blocking: bool,
+}
+
+impl OamDma {
+    fn new() -> Self {
+        OamDma { active: false, source: 0, progress: 0, delay: 0, was_blocking: false, blocking: false }
+    }
+    fn is_blocking(&self) -> bool {
+        self.blocking
+    }
+    /// Compute whether OAM should be blocked this M-cycle, based on current DMA state
+    /// (called before step_oam_dma so the result reflects the start of the M-cycle).
+    fn compute_blocking(&self) -> bool {
+        if !self.active { return false; }
+        if self.delay > 0 { return self.was_blocking; }
+        true // actively copying
+    }
+}
+
 /// HDMA state (0xFF51–0xFF55).
 struct Hdma {
     src: u16,
@@ -48,11 +88,18 @@ pub struct Bus {
     /// Double-speed mode active
     pub double_speed: bool,
 
+    oam_dma: OamDma,
     hdma: Hdma,
+
+    /// Boot ROM bytes (up to 0x900 for CGB). None = skip boot ROM.
+    boot_rom: Option<Vec<u8>>,
+    /// Whether the boot ROM is still mapped (cleared by writing 0xFF50).
+    boot_rom_active: bool,
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>) -> Self {
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>) -> Self {
+        let boot_rom_active = boot_rom.is_some();
         Bus {
             cart: make_cartridge(rom),
             ppu: Ppu::new(),
@@ -68,8 +115,15 @@ impl Bus {
             sc: 0x7E,
             key1: 0xFF,
             double_speed: false,
+            oam_dma: OamDma::new(),
             hdma: Hdma::new(),
+            boot_rom,
+            boot_rom_active,
         }
+    }
+
+    pub fn has_boot_rom(&self) -> bool {
+        self.boot_rom.is_some()
     }
 
     // ── Public accessors for Cpu ───────────────────────────────────────────────
@@ -80,20 +134,51 @@ impl Bus {
 
     // ── Memory read ───────────────────────────────────────────────────────────
 
+    /// CPU memory read. On CGB, OAM DMA only blocks OAM (0xFE00–0xFE9F);
+    /// all other memory (ROM, WRAM, VRAM, I/O, HRAM) remains accessible.
     pub fn read_byte(&self, addr: u16) -> u8 {
+        if self.oam_dma.is_blocking() {
+            if matches!(addr, 0xFE00..=0xFE9F) {
+                return 0xFF;
+            }
+        }
+        self.read_byte_raw(addr)
+    }
+
+    /// Raw read bypassing DMA bus-conflict logic (for DMA/HDMA controllers).
+    fn read_byte_raw(&self, addr: u16) -> u8 {
+        // Boot ROM overlay: covers 0x0000-0x00FF and (for CGB) 0x0200-0x08FF.
+        if self.boot_rom_active {
+            if let Some(ref brom) = self.boot_rom {
+                let idx = match addr {
+                    0x0000..=0x00FF => Some(addr as usize),
+                    0x0200..=0x08FF => Some(addr as usize), // CGB second section
+                    _ => None,
+                };
+                if let Some(i) = idx {
+                    if i < brom.len() {
+                        return brom[i];
+                    }
+                }
+            }
+        }
         match addr {
             0x0000..=0x7FFF => self.cart.read_rom(addr),
-            0x8000..=0x9FFF => self.ppu.read_vram(addr),
+            0x8000..=0x9FFF => {
+                if !self.ppu.vram_accessible { 0xFF } else { self.ppu.read_vram(addr) }
+            }
             0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize],
             0xD000..=0xDFFF => self.wram[self.wram_bank][(addr - 0xD000) as usize],
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize], // echo
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize], // echo
-            0xFE00..=0xFE9F => self.ppu.read_oam(addr),
+            0xFE00..=0xFE9F => {
+                if !self.ppu.oam_accessible { 0xFF } else { self.ppu.read_oam(addr) }
+            }
             0xFEA0..=0xFEFF => 0xFF, // unusable
             0xFF00..=0xFF7F => self.read_io(addr),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
-            0xFFFF => self.ie,
+            0xFFFF          => self.ie,
         }
     }
 
@@ -105,20 +190,35 @@ impl Bus {
 
     // ── Memory write ──────────────────────────────────────────────────────────
 
+    /// CPU memory write. On CGB, OAM DMA only blocks OAM writes;
+    /// all other writes (ROM, WRAM, I/O, HRAM) proceed normally.
     pub fn write_byte(&mut self, addr: u16, val: u8) {
+        if self.oam_dma.is_blocking() {
+            if matches!(addr, 0xFE00..=0xFE9F) {
+                return; // OAM writes ignored during DMA
+            }
+        }
+        self.write_byte_raw(addr, val);
+    }
+
+    fn write_byte_raw(&mut self, addr: u16, val: u8) {
         match addr {
             0x0000..=0x7FFF => self.cart.write_rom(addr, val),
-            0x8000..=0x9FFF => self.ppu.write_vram(addr, val),
+            0x8000..=0x9FFF => {
+                if self.ppu.vram_accessible { self.ppu.write_vram(addr, val); }
+            }
             0xA000..=0xBFFF => self.cart.write_ram(addr, val),
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = val,
             0xD000..=0xDFFF => self.wram[self.wram_bank][(addr - 0xD000) as usize] = val,
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize] = val,
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize] = val,
-            0xFE00..=0xFE9F => self.ppu.write_oam(addr, val),
+            0xFE00..=0xFE9F => {
+                if self.ppu.oam_accessible { self.ppu.write_oam(addr, val); }
+            }
             0xFEA0..=0xFEFF => {} // unusable
             0xFF00..=0xFF7F => self.write_io(addr, val),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
-            0xFFFF => self.ie = val,
+            0xFFFF          => self.ie = val,
         }
     }
 
@@ -151,6 +251,7 @@ impl Bus {
                     0xFF
                 }
             }
+            0xFF50 => if self.boot_rom_active { 0xFE } else { 0xFF },
             0xFF70 => self.wram_bank as u8 | 0xF8,
             _ => 0xFF,
         }
@@ -171,11 +272,25 @@ impl Bus {
                     let _ = std::io::stdout().flush();
                 }
             }
-            0xFF04..=0xFF07 => self.timer.write(addr, val),
+            0xFF04..=0xFF07 => {
+                self.timer.write(addr, val);
+                if self.timer.interrupt {
+                    self.if_ |= 0x04;
+                    self.timer.clear_interrupt();
+                }
+            }
             0xFF0F => self.if_ = val | 0xE0,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
-            0xFF46 => self.oam_dma(val),
-            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => self.ppu.write(addr, val),
+            0xFF46 => self.start_oam_dma(val),
+            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
+                self.ppu.write(addr, val);
+                // Immediately transfer any interrupt flags from register writes
+                // (e.g., LCD enable triggering STAT, LYC write causing coincidence)
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
             0xFF4D => {
                 // KEY1: prepare speed switch (bit 0 = switch request)
                 self.key1 = (self.key1 & 0x80) | (val & 0x01);
@@ -185,6 +300,12 @@ impl Bus {
             0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | (((val & 0x1F) as u16) << 8) | 0x8000,
             0xFF54 => self.hdma.dst = (self.hdma.dst & 0xFF00) | ((val & 0xF0) as u16),
             0xFF55 => self.start_hdma(val),
+            0xFF50 => {
+                // Writing any non-zero value permanently disables the boot ROM.
+                if val != 0 {
+                    self.boot_rom_active = false;
+                }
+            }
             0xFF70 => {
                 let bank = (val & 0x07) as usize;
                 self.wram_bank = if bank == 0 { 1 } else { bank };
@@ -195,14 +316,37 @@ impl Bus {
 
     // ── OAM DMA ───────────────────────────────────────────────────────────────
 
-    fn oam_dma(&mut self, source_page: u8) {
-        // Instant OAM DMA: copy 0xA0 bytes from (source_page << 8) to OAM
-        let base = (source_page as u16) << 8;
-        for i in 0..0xA0u16 {
-            let byte = self.read_byte(base + i);
-            self.ppu.write_oam(0xFE00 + i, byte);
-        }
+    fn start_oam_dma(&mut self, source_page: u8) {
+        // Store source page in PPU register so 0xFF46 reads back correctly.
         self.ppu.write(0xFF46, source_page);
+        // Use the pre-step blocking state captured at the start of this M-cycle.
+        let was_blocking = self.oam_dma.blocking;
+        // Schedule DMA: 1 M-cycle delay before blocking starts, then 160 transfers.
+        self.oam_dma = OamDma {
+            active:       true,
+            source:       (source_page as u16) << 8,
+            progress:     0,
+            delay:        1,
+            was_blocking,
+            blocking:     was_blocking,
+        };
+    }
+
+    /// Advance OAM DMA by one M-cycle. Called from tick_mcycle().
+    fn step_oam_dma(&mut self) {
+        if !self.oam_dma.active { return; }
+        if self.oam_dma.delay > 0 {
+            self.oam_dma.delay -= 1;
+            return;
+        }
+        // Copy one byte from source to OAM.
+        let src = self.oam_dma.source + self.oam_dma.progress as u16;
+        let byte = self.read_byte_raw(src);
+        self.ppu.oam[self.oam_dma.progress as usize] = byte;
+        self.oam_dma.progress += 1;
+        if self.oam_dma.progress >= 160 {
+            self.oam_dma.active = false;
+        }
     }
 
     // ── HDMA ──────────────────────────────────────────────────────────────────
@@ -232,7 +376,7 @@ impl Bus {
             for byte_off in 0..16u16 {
                 let src_addr = self.hdma.src + byte_off;
                 let dst_addr = self.hdma.dst + byte_off;
-                let byte = self.read_byte(src_addr);
+                let byte = self.read_byte_raw(src_addr);
                 self.ppu.write_vram(dst_addr, byte);
             }
             self.hdma.src = self.hdma.src.wrapping_add(16);
@@ -261,12 +405,15 @@ impl Bus {
     /// Tick the bus by one M-cycle (4 T-cycles normal speed, 2 in double-speed).
     /// Call this once per CPU M-cycle (memory access or internal cycle).
     pub fn tick_mcycle(&mut self) {
+        // Capture blocking state BEFORE advancing DMA so CPU accesses in this M-cycle
+        // see the correct blocking state (e.g. last DMA copy still blocks OAM).
+        self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let cycles = if self.double_speed { 2 } else { 4 };
         self.tick(cycles);
+        self.step_oam_dma();
     }
 
     /// Advance all bus components by `cycles` T-cycles (at normal 4MHz rate).
-    /// The caller (emulator) divides by speed factor before calling for PPU/timer.
     pub fn tick(&mut self, cycles: u32) {
         self.timer.step(cycles);
         if self.timer.interrupt {

@@ -30,6 +30,19 @@ impl Registers {
         }
     }
 
+    /// Hardware reset state: all registers zeroed, PC starts at 0x0000.
+    /// Used when executing an actual boot ROM.
+    pub fn reset() -> Self {
+        Registers {
+            a: 0x00, f: 0x00,
+            b: 0x00, c: 0x00,
+            d: 0x00, e: 0x00,
+            h: 0x00, l: 0x00,
+            sp: 0x0000,
+            pc: 0x0000,
+        }
+    }
+
     // 16-bit pair accessors
     pub fn af(&self) -> u16 { ((self.a as u16) << 8) | (self.f as u16) }
     pub fn bc(&self) -> u16 { ((self.b as u16) << 8) | (self.c as u16) }

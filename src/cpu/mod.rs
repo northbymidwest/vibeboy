@@ -61,8 +61,9 @@ impl Cpu {
 
         let cycles = self.execute(bus, op);
 
-        // Apply EI delay: IME is enabled after the instruction following EI
-        if pending_ime {
+        // Apply EI delay: IME is enabled after the instruction following EI.
+        // If DI executed this step it cleared ime_pending, so we skip the apply.
+        if pending_ime && self.ime_pending {
             self.ime = true;
             self.ime_pending = false;
         }
@@ -73,22 +74,42 @@ impl Cpu {
     fn dispatch_interrupt(&mut self, bus: &mut Bus) {
         self.halted = false;
         self.ime = false;
-        let pending = bus.ie() & bus.if_reg() & 0x1F;
-        let bit = pending.trailing_zeros() as u8;
-        *bus.if_mut() &= !(1 << bit);
         bus.tick_mcycle(); // internal 1
         bus.tick_mcycle(); // internal 2
+
         let pc = self.regs.pc;
-        self.push(bus, pc);
-        bus.tick_mcycle(); // vector fetch (internal)
-        self.regs.pc = match bit {
-            0 => 0x0040, // VBlank
-            1 => 0x0048, // STAT
-            2 => 0x0050, // Timer
-            3 => 0x0058, // Serial
-            4 => 0x0060, // Joypad
-            _ => 0x0040,
+
+        // Push high byte of PC. If SP-1 happens to be 0xFFFF (IE register),
+        // this write can change which interrupt is pending or cancel the dispatch.
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.tick_mcycle();
+        bus.write_byte(self.regs.sp, (pc >> 8) as u8);
+
+        // Re-read pending AFTER the high-byte push (IE may have changed).
+        let pending = bus.ie() & bus.if_reg() & 0x1F;
+        let vector = if pending != 0 {
+            let bit = pending.trailing_zeros() as u8;
+            *bus.if_mut() &= !(1 << bit); // clear the winning interrupt
+            match bit {
+                0 => 0x0040u16, // VBlank
+                1 => 0x0048,    // STAT
+                2 => 0x0050,    // Timer
+                3 => 0x0058,    // Serial
+                4 => 0x0060,    // Joypad
+                _ => 0x0040,
+            }
+        } else {
+            // All interrupt bits cleared from IE — dispatch cancelled, jump to $0000.
+            0x0000
         };
+
+        // Push low byte of PC (may also land on 0xFFFF, but we don't re-check).
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.tick_mcycle();
+        bus.write_byte(self.regs.sp, (pc & 0xFF) as u8);
+
+        bus.tick_mcycle(); // vector fetch (internal)
+        self.regs.pc = vector;
     }
 
     fn push(&mut self, bus: &mut Bus, val: u16) {

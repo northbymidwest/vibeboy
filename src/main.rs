@@ -31,7 +31,7 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <rom.gb>", args[0]);
+        eprintln!("Usage: {} <rom.gb> [--bootrom <bootrom.bin>]", args[0]);
         std::process::exit(1);
     }
 
@@ -40,7 +40,29 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut emu = Emulator::new(rom);
+    // Optional boot ROM: --bootrom <path>
+    let boot_rom: Option<Vec<u8>> = {
+        let mut path = None;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--bootrom" && i + 1 < args.len() {
+                path = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        path.map(|p| fs::read(&p).unwrap_or_else(|e| {
+            eprintln!("Failed to read boot ROM '{}': {}", p, e);
+            std::process::exit(1);
+        }))
+    };
+
+    if boot_rom.is_some() {
+        eprintln!("Boot ROM loaded — executing boot sequence.");
+    }
+
+    let mut emu = Emulator::new(rom, boot_rom);
 
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();

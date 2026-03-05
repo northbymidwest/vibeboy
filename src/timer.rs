@@ -16,6 +16,10 @@ pub struct Timer {
     pub interrupt: bool,
     /// Overflow delay: TIMA is reloaded 4 cycles after overflow
     overflow_delay: u8,
+    /// Set when the reload (TMA→TIMA copy) fired during the current M-cycle's step().
+    /// Used to resolve write conflicts: TIMA write in same M-cycle as reload is ignored;
+    /// TMA write in same M-cycle as reload updates the just-reloaded TIMA value.
+    reload_fired: bool,
 }
 
 impl Timer {
@@ -27,11 +31,13 @@ impl Timer {
             tac: 0xF8,
             interrupt: false,
             overflow_delay: 0,
+            reload_fired: false,
         }
     }
 
-    /// Advance timer by `cycles` T-cycles.
+    /// Advance timer by `cycles` T-cycles (one M-cycle = 4 T-cycles).
     pub fn step(&mut self, cycles: u32) {
+        self.reload_fired = false;
         for _ in 0..cycles {
             self.tick_once();
         }
@@ -41,26 +47,44 @@ impl Timer {
         let old_counter = self.counter;
         self.counter = self.counter.wrapping_add(1);
 
-        // Handle overflow delay
+        // Handle overflow delay: TIMA is reloaded from TMA 4 T-cycles after overflow.
         if self.overflow_delay > 0 {
             self.overflow_delay -= 1;
             if self.overflow_delay == 0 {
                 self.tima = self.tma;
                 self.interrupt = true;
+                self.reload_fired = true;
             }
         }
 
-        // Check if TIMA should increment (falling edge detection on relevant bit)
+        // Check if TIMA should increment (falling edge on the counter bit driving TIMA).
         if self.tac & 0x04 != 0 {
             let bit = self.timer_bit();
             let old_bit = (old_counter >> bit) & 1;
             let new_bit = (self.counter >> bit) & 1;
             if old_bit == 1 && new_bit == 0 {
-                self.tima = self.tima.wrapping_add(1);
-                if self.tima == 0 {
-                    self.overflow_delay = 4;
-                }
+                self.increment_tima();
             }
+        }
+    }
+
+    fn increment_tima(&mut self) {
+        self.tima = self.tima.wrapping_add(1);
+        if self.tima == 0 {
+            self.overflow_delay = 4;
+        }
+    }
+
+    /// Glitch-triggered TIMA increment (from DIV or TAC writes).
+    /// On real hardware, the write occurs mid-M-cycle (T2). Since our model
+    /// applies the full M-cycle tick before the write, and the 4-cycle overflow
+    /// delay would start counting from the next tick_mcycle (too late), we fire
+    /// the interrupt immediately for write-triggered overflows.
+    fn increment_tima_glitch(&mut self) {
+        self.tima = self.tima.wrapping_add(1);
+        if self.tima == 0 {
+            self.tima = self.tma;
+            self.interrupt = true;
         }
     }
 
@@ -73,6 +97,12 @@ impl Timer {
             3 => 7,  // 16384 Hz  (every 256 T-cycles)
             _ => unreachable!(),
         }
+    }
+
+    /// The "mux output": 1 when the timer is enabled and the selected counter bit is high.
+    /// TIMA increments on a falling edge of this signal.
+    fn mux_output(&self) -> bool {
+        self.tac & 0x04 != 0 && (self.counter >> self.timer_bit()) & 1 == 1
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -88,13 +118,42 @@ impl Timer {
 
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
-            0xFF04 => self.counter = 0, // Any write resets DIV
-            0xFF05 => {
-                self.tima = val;
-                self.overflow_delay = 0;
+            0xFF04 => {
+                // Writing DIV resets the counter to 0.
+                // If the currently-selected timer bit was 1, the reset creates a falling edge
+                // on that bit → TIMA increments (even with timer disabled via TAC bit 2,
+                // because the falling edge comes from the counter directly).
+                if self.mux_output() {
+                    self.increment_tima_glitch();
+                }
+                self.counter = 0;
             }
-            0xFF06 => self.tma = val,
-            0xFF07 => self.tac = val & 0x07,
+            0xFF05 => {
+                // Writing TIMA during the reload M-cycle is ignored — the reload wins.
+                // Otherwise, the write cancels any pending reload.
+                if !self.reload_fired {
+                    self.tima = val;
+                    self.overflow_delay = 0;
+                }
+            }
+            0xFF06 => {
+                self.tma = val;
+                // If the TMA→TIMA reload just fired this M-cycle, the new TMA value is
+                // used retroactively (hardware reads TMA after the CPU write completes).
+                if self.reload_fired {
+                    self.tima = val;
+                }
+            }
+            0xFF07 => {
+                // TAC write: if the mux output falls from 1 to 0 (timer disabled or bit
+                // changes to a currently-low bit), a falling edge triggers TIMA increment.
+                let old_mux = self.mux_output();
+                self.tac = val & 0x07;
+                let new_mux = self.mux_output();
+                if old_mux && !new_mux {
+                    self.increment_tima_glitch();
+                }
+            }
             _ => {}
         }
     }

@@ -1,9 +1,11 @@
-/// Game Boy Color PPU (Pixel Processing Unit)
+/// Game Boy Color PPU (Pixel Processing Unit) — T-cycle accurate
 ///
-/// Timing (T-cycles):
-///   Scanlines 0-143: Mode2(80) -> Mode3(172) -> Mode0(204) = 456 per line
-///   Scanlines 144-153: Mode1(456 each) = 4560 total VBlank
-///   Total frame: 70224 T-cycles
+/// Timing (T-cycles per scanline = 456):
+///   Mode 2: OAM scan        — 80 dots (dot 0..79)
+///   Mode 3: Drawing          — variable (172 + SCX penalty + sprite penalty + window penalty)
+///   Mode 0: HBlank           — remainder of 456
+///   Mode 1: VBlank           — lines 144-153, 456 dots each
+///   Total frame: 154 lines × 456 = 70224 T-cycles
 
 pub struct Ppu {
     /// VRAM banks 0 and 1 (8 KiB each)
@@ -35,7 +37,22 @@ pub struct Ppu {
 
     // Internal state
     mode: u8,
-    cycles: u32,
+    /// T-cycle counter within the current scanline (0..455)
+    dot: u32,
+
+    /// Previous state of internal STAT IRQ signal (for edge detection)
+    stat_irq_line: bool,
+
+    /// Sprites collected during Mode 2 OAM scan: (y, x, tile, attrs)
+    scanline_sprites: Vec<(u8, u8, u8, u8)>,
+
+    /// Computed Mode 3 duration for the current scanline
+    mode3_duration: u32,
+
+    /// VRAM accessible (false during Mode 3)
+    pub vram_accessible: bool,
+    /// OAM accessible (false during Modes 2 and 3)
+    pub oam_accessible: bool,
 
     // Output
     pub frame_buffer: Vec<u32>,
@@ -50,12 +67,21 @@ pub struct Ppu {
 
     /// Set to true each time the PPU enters Mode 0 (HBlank); cleared by Bus.
     pub hblank_entered: bool,
+
+    /// True on the first scanline after LCD is enabled (special timing).
+    lcd_first_line: bool,
+
+    /// CGB: dot at which Mode 0 becomes visible in STAT (0 = not pending).
+    /// On CGB, the STAT interrupt fires ~4T before the mode bits update.
+    mode0_stat_dot: u32,
+
+    /// CGB: dot at which Mode 3 becomes visible in STAT (0 = not pending).
+    mode3_stat_dot: u32,
 }
 
 impl Ppu {
     pub fn new() -> Self {
-        // Default all-white GBC palettes: 0x7FFF per color (white in 15-bit BGR)
-        // Each color is 2 bytes little-endian: 0xFF, 0x7F
+        // Default all-white GBC palettes: 0xFFFF per color
         let mut bcpd = [0u8; 64];
         let mut ocpd = [0u8; 64];
         for i in 0..32 {
@@ -88,8 +114,15 @@ impl Ppu {
             ocps: 0,
             ocpd,
 
-            mode: 2,
-            cycles: 0,
+            mode: 1, // Post-boot: VBlank
+            dot: 0,
+
+            stat_irq_line: false,
+            scanline_sprites: Vec::with_capacity(10),
+            mode3_duration: 172,
+
+            vram_accessible: true,
+            oam_accessible: true, // VBlank: accessible
 
             frame_buffer: vec![0u32; 160 * 144],
             frame_ready: false,
@@ -99,81 +132,23 @@ impl Ppu {
 
             if_flags: 0,
             hblank_entered: false,
+            lcd_first_line: false,
+            mode0_stat_dot: 0,
+            mode3_stat_dot: 0,
         }
     }
 
     /// Step the PPU by `cycles` T-cycles.
     /// Returns interrupt flags (bit0=VBlank, bit1=STAT) to OR into IF.
     pub fn step(&mut self, cycles: u32) -> u8 {
-        // If LCD is off, do nothing
+        self.if_flags = 0;
+
         if self.lcdc & 0x80 == 0 {
             return 0;
         }
 
-        self.if_flags = 0;
-
         for _ in 0..cycles {
-            self.cycles += 1;
-
-            match self.mode {
-                // Mode 2: OAM scan (80 T-cycles)
-                2 => {
-                    if self.cycles >= 80 {
-                        self.cycles -= 80;
-                        self.enter_mode3();
-                    }
-                }
-
-                // Mode 3: Drawing (172 T-cycles)
-                3 => {
-                    if self.cycles >= 172 {
-                        self.cycles -= 172;
-                        // Render scanline at END of mode 3
-                        self.render_scanline();
-                        self.enter_mode0();
-                    }
-                }
-
-                // Mode 0: HBlank (204 T-cycles)
-                0 => {
-                    if self.cycles >= 204 {
-                        self.cycles -= 204;
-                        // Increment LY
-                        self.ly = self.ly.wrapping_add(1);
-                        self.check_lyc_coincidence();
-
-                        if self.ly == 144 {
-                            // Enter VBlank
-                            self.enter_mode1();
-                        } else {
-                            // Next scanline: enter OAM scan
-                            self.enter_mode2();
-                        }
-                    }
-                }
-
-                // Mode 1: VBlank (456 T-cycles per line, lines 144-153)
-                1 => {
-                    if self.cycles >= 456 {
-                        self.cycles -= 456;
-                        self.ly = self.ly.wrapping_add(1);
-
-                        if self.ly > 153 {
-                            // End of VBlank, back to line 0
-                            self.ly = 0;
-                            self.frame_ready = true;
-                            self.window_line_counter = 0;
-                            self.wy_triggered = false;
-                            self.check_lyc_coincidence();
-                            self.enter_mode2();
-                        } else {
-                            self.check_lyc_coincidence();
-                        }
-                    }
-                }
-
-                _ => {}
-            }
+            self.tick();
         }
 
         let flags = self.if_flags;
@@ -181,50 +156,228 @@ impl Ppu {
         flags
     }
 
-    fn enter_mode2(&mut self) {
+    /// Advance the PPU by one T-cycle.
+    fn tick(&mut self) {
+        self.dot += 1;
+
+        match self.mode {
+            2 => {
+                // Mode 2 → Mode 3: internal transition at dot 80, STAT bits update 1T later
+                if self.dot >= 80 {
+                    self.mode = 3;
+                    self.oam_accessible = false;
+                    self.vram_accessible = false;
+                    self.compute_mode3_duration();
+                    // Delay STAT mode bits update by 1T
+                    self.mode3_stat_dot = self.dot + 1;
+                    self.update_stat_irq();
+                }
+            }
+            3 => {
+                // Delayed STAT mode bits update for Mode 2→3
+                if self.mode3_stat_dot > 0 && self.dot >= self.mode3_stat_dot {
+                    self.mode3_stat_dot = 0;
+                    self.stat = (self.stat & !0x03) | 0x03;
+                }
+                // Mode 3 → Mode 0 transition (CGB: IRQ fires 4T before mode bits update)
+                if self.dot >= 80 + self.mode3_duration {
+                    self.render_scanline();
+                    // Fire STAT IRQ with mode 0 signal NOW, but delay mode bit update
+                    self.mode = 0;
+                    // Don't update STAT mode bits yet — they still read as mode 3
+                    self.mode0_stat_dot = self.dot + 1;
+                    self.update_stat_irq();
+                    // Restore mode to a transient state: internal=0 for IRQ, STAT bits=3 for reads
+                    // We use mode=0 so future update_stat_irq calls see mode 0
+                }
+            }
+            0 => {
+                // CGB: delayed mode bit update for Mode 0
+                if self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
+                    self.mode0_stat_dot = 0;
+                    self.stat = self.stat & !0x03; // mode bits = 0
+                    self.oam_accessible = true;
+                    self.vram_accessible = true;
+                    self.hblank_entered = true;
+                }
+                // LCD first-line: STAT mode bits stay 0 for ~80 dots, then skip to mode 3
+                if self.lcd_first_line && self.dot >= 80 {
+                    self.lcd_first_line = false;
+                    self.oam_scan(); // collect sprites
+                    self.transition_to_mode3();
+                    return;
+                }
+                // Mode 0 → end of scanline at dot 456
+                if self.dot >= 456 {
+                    self.dot = 0;
+                    self.ly = self.ly.wrapping_add(1);
+                    self.update_coincidence();
+
+                    if self.ly == 144 {
+                        self.transition_to_mode1();
+                    } else {
+                        self.transition_to_mode2();
+                    }
+                }
+            }
+            1 => {
+                // VBlank lines
+                if self.dot >= 456 {
+                    self.dot = 0;
+                    self.ly = self.ly.wrapping_add(1);
+                    self.update_coincidence();
+
+                    if self.ly > 153 {
+                        // End of VBlank, back to line 0
+                        self.ly = 0;
+                        self.update_coincidence();
+                        self.frame_ready = true;
+                        self.window_line_counter = 0;
+                        self.wy_triggered = false;
+                        self.transition_to_mode2();
+                    } else {
+                        self.update_stat_irq();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- Mode transitions ----
+
+    fn transition_to_mode2(&mut self) {
         self.mode = 2;
         self.stat = (self.stat & !0x03) | 0x02;
-        // STAT interrupt if bit5 set
-        if self.stat & 0x20 != 0 {
-            self.if_flags |= 0x02;
-        }
+        self.oam_accessible = false;
+        self.vram_accessible = true;
+        // OAM scan: collect sprites for this scanline
+        self.oam_scan();
+        self.update_stat_irq();
     }
 
-    fn enter_mode3(&mut self) {
+    fn transition_to_mode3(&mut self) {
         self.mode = 3;
         self.stat = (self.stat & !0x03) | 0x03;
+        self.oam_accessible = false;
+        self.vram_accessible = false;
+        // Compute variable Mode 3 duration
+        self.compute_mode3_duration();
+        self.update_stat_irq();
     }
 
-    fn enter_mode0(&mut self) {
-        self.mode = 0;
-        self.stat = self.stat & !0x03; // bits 0-1 = 00
-        // STAT interrupt if bit3 set
-        if self.stat & 0x08 != 0 {
-            self.if_flags |= 0x02;
-        }
-        self.hblank_entered = true;
-    }
-
-    fn enter_mode1(&mut self) {
+    fn transition_to_mode1(&mut self) {
         self.mode = 1;
         self.stat = (self.stat & !0x03) | 0x01;
-        // VBlank interrupt always
+        self.oam_accessible = true;
+        self.vram_accessible = true;
+        // VBlank interrupt always fires
         self.if_flags |= 0x01;
-        // STAT interrupt if bit4 set
-        if self.stat & 0x10 != 0 {
+        // Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
+        self.update_stat_irq_with_mode2(true);
+    }
+
+    // ---- Edge-triggered STAT interrupt ----
+
+    fn update_stat_irq(&mut self) {
+        self.update_stat_irq_with_mode2(false);
+    }
+
+    fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
+        let coincidence = self.stat & 0x04 != 0;
+        let signal =
+            (self.stat & 0x08 != 0 && self.mode == 0) ||  // bit3: Mode 0
+            (self.stat & 0x10 != 0 && self.mode == 1) ||  // bit4: Mode 1
+            (self.stat & 0x20 != 0 && (self.mode == 2 || force_mode2)) || // bit5: Mode 2
+            (self.stat & 0x40 != 0 && coincidence);        // bit6: LYC=LY
+
+        // Fire on rising edge only
+        if signal && !self.stat_irq_line {
             self.if_flags |= 0x02;
+        }
+        self.stat_irq_line = signal;
+    }
+
+    fn update_coincidence(&mut self) {
+        if self.ly == self.lyc {
+            self.stat |= 0x04;
+        } else {
+            self.stat &= !0x04;
         }
     }
 
-    fn check_lyc_coincidence(&mut self) {
-        if self.ly == self.lyc {
-            self.stat |= 0x04; // Set coincidence flag (bit2)
-            if self.stat & 0x40 != 0 {
-                self.if_flags |= 0x02;
+    // ---- OAM scan ----
+
+    fn oam_scan(&mut self) {
+        self.scanline_sprites.clear();
+        let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
+        let ly = self.ly as i16;
+
+        for i in 0..40usize {
+            let sprite_y = self.oam[i * 4] as i16 - 16;
+            let sprite_x = self.oam[i * 4 + 1];
+            let tile_idx = self.oam[i * 4 + 2];
+            let attrs = self.oam[i * 4 + 3];
+
+            if ly >= sprite_y && ly < sprite_y + sprite_height {
+                self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs));
+                if self.scanline_sprites.len() >= 10 {
+                    break;
+                }
             }
-        } else {
-            self.stat &= !0x04; // Clear coincidence flag
         }
+
+    }
+
+    // ---- Variable Mode 3 duration ----
+
+    fn compute_mode3_duration(&mut self) {
+        let mut duration: u32 = 172;
+
+        // SCX penalty: (scx & 7) T-cycles
+        duration += (self.scx & 7) as u32;
+
+        // Sprite penalty: per-sprite cost depends on X position and slot overlap
+        if self.lcdc & 0x02 != 0 && !self.scanline_sprites.is_empty() {
+            // Sort sprites by X position (leftmost first)
+            let mut sorted_x: Vec<u8> = self.scanline_sprites.iter().map(|s| s.1).collect();
+            sorted_x.sort_unstable();
+
+            let scx = self.scx;
+            let mut prev_slot: i16 = -1;
+
+            for &x in &sorted_x {
+                // Sprites at X >= 168 are off-screen right, no penalty
+                if x >= 168 {
+                    continue;
+                }
+
+                let adjusted = x.wrapping_add(scx);
+                let slot = (adjusted >> 3) as i16;
+
+                if slot == prev_slot {
+                    // Same 8-pixel slot: just the base fetch cost
+                    duration += 6;
+                } else {
+                    // New slot: full penalty
+                    let alignment = (adjusted & 7) as u32;
+                    duration += 11 - std::cmp::min(5, alignment);
+                    prev_slot = slot;
+                }
+            }
+        }
+
+        // Window penalty: 6 T-cycles if window is active on this line
+        if self.lcdc & 0x20 != 0 && self.wy_triggered && self.wx <= 166 {
+            duration += 6;
+        }
+
+        // Clamp so Mode 0 has at least 1 dot
+        if duration > 456 - 80 - 1 {
+            duration = 456 - 80 - 1;
+        }
+
+        self.mode3_duration = duration;
     }
 
     /// Render one scanline (self.ly) into frame_buffer.
@@ -235,12 +388,10 @@ impl Ppu {
         }
 
         // Per-pixel background data for sprite priority checking
-        let mut bg_color: [u32; 160] = [0u32; 160];
         let mut bg_priority: [bool; 160] = [false; 160]; // attr bit7 set
         let mut bg_color_zero: [bool; 160] = [true; 160]; // color index == 0
 
         // ---- Background Rendering ----
-        // In GBC mode we always render BG (LCDC bit0 disables BG/Window priority instead)
         {
             let bg_map_base: u16 = if self.lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
             let tile_data_signed = self.lcdc & 0x10 == 0;
@@ -263,7 +414,6 @@ impl Ppu {
                 let y_flip = tile_attrs & 0x40 != 0;
                 let bg_prio = tile_attrs & 0x80 != 0;
 
-                // Tile address in VRAM
                 let tile_addr: u16 = if !tile_data_signed {
                     tile_idx as u16 * 16
                 } else {
@@ -289,18 +439,15 @@ impl Ppu {
 
                 let color32 = self.gbc_bg_color(palette_idx, color_idx as usize);
 
-                bg_color[x as usize] = color32;
                 bg_priority[x as usize] = bg_prio;
                 bg_color_zero[x as usize] = color_idx == 0;
 
-                // Write BG pixel to frame buffer (will be overwritten by sprite if needed)
                 self.frame_buffer[ly * 160 + x as usize] = color32;
             }
         }
 
         // ---- Window Rendering ----
         if self.lcdc & 0x20 != 0 {
-            // Check WY trigger
             if self.ly == self.wy {
                 self.wy_triggered = true;
             }
@@ -355,7 +502,6 @@ impl Ppu {
 
                     let color32 = self.gbc_bg_color(palette_idx, color_idx as usize);
 
-                    bg_color[x as usize] = color32;
                     bg_priority[x as usize] = bg_prio;
                     bg_color_zero[x as usize] = color_idx == 0;
 
@@ -373,30 +519,16 @@ impl Ppu {
         if self.lcdc & 0x02 != 0 {
             let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
 
-            // Collect up to 10 visible sprites (OAM priority: lower index wins)
-            let mut sprites: Vec<(i16, i16, u8, u8)> = Vec::with_capacity(10); // (sprite_y, sprite_x, tile_idx, attrs)
-
-            for i in 0..40usize {
-                let sprite_y = self.oam[i * 4 + 0] as i16 - 16;
-                let sprite_x = self.oam[i * 4 + 1] as i16 - 8;
-                let mut tile_idx = self.oam[i * 4 + 2];
-                let attrs = self.oam[i * 4 + 3];
-
-                let ly_i16 = self.ly as i16;
-                if ly_i16 >= sprite_y && ly_i16 < sprite_y + sprite_height {
-                    // In 8x16 mode, mask LSB of tile index
-                    if sprite_height == 16 {
-                        tile_idx &= 0xFE;
-                    }
-                    sprites.push((sprite_y, sprite_x, tile_idx, attrs));
-                    if sprites.len() == 10 {
-                        break;
-                    }
-                }
-            }
-
             // Render in reverse order so lower OAM index wins (drawn last = on top)
-            for &(sprite_y, sprite_x, tile_idx, attrs) in sprites.iter().rev() {
+            for &(raw_y, raw_x, mut tile_idx, attrs) in self.scanline_sprites.iter().rev() {
+                let sprite_y = raw_y as i16 - 16;
+                let sprite_x = raw_x as i16 - 8;
+
+                // In 8x16 mode, mask LSB of tile index
+                if sprite_height == 16 {
+                    tile_idx &= 0xFE;
+                }
+
                 let palette_idx = (attrs & 0x07) as usize;
                 let vram_bank_sel = if attrs & 0x08 != 0 { 1usize } else { 0usize };
                 let x_flip = attrs & 0x20 != 0;
@@ -409,7 +541,6 @@ impl Ppu {
                     row_in_sprite = sprite_height as u16 - 1 - row_in_sprite;
                 }
 
-                // In 8x16 mode, choose top or bottom tile
                 let actual_tile_idx = if sprite_height == 16 {
                     if row_in_sprite < 8 {
                         tile_idx & 0xFE
@@ -435,20 +566,13 @@ impl Ppu {
                     let bit = 7 - px;
                     let color_idx = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
 
-                    // Color 0 is transparent for sprites
                     if color_idx == 0 {
                         continue;
                     }
 
                     let sx = screen_x as usize;
 
-                    // Priority resolution:
-                    // LCDC bit0 = 0 in GBC: sprites always on top (master BG/WIN disable)
-                    // LCDC bit0 = 1: use per-attribute priority
-                    //   - if sprite attr bit7 set AND bg pixel is not color 0: BG wins
-                    //   - if bg tile attr bit7 set AND bg pixel is not color 0: BG wins
                     let sprite_wins = if self.lcdc & 0x01 == 0 {
-                        // Master priority: sprites always win
                         true
                     } else if bg_over_sprite && !bg_color_zero[sx] {
                         false
@@ -473,7 +597,6 @@ impl Ppu {
         let g5 = ((c >> 5) & 0x1F) as u32;
         let b5 = ((c >> 10) & 0x1F) as u32;
 
-        // Expand 5-bit to 8-bit: val8 = (val5 << 3) | (val5 >> 2)
         let r8 = (r5 << 3) | (r5 >> 2);
         let g8 = (g5 << 3) | (g5 >> 2);
         let b8 = (b5 << 3) | (b5 >> 2);
@@ -528,28 +651,49 @@ impl Ppu {
                 let lcd_was_on = self.lcdc & 0x80 != 0;
                 self.lcdc = val;
                 let lcd_now_on = self.lcdc & 0x80 != 0;
-                // If LCD just turned off, reset LY and mode
+
                 if lcd_was_on && !lcd_now_on {
+                    // LCD off: reset LY, dot, mode; preserve coincidence bit
+                    // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
                     self.ly = 0;
+                    self.dot = 0;
                     self.mode = 0;
-                    self.cycles = 0;
-                    self.stat &= !0x03;
-                    // Blank the screen
+                    self.stat = (self.stat & !0x03) | (self.stat & 0x04); // keep bit2
+                    self.oam_accessible = true;
+                    self.vram_accessible = true;
                     for p in self.frame_buffer.iter_mut() {
-                        *p = 0x00FFFFFF; // white when off
+                        *p = 0x00FFFFFF;
                     }
+                } else if !lcd_was_on && lcd_now_on {
+                    // LCD on: start at line 0, mode reads as 0 initially
+                    self.ly = 0;
+                    self.dot = 0;
+                    self.mode = 0;
+                    self.stat = self.stat & !0x03; // mode bits = 0
+                    self.oam_accessible = true;
+                    self.vram_accessible = true;
+                    self.lcd_first_line = true;
+                    self.update_coincidence();
+                    self.update_stat_irq();
                 }
             }
             0xFF41 => {
                 // Lower 3 bits (mode flags + coincidence) are read-only
                 self.stat = (self.stat & 0x07) | (val & 0x78);
+                // Writing STAT can change which sources are enabled → re-check edge
+                if self.lcdc & 0x80 != 0 {
+                    self.update_stat_irq();
+                }
             }
             0xFF42 => self.scy = val,
             0xFF43 => self.scx = val,
             0xFF44 => {} // LY is read-only
             0xFF45 => {
                 self.lyc = val;
-                self.check_lyc_coincidence();
+                if self.lcdc & 0x80 != 0 {
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                }
             }
             0xFF46 => self.dma = val,
             0xFF47 => self.bgp = val,
@@ -562,7 +706,6 @@ impl Ppu {
             0xFF69 => {
                 let idx = (self.bcps & 0x3F) as usize;
                 self.bcpd[idx] = val;
-                // Auto-increment if bit7 set
                 if self.bcps & 0x80 != 0 {
                     let next = (idx + 1) & 0x3F;
                     self.bcps = (self.bcps & 0x80) | next as u8;
@@ -572,7 +715,6 @@ impl Ppu {
             0xFF6B => {
                 let idx = (self.ocps & 0x3F) as usize;
                 self.ocpd[idx] = val;
-                // Auto-increment if bit7 set
                 if self.ocps & 0x80 != 0 {
                     let next = (idx + 1) & 0x3F;
                     self.ocps = (self.ocps & 0x80) | next as u8;

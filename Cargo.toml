@@ -7,6 +7,10 @@ edition = "2021"
 name = "gbcemu"
 path = "src/main.rs"
 
+[[bin]]
+name = "test_runner"
+path = "src/test_runner.rs"
+
 [dependencies]
 sdl3 = "0.17"
 log = "0.4"
