@@ -118,6 +118,21 @@ impl Bus {
             ppu.reset();
         }
 
+        // Detect DMG game running on CGB hardware (no boot ROM)
+        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
+        let is_dmg_game = cgb_flag != 0x80 && cgb_flag != 0xC0;
+        if model.is_cgb() && is_dmg_game && !boot_rom_active {
+            ppu.dmg_compat = true;
+            // Default grayscale reference colors (no boot ROM to set real ones)
+            let grays: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+            ppu.dmg_bg_ref = grays;
+            ppu.dmg_obj_ref = [grays, grays];
+            // Sync initial post-boot palette values to CGB palette RAM
+            ppu.sync_dmg_palette_to_cgb(0xFC, false, 0);
+            ppu.sync_dmg_palette_to_cgb(0xFF, true, 0);
+            ppu.sync_dmg_palette_to_cgb(0xFF, true, 1);
+        }
+
         let mut joypad = Joypad::new();
         if !boot_rom_active {
             // Post-boot P1: boot ROM writes 0x00, clearing both select bits.
@@ -379,8 +394,22 @@ impl Bus {
                 // Writing any non-zero value permanently disables the boot ROM.
                 if val != 0 {
                     self.boot_rom_active = false;
-                    // Keep cgb_mode=true: the boot ROM programs CGB palettes
-                    // for both CGB and DMG games (DMG compat palette).
+                    // Detect DMG compat: CGB hardware running DMG game
+                    let cgb_flag = self.cart.read_rom(0x0143);
+                    if self.model.is_cgb() && cgb_flag != 0x80 && cgb_flag != 0xC0 {
+                        self.ppu.dmg_compat = true;
+                        // Capture current CGB palette RAM as reference colors
+                        // (the boot ROM has programmed these)
+                        for i in 0..4 {
+                            let off = i * 2;
+                            self.ppu.dmg_bg_ref[i] = self.ppu.bcpd[off] as u16
+                                | ((self.ppu.bcpd[off + 1] as u16) << 8);
+                            self.ppu.dmg_obj_ref[0][i] = self.ppu.ocpd[off] as u16
+                                | ((self.ppu.ocpd[off + 1] as u16) << 8);
+                            self.ppu.dmg_obj_ref[1][i] = self.ppu.ocpd[8 + off] as u16
+                                | ((self.ppu.ocpd[8 + off + 1] as u16) << 8);
+                        }
+                    }
                 }
             }
             0xFF70 if !self.model.is_cgb() => {} // ignore on DMG

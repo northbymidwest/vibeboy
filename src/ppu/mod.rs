@@ -183,6 +183,15 @@ pub struct Ppu {
     /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
     pub cgb_mode: bool,
 
+    /// True = CGB hardware running a DMG game (DMG compatibility mode).
+    /// Uses CGB palette RAM but with DMG-style palette selection.
+    pub dmg_compat: bool,
+
+    /// Reference colors for DMG compat mode (RGB555).
+    /// Set by boot ROM or default grayscale when no boot ROM.
+    pub dmg_bg_ref: [u16; 4],
+    pub dmg_obj_ref: [[u16; 4]; 2],
+
     // ---- Pixel FIFO state ----
     bg_fifo: PixelFifo,
     fetcher: Fetcher,
@@ -265,6 +274,9 @@ impl Ppu {
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
             cgb_mode: true,
+            dmg_compat: false,
+            dmg_bg_ref: [0x7FFF; 4],
+            dmg_obj_ref: [[0x7FFF; 4]; 2],
 
             bg_fifo: PixelFifo::new(),
             fetcher: Fetcher::new(),
@@ -659,7 +671,13 @@ impl Ppu {
     fn mix_sprite_into_fifo(&mut self, sprite_x: u8, attrs: u8) {
         let x_flip = attrs & 0x20 != 0;
         let bg_over = attrs & 0x80 != 0;
-        let palette_idx = if self.cgb_mode { attrs & 0x07 } else { 0 };
+        let palette_idx = if self.cgb_mode && !self.dmg_compat {
+            attrs & 0x07
+        } else if self.dmg_compat {
+            if attrs & 0x10 != 0 { 1 } else { 0 }
+        } else {
+            0
+        };
         let dmg_pal = if attrs & 0x10 != 0 { self.obp1 } else { self.obp0 };
 
         let lo = self.sprite_tile_data_low;
@@ -797,7 +815,7 @@ impl Ppu {
 
         let x_flip = self.cgb_mode && attrs & 0x20 != 0;
         let bg_prio = self.cgb_mode && attrs & 0x80 != 0;
-        let palette = if self.cgb_mode { attrs & 0x07 } else { 0 };
+        let palette = if self.cgb_mode && !self.dmg_compat { attrs & 0x07 } else { 0 };
 
         for px in 0..8u8 {
             let bit = if x_flip { px } else { 7 - px };
@@ -982,6 +1000,29 @@ impl Ppu {
         }
     }
 
+    /// In DMG compat mode, sync a DMG palette register write to CGB palette RAM.
+    /// Maps each 2-bit shade entry through the reference colors.
+    pub fn sync_dmg_palette_to_cgb(&mut self, palette_reg: u8, is_obj: bool, pal_idx: usize) {
+        for color_idx in 0..4 {
+            let shade = (palette_reg >> (color_idx * 2)) & 0x03;
+            let rgb555 = if is_obj {
+                self.dmg_obj_ref[pal_idx][shade as usize]
+            } else {
+                self.dmg_bg_ref[shade as usize]
+            };
+            let lo = (rgb555 & 0xFF) as u8;
+            let hi = (rgb555 >> 8) as u8;
+            let offset = pal_idx * 8 + color_idx * 2;
+            if is_obj {
+                self.ocpd[offset] = lo;
+                self.ocpd[offset + 1] = hi;
+            } else {
+                self.bcpd[offset] = lo;
+                self.bcpd[offset + 1] = hi;
+            }
+        }
+    }
+
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
             0xFF40 => {
@@ -1033,9 +1074,18 @@ impl Ppu {
                 }
             }
             0xFF46 => self.dma = val,
-            0xFF47 => self.bgp = val,
-            0xFF48 => self.obp0 = val,
-            0xFF49 => self.obp1 = val,
+            0xFF47 => {
+                self.bgp = val;
+                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, false, 0); }
+            }
+            0xFF48 => {
+                self.obp0 = val;
+                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 0); }
+            }
+            0xFF49 => {
+                self.obp1 = val;
+                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 1); }
+            }
             0xFF4A => self.wy = val,
             0xFF4B => self.wx = val,
             0xFF4F => self.vram_bank = (val & 0x01) as usize,
