@@ -1,0 +1,5 @@
+/target/
+*.gb
+*.gbc
+*.bin
+test-roms/
