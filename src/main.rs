@@ -46,6 +46,10 @@ struct Cli {
     /// Path to SNES program ROM for SGB LLE (auto-detected if not specified)
     #[arg(long)]
     snes_rom: Option<PathBuf>,
+
+    /// Enable SGB Low-Level Emulation (run SNES CPU with BIOS ROM)
+    #[arg(long)]
+    lle: bool,
 }
 
 fn main() {
@@ -90,8 +94,8 @@ fn main() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
     }
 
-    // Load SNES program ROM for SGB LLE
-    let snes_rom: Option<Vec<u8>> = if model.is_sgb() {
+    // Load SNES program ROM for SGB LLE (only when --lle flag is set)
+    let snes_rom: Option<Vec<u8>> = if model.is_sgb() && cli.lle {
         if let Some(ref p) = cli.snes_rom {
             Some(fs::read(p).unwrap_or_else(|e| {
                 eprintln!("Failed to read SNES ROM '{}': {}", p.display(), e);

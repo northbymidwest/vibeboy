@@ -47,6 +47,15 @@ pub struct SnesBus {
     pub mdmaen: u8,             // $420B: DMA enable
     pub hdmaen: u8,             // $420C: HDMA enable
     pub memsel: u8,             // $420D: ROM speed
+
+    // APU I/O ports ($2140-$2143) — SNES→SPC writes, SPC→SNES reads
+    pub apu_out: [u8; 4],       // What the SNES writes (CPU→APU)
+    pub apu_in: [u8; 4],        // What the SNES reads (APU→CPU)
+    pub apu_handshake_done: bool,   // True after initial $AA/$BB handshake
+    apu_port0_reads: u32,       // Consecutive port 0 reads without a port 0 write
+
+    /// Set when TIMEUP ($4211) is read, signaling IRQ was acknowledged.
+    pub irq_ack: bool,
 }
 
 impl SnesBus {
@@ -75,6 +84,11 @@ impl SnesBus {
             mdmaen: 0,
             hdmaen: 0,
             memsel: 0,
+            apu_out: [0; 4],
+            apu_in: [0xAA, 0xBB, 0x00, 0x00], // SPC700 IPL ready handshake
+            apu_handshake_done: false,
+            apu_port0_reads: 0,
+            irq_ack: false,
         }
     }
 
@@ -94,6 +108,21 @@ impl SnesBus {
             0x0000..=0x1FFF if effective_bank <= 0x3F => {
                 // WRAM mirror (first 8KB)
                 self.wram[offset as usize]
+            }
+            0x2140..=0x2143 if effective_bank <= 0x3F => {
+                // APU I/O ports — read from SPC700 side
+                let port = (offset - 0x2140) as usize;
+                if port == 0 {
+                    self.apu_port0_reads += 1;
+                    // If stuck polling port 0 (>128 reads without a write),
+                    // the upload/execute phase is done. Reset to $AA/$BB
+                    // so the next handshake can proceed.
+                    if self.apu_port0_reads > 128 && self.apu_in[0] != 0xAA {
+                        self.apu_in = [0xAA, 0xBB, 0x00, 0x00];
+                        self.apu_handshake_done = false;
+                    }
+                }
+                self.apu_in[port]
             }
             0x2100..=0x21FF if effective_bank <= 0x3F => {
                 self.ppu.read(offset)
@@ -138,6 +167,26 @@ impl SnesBus {
             0x0000..=0x1FFF if effective_bank <= 0x3F => {
                 self.wram[offset as usize] = val;
             }
+            0x2140..=0x2143 if effective_bank <= 0x3F => {
+                // APU I/O ports — SNES→SPC700 write
+                let port = (offset - 0x2140) as usize;
+                self.apu_out[port] = val;
+                // SPC700 IPL upload protocol simulation:
+                // Before handshake: ignore writes (preserve $AA/$BB)
+                // After handshake ($CC on port 0): echo port 0 writes
+                // Stuck polling is detected on the read side and resets state.
+                if port == 0 {
+                    self.apu_port0_reads = 0; // Reset polling counter
+                }
+                if !self.apu_handshake_done {
+                    if port == 0 && val == 0xCC {
+                        self.apu_handshake_done = true;
+                        self.apu_in[0] = val;
+                    }
+                } else if port == 0 {
+                    self.apu_in[0] = val;
+                }
+            }
             0x2100..=0x21FF if effective_bank <= 0x3F => {
                 self.ppu.write(offset, val);
             }
@@ -176,6 +225,7 @@ impl SnesBus {
             0x4211 => {
                 let v = self.timeup;
                 self.timeup = 0;
+                self.irq_ack = true; // Signal IRQ line should be deasserted
                 v
             }
             0x4212 => self.hvbjoy,

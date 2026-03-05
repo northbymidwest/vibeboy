@@ -60,6 +60,11 @@ impl Icd2 {
         }
     }
 
+    /// Mutable access to packet data for initialization.
+    pub fn packet_data_mut(&mut self) -> &mut [u8; 16] {
+        &mut self.packet_data
+    }
+
     /// Feed a 16-byte command packet from the GB side.
     pub fn feed_packet(&mut self, data: &[u8; 16]) {
         self.packet_data = *data;
@@ -128,8 +133,8 @@ impl Icd2 {
                 self.rows_ready
             }
             0x6002 => {
-                // Packet ready
-                if self.packet_ready { 0x80 } else { 0x00 }
+                // Packet ready — bit 0 indicates a command packet is available
+                if self.packet_ready { 0x01 } else { 0x00 }
             }
             0x6003 => self.control,
             0x7000..=0x700F => {

@@ -82,7 +82,7 @@ impl SnesPpuRegs {
             }
             _ => unreachable!(),
         };
-        (addr as usize) * 2
+        ((addr as usize) * 2) & 0xFFFF
     }
 
     fn vram_increment(&self) -> u16 {

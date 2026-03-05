@@ -35,8 +35,9 @@ pub struct Sgb {
     /// LLE mode: when true, packets are relayed to the SNES CPU instead of
     /// being processed by the HLE command handlers.
     pub lle_mode: bool,
-    /// Pending packet to relay to the SNES subsystem (set by finish_packet in LLE mode).
-    pub pending_packet: Option<[u8; 16]>,
+    /// Queue of individual 16-byte packets to relay to the SNES subsystem.
+    /// Each packet is relayed as it completes (not accumulated for multi-packet commands).
+    pub pending_packets: Vec<[u8; 16]>,
 
     // ── Palettes ──
     /// 4 active SGB palettes (RGB555), color 0 is shared across all
@@ -95,7 +96,7 @@ impl Sgb {
             packets_received: 0,
 
             lle_mode: false,
-            pending_packet: None,
+            pending_packets: Vec::new(),
 
             palettes: [DEFAULT_PALETTE; 4],
 
@@ -222,17 +223,22 @@ impl Sgb {
 
         self.packets_received += 1;
 
+        // In LLE mode, relay each individual 16-byte packet to the SNES as it
+        // completes. The SNES BIOS receives one packet per NMI and handles
+        // multi-packet command accumulation internally.
+        if self.lle_mode {
+            let mut pkt = [0u8; 16];
+            let start = (self.packets_received as usize - 1) * 16;
+            let end = std::cmp::min(start + 16, self.packet_buf.len());
+            pkt[..end - start].copy_from_slice(&self.packet_buf[start..end]);
+            self.pending_packets.push(pkt);
+        }
+
         if self.packets_received >= self.expected_packets {
-            if self.lle_mode {
-                // In LLE mode, relay the first packet to the SNES subsystem.
-                // The SNES BIOS handles multi-packet commands internally.
-                let mut pkt = [0u8; 16];
-                let len = std::cmp::min(16, self.packet_buf.len());
-                pkt[..len].copy_from_slice(&self.packet_buf[..len]);
-                self.pending_packet = Some(pkt);
-                // Also run HLE for palette/mask commands to keep SGB state in sync
+            if !self.lle_mode {
                 self.execute_command();
             } else {
+                // Also run HLE for palette/mask commands to keep SGB state in sync
                 self.execute_command();
             }
             self.packets_received = 0;
@@ -251,7 +257,7 @@ impl Sgb {
             return;
         }
         let cmd = (self.packet_buf[0] >> 3) & 0x1F;
-        log::trace!("SGB command 0x{:02X} ({} packets, {} bytes)", cmd, self.expected_packets, self.packet_buf.len());
+        log::debug!("SGB command 0x{:02X} ({} packets, {} bytes)", cmd, self.expected_packets, self.packet_buf.len());
 
         if cmd > 0x17 {
             // Invalid command — likely false positive from joypad polling
@@ -515,7 +521,7 @@ impl Sgb {
                     self.palettes[i][c] = self.sys_palettes[base + c];
                 }
             }
-            log::trace!("SGB PAL_SET: pal[{}] = sys[{}] = [{:04X},{:04X},{:04X},{:04X}]",
+            log::debug!("SGB PAL_SET: pal[{}] = sys[{}] = [{:04X},{:04X},{:04X},{:04X}]",
                 i, pal_idx,
                 self.palettes[i][0], self.palettes[i][1],
                 self.palettes[i][2], self.palettes[i][3]);
@@ -728,11 +734,11 @@ impl Sgb {
                 let y_flip = entry & 0x8000 != 0;
                 // Priority bit (0x2000) ignored for border
 
-                let pal = if pal_idx < 4 {
-                    &self.border_palettes[pal_idx]
-                } else {
-                    &self.border_palettes[0]
-                };
+                // The SGB BIOS uses SNES palettes 4-7 for border tiles.
+                // border_palettes[0-3] maps to SNES palettes 4-7.
+                // Remap tilemap palette index: 4→0, 5→1, 6→2, 7→3, 0-3→as-is.
+                let local_pal = if pal_idx >= 4 { pal_idx - 4 } else { pal_idx };
+                let pal = &self.border_palettes[local_pal.min(3)];
 
                 for ty in 0..8usize {
                     let row = if y_flip { 7 - ty } else { ty };
