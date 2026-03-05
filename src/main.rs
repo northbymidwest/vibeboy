@@ -69,12 +69,9 @@ fn main() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
     }
 
-    // Auto-detect hardware model from cartridge header CGB flag
-    let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
-    let model = if cgb_flag == 0x80 || cgb_flag == 0xC0 { GbModel::Cgb } else { GbModel::Dmg };
-
+    // We emulate CGB hardware — DMG games run in CGB compatibility mode
     let rom_path = std::path::Path::new(&args[1]);
-    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path), model);
+    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path), GbModel::Cgb);
 
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();
