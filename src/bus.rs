@@ -4,6 +4,8 @@ use crate::joypad::Joypad;
 use crate::ppu::Ppu;
 use crate::timer::Timer;
 
+use std::path::{Path, PathBuf};
+
 /// OAM DMA state.
 ///
 /// Timing (from hardware):
@@ -95,17 +97,33 @@ pub struct Bus {
     boot_rom: Option<Vec<u8>>,
     /// Whether the boot ROM is still mapped (cleared by writing 0xFF50).
     boot_rom_active: bool,
+
+    /// Path to .sav file (set when cartridge has battery).
+    save_path: Option<PathBuf>,
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>) -> Self {
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>) -> Self {
         let boot_rom_active = boot_rom.is_some();
         let mut ppu = Ppu::new();
         if boot_rom_active {
             ppu.reset();
         }
+        let mut cart = make_cartridge(rom);
+
+        // Compute .sav path and load existing save data
+        let save_path = rom_path
+            .filter(|_| cart.has_battery())
+            .map(|p| p.with_extension("sav"));
+        if let Some(ref sp) = save_path {
+            if let Ok(data) = std::fs::read(sp) {
+                log::info!("Loaded save from {}", sp.display());
+                cart.load_ram(&data);
+            }
+        }
+
         Bus {
-            cart: make_cartridge(rom),
+            cart,
             ppu,
             timer: Timer::new(),
             joypad: Joypad::new(),
@@ -123,11 +141,26 @@ impl Bus {
             hdma: Hdma::new(),
             boot_rom,
             boot_rom_active,
+            save_path,
         }
     }
 
     pub fn has_boot_rom(&self) -> bool {
         self.boot_rom.is_some()
+    }
+
+    /// Write cartridge RAM to .sav file if battery-backed.
+    pub fn save_to_disk(&self) {
+        if let Some(ref path) = self.save_path {
+            let data = self.cart.ram_data();
+            if !data.is_empty() {
+                if let Err(e) = std::fs::write(path, data) {
+                    log::error!("Failed to write save file '{}': {}", path.display(), e);
+                } else {
+                    log::info!("Saved to {}", path.display());
+                }
+            }
+        }
     }
 
     // ── Public accessors for Cpu ───────────────────────────────────────────────

@@ -67,7 +67,8 @@ fn main() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
     }
 
-    let mut emu = Emulator::new(rom, boot_rom);
+    let rom_path = std::path::Path::new(&args[1]);
+    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path));
 
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();
@@ -175,6 +176,8 @@ fn main() {
         }
         frame_start = Instant::now();
     }
+
+    emu.save();
 }
 
 fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {

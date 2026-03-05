@@ -3,6 +3,7 @@ use crate::cpu::{Cpu, Registers};
 use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
 };
+use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
 pub const CYCLES_PER_FRAME: u32 = 70_224;
@@ -16,7 +17,7 @@ impl Emulator {
     /// Create a new emulator. If `boot_rom` is Some, the CPU starts at PC=0x0000
     /// with hardware reset registers and executes the boot ROM. Otherwise the CPU
     /// starts at PC=0x0100 with post-boot GBC register values (no boot animation).
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>) -> Self {
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>) -> Self {
         let has_boot = boot_rom.is_some();
         let mut cpu = Cpu::new();
         if has_boot {
@@ -24,8 +25,13 @@ impl Emulator {
         }
         Emulator {
             cpu,
-            bus: Bus::new(rom, boot_rom),
+            bus: Bus::new(rom, boot_rom, rom_path),
         }
+    }
+
+    /// Persist battery-backed cartridge RAM to disk.
+    pub fn save(&self) {
+        self.bus.save_to_disk();
     }
 
     /// Run until one full frame has been rendered (VBlank).

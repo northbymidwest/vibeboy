@@ -21,7 +21,7 @@ fn run_test(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static 
         Ok(r) => r,
         Err(_) => return "ERR",
     };
-    let mut emu = Emulator::new(rom, boot_rom.clone());
+    let mut emu = Emulator::new(rom, boot_rom.clone(), None);
     match emu.run_until_breakpoint(300) {
         Some(regs) => {
             if mooneye_passed(regs) {

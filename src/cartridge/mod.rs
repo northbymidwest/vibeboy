@@ -5,6 +5,9 @@ pub trait Cartridge: Send {
     fn write_rom(&mut self, addr: u16, val: u8);
     fn read_ram(&self, addr: u16) -> u8;
     fn write_ram(&mut self, addr: u16, val: u8);
+    fn has_battery(&self) -> bool { false }
+    fn ram_data(&self) -> &[u8] { &[] }
+    fn load_ram(&mut self, _data: &[u8]) {}
 }
 
 // ── ROM-only ──────────────────────────────────────────────────────────────────
@@ -38,10 +41,11 @@ pub struct Mbc1 {
     banking_mode: u8,
     /// Upper 2 bits (affect bank 0 in mode 1, and RAM bank)
     upper: usize,
+    battery: bool,
 }
 
 impl Mbc1 {
-    fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    fn new(rom: Vec<u8>, ram_size: usize, battery: bool) -> Self {
         Mbc1 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
@@ -50,6 +54,7 @@ impl Mbc1 {
             ram_enabled: false,
             banking_mode: 0,
             upper: 0,
+            battery,
         }
     }
 }
@@ -111,6 +116,13 @@ impl Cartridge for Mbc1 {
         let i = idx % len;
         self.ram[i] = val;
     }
+
+    fn has_battery(&self) -> bool { self.battery }
+    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn load_ram(&mut self, data: &[u8]) {
+        let len = self.ram.len().min(data.len());
+        self.ram[..len].copy_from_slice(&data[..len]);
+    }
 }
 
 // ── MBC3 ──────────────────────────────────────────────────────────────────────
@@ -121,16 +133,18 @@ pub struct Mbc3 {
     rom_bank: usize,
     ram_bank: usize,
     ram_enabled: bool,
+    battery: bool,
 }
 
 impl Mbc3 {
-    fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    fn new(rom: Vec<u8>, ram_size: usize, battery: bool) -> Self {
         Mbc3 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
             rom_bank: 1,
             ram_bank: 0,
             ram_enabled: false,
+            battery,
         }
     }
 }
@@ -170,6 +184,13 @@ impl Cartridge for Mbc3 {
         let len = self.ram.len().max(1);
         self.ram[idx % len] = val;
     }
+
+    fn has_battery(&self) -> bool { self.battery }
+    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn load_ram(&mut self, data: &[u8]) {
+        let len = self.ram.len().min(data.len());
+        self.ram[..len].copy_from_slice(&data[..len]);
+    }
 }
 
 // ── MBC5 ──────────────────────────────────────────────────────────────────────
@@ -180,16 +201,18 @@ pub struct Mbc5 {
     rom_bank: usize, // 9-bit bank number
     ram_bank: usize,
     ram_enabled: bool,
+    battery: bool,
 }
 
 impl Mbc5 {
-    fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    fn new(rom: Vec<u8>, ram_size: usize, battery: bool) -> Self {
         Mbc5 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
             rom_bank: 1,
             ram_bank: 0,
             ram_enabled: false,
+            battery,
         }
     }
 }
@@ -225,6 +248,13 @@ impl Cartridge for Mbc5 {
         let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
         if let Some(b) = self.ram.get_mut(idx) { *b = val; }
     }
+
+    fn has_battery(&self) -> bool { self.battery }
+    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn load_ram(&mut self, data: &[u8]) {
+        let len = self.ram.len().min(data.len());
+        self.ram[..len].copy_from_slice(&data[..len]);
+    }
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────
@@ -253,9 +283,18 @@ pub fn make_cartridge(rom: Vec<u8>) -> Box<dyn Cartridge> {
 
     match cart_type {
         0x00 => Box::new(RomOnly::new(rom)),
-        0x01..=0x03 => Box::new(Mbc1::new(rom, ram_size)),
-        0x0F..=0x13 => Box::new(Mbc3::new(rom, ram_size)),
-        0x19..=0x1E => Box::new(Mbc5::new(rom, ram_size)),
+        0x01..=0x03 => {
+            let battery = cart_type == 0x03;
+            Box::new(Mbc1::new(rom, ram_size, battery))
+        }
+        0x0F..=0x13 => {
+            let battery = matches!(cart_type, 0x0F | 0x10 | 0x13);
+            Box::new(Mbc3::new(rom, ram_size, battery))
+        }
+        0x19..=0x1E => {
+            let battery = matches!(cart_type, 0x1B | 0x1E);
+            Box::new(Mbc5::new(rom, ram_size, battery))
+        }
         other => {
             log::warn!("Unsupported cart type {:#04X}, using ROM-only", other);
             Box::new(RomOnly::new(rom))
