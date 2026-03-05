@@ -40,7 +40,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    // Optional boot ROM: --bootrom <path>
+    // Optional boot ROM: --bootrom <path>, or auto-detect gbc_bios.bin
     let boot_rom: Option<Vec<u8>> = {
         let mut path = None;
         let mut i = 2;
@@ -52,10 +52,15 @@ fn main() {
                 i += 1;
             }
         }
-        path.map(|p| fs::read(&p).unwrap_or_else(|e| {
-            eprintln!("Failed to read boot ROM '{}': {}", p, e);
-            std::process::exit(1);
-        }))
+        if let Some(p) = path {
+            Some(fs::read(&p).unwrap_or_else(|e| {
+                eprintln!("Failed to read boot ROM '{}': {}", p, e);
+                std::process::exit(1);
+            }))
+        } else {
+            // Auto-detect boot ROM in crate root
+            fs::read("gbc_bios.bin").ok()
+        }
     };
 
     if boot_rom.is_some() {
@@ -96,6 +101,9 @@ fn main() {
     audio_stream.resume().unwrap();
 
     let mut frame_start = Instant::now();
+    let mut fps_timer = Instant::now();
+    let mut fps_count = 0u32;
+    let mut fps_emu_total = Duration::ZERO;
 
     'running: loop {
         // ── Events ────────────────────────────────────────────────────────────
@@ -142,10 +150,28 @@ fn main() {
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
 
+        // ── FPS counter ───────────────────────────────────────────────────────
+        let emu_time = frame_start.elapsed();
+        fps_count += 1;
+        fps_emu_total += emu_time;
+        let fps_elapsed = fps_timer.elapsed();
+        if fps_elapsed >= Duration::from_secs(1) {
+            let fps = fps_count as f64 / fps_elapsed.as_secs_f64();
+            let avg_emu_ms = fps_emu_total.as_secs_f64() * 1000.0 / fps_count as f64;
+            eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
+            fps_count = 0;
+            fps_emu_total = Duration::ZERO;
+            fps_timer = Instant::now();
+        }
+
         // ── Frame rate cap ────────────────────────────────────────────────────
-        let elapsed = frame_start.elapsed();
-        if elapsed < FRAME_DURATION {
-            std::thread::sleep(FRAME_DURATION - elapsed);
+        // Sleep for the bulk, then spin-wait for precision (thread::sleep overshoots on macOS)
+        let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
+        if remaining > Duration::from_millis(2) {
+            std::thread::sleep(remaining - Duration::from_millis(2));
+        }
+        while frame_start.elapsed() < FRAME_DURATION {
+            std::hint::spin_loop();
         }
         frame_start = Instant::now();
     }

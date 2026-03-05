@@ -138,6 +138,39 @@ impl Ppu {
         }
     }
 
+    /// Reset PPU to hardware power-on state (for boot ROM execution).
+    /// LCD is off, all registers zeroed, palettes zeroed.
+    pub fn reset(&mut self) {
+        self.lcdc = 0x00; // LCD off
+        self.stat = 0x00;
+        self.scy = 0;
+        self.scx = 0;
+        self.ly = 0;
+        self.lyc = 0;
+        self.bgp = 0;
+        self.obp0 = 0;
+        self.obp1 = 0;
+        self.wy = 0;
+        self.wx = 0;
+        self.dma = 0;
+        self.bcps = 0;
+        self.bcpd = [0u8; 64];
+        self.ocps = 0;
+        self.ocpd = [0u8; 64];
+        self.mode = 0;
+        self.dot = 0;
+        self.stat_irq_line = false;
+        self.vram_accessible = true;
+        self.oam_accessible = true;
+        self.frame_ready = false;
+        self.hblank_entered = false;
+        self.lcd_first_line = false;
+        self.mode0_stat_dot = 0;
+        self.mode3_stat_dot = 0;
+        self.window_line_counter = 0;
+        self.wy_triggered = false;
+    }
+
     /// Step the PPU by `cycles` T-cycles.
     /// Returns interrupt flags (bit0=VBlank, bit1=STAT) to OR into IF.
     pub fn step(&mut self, cycles: u32) -> u8 {

@@ -100,9 +100,13 @@ pub struct Bus {
 impl Bus {
     pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>) -> Self {
         let boot_rom_active = boot_rom.is_some();
+        let mut ppu = Ppu::new();
+        if boot_rom_active {
+            ppu.reset();
+        }
         Bus {
             cart: make_cartridge(rom),
-            ppu: Ppu::new(),
+            ppu,
             timer: Timer::new(),
             joypad: Joypad::new(),
             apu: Apu::new(),
@@ -113,7 +117,7 @@ impl Bus {
             ie: 0x00,
             sb: 0x00,
             sc: 0x7E,
-            key1: 0xFF,
+            key1: 0x00,
             double_speed: false,
             oam_dma: OamDma::new(),
             hdma: Hdma::new(),
@@ -239,7 +243,7 @@ impl Bus {
             0xFF0F => self.if_ | 0xE0,
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => self.ppu.read(addr),
-            0xFF4D => self.key1,
+            0xFF4D => self.key1 | 0x7E, // bits 1-6 unused, read as 1
             0xFF51 => (self.hdma.src >> 8) as u8,
             0xFF52 => (self.hdma.src & 0xFF) as u8,
             0xFF53 => (self.hdma.dst >> 8) as u8,
