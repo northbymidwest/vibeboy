@@ -167,7 +167,7 @@ impl Bus {
     /// Write cartridge RAM to .sav file if battery-backed.
     pub fn save_to_disk(&self) {
         if let Some(ref path) = self.save_path {
-            let data = self.cart.ram_data();
+            let data = self.cart.save_data();
             if !data.is_empty() {
                 if let Err(e) = std::fs::write(path, data) {
                     log::error!("Failed to write save file '{}': {}", path.display(), e);
