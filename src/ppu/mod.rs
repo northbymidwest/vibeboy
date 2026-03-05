@@ -77,6 +77,9 @@ pub struct Ppu {
 
     /// CGB: dot at which Mode 3 becomes visible in STAT (0 = not pending).
     mode3_stat_dot: u32,
+
+    /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
+    pub cgb_mode: bool,
 }
 
 impl Ppu {
@@ -135,6 +138,7 @@ impl Ppu {
             lcd_first_line: false,
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
+            cgb_mode: true,
         }
     }
 
@@ -439,13 +443,19 @@ impl Ppu {
                 let map_addr = (bg_map_base + tile_y * 32 + tile_x) as usize;
 
                 let tile_idx = self.vram[0][map_addr];
-                let tile_attrs = self.vram[1][map_addr];
 
-                let palette_idx = (tile_attrs & 0x07) as usize;
-                let vram_bank_sel = if tile_attrs & 0x08 != 0 { 1usize } else { 0usize };
-                let x_flip = tile_attrs & 0x20 != 0;
-                let y_flip = tile_attrs & 0x40 != 0;
-                let bg_prio = tile_attrs & 0x80 != 0;
+                let (palette_idx, vram_bank_sel, x_flip, y_flip, bg_prio) = if self.cgb_mode {
+                    let tile_attrs = self.vram[1][map_addr];
+                    (
+                        (tile_attrs & 0x07) as usize,
+                        if tile_attrs & 0x08 != 0 { 1usize } else { 0usize },
+                        tile_attrs & 0x20 != 0,
+                        tile_attrs & 0x40 != 0,
+                        tile_attrs & 0x80 != 0,
+                    )
+                } else {
+                    (0, 0, false, false, false)
+                };
 
                 let tile_addr: u16 = if !tile_data_signed {
                     tile_idx as u16 * 16
@@ -470,7 +480,11 @@ impl Ppu {
                 let bit = 7 - pixel_x_in_tile;
                 let color_idx = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
 
-                let color32 = self.gbc_bg_color(palette_idx, color_idx as usize);
+                let color32 = if self.cgb_mode {
+                    self.gbc_bg_color(palette_idx, color_idx as usize)
+                } else {
+                    Self::dmg_color(self.bgp, color_idx)
+                };
 
                 bg_priority[x as usize] = bg_prio;
                 bg_color_zero[x as usize] = color_idx == 0;
@@ -502,13 +516,19 @@ impl Ppu {
                     let map_addr = (win_map_base + tile_y * 32 + tile_x) as usize;
 
                     let tile_idx = self.vram[0][map_addr];
-                    let tile_attrs = self.vram[1][map_addr];
 
-                    let palette_idx = (tile_attrs & 0x07) as usize;
-                    let vram_bank_sel = if tile_attrs & 0x08 != 0 { 1usize } else { 0usize };
-                    let x_flip = tile_attrs & 0x20 != 0;
-                    let y_flip = tile_attrs & 0x40 != 0;
-                    let bg_prio = tile_attrs & 0x80 != 0;
+                    let (palette_idx, vram_bank_sel, x_flip, y_flip, bg_prio) = if self.cgb_mode {
+                        let tile_attrs = self.vram[1][map_addr];
+                        (
+                            (tile_attrs & 0x07) as usize,
+                            if tile_attrs & 0x08 != 0 { 1usize } else { 0usize },
+                            tile_attrs & 0x20 != 0,
+                            tile_attrs & 0x40 != 0,
+                            tile_attrs & 0x80 != 0,
+                        )
+                    } else {
+                        (0, 0, false, false, false)
+                    };
 
                     let tile_addr: u16 = if !tile_data_signed {
                         tile_idx as u16 * 16
@@ -533,7 +553,11 @@ impl Ppu {
                     let bit = 7 - pixel_x_in_tile;
                     let color_idx = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
 
-                    let color32 = self.gbc_bg_color(palette_idx, color_idx as usize);
+                    let color32 = if self.cgb_mode {
+                        self.gbc_bg_color(palette_idx, color_idx as usize)
+                    } else {
+                        Self::dmg_color(self.bgp, color_idx)
+                    };
 
                     bg_priority[x as usize] = bg_prio;
                     bg_color_zero[x as usize] = color_idx == 0;
@@ -562,11 +586,12 @@ impl Ppu {
                     tile_idx &= 0xFE;
                 }
 
-                let palette_idx = (attrs & 0x07) as usize;
-                let vram_bank_sel = if attrs & 0x08 != 0 { 1usize } else { 0usize };
+                let vram_bank_sel = if self.cgb_mode && attrs & 0x08 != 0 { 1usize } else { 0usize };
                 let x_flip = attrs & 0x20 != 0;
                 let y_flip = attrs & 0x40 != 0;
                 let bg_over_sprite = attrs & 0x80 != 0;
+                let dmg_palette = if attrs & 0x10 != 0 { self.obp1 } else { self.obp0 };
+                let palette_idx = if self.cgb_mode { (attrs & 0x07) as usize } else { 0 };
 
                 let mut row_in_sprite = (self.ly as i16 - sprite_y) as u16;
 
@@ -616,7 +641,11 @@ impl Ppu {
                     };
 
                     if sprite_wins {
-                        let color32 = self.gbc_obj_color(palette_idx, color_idx as usize);
+                        let color32 = if self.cgb_mode {
+                            self.gbc_obj_color(palette_idx, color_idx as usize)
+                        } else {
+                            Self::dmg_color(dmg_palette, color_idx)
+                        };
                         self.frame_buffer[ly * 160 + sx] = color32;
                     }
                 }
@@ -651,6 +680,14 @@ impl Ppu {
         let hi = self.ocpd[offset + 1] as u16;
         let c = lo | (hi << 8);
         Self::gbc_15bit_to_32bit(c)
+    }
+
+    /// DMG palette lookup: map a 2-bit color index through a palette register to grayscale.
+    const DMG_SHADES: [u32; 4] = [0x00FFFFFF, 0x00AAAAAA, 0x00555555, 0x00000000];
+
+    fn dmg_color(palette_reg: u8, color_idx: u8) -> u32 {
+        let shade = (palette_reg >> (color_idx * 2)) & 0x03;
+        Self::DMG_SHADES[shade as usize]
     }
 
     // ---- I/O Register Access ----

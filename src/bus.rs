@@ -100,14 +100,25 @@ pub struct Bus {
 
     /// Path to .sav file (set when cartridge has battery).
     save_path: Option<PathBuf>,
+
+    /// CGB mode determined by cartridge header; applied after boot ROM finishes.
+    cart_cgb_mode: bool,
 }
 
 impl Bus {
     pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>) -> Self {
         let boot_rom_active = boot_rom.is_some();
+        // CGB flag at header byte 0x0143: 0x80 = CGB enhanced, 0xC0 = CGB only
+        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
+        let cgb_mode = cgb_flag == 0x80 || cgb_flag == 0xC0;
+
         let mut ppu = Ppu::new();
         if boot_rom_active {
+            // Boot ROM always runs in CGB mode; switch to cart mode when it finishes
+            ppu.cgb_mode = true;
             ppu.reset();
+        } else {
+            ppu.cgb_mode = cgb_mode;
         }
         let mut cart = make_cartridge(rom);
 
@@ -142,6 +153,7 @@ impl Bus {
             boot_rom,
             boot_rom_active,
             save_path,
+            cart_cgb_mode: cgb_mode,
         }
     }
 
@@ -341,6 +353,8 @@ impl Bus {
                 // Writing any non-zero value permanently disables the boot ROM.
                 if val != 0 {
                     self.boot_rom_active = false;
+                    // Keep cgb_mode=true: the boot ROM programs CGB palettes
+                    // for both CGB and DMG games (DMG compat palette).
                 }
             }
             0xFF70 => {
