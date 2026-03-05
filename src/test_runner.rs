@@ -4,12 +4,36 @@ mod cartridge;
 mod cpu;
 mod emulator;
 mod joypad;
+mod model;
 mod ppu;
 mod timer;
 
 use emulator::Emulator;
+use model::GbModel;
 use std::fs;
 use std::path::Path;
+
+/// Detect hardware model from test filename suffix.
+fn detect_model(path: &Path) -> GbModel {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    // Check longer suffixes first to avoid partial matches
+    if stem.ends_with("-dmgABCmgb") || stem.ends_with("-dmgABC") {
+        GbModel::Dmg
+    } else if stem.ends_with("-dmg0") {
+        GbModel::Dmg0
+    } else if stem.ends_with("-mgb") {
+        GbModel::Mgb
+    } else if stem.ends_with("-sgb2") {
+        GbModel::Sgb2
+    } else if stem.ends_with("-sgb") || stem.ends_with("-S") {
+        GbModel::Sgb
+    } else if stem.ends_with("-GS") || stem.ends_with("-G") {
+        GbModel::Dmg
+    } else {
+        GbModel::Cgb
+    }
+}
+
 
 /// Mooneye pass: B=3,C=5,D=8,E=13,H=21,L=34 (Fibonacci)
 fn mooneye_passed(regs: [u8; 6]) -> bool {
@@ -21,7 +45,10 @@ fn run_test_mooneye(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &
         Ok(r) => r,
         Err(_) => return "ERR",
     };
-    let mut emu = Emulator::new(rom, boot_rom.clone(), None);
+    let model = detect_model(path);
+    // Only use boot ROM for CGB tests; non-CGB tests use post_boot() state
+    let br = if model.is_cgb() { boot_rom.clone() } else { None };
+    let mut emu = Emulator::new(rom, br, None, model);
     match emu.run_until_breakpoint(300) {
         Some(regs) => {
             if mooneye_passed(regs) {
@@ -43,7 +70,9 @@ fn run_test_blargg(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'
         Ok(r) => r,
         Err(_) => return "ERR",
     };
-    let mut emu = Emulator::new(rom, boot_rom.clone(), None);
+    let model = detect_model(path);
+    let br = if model.is_cgb() { boot_rom.clone() } else { None };
+    let mut emu = Emulator::new(rom, br, None, model);
     let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
     if verbose && !output.is_empty() {
         // Print serial output indented
@@ -64,27 +93,22 @@ fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: test_runner <dir_or_glob> [--boot-rom <path>] [--blargg]");
+        eprintln!("Usage: test_runner <dir_or_glob> [--blargg]");
         std::process::exit(1);
     }
 
     let root = Path::new(&args[1]);
     let blargg_mode = args.iter().any(|a| a == "--blargg");
 
-    // Parse optional --boot-rom argument
-    let boot_rom = if let Some(pos) = args.iter().position(|a| a == "--boot-rom") {
-        args.get(pos + 1).and_then(|p| fs::read(p).ok())
-    } else {
-        // Auto-detect boot ROM in crate root
-        fs::read("gbc_bios.bin").ok()
-    };
+    // Auto-detect CGB boot ROM in crate root
+    let boot_rom = fs::read("gbc_bios.bin").ok();
 
     let mut roms: Vec<std::path::PathBuf> = Vec::new();
     collect_roms(root, &mut roms);
     roms.sort();
 
     if boot_rom.is_some() {
-        eprintln!("Using GBC boot ROM");
+        eprintln!("Using CGB boot ROM");
     }
     if blargg_mode {
         eprintln!("Blargg mode (serial output detection)");

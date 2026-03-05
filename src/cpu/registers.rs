@@ -1,3 +1,5 @@
+use crate::model::GbModel;
+
 /// SM83 CPU register file.
 #[derive(Debug, Clone)]
 pub struct Registers {
@@ -14,20 +16,22 @@ pub struct Registers {
 }
 
 impl Registers {
-    /// Post-boot-ROM state for GBC (A=0x11 signals GBC mode to games).
+    /// Post-boot-ROM state for CGB (default).
     pub fn new() -> Self {
-        Registers {
-            a: 0x11,
-            f: 0x80,
-            b: 0x00,
-            c: 0x00,
-            d: 0xFF,
-            e: 0x56,
-            h: 0x00,
-            l: 0x0D,
-            sp: 0xFFFE,
-            pc: 0x0100,
-        }
+        Self::post_boot(GbModel::Cgb)
+    }
+
+    /// Post-boot-ROM register state for the given hardware model.
+    pub fn post_boot(model: GbModel) -> Self {
+        let (a, f, b, c, d, e, h, l) = match model {
+            GbModel::Dmg0 => (0x01, 0x00, 0xFF, 0x13, 0x00, 0xC1, 0x84, 0x03),
+            GbModel::Dmg  => (0x01, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
+            GbModel::Mgb  => (0xFF, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
+            GbModel::Sgb  => (0x01, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
+            GbModel::Sgb2 => (0xFF, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
+            GbModel::Cgb  => (0x11, 0x80, 0x00, 0x00, 0xFF, 0x56, 0x00, 0x0D),
+        };
+        Registers { a, f, b, c, d, e, h, l, sp: 0xFFFE, pc: 0x0100 }
     }
 
     /// Hardware reset state: all registers zeroed, PC starts at 0x0000.

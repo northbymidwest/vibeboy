@@ -1,6 +1,7 @@
 use crate::apu::Apu;
 use crate::cartridge::{make_cartridge, Cartridge};
 use crate::joypad::Joypad;
+use crate::model::GbModel;
 use crate::ppu::Ppu;
 use crate::timer::Timer;
 
@@ -103,25 +104,27 @@ pub struct Bus {
     /// Path to .sav file (set when cartridge has battery).
     save_path: Option<PathBuf>,
 
-    /// CGB mode determined by cartridge header; applied after boot ROM finishes.
-    cart_cgb_mode: bool,
+    /// Hardware model (DMG, CGB, etc.)
+    model: GbModel,
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>) -> Self {
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>, model: GbModel) -> Self {
         let boot_rom_active = boot_rom.is_some();
-        // CGB flag at header byte 0x0143: 0x80 = CGB enhanced, 0xC0 = CGB only
-        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
-        let cgb_mode = cgb_flag == 0x80 || cgb_flag == 0xC0;
 
         let mut ppu = Ppu::new();
+        ppu.cgb_mode = model.is_cgb();
         if boot_rom_active {
-            // Boot ROM always runs in CGB mode; switch to cart mode when it finishes
-            ppu.cgb_mode = true;
             ppu.reset();
-        } else {
-            ppu.cgb_mode = cgb_mode;
         }
+
+        let mut joypad = Joypad::new();
+        if !boot_rom_active {
+            // Post-boot P1: boot ROM writes 0x00, clearing both select bits.
+            // This makes P1 read as 0xCF (both groups selected, no buttons pressed).
+            joypad.write(0x00);
+        }
+
         let mut cart = make_cartridge(rom);
 
         // Compute .sav path and load existing save data
@@ -138,8 +141,8 @@ impl Bus {
         Bus {
             cart,
             ppu,
-            timer: Timer::new(),
-            joypad: Joypad::new(),
+            timer: Timer::post_boot(model),
+            joypad,
             apu: Apu::new(),
             wram: [[0u8; 0x1000]; 8],
             wram_bank: 1,
@@ -156,7 +159,7 @@ impl Bus {
             boot_rom,
             boot_rom_active,
             save_path,
-            cart_cgb_mode: cgb_mode,
+            model,
         }
     }
 
@@ -204,7 +207,7 @@ impl Bus {
             if let Some(ref brom) = self.boot_rom {
                 let idx = match addr {
                     0x0000..=0x00FF => Some(addr as usize),
-                    0x0200..=0x08FF => Some(addr as usize), // CGB second section
+                    0x0200..=0x08FF if self.model.is_cgb() => Some(addr as usize),
                     _ => None,
                 };
                 if let Some(i) = idx {
@@ -290,21 +293,37 @@ impl Bus {
             0xFF04..=0xFF07 => self.timer.read(addr),
             0xFF0F => self.if_ | 0xE0,
             0xFF10..=0xFF3F => self.apu.read(addr),
-            0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => self.ppu.read(addr),
-            0xFF4D => self.key1 | 0x7E, // bits 1-6 unused, read as 1
-            0xFF51 => (self.hdma.src >> 8) as u8,
-            0xFF52 => (self.hdma.src & 0xFF) as u8,
-            0xFF53 => (self.hdma.dst >> 8) as u8,
-            0xFF54 => (self.hdma.dst & 0xFF) as u8,
-            0xFF55 => {
-                if self.hdma.active {
-                    self.hdma.blocks.wrapping_sub(1) & 0x7F
-                } else {
-                    0xFF
+            0xFF40..=0xFF4B => self.ppu.read(addr),
+            0xFF4D => {
+                if !self.model.is_cgb() { return 0xFF; }
+                self.key1 | 0x7E
+            }
+            0xFF4F | 0xFF68..=0xFF6B => {
+                if !self.model.is_cgb() { return 0xFF; }
+                self.ppu.read(addr)
+            }
+            0xFF51..=0xFF55 => {
+                if !self.model.is_cgb() { return 0xFF; }
+                match addr {
+                    0xFF51 => (self.hdma.src >> 8) as u8,
+                    0xFF52 => (self.hdma.src & 0xFF) as u8,
+                    0xFF53 => (self.hdma.dst >> 8) as u8,
+                    0xFF54 => (self.hdma.dst & 0xFF) as u8,
+                    0xFF55 => {
+                        if self.hdma.active {
+                            self.hdma.blocks.wrapping_sub(1) & 0x7F
+                        } else {
+                            0xFF
+                        }
+                    }
+                    _ => 0xFF,
                 }
             }
             0xFF50 => if self.boot_rom_active { 0xFE } else { 0xFF },
-            0xFF70 => self.wram_bank as u8 | 0xF8,
+            0xFF70 => {
+                if !self.model.is_cgb() { return 0xFF; }
+                self.wram_bank as u8 | 0xF8
+            }
             _ => 0xFF,
         }
     }
@@ -335,6 +354,7 @@ impl Bus {
             0xFF0F => self.if_ = val | 0xE0,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF46 => self.start_oam_dma(val),
+            0xFF4F | 0xFF68..=0xFF6B if !self.model.is_cgb() => {} // ignore on DMG
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
                 self.ppu.write(addr, val);
                 // Immediately transfer any interrupt flags from register writes
@@ -344,10 +364,12 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
+            0xFF4D if !self.model.is_cgb() => {} // ignore on DMG
             0xFF4D => {
                 // KEY1: prepare speed switch (bit 0 = switch request)
                 self.key1 = (self.key1 & 0x80) | (val & 0x01);
             }
+            0xFF51..=0xFF55 if !self.model.is_cgb() => {} // ignore on DMG
             0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | ((val as u16) << 8),
             0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | ((val & 0xF0) as u16),
             0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | (((val & 0x1F) as u16) << 8) | 0x8000,
@@ -361,6 +383,7 @@ impl Bus {
                     // for both CGB and DMG games (DMG compat palette).
                 }
             }
+            0xFF70 if !self.model.is_cgb() => {} // ignore on DMG
             0xFF70 => {
                 let bank = (val & 0x07) as usize;
                 self.wram_bank = if bank == 0 { 1 } else { bank };

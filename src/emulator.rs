@@ -3,6 +3,7 @@ use crate::cpu::{Cpu, Registers};
 use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
 };
+use crate::model::GbModel;
 use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
@@ -16,16 +17,18 @@ pub struct Emulator {
 impl Emulator {
     /// Create a new emulator. If `boot_rom` is Some, the CPU starts at PC=0x0000
     /// with hardware reset registers and executes the boot ROM. Otherwise the CPU
-    /// starts at PC=0x0100 with post-boot GBC register values (no boot animation).
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>) -> Self {
+    /// starts at PC=0x0100 with post-boot register values for the given model.
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>, model: GbModel) -> Self {
         let has_boot = boot_rom.is_some();
         let mut cpu = Cpu::new();
         if has_boot {
             cpu.regs = Registers::reset();
+        } else {
+            cpu.regs = Registers::post_boot(model);
         }
         Emulator {
             cpu,
-            bus: Bus::new(rom, boot_rom, rom_path),
+            bus: Bus::new(rom, boot_rom, rom_path, model),
         }
     }
 

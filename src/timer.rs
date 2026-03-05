@@ -1,3 +1,5 @@
+use crate::model::GbModel;
+
 /// Timer — DIV (0xFF04), TIMA (0xFF05), TMA (0xFF06), TAC (0xFF07).
 ///
 /// DIV: Upper byte of an internal 16-bit counter that increments every T-cycle.
@@ -24,8 +26,19 @@ pub struct Timer {
 
 impl Timer {
     pub fn new() -> Self {
+        Self::post_boot(GbModel::Cgb)
+    }
+
+    /// Post-boot timer state for the given hardware model.
+    pub fn post_boot(model: GbModel) -> Self {
+        let counter = match model {
+            GbModel::Cgb => 0x2670,
+            GbModel::Dmg0 => 0x182C,
+            GbModel::Dmg | GbModel::Mgb => 0xABC8,
+            GbModel::Sgb | GbModel::Sgb2 => 0xD85C,
+        };
         Timer {
-            counter: 0xAB00, // GBC post-boot value
+            counter,
             tima: 0,
             tma: 0,
             tac: 0xF8,
