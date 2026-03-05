@@ -69,7 +69,8 @@ fn main() {
         channels: Some(2),
         format:   Some(AudioFormat::F32LE),
     };
-    let audio_stream = audio.new_playback_stream(&spec, None).unwrap();
+    let audio_device = audio.open_playback_device(&spec).unwrap();
+    let audio_stream = audio_device.open_device_stream(Some(&spec)).unwrap();
     audio_stream.resume().unwrap();
 
     let mut frame_start = Instant::now();
