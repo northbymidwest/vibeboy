@@ -258,6 +258,13 @@ impl Bus {
 
     // ── Tick: advance all components by T-cycles ──────────────────────────────
 
+    /// Tick the bus by one M-cycle (4 T-cycles normal speed, 2 in double-speed).
+    /// Call this once per CPU M-cycle (memory access or internal cycle).
+    pub fn tick_mcycle(&mut self) {
+        let cycles = if self.double_speed { 2 } else { 4 };
+        self.tick(cycles);
+    }
+
     /// Advance all bus components by `cycles` T-cycles (at normal 4MHz rate).
     /// The caller (emulator) divides by speed factor before calling for PPU/timer.
     pub fn tick(&mut self, cycles: u32) {

@@ -30,17 +30,8 @@ impl Emulator {
 
     /// Execute one CPU instruction and advance bus components.
     fn step(&mut self) {
-        let cpu_cycles = self.cpu.step(&mut self.bus);
-
-        // In double-speed mode the CPU runs twice as fast but PPU/timer run at
-        // the same rate, so we halve the effective cycle count for bus tick.
-        let bus_cycles = if self.bus.double_speed {
-            cpu_cycles / 2
-        } else {
-            cpu_cycles
-        };
-
-        self.bus.tick(bus_cycles);
+        self.cpu.step(&mut self.bus);
+        // Ticking is now done inline by CPU during each M-cycle
     }
 
     /// Return the current frame buffer (160 × 144 pixels, 0x00RRGGBB).

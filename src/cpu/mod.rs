@@ -44,6 +44,7 @@ impl Cpu {
             if pending != 0 {
                 self.halted = false;
             } else {
+                bus.tick_mcycle(); // halted NOP
                 return 4;
             }
         }
@@ -52,6 +53,7 @@ impl Cpu {
         let op = if self.halt_bug {
             // Halt bug: PC is not incremented for the next byte
             self.halt_bug = false;
+            bus.tick_mcycle();
             bus.read_byte(self.regs.pc)
         } else {
             self.fetch_byte(bus)
@@ -74,8 +76,11 @@ impl Cpu {
         let pending = bus.ie() & bus.if_reg() & 0x1F;
         let bit = pending.trailing_zeros() as u8;
         *bus.if_mut() &= !(1 << bit);
+        bus.tick_mcycle(); // internal 1
+        bus.tick_mcycle(); // internal 2
         let pc = self.regs.pc;
         self.push(bus, pc);
+        bus.tick_mcycle(); // vector fetch (internal)
         self.regs.pc = match bit {
             0 => 0x0040, // VBlank
             1 => 0x0048, // STAT
@@ -87,19 +92,26 @@ impl Cpu {
     }
 
     fn push(&mut self, bus: &mut Bus, val: u16) {
-        self.regs.sp = self.regs.sp.wrapping_sub(2);
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.tick_mcycle();
+        bus.write_byte(self.regs.sp, (val >> 8) as u8);
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
+        bus.tick_mcycle();
         bus.write_byte(self.regs.sp, (val & 0xFF) as u8);
-        bus.write_byte(self.regs.sp.wrapping_add(1), (val >> 8) as u8);
     }
 
     fn pop(&mut self, bus: &mut Bus) -> u16 {
+        bus.tick_mcycle();
         let lo = bus.read_byte(self.regs.sp) as u16;
-        let hi = bus.read_byte(self.regs.sp.wrapping_add(1)) as u16;
-        self.regs.sp = self.regs.sp.wrapping_add(2);
+        self.regs.sp = self.regs.sp.wrapping_add(1);
+        bus.tick_mcycle();
+        let hi = bus.read_byte(self.regs.sp) as u16;
+        self.regs.sp = self.regs.sp.wrapping_add(1);
         (hi << 8) | lo
     }
 
     fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
+        bus.tick_mcycle();
         let v = bus.read_byte(self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
         v
@@ -111,7 +123,7 @@ impl Cpu {
         (hi << 8) | lo
     }
 
-    fn r8(&self, bus: &Bus, id: u8) -> u8 {
+    fn r8(&self, bus: &mut Bus, id: u8) -> u8 {
         match id {
             0 => self.regs.b,
             1 => self.regs.c,
@@ -119,7 +131,7 @@ impl Cpu {
             3 => self.regs.e,
             4 => self.regs.h,
             5 => self.regs.l,
-            6 => bus.read_byte(self.regs.hl()),
+            6 => { bus.tick_mcycle(); bus.read_byte(self.regs.hl()) }
             7 => self.regs.a,
             _ => unreachable!(),
         }
@@ -133,7 +145,7 @@ impl Cpu {
             3 => self.regs.e = val,
             4 => self.regs.h = val,
             5 => self.regs.l = val,
-            6 => bus.write_byte(self.regs.hl(), val),
+            6 => { bus.tick_mcycle(); bus.write_byte(self.regs.hl(), val) }
             7 => self.regs.a = val,
             _ => unreachable!(),
         }
@@ -400,12 +412,14 @@ impl Cpu {
             }
             0x02 => {
                 // LD (BC), A
+                bus.tick_mcycle();
                 bus.write_byte(self.regs.bc(), self.regs.a);
                 8
             }
             0x03 => {
                 // INC BC
                 self.regs.set_bc(self.regs.bc().wrapping_add(1));
+                bus.tick_mcycle();
                 8
             }
             0x04 => {
@@ -435,7 +449,9 @@ impl Cpu {
             0x08 => {
                 // LD (a16), SP
                 let addr = self.fetch_word(bus);
+                bus.tick_mcycle();
                 bus.write_byte(addr, (self.regs.sp & 0xFF) as u8);
+                bus.tick_mcycle();
                 bus.write_byte(addr.wrapping_add(1), (self.regs.sp >> 8) as u8);
                 20
             }
@@ -443,16 +459,19 @@ impl Cpu {
                 // ADD HL, BC
                 let v = self.regs.bc();
                 self.add_hl(v);
+                bus.tick_mcycle();
                 8
             }
             0x0A => {
                 // LD A, (BC)
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(self.regs.bc());
                 8
             }
             0x0B => {
                 // DEC BC
                 self.regs.set_bc(self.regs.bc().wrapping_sub(1));
+                bus.tick_mcycle();
                 8
             }
             0x0C => {
@@ -495,12 +514,14 @@ impl Cpu {
             }
             0x12 => {
                 // LD (DE), A
+                bus.tick_mcycle();
                 bus.write_byte(self.regs.de(), self.regs.a);
                 8
             }
             0x13 => {
                 // INC DE
                 self.regs.set_de(self.regs.de().wrapping_add(1));
+                bus.tick_mcycle();
                 8
             }
             0x14 => {
@@ -532,22 +553,26 @@ impl Cpu {
                 // JR e8: unconditional relative jump
                 let e = self.fetch_byte(bus) as i8;
                 self.regs.pc = self.regs.pc.wrapping_add(e as u16);
+                bus.tick_mcycle();
                 12
             }
             0x19 => {
                 // ADD HL, DE
                 let v = self.regs.de();
                 self.add_hl(v);
+                bus.tick_mcycle();
                 8
             }
             0x1A => {
                 // LD A, (DE)
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(self.regs.de());
                 8
             }
             0x1B => {
                 // DEC DE
                 self.regs.set_de(self.regs.de().wrapping_sub(1));
+                bus.tick_mcycle();
                 8
             }
             0x1C => {
@@ -582,6 +607,7 @@ impl Cpu {
                 let e = self.fetch_byte(bus) as i8;
                 if !self.regs.flag_z() {
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
+                    bus.tick_mcycle();
                     12
                 } else {
                     8
@@ -596,6 +622,7 @@ impl Cpu {
             0x22 => {
                 // LD (HL+), A
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 bus.write_byte(hl, self.regs.a);
                 self.regs.set_hl(hl.wrapping_add(1));
                 8
@@ -603,6 +630,7 @@ impl Cpu {
             0x23 => {
                 // INC HL
                 self.regs.set_hl(self.regs.hl().wrapping_add(1));
+                bus.tick_mcycle();
                 8
             }
             0x24 => {
@@ -632,6 +660,7 @@ impl Cpu {
                 let e = self.fetch_byte(bus) as i8;
                 if self.regs.flag_z() {
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
+                    bus.tick_mcycle();
                     12
                 } else {
                     8
@@ -641,11 +670,13 @@ impl Cpu {
                 // ADD HL, HL
                 let v = self.regs.hl();
                 self.add_hl(v);
+                bus.tick_mcycle();
                 8
             }
             0x2A => {
                 // LD A, (HL+)
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(hl);
                 self.regs.set_hl(hl.wrapping_add(1));
                 8
@@ -653,6 +684,7 @@ impl Cpu {
             0x2B => {
                 // DEC HL
                 self.regs.set_hl(self.regs.hl().wrapping_sub(1));
+                bus.tick_mcycle();
                 8
             }
             0x2C => {
@@ -685,6 +717,7 @@ impl Cpu {
                 let e = self.fetch_byte(bus) as i8;
                 if !self.regs.flag_c() {
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
+                    bus.tick_mcycle();
                     12
                 } else {
                     8
@@ -698,6 +731,7 @@ impl Cpu {
             0x32 => {
                 // LD (HL-), A
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 bus.write_byte(hl, self.regs.a);
                 self.regs.set_hl(hl.wrapping_sub(1));
                 8
@@ -705,27 +739,33 @@ impl Cpu {
             0x33 => {
                 // INC SP
                 self.regs.sp = self.regs.sp.wrapping_add(1);
+                bus.tick_mcycle();
                 8
             }
             0x34 => {
                 // INC (HL)
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 let v = bus.read_byte(hl);
                 let r = self.inc8(v);
+                bus.tick_mcycle();
                 bus.write_byte(hl, r);
                 12
             }
             0x35 => {
                 // DEC (HL)
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 let v = bus.read_byte(hl);
                 let r = self.dec8(v);
+                bus.tick_mcycle();
                 bus.write_byte(hl, r);
                 12
             }
             0x36 => {
                 // LD (HL), n8
                 let n = self.fetch_byte(bus);
+                bus.tick_mcycle();
                 bus.write_byte(self.regs.hl(), n);
                 12
             }
@@ -740,6 +780,7 @@ impl Cpu {
                 let e = self.fetch_byte(bus) as i8;
                 if self.regs.flag_c() {
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
+                    bus.tick_mcycle();
                     12
                 } else {
                     8
@@ -749,11 +790,13 @@ impl Cpu {
                 // ADD HL, SP
                 let v = self.regs.sp;
                 self.add_hl(v);
+                bus.tick_mcycle();
                 8
             }
             0x3A => {
                 // LD A, (HL-)
                 let hl = self.regs.hl();
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(hl);
                 self.regs.set_hl(hl.wrapping_sub(1));
                 8
@@ -761,6 +804,7 @@ impl Cpu {
             0x3B => {
                 // DEC SP
                 self.regs.sp = self.regs.sp.wrapping_sub(1);
+                bus.tick_mcycle();
                 8
             }
             0x3C => {
@@ -864,8 +908,11 @@ impl Cpu {
             // ---- 0xC0-0xFF: Control / misc ----
             0xC0 => {
                 // RET NZ
+                bus.tick_mcycle(); // internal (condition check)
                 if !self.regs.flag_z() {
-                    self.regs.pc = self.pop(bus);
+                    let pc = self.pop(bus); // 2 M-cycles
+                    bus.tick_mcycle(); // internal after pop
+                    self.regs.pc = pc;
                     20
                 } else {
                     8
@@ -882,6 +929,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_z() {
                     self.regs.pc = addr;
+                    bus.tick_mcycle();
                     16
                 } else {
                     12
@@ -891,6 +939,7 @@ impl Cpu {
                 // JP a16
                 let addr = self.fetch_word(bus);
                 self.regs.pc = addr;
+                bus.tick_mcycle();
                 16
             }
             0xC4 => {
@@ -898,6 +947,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_z() {
                     let pc = self.regs.pc;
+                    bus.tick_mcycle();
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -908,6 +958,7 @@ impl Cpu {
             0xC5 => {
                 // PUSH BC
                 let v = self.regs.bc();
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -920,14 +971,18 @@ impl Cpu {
             0xC7 => {
                 // RST 00H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0000;
                 16
             }
             0xC8 => {
                 // RET Z
+                bus.tick_mcycle(); // internal (condition check)
                 if self.regs.flag_z() {
-                    self.regs.pc = self.pop(bus);
+                    let pc = self.pop(bus); // 2 M-cycles
+                    bus.tick_mcycle(); // internal after pop
+                    self.regs.pc = pc;
                     20
                 } else {
                     8
@@ -935,7 +990,9 @@ impl Cpu {
             }
             0xC9 => {
                 // RET
-                self.regs.pc = self.pop(bus);
+                let pc = self.pop(bus); // 2 M-cycles
+                bus.tick_mcycle(); // internal
+                self.regs.pc = pc;
                 16
             }
             0xCA => {
@@ -943,6 +1000,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_z() {
                     self.regs.pc = addr;
+                    bus.tick_mcycle();
                     16
                 } else {
                     12
@@ -957,6 +1015,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_z() {
                     let pc = self.regs.pc;
+                    bus.tick_mcycle();
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -968,6 +1027,7 @@ impl Cpu {
                 // CALL a16
                 let addr = self.fetch_word(bus);
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = addr;
                 24
@@ -982,6 +1042,7 @@ impl Cpu {
             0xCF => {
                 // RST 08H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0008;
                 16
@@ -989,8 +1050,11 @@ impl Cpu {
 
             0xD0 => {
                 // RET NC
+                bus.tick_mcycle(); // internal (condition check)
                 if !self.regs.flag_c() {
-                    self.regs.pc = self.pop(bus);
+                    let pc = self.pop(bus); // 2 M-cycles
+                    bus.tick_mcycle(); // internal after pop
+                    self.regs.pc = pc;
                     20
                 } else {
                     8
@@ -1007,6 +1071,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_c() {
                     self.regs.pc = addr;
+                    bus.tick_mcycle();
                     16
                 } else {
                     12
@@ -1018,6 +1083,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_c() {
                     let pc = self.regs.pc;
+                    bus.tick_mcycle();
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1028,6 +1094,7 @@ impl Cpu {
             0xD5 => {
                 // PUSH DE
                 let v = self.regs.de();
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1041,14 +1108,18 @@ impl Cpu {
             0xD7 => {
                 // RST 10H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0010;
                 16
             }
             0xD8 => {
                 // RET C
+                bus.tick_mcycle(); // internal (condition check)
                 if self.regs.flag_c() {
-                    self.regs.pc = self.pop(bus);
+                    let pc = self.pop(bus); // 2 M-cycles
+                    bus.tick_mcycle(); // internal after pop
+                    self.regs.pc = pc;
                     20
                 } else {
                     8
@@ -1056,7 +1127,9 @@ impl Cpu {
             }
             0xD9 => {
                 // RETI: return and enable interrupts
-                self.regs.pc = self.pop(bus);
+                let pc = self.pop(bus); // 2 M-cycles
+                bus.tick_mcycle(); // internal
+                self.regs.pc = pc;
                 self.ime = true;
                 16
             }
@@ -1065,6 +1138,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_c() {
                     self.regs.pc = addr;
+                    bus.tick_mcycle();
                     16
                 } else {
                     12
@@ -1076,6 +1150,7 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_c() {
                     let pc = self.regs.pc;
+                    bus.tick_mcycle();
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1095,6 +1170,7 @@ impl Cpu {
             0xDF => {
                 // RST 18H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0018;
                 16
@@ -1103,6 +1179,7 @@ impl Cpu {
             0xE0 => {
                 // LDH (a8), A  — write A to 0xFF00 + n
                 let n = self.fetch_byte(bus);
+                bus.tick_mcycle();
                 bus.write_byte(0xFF00 | n as u16, self.regs.a);
                 12
             }
@@ -1114,6 +1191,7 @@ impl Cpu {
             }
             0xE2 => {
                 // LD (C), A  — write A to 0xFF00 + C
+                bus.tick_mcycle();
                 bus.write_byte(0xFF00 | self.regs.c as u16, self.regs.a);
                 8
             }
@@ -1122,6 +1200,7 @@ impl Cpu {
             0xE5 => {
                 // PUSH HL
                 let v = self.regs.hl();
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1134,6 +1213,7 @@ impl Cpu {
             0xE7 => {
                 // RST 20H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0020;
                 16
@@ -1141,6 +1221,8 @@ impl Cpu {
             0xE8 => {
                 // ADD SP, e8
                 let e = self.fetch_byte(bus);
+                bus.tick_mcycle();
+                bus.tick_mcycle();
                 self.regs.sp = self.add_sp_signed(e);
                 16
             }
@@ -1152,6 +1234,7 @@ impl Cpu {
             0xEA => {
                 // LD (a16), A
                 let addr = self.fetch_word(bus);
+                bus.tick_mcycle();
                 bus.write_byte(addr, self.regs.a);
                 16
             }
@@ -1167,6 +1250,7 @@ impl Cpu {
             0xEF => {
                 // RST 28H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0028;
                 16
@@ -1175,6 +1259,7 @@ impl Cpu {
             0xF0 => {
                 // LDH A, (a8)  — read from 0xFF00 + n into A
                 let n = self.fetch_byte(bus);
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(0xFF00 | n as u16);
                 12
             }
@@ -1186,6 +1271,7 @@ impl Cpu {
             }
             0xF2 => {
                 // LD A, (C)  — read from 0xFF00 + C into A
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(0xFF00 | self.regs.c as u16);
                 8
             }
@@ -1199,6 +1285,7 @@ impl Cpu {
             0xF5 => {
                 // PUSH AF
                 let v = self.regs.af();
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1211,6 +1298,7 @@ impl Cpu {
             0xF7 => {
                 // RST 30H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0030;
                 16
@@ -1218,6 +1306,7 @@ impl Cpu {
             0xF8 => {
                 // LD HL, SP+e8
                 let e = self.fetch_byte(bus);
+                bus.tick_mcycle();
                 let v = self.add_sp_signed(e);
                 self.regs.set_hl(v);
                 12
@@ -1225,11 +1314,13 @@ impl Cpu {
             0xF9 => {
                 // LD SP, HL
                 self.regs.sp = self.regs.hl();
+                bus.tick_mcycle();
                 8
             }
             0xFA => {
                 // LD A, (a16)
                 let addr = self.fetch_word(bus);
+                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(addr);
                 16
             }
@@ -1249,6 +1340,7 @@ impl Cpu {
             0xFF => {
                 // RST 38H
                 let pc = self.regs.pc;
+                bus.tick_mcycle();
                 self.push(bus, pc);
                 self.regs.pc = 0x0038;
                 16
