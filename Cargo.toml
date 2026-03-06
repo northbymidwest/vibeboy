@@ -3,6 +3,9 @@ name = "gbcemu"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+exclude = ["test-roms/mooneye-gb"]
+
 [[bin]]
 name = "gbcemu"
 path = "src/main.rs"

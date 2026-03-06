@@ -57,6 +57,21 @@ impl Emulator {
         }
         let mut bus = Bus::new(rom, boot_rom, rom_path, model);
 
+        // When no boot ROM, set post-boot IO register values
+        if !has_boot {
+            // LCDC=0x91 (LCD on, BG on, tile data $8000)
+            bus.write_byte(0xFF40, 0x91);
+            // BGP=0xFC (standard DMG palette)
+            bus.write_byte(0xFF47, 0xFC);
+            // NR52=$F1 (sound on), NR11=$BF, NR12=$F3, NR14=$BF, NR50=$77, NR51=$F3
+            bus.write_byte(0xFF26, 0xF1);
+            bus.write_byte(0xFF11, 0xBF);
+            bus.write_byte(0xFF12, 0xF3);
+            bus.write_byte(0xFF14, 0xBF);
+            bus.write_byte(0xFF24, 0x77);
+            bus.write_byte(0xFF25, 0xF3);
+        }
+
         // Enable LLE mode if we have a SNES program ROM
         let snes = if model.is_sgb() && snes_rom.is_some() {
             if let Some(ref mut sgb) = bus.sgb {
@@ -249,8 +264,16 @@ impl Emulator {
         let mut cycles = 0u32;
         let limit = cycles_per_frame * max_frames;
         loop {
-            // Check for Mooneye LD B,B breakpoint before executing
-            if self.bus.read_byte(self.cpu.regs.pc) == 0x40 {
+            // Check for Mooneye breakpoints before executing:
+            // - LD B,B ($40): modern mooneye-test-suite
+            // - NOP; JR -3 ($00 $18 $FD): older mooneye-gb halt_execution loop
+            //   We detect at the NOP so we catch it on the first iteration
+            let opcode = self.bus.read_byte(self.cpu.regs.pc);
+            if opcode == 0x40
+                || (opcode == 0x00
+                    && self.bus.read_byte(self.cpu.regs.pc.wrapping_add(1)) == 0x18
+                    && self.bus.read_byte(self.cpu.regs.pc.wrapping_add(2)) == 0xFD)
+            {
                 let r = &self.cpu.regs;
                 return Some([r.b, r.c, r.d, r.e, r.h, r.l]);
             }

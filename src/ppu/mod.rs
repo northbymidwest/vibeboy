@@ -182,6 +182,7 @@ pub struct Ppu {
     /// CGB: dot at which Mode 3 becomes visible in STAT (0 = not pending).
     mode3_stat_dot: u32,
 
+
     /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
     pub cgb_mode: bool,
 
@@ -376,20 +377,24 @@ impl Ppu {
 
         match self.mode {
             2 => {
-                // Mode 2 → Mode 3: internal transition at dot 80, STAT bits update 1T later
+                // Mode 2 → Mode 3: internal transition at dot 80
+                // CGB: STAT bits update 1T later; DMG: immediate
                 if self.dot >= 80 {
                     self.mode = 3;
                     self.oam_accessible = false;
                     self.vram_accessible = false;
                     self.init_fifo();
-                    // Delay STAT mode bits update by 1T
-                    self.mode3_stat_dot = self.dot + 1;
+                    if self.cgb_mode {
+                        self.mode3_stat_dot = self.dot + 1;
+                    } else {
+                        self.stat = (self.stat & !0x03) | 0x03;
+                    }
                     self.update_stat_irq();
                 }
             }
             3 => {
-                // Delayed STAT mode bits update for Mode 2→3
-                if self.mode3_stat_dot > 0 && self.dot >= self.mode3_stat_dot {
+                // CGB: delayed STAT mode bits update for Mode 2→3
+                if self.cgb_mode && self.mode3_stat_dot > 0 && self.dot >= self.mode3_stat_dot {
                     self.mode3_stat_dot = 0;
                     self.stat = (self.stat & !0x03) | 0x03;
                 }
@@ -398,7 +403,14 @@ impl Ppu {
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
                     self.mode = 0;
-                    self.mode0_stat_dot = self.dot + 1;
+                    if self.cgb_mode {
+                        self.mode0_stat_dot = self.dot + 1;
+                    } else {
+                        self.stat = self.stat & !0x03;
+                        self.oam_accessible = true;
+                        self.vram_accessible = true;
+                        self.hblank_entered = true;
+                    }
                     self.update_stat_irq();
                     if self.window_active {
                         self.window_line_counter = self.window_line_counter.wrapping_add(1);
@@ -407,7 +419,7 @@ impl Ppu {
             }
             0 => {
                 // CGB: delayed mode bit update for Mode 0
-                if self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
+                if self.cgb_mode && self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
                     self.mode0_stat_dot = 0;
                     self.stat = self.stat & !0x03; // mode bits = 0
                     self.oam_accessible = true;
@@ -1129,8 +1141,18 @@ impl Ppu {
                 }
             }
             0xFF41 => {
+                // DMG STAT write bug: writing STAT during Mode 0 or Mode 1
+                // causes a glitch that briefly drives the STAT IRQ line high,
+                // firing a spurious interrupt if the line was previously low.
+                let glitch = !self.cgb_mode
+                    && self.lcdc & 0x80 != 0
+                    && (self.mode == 0 || self.mode == 1)
+                    && !self.stat_irq_line;
                 // Lower 3 bits (mode flags + coincidence) are read-only
                 self.stat = (self.stat & 0x07) | (val & 0x78);
+                if glitch {
+                    self.if_flags |= 0x02;
+                }
                 // Writing STAT can change which sources are enabled → re-check edge
                 if self.lcdc & 0x80 != 0 {
                     self.update_stat_irq();
