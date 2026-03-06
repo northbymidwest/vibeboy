@@ -11,8 +11,11 @@ path = "src/main.rs"
 name = "test_runner"
 path = "src/test_runner.rs"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
-sdl3 = "0.17"
+sdl3 = { version = "0.17", features = ["hidapi"] }
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }

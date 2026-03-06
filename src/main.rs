@@ -25,11 +25,27 @@ use sdl3::sys::camera::{
     SDL_OpenCamera, SDL_ReleaseCameraFrame,
 };
 use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
+use sdl3::sensor::{SensorData, SensorType};
 use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn macos_accel_init() -> bool;
+    fn macos_accel_close();
+    fn macos_accel_poll(x: *mut f32, y: *mut f32, z: *mut f32) -> bool;
+}
+
+/// Which accelerometer source is active.
+enum AccelSource {
+    None,
+    #[cfg(target_os = "macos")]
+    MacosNative,
+    Sdl(sdl3::sensor::Sensor),
+}
 
 const SCALE: u32 = 3;
 /// Target frame time for ~59.73 fps.
@@ -202,6 +218,13 @@ fn main() {
     };
     let mut camera_buf = [0u8; 128 * 112];
 
+    // ── Accelerometer (MBC7 / Kirby Tilt 'n' Tumble) ──
+    let accel_source = if emu.bus.cart.has_accelerometer() {
+        init_accel(&sdl)
+    } else {
+        AccelSource::None
+    };
+
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
 
     let mut frame_start = Instant::now();
@@ -255,6 +278,40 @@ fn main() {
         if !camera_ptr.is_null() {
             if acquire_camera_frame(camera_ptr, &mut camera_buf) {
                 emu.bus.cart.set_camera_image(&camera_buf);
+            }
+        }
+
+        // ── Accelerometer → MBC7 ─────────────────────────────────────────────
+        {
+            const CENTER: f32 = 0x81D0 as u16 as f32; // 33232.0
+            const RANGE: f32 = 0x70 as u16 as f32;   // 112.0
+            let mut got = false;
+            let mut gx: f32 = 0.0;
+            let mut gy: f32 = 0.0;
+
+            match accel_source {
+                #[cfg(target_os = "macos")]
+                AccelSource::MacosNative => {
+                    let mut z: f32 = 0.0;
+                    if unsafe { macos_accel_poll(&mut gx, &mut gy, &mut z) } {
+                        gx = -gx; // MacBook X axis is opposite to MBC7 convention
+                        got = true;
+                    }
+                }
+                AccelSource::Sdl(ref sensor) => {
+                    if let Ok(SensorData::Accel([raw_x, raw_y, _])) = sensor.get_data() {
+                        gx = raw_x / 9.81_f32;
+                        gy = raw_y / 9.81_f32;
+                        got = true;
+                    }
+                }
+                AccelSource::None => {}
+            }
+
+            if got {
+                let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
+                let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
+                emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
             }
         }
 
@@ -362,6 +419,12 @@ fn main() {
             std::hint::spin_loop();
         }
         frame_start = Instant::now();
+    }
+
+    // Cleanup accelerometer
+    #[cfg(target_os = "macos")]
+    if matches!(accel_source, AccelSource::MacosNative) {
+        unsafe { macos_accel_close(); }
     }
 
     if !camera_ptr.is_null() {
@@ -487,4 +550,46 @@ fn acquire_camera_frame(camera: *mut SDL_Camera, buf: &mut [u8; 128 * 112]) -> b
         SDL_ReleaseCameraFrame(camera, surface);
         true
     }
+}
+
+// ── Accelerometer helpers ─────────────────────────────────────────────────────
+
+/// Try to open an accelerometer: prefer macOS native IOKit on Apple Silicon,
+/// fall back to SDL3 sensor API.
+fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
+    // Try macOS native accelerometer first
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe { macos_accel_init() } {
+            eprintln!("Accelerometer: macOS native (Apple Silicon)");
+            return AccelSource::MacosNative;
+        }
+        log::info!("macOS native accelerometer not available, trying SDL3");
+    }
+
+    // Fall back to SDL3 sensor
+    let sensor_sys = match sdl.sensor() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("SDL sensor subsystem init failed: {} — accelerometer disabled", e);
+            return AccelSource::None;
+        }
+    };
+    let ids = match sensor_sys.num_sensors() {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::info!("No sensors found: {} — accelerometer disabled", e);
+            return AccelSource::None;
+        }
+    };
+    for id in ids {
+        if let Ok(sensor) = sensor_sys.open(id) {
+            if sensor.sensor_type() == SensorType::Accelerometer {
+                eprintln!("Accelerometer: SDL3 ({})", sensor.name());
+                return AccelSource::Sdl(sensor);
+            }
+        }
+    }
+    log::info!("No accelerometer found — MBC7 will use center values");
+    AccelSource::None
 }

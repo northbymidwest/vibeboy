@@ -16,6 +16,10 @@ pub trait Cartridge: Send {
     fn has_camera(&self) -> bool { false }
     /// Feed a 128×112 grayscale image from a webcam into the camera sensor.
     fn set_camera_image(&mut self, _grayscale: &[u8; 128 * 112]) {}
+    /// Returns true if this cartridge has an accelerometer (MBC7).
+    fn has_accelerometer(&self) -> bool { false }
+    /// Feed accelerometer values in MBC7 u16 format (center = 0x81D0).
+    fn set_accelerometer(&mut self, _x: u16, _y: u16) {}
     /// Snapshot mutable cartridge state (registers + RAM, not ROM) for save states / rewind.
     fn snapshot_state(&self) -> Vec<u8> { Vec::new() }
     /// Restore mutable cartridge state from a previous snapshot.
@@ -764,6 +768,9 @@ pub struct Mbc7 {
     accel_latched: bool,
     accel_x: u16,
     accel_y: u16,
+    /// Live accelerometer values set by external sensor; latched on write 0xAA.
+    sensor_x: u16,
+    sensor_y: u16,
     // EEPROM 93LC56: 128 × 16-bit words
     eeprom: [u16; 128],
     eeprom_cs: bool,
@@ -788,6 +795,8 @@ impl Mbc7 {
             accel_latched: false,
             accel_x: 0x8000,
             accel_y: 0x8000,
+            sensor_x: 0x81D0,
+            sensor_y: 0x81D0,
             eeprom: [0xFFFF; 128],
             eeprom_cs: false,
             eeprom_clk: false,
@@ -961,9 +970,8 @@ impl Cartridge for Mbc7 {
             }
             0x1 => {
                 if val == 0xAA && !self.accel_latched {
-                    // Stub: center position (flat on table)
-                    self.accel_x = 0x81D0;
-                    self.accel_y = 0x81D0;
+                    self.accel_x = self.sensor_x;
+                    self.accel_y = self.sensor_y;
                     self.accel_latched = true;
                 }
             }
@@ -990,6 +998,11 @@ impl Cartridge for Mbc7 {
     }
 
     fn has_battery(&self) -> bool { true }
+    fn has_accelerometer(&self) -> bool { true }
+    fn set_accelerometer(&mut self, x: u16, y: u16) {
+        self.sensor_x = x;
+        self.sensor_y = y;
+    }
 
     fn save_data(&self) -> Vec<u8> {
         // Save EEPROM as 256 bytes (128 × 16-bit LE words)
