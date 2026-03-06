@@ -193,10 +193,11 @@ pub struct Mbc3 {
     rom: Vec<u8>,
     ram: Vec<u8>,
     rom_bank: usize,
-    ram_bank: usize, // 0-3 = RAM, 0x08-0x0C = RTC registers
+    ram_bank: usize, // 0-3 (or 0-7 for MBC30) = RAM, 0x08-0x0C = RTC registers
     ram_enabled: bool,
     battery: bool,
     has_rtc: bool,
+    mbc30: bool,           // MBC30: 8-bit ROM bank, 8 RAM banks (Pokemon Crystal JP)
     rtc_regs: [u8; 5],     // S, M, H, DL, DH (live counters)
     rtc_latched: [u8; 5],  // latched snapshot for reading
     rtc_latch_ready: bool, // true after writing 0x00, arms latch
@@ -205,6 +206,11 @@ pub struct Mbc3 {
 
 impl Mbc3 {
     fn new(rom: Vec<u8>, ram_size: usize, battery: bool, has_rtc: bool) -> Self {
+        // MBC30 detection: ROM > 2MB or RAM > 32KB (only Pokemon Crystal JP)
+        let mbc30 = rom.len() > 0x200000 || ram_size > 0x8000;
+        if mbc30 {
+            log::info!("MBC30 detected (ROM={}KB, RAM={}KB)", rom.len() / 1024, ram_size / 1024);
+        }
         Mbc3 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
@@ -213,6 +219,7 @@ impl Mbc3 {
             ram_enabled: false,
             battery,
             has_rtc,
+            mbc30,
             rtc_regs: [0; 5],
             rtc_latched: [0; 5],
             rtc_latch_ready: false,
@@ -268,7 +275,8 @@ impl Cartridge for Mbc3 {
         match addr {
             0x0000..=0x1FFF => self.ram_enabled = val & 0x0F == 0x0A,
             0x2000..=0x3FFF => {
-                let b = (val & 0x7F) as usize;
+                let mask = if self.mbc30 { 0xFF } else { 0x7F };
+                let b = (val & mask) as usize;
                 self.rom_bank = if b == 0 { 1 } else { b };
             }
             0x4000..=0x5FFF => {
@@ -295,9 +303,10 @@ impl Cartridge for Mbc3 {
 
     fn read_ram(&self, addr: u16) -> u8 {
         if !self.ram_enabled { return 0xFF; }
+        let max_ram_bank = if self.mbc30 { 0x07 } else { 0x03 };
         match self.ram_bank {
-            0x00..=0x03 => {
-                let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
+            b if b <= max_ram_bank => {
+                let idx = b * 0x2000 + (addr as usize - 0xA000);
                 self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
             }
             0x08..=0x0C if self.has_rtc => self.rtc_latched[self.ram_bank - 0x08],
@@ -307,9 +316,10 @@ impl Cartridge for Mbc3 {
 
     fn write_ram(&mut self, addr: u16, val: u8) {
         if !self.ram_enabled { return; }
+        let max_ram_bank = if self.mbc30 { 0x07 } else { 0x03 };
         match self.ram_bank {
-            0x00..=0x03 => {
-                let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
+            b if b <= max_ram_bank => {
+                let idx = b * 0x2000 + (addr as usize - 0xA000);
                 let len = self.ram.len().max(1);
                 self.ram[idx % len] = val;
             }
