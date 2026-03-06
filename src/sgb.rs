@@ -281,8 +281,8 @@ impl Sgb {
             0x11 => self.cmd_mlt_req(),
             0x13 => self.cmd_chr_trn(),
             0x14 => self.cmd_pct_trn(),
-            0x15 => self.cmd_attr_set(),
-            0x16 => self.cmd_attr_trn(),
+            0x15 => self.cmd_attr_trn(),
+            0x16 => self.cmd_attr_set(),
             0x17 => self.cmd_mask_en(),
             0x0F => self.cmd_data_snd(),
             0x08 | 0x09 | 0x0C | 0x0D | 0x0E | 0x19 => {
@@ -594,7 +594,7 @@ impl Sgb {
 
     /// ATTR_TRN: Transfer attribute files from VRAM
     fn cmd_attr_trn(&mut self) {
-        self.pending_transfer = Some(0x16);
+        self.pending_transfer = Some(0x15);
         self.pending_transfer_data = 0;
         self.transfer_countdown = 2;
     }
@@ -685,7 +685,7 @@ impl Sgb {
                 self.border_dirty = true;
                 log::debug!("SGB PCT_TRN: loaded border map + palettes");
             }
-            0x16 => {
+            0x15 => {
                 // ATTR_TRN: 45 attribute files × 90 bytes = 4050 bytes
                 for f in 0..45 {
                     let base = f * 90;
