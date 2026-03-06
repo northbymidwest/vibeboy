@@ -174,4 +174,9 @@ impl Timer {
     pub fn clear_interrupt(&mut self) {
         self.interrupt = false;
     }
+
+    /// Expose the internal 16-bit DIV counter for serial clock edge detection.
+    pub fn counter(&self) -> u16 {
+        self.counter
+    }
 }

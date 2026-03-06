@@ -6,6 +6,8 @@ mod emulator;
 mod joypad;
 mod model;
 mod ppu;
+mod printer;
+mod serial;
 mod sgb;
 mod snes;
 mod timer;
@@ -59,6 +61,10 @@ struct Cli {
     /// Skip boot ROM (start at PC=0x100 with post-boot state)
     #[arg(long)]
     no_bootrom: bool,
+
+    /// Connect a Game Boy Printer (saves PNGs to prints/ directory)
+    #[arg(long)]
+    printer: bool,
 }
 
 fn main() {
@@ -129,6 +135,12 @@ fn main() {
     }
 
     let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model, snes_rom);
+
+    if cli.printer {
+        let output_dir = std::path::Path::new("prints");
+        emu.bus.serial.device = Box::new(printer::Printer::new(output_dir));
+        eprintln!("Game Boy Printer connected — images will be saved to prints/");
+    }
 
     let is_sgb = emu.is_sgb();
     let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };

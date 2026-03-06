@@ -6,6 +6,8 @@ mod emulator;
 mod joypad;
 mod model;
 mod ppu;
+mod printer;
+mod serial;
 mod sgb;
 mod snes;
 mod timer;

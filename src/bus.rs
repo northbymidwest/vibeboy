@@ -3,6 +3,7 @@ use crate::cartridge::{make_cartridge, Cartridge};
 use crate::joypad::Joypad;
 use crate::model::GbModel;
 use crate::ppu::Ppu;
+use crate::serial::Serial;
 use crate::sgb::Sgb;
 use crate::timer::Timer;
 
@@ -83,11 +84,8 @@ pub struct Bus {
     /// Interrupt Enable (0xFFFF)
     pub ie: u8,
 
-    /// Serial registers (stub)
-    sb: u8,
-    sc: u8,
-    /// Buffer of serial output bytes (for test ROM detection)
-    pub serial_output: Vec<u8>,
+    /// Serial port (SB/SC registers + attached device)
+    pub serial: Serial,
 
     /// KEY1 — speed switch (0xFF4D)
     pub key1: u8,
@@ -172,9 +170,7 @@ impl Bus {
             hram: [0u8; 0x7F],
             if_: 0xE1,
             ie: 0x00,
-            sb: 0x00,
-            sc: 0x7E,
-            serial_output: Vec::new(),
+            serial: Serial::new(model.is_cgb()),
             key1: 0x00,
             double_speed: false,
             oam_dma: OamDma::new(),
@@ -330,8 +326,8 @@ impl Bus {
                 }
                 self.joypad.read()
             }
-            0xFF01 => self.sb,
-            0xFF02 => self.sc | 0x7E,
+            0xFF01 => self.serial.sb,
+            0xFF02 => self.serial.read_sc(),
             0xFF03 => 0xFF,
             0xFF04..=0xFF07 => self.timer.read(addr),
             0xFF0F => self.if_ | 0xE0,
@@ -381,22 +377,29 @@ impl Bus {
                     sgb.write_p1(val);
                 }
             }
-            0xFF01 => self.sb = val,
+            0xFF01 => self.serial.sb = val,
             0xFF02 => {
-                self.sc = val;
-                // Serial transfer start (bit7=1): print byte to stdout for test ROMs
+                self.serial.write_sc(val);
+                // Print to stdout for test ROMs (write_sc pushes to serial_output)
                 if val & 0x80 != 0 {
-                    self.serial_output.push(self.sb);
-                    print!("{}", self.sb as char);
+                    print!("{}", self.serial.sb as char);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
             }
             0xFF04..=0xFF07 => {
+                let old_div = self.timer.counter();
                 self.timer.write(addr, val);
+                let new_div = self.timer.counter();
                 if self.timer.interrupt {
                     self.if_ |= 0x04;
                     self.timer.clear_interrupt();
+                }
+                // DIV reset can create falling edge for serial clock
+                self.serial.step(old_div, new_div);
+                if self.serial.interrupt {
+                    self.if_ |= 0x08;
+                    self.serial.interrupt = false;
                 }
             }
             0xFF0F => self.if_ = val | 0xE0,
@@ -562,10 +565,20 @@ impl Bus {
     /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
     /// `bus_cycles` is 4MHz-rate T-cycles (4 normal, 2 double-speed).
     pub fn tick(&mut self, timer_cycles: u32, bus_cycles: u32) {
+        // Capture DIV counter before and after timer step for serial edge detection
+        let old_div = self.timer.counter();
         self.timer.step(timer_cycles);
+        let new_div = self.timer.counter();
         if self.timer.interrupt {
             self.if_ |= 0x04;
             self.timer.clear_interrupt();
+        }
+
+        // Serial clock is derived from DIV counter
+        self.serial.step(old_div, new_div);
+        if self.serial.interrupt {
+            self.if_ |= 0x08;
+            self.serial.interrupt = false;
         }
 
         let ppu_flags = self.ppu.step(bus_cycles);

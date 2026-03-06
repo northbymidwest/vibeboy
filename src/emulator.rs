@@ -206,7 +206,7 @@ impl Emulator {
 
             // Check serial output periodically
             if cycles % 1024 == 0 || cycles >= limit {
-                let output = String::from_utf8_lossy(&self.bus.serial_output);
+                let output = String::from_utf8_lossy(&self.bus.serial.serial_output);
                 if output.contains("Passed") || output.contains("Failed") || cycles >= limit {
                     return output.into_owned();
                 }
