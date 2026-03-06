@@ -211,6 +211,8 @@ pub struct Ppu {
     pixel_x: u8,
     /// SCX%8 pixels to discard from first BG tile
     scx_discard: u8,
+    /// SCX/8 tile column offset latched at Mode 3 start
+    scx_tile_offset: u8,
     /// Sprite fetch in progress
     sprite_fetch_active: bool,
     sprite_fetch_step: u8,   // 0=tile_id, 1=data_lo, 2=data_hi
@@ -241,6 +243,7 @@ pub struct Ppu {
     line_start_is_vblank: bool,
     /// DMG line-start timing: mode override for STAT IRQ check (-1 = use self.mode).
     mode_for_interrupt: i8,
+
 }
 
 impl Ppu {
@@ -310,6 +313,7 @@ impl Ppu {
             fetcher: Fetcher::new(),
             pixel_x: 0,
             scx_discard: 0,
+            scx_tile_offset: 0,
             sprite_fetch_active: false,
             sprite_fetch_step: 0,
             sprite_fetch_tick: 0,
@@ -364,6 +368,7 @@ impl Ppu {
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.scx_discard = 0;
+        self.scx_tile_offset = 0;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -692,6 +697,7 @@ impl Ppu {
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.scx_discard = self.scx & 7;
+        self.scx_tile_offset = self.scx / 8;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -990,7 +996,7 @@ impl Ppu {
         } else {
             let bg_map_base: u16 = if self.lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
             let scroll_y = self.scy.wrapping_add(self.ly);
-            let tile_x = ((self.scx / 8).wrapping_add(self.fetcher.tile_x)) & 0x1F;
+            let tile_x = (self.scx_tile_offset.wrapping_add(self.fetcher.tile_x)) & 0x1F;
             let tile_y = (scroll_y as u16) / 8;
             (bg_map_base + tile_y * 32 + tile_x as u16) as usize
         }

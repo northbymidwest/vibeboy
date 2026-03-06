@@ -111,12 +111,113 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     }
 }
 
+fn analyze_frame(path: &Path, frames: u32) {
+    let rom = fs::read(path).expect("Failed to read ROM");
+    let model = GbModel::Cgb;
+    let br = load_boot_rom(model);
+    let mut emu = Emulator::new(rom, br, None, model, None);
+
+    for f in 0..frames {
+        emu.step_frame();
+    }
+
+    // Analyze the frame buffer for yellow pixels on right edge
+    let fb = emu.frame_buffer();
+    eprintln!("Frame {} analysis (right edge, columns 155-159):", frames);
+    let mut yellow_count = 0;
+    for y in 0..144 {
+        let mut right_colors = Vec::new();
+        for x in 155..160 {
+            let pixel = fb[y * 160 + x];
+            right_colors.push(pixel);
+            // Check for yellow-ish (R > 200, G > 150, B < 100)
+            let r = (pixel >> 16) & 0xFF;
+            let g = (pixel >> 8) & 0xFF;
+            let b = pixel & 0xFF;
+            if r > 200 && g > 150 && b < 100 {
+                yellow_count += 1;
+            }
+        }
+        if right_colors.iter().any(|&p| {
+            let r = (p >> 16) & 0xFF;
+            let g = (p >> 8) & 0xFF;
+            let b = p & 0xFF;
+            r > 200 && g > 150 && b < 100
+        }) {
+            eprintln!("  LY={:3}: {:08X} {:08X} {:08X} {:08X} {:08X}  SCX={}",
+                y, right_colors[0], right_colors[1], right_colors[2],
+                right_colors[3], right_colors[4], emu.bus.ppu.scx);
+        }
+    }
+    // Also dump left edge for reference
+    eprintln!("\nLeft edge sample (LY=72):");
+    for x in 0..8 {
+        let pixel = fb[72 * 160 + x];
+        eprint!("{:08X} ", pixel);
+    }
+    eprintln!("\nRight edge sample (LY=72):");
+    for x in 152..160 {
+        let pixel = fb[72 * 160 + x];
+        eprint!("{:08X} ", pixel);
+    }
+    eprintln!("\nTotal yellow pixels on right edge (cols 155-159): {}", yellow_count);
+}
+
 fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: test_runner <dir_or_glob> [--blargg]");
         std::process::exit(1);
+    }
+
+    // Quick analyze mode
+    if args.iter().any(|a| a == "--analyze") {
+        let path = Path::new(&args[1]);
+        let frames = args.iter()
+            .position(|a| a == "--frames")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        analyze_frame(path, frames);
+        return;
+    }
+
+    // Screenshot mode: dump frame buffer as PPM
+    if args.iter().any(|a| a == "--screenshot") {
+        let path = Path::new(&args[1]);
+        let frames: u32 = args.iter()
+            .position(|a| a == "--frames")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        let out_path = args.iter()
+            .position(|a| a == "--out")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.clone())
+            .unwrap_or_else(|| "screenshot.ppm".to_string());
+        let rom = fs::read(path).expect("Failed to read ROM");
+        let model = GbModel::Cgb;
+        let br = load_boot_rom(model);
+        let mut emu = Emulator::new(rom, br, None, model, None);
+        for _ in 0..frames {
+            emu.step_frame();
+        }
+        let fb = emu.frame_buffer();
+        let mut ppm = format!("P3\n160 144\n255\n");
+        for y in 0..144 {
+            for x in 0..160 {
+                let pixel = fb[y * 160 + x];
+                let r = (pixel >> 16) & 0xFF;
+                let g = (pixel >> 8) & 0xFF;
+                let b = pixel & 0xFF;
+                ppm.push_str(&format!("{} {} {} ", r, g, b));
+            }
+            ppm.push('\n');
+        }
+        fs::write(&out_path, ppm).expect("Failed to write PPM");
+        eprintln!("Wrote {} (frame {})", out_path, frames);
+        return;
     }
 
     let root = Path::new(&args[1]);

@@ -22,6 +22,7 @@ use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::PixelFormat;
+use sdl3::render::ScaleMode;
 use sdl3::sys::camera::{
     SDL_AcquireCameraFrame, SDL_Camera, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
     SDL_OpenCamera, SDL_ReleaseCameraFrame,
@@ -189,6 +190,7 @@ fn main() {
     let mut texture = texture_creator
         .create_texture_streaming(PixelFormat::ARGB8888, tex_w, tex_h)
         .unwrap();
+    texture.set_scale_mode(ScaleMode::Nearest);
 
     let mut event_pump = sdl.event_pump().unwrap();
 
