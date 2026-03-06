@@ -231,44 +231,48 @@ fn main() {
             }
         }
 
-        // ── Render ────────────────────────────────────────────────────────────
-        if is_sgb {
-            let src = emu.sgb_composited_frame();
-            texture
-                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                    for y in 0..224usize {
-                        for x in 0..256usize {
-                            let argb = src[y * 256 + x];
-                            let off = y * pitch + x * 4;
-                            pixels[off]     =  argb        as u8; // B
-                            pixels[off + 1] = (argb >>  8) as u8; // G
-                            pixels[off + 2] = (argb >> 16) as u8; // R
-                            pixels[off + 3] = 0xFF;                // A
+        // ── Render (skip when window is fully occluded to avoid compositor throttle) ──
+        let occluded = canvas.window().window_flags()
+            & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
+        if !occluded {
+            if is_sgb {
+                let src = emu.sgb_composited_frame();
+                texture
+                    .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                        for y in 0..224usize {
+                            for x in 0..256usize {
+                                let argb = src[y * 256 + x];
+                                let off = y * pitch + x * 4;
+                                pixels[off]     =  argb        as u8; // B
+                                pixels[off + 1] = (argb >>  8) as u8; // G
+                                pixels[off + 2] = (argb >> 16) as u8; // R
+                                pixels[off + 3] = 0xFF;                // A
+                            }
                         }
-                    }
-                })
-                .unwrap();
-        } else {
-            let src = emu.frame_buffer();
-            texture
-                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                    for y in 0..144usize {
-                        for x in 0..160usize {
-                            let argb = src[y * 160 + x];
-                            let off = y * pitch + x * 4;
-                            pixels[off]     =  argb        as u8; // B
-                            pixels[off + 1] = (argb >>  8) as u8; // G
-                            pixels[off + 2] = (argb >> 16) as u8; // R
-                            pixels[off + 3] = 0xFF;                // A
+                    })
+                    .unwrap();
+            } else {
+                let src = emu.frame_buffer();
+                texture
+                    .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                        for y in 0..144usize {
+                            for x in 0..160usize {
+                                let argb = src[y * 160 + x];
+                                let off = y * pitch + x * 4;
+                                pixels[off]     =  argb        as u8; // B
+                                pixels[off + 1] = (argb >>  8) as u8; // G
+                                pixels[off + 2] = (argb >> 16) as u8; // R
+                                pixels[off + 3] = 0xFF;                // A
+                            }
                         }
-                    }
-                })
-                .unwrap();
-        }
+                    })
+                    .unwrap();
+            }
 
-        canvas.clear();
-        canvas.copy(&texture, None, None).unwrap();
-        canvas.present();
+            canvas.clear();
+            canvas.copy(&texture, None, None).unwrap();
+            canvas.present();
+        }
 
         // ── FPS counter ───────────────────────────────────────────────────────
         let emu_time = frame_start.elapsed();
