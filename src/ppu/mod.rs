@@ -201,6 +201,10 @@ pub struct Ppu {
 
     // ---- Pixel FIFO state ----
     bg_fifo: PixelFifo,
+    /// Separate OAM (sprite) FIFO — popped in lockstep with bg_fifo.
+    /// Sprite pixels are stored here rather than overlaid into bg_fifo,
+    /// so priority is resolved correctly at output time.
+    oam_fifo: PixelFifo,
     fetcher: Fetcher,
     /// Pixels pushed to framebuffer this scanline (0-160)
     pixel_x: u8,
@@ -288,6 +292,7 @@ impl Ppu {
             dmg_obj_ref: [[0x7FFF; 4]; 2],
 
             bg_fifo: PixelFifo::new(),
+            oam_fifo: PixelFifo::new(),
             fetcher: Fetcher::new(),
             pixel_x: 0,
             scx_discard: 0,
@@ -513,6 +518,7 @@ impl Ppu {
     /// Initialize FIFO state at the start of Mode 3
     fn init_fifo(&mut self) {
         self.bg_fifo.clear();
+        self.oam_fifo.clear();
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.scx_discard = self.scx & 7;
@@ -546,8 +552,10 @@ impl Ppu {
         // Advance BG fetcher
         self.tick_bg_fetcher();
 
-        // Check sprite trigger
-        if self.lcdc & 0x02 != 0 && self.bg_fifo.len() > 0 {
+        // Check sprite trigger (only after SCX discard is complete, so sprite
+        // pixels aren't consumed by background scrolling — sprites have absolute
+        // screen positions unaffected by SCX)
+        if self.lcdc & 0x02 != 0 && self.bg_fifo.len() > 0 && self.scx_discard == 0 {
             if let Some(sprite_idx) = self.find_sprite_at_pixel_x() {
                 self.start_sprite_fetch(sprite_idx);
                 // Process first cycle immediately to avoid off-by-one penalty
@@ -562,23 +570,29 @@ impl Ppu {
 
         // Pop pixel from FIFO and output
         if self.bg_fifo.len() > 0 {
-            let pixel = self.bg_fifo.pop_front();
+            // Check window trigger BEFORE popping, so pixels aren't lost
+            if self.scx_discard == 0 && self.check_window_trigger() {
+                self.bg_fifo.clear();
+                // OAM FIFO is NOT cleared — sprite pixels survive window transition
+                self.fetcher.reset(true);
+                self.window_active = true;
+                return;
+            }
+
+            let bg_pixel = self.bg_fifo.pop_front();
+            // Pop OAM FIFO in lockstep (may be empty if no sprites)
+            let oam_pixel = if self.oam_fifo.len() > 0 {
+                Some(self.oam_fifo.pop_front())
+            } else {
+                None
+            };
 
             if self.scx_discard > 0 {
                 self.scx_discard -= 1;
                 return;
             }
 
-            // Check window trigger before outputting
-            if self.check_window_trigger() {
-                self.bg_fifo.clear();
-                self.fetcher.reset(true);
-                self.window_active = true;
-                self.scx_discard = 0;
-                return;
-            }
-
-            self.output_pixel(pixel);
+            self.output_pixel_dual(bg_pixel, oam_pixel);
         }
     }
 
@@ -695,7 +709,9 @@ impl Ppu {
         }
     }
 
-    /// Mix fetched sprite data into the BG FIFO
+    /// Mix fetched sprite data into the OAM FIFO.
+    /// Sprite pixels are stored separately from BG pixels; priority is resolved
+    /// at output time when both FIFOs are popped together.
     fn mix_sprite_into_fifo(&mut self, sprite_x: u8, attrs: u8) {
         let x_flip = attrs & 0x20 != 0;
         let bg_over = attrs & 0x80 != 0;
@@ -711,42 +727,43 @@ impl Ppu {
         let lo = self.sprite_tile_data_low;
         let hi = self.sprite_tile_data_high;
 
-        // Determine the start offset into the FIFO
-        // If sprite_x < 8, some leftmost pixels are clipped
-        let start_pixel = if sprite_x < 8 { 8 - sprite_x } else { 0 };
+        // Pad OAM FIFO to exactly 8 entries (matching SameBoy's fifo_overlay_object_row).
+        while self.oam_fifo.len() < 8 {
+            self.oam_fifo.push_back(FifoPixel::default());
+        }
 
-        for px in start_pixel..8 {
-            let fifo_pos = if sprite_x >= 8 {
-                (sprite_x as i16 - 8 - self.pixel_x as i16 + px as i16) as usize
-            } else {
-                (px - start_pixel) as usize
-            };
+        // Overlay sprite pixels into OAM FIFO.
+        // For left-edge sprites (X < 8), the leftmost (8-X) tile pixels are
+        // clipped. FIFO pos 0 = next pixel to output (leftmost on screen).
+        // Non-flipped: fifo[p] gets bit (7 - tile_pixel), where tile_pixel 0=left
+        // Flipped:     fifo[p] gets bit (tile_pixel)
+        let skip = if sprite_x >= 8 { 0u8 } else { 8 - sprite_x };
+        let num_visible = 8 - skip;
 
-            if fifo_pos >= self.bg_fifo.len() {
-                break;
-            }
-
-            let bit = if x_flip { px } else { 7 - px };
+        for p in 0..num_visible {
+            let tile_pixel = skip + p; // 0=leftmost .. 7=rightmost in tile
+            let bit = if x_flip { tile_pixel } else { 7 - tile_pixel };
             let color_idx = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
+            let fifo_pos = p as usize;
 
             if color_idx == 0 {
-                continue; // transparent sprite pixel
+                continue;
             }
 
-            let existing = *self.bg_fifo.get(fifo_pos);
-            if existing.is_sprite {
-                continue; // first sprite wins
+            let existing = *self.oam_fifo.get(fifo_pos);
+            if existing.color_index != 0 {
+                continue;
             }
 
-            self.bg_fifo.replace(fifo_pos, FifoPixel {
+            self.oam_fifo.replace(fifo_pos, FifoPixel {
                 color_index: color_idx,
                 palette: palette_idx,
                 is_sprite: true,
-                bg_priority: existing.bg_priority,
+                bg_priority: false,
                 sprite_bg_over: bg_over,
                 sprite_dmg_palette: dmg_pal,
-                bg_color_index: existing.color_index,
-                bg_palette: existing.palette,
+                bg_color_index: 0,
+                bg_palette: 0,
             });
         }
     }
@@ -862,8 +879,8 @@ impl Ppu {
         }
     }
 
-    /// Output one pixel to the framebuffer
-    fn output_pixel(&mut self, pixel: FifoPixel) {
+    /// Output one pixel to the framebuffer, resolving BG/OAM priority.
+    fn output_pixel_dual(&mut self, bg: FifoPixel, oam: Option<FifoPixel>) {
         if self.pixel_x >= 160 {
             return;
         }
@@ -872,42 +889,45 @@ impl Ppu {
             return;
         }
 
-        let color32 = if pixel.is_sprite {
-            // Sprite pixel — check priority
-            let bg_color_idx = pixel.bg_color_index;
-            let bg_is_zero = bg_color_idx == 0;
-
-            let sprite_wins = if self.lcdc & 0x01 == 0 {
-                // BG/Window master disable — sprite always wins
-                true
-            } else if pixel.sprite_bg_over && !bg_is_zero {
+        // Determine if the sprite pixel wins over the BG pixel
+        let draw_sprite = if let Some(ref oam_px) = oam {
+            if oam_px.color_index == 0 {
+                false // transparent OAM pixel
+            } else if self.lcdc & 0x02 == 0 && !self.cgb_mode {
+                // DMG: LCDC bit 1 off disables sprites entirely
                 false
-            } else if pixel.bg_priority && !bg_is_zero {
-                false
+            } else if self.lcdc & 0x01 == 0 {
+                if self.cgb_mode {
+                    // CGB: LCDC bit 0 off disables BG priority, sprite always wins
+                    true
+                } else {
+                    // DMG: LCDC bit 0 off disables BG, sprite always shows
+                    true
+                }
+            } else if oam_px.sprite_bg_over && bg.color_index != 0 {
+                false // OAM attr bit 7: sprite behind non-zero BG
+            } else if bg.bg_priority && bg.color_index != 0 {
+                false // CGB BG attr bit 7: BG over sprite when non-zero
             } else {
                 true
-            };
+            }
+        } else {
+            false
+        };
 
-            if sprite_wins {
-                if self.cgb_mode {
-                    self.gbc_obj_color(pixel.palette as usize, pixel.color_index as usize)
-                } else {
-                    Self::dmg_color(pixel.sprite_dmg_palette, pixel.color_index)
-                }
+        let color32 = if draw_sprite {
+            let oam_px = oam.unwrap();
+            if self.cgb_mode {
+                self.gbc_obj_color(oam_px.palette as usize, oam_px.color_index as usize)
             } else {
-                // BG wins — use the stored BG color
-                if self.cgb_mode {
-                    self.gbc_bg_color(pixel.bg_palette as usize, bg_color_idx as usize)
-                } else {
-                    Self::dmg_color(self.bgp, bg_color_idx)
-                }
+                Self::dmg_color(oam_px.sprite_dmg_palette, oam_px.color_index)
             }
         } else {
             // BG/window pixel
             if self.cgb_mode {
-                self.gbc_bg_color(pixel.palette as usize, pixel.color_index as usize)
+                self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
             } else {
-                Self::dmg_color(self.bgp, pixel.color_index)
+                Self::dmg_color(self.bgp, bg.color_index)
             }
         };
 
@@ -915,25 +935,11 @@ impl Ppu {
 
         // SGB: capture 2-bit shade index for palette remapping
         if self.sgb_mode {
-            let (pal_reg, cidx) = if pixel.is_sprite {
-                let bg_color_idx = pixel.bg_color_index;
-                let bg_is_zero = bg_color_idx == 0;
-                let sprite_wins = if self.lcdc & 0x01 == 0 {
-                    true
-                } else if pixel.sprite_bg_over && !bg_is_zero {
-                    false
-                } else if pixel.bg_priority && !bg_is_zero {
-                    false
-                } else {
-                    true
-                };
-                if sprite_wins {
-                    (pixel.sprite_dmg_palette, pixel.color_index)
-                } else {
-                    (self.bgp, bg_color_idx)
-                }
+            let (pal_reg, cidx) = if draw_sprite {
+                let oam_px = oam.unwrap();
+                (oam_px.sprite_dmg_palette, oam_px.color_index)
             } else {
-                (self.bgp, pixel.color_index)
+                (self.bgp, bg.color_index)
             };
             let shade = (pal_reg >> (cidx * 2)) & 0x03;
             self.shade_buffer[fb_idx] = shade;
