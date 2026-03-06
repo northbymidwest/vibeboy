@@ -15,8 +15,6 @@ const COMMAND_INIT: u8 = 0x01;
 const COMMAND_START: u8 = 0x02;
 const COMMAND_DATA: u8 = 0x04;
 
-/// Clock rate for idle timeout (~4 MHz)
-const CLOCK_RATE: u32 = 4_194_304;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CommandState {
@@ -86,10 +84,12 @@ pub struct Printer {
     output_dir: PathBuf,
     /// Counter for naming output files
     print_count: u32,
+    /// CPU clock rate for timing calculations
+    clock_rate: u32,
 }
 
 impl Printer {
-    pub fn new(output_dir: &Path) -> Self {
+    pub fn new(output_dir: &Path, clock_rate: u32) -> Self {
         Printer {
             command_state: CommandState::Magic1,
             command_id: 0,
@@ -111,6 +111,7 @@ impl Printer {
             time_remaining: 0,
             output_dir: output_dir.to_path_buf(),
             print_count: 0,
+            clock_rate,
         }
     }
 
@@ -232,7 +233,7 @@ impl Printer {
 
                     // Calculate print time: 1 second per 8-pixel row
                     let rows = self.image_offset / 160;
-                    self.time_remaining = (rows as u32) * CLOCK_RATE / 256 / 8;
+                    self.time_remaining = (rows as u32) * self.clock_rate / 256 / 8;
 
                     self.save_image();
                     self.image_offset = 0;
@@ -327,7 +328,7 @@ impl Printer {
 impl SerialDevice for Printer {
     fn bit_start(&mut self, bit: bool) {
         // Reset protocol if idle too long (> 1 second)
-        if self.idle_time > CLOCK_RATE {
+        if self.idle_time > self.clock_rate {
             self.command_state = CommandState::Magic1;
             self.bits_received = 0;
         }

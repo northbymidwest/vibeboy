@@ -21,6 +21,14 @@ impl GbModel {
     pub fn is_sgb(self) -> bool {
         self == GbModel::Sgb || self == GbModel::Sgb2
     }
+
+    /// CPU clock rate in Hz. SGB1 runs at SNES master clock / 5 (~2.4% faster).
+    pub fn cpu_clock_rate(self) -> u32 {
+        match self {
+            GbModel::Sgb => 4_295_454, // 21_477_272 / 5
+            _ => 4_194_304,            // 2^22
+        }
+    }
 }
 
 impl std::fmt::Display for GbModel {

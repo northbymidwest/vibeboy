@@ -44,8 +44,12 @@ enum AccelSource {
 }
 
 const SCALE: u32 = 3;
-/// Target frame time for ~59.73 fps.
-const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
+/// Target frame time: 70224 T-cycles / cpu_clock_rate.
+/// Standard: ~16.74ms (~59.73 fps). SGB1: ~16.35ms (~61.17 fps).
+fn frame_duration(model: GbModel) -> Duration {
+    let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
+    Duration::from_nanos(nanos)
+}
 
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
@@ -99,6 +103,8 @@ fn main() {
             std::process::exit(1);
         })
     };
+
+    let frame_dur = frame_duration(model);
 
     // Resolve boot ROM: explicit path, or auto-detect by model
     let boot_rom: Option<Vec<u8>> = if cli.no_bootrom {
@@ -164,7 +170,7 @@ fn main() {
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
-        emu.bus.serial.device = Box::new(printer::Printer::new(output_dir));
+        emu.bus.serial.device = Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate()));
         eprintln!("Game Boy Printer connected — images will be saved to prints/");
     }
 
@@ -409,11 +415,11 @@ fn main() {
         // ── Frame rate cap ────────────────────────────────────────────────────
         // Normal: cap to ~59.73 fps. Fast-forward: same wall-clock cap but we
         // ran 4 emulated frames, so effective speed is 4×.
-        let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
+        let remaining = frame_dur.saturating_sub(frame_start.elapsed());
         if remaining > Duration::from_millis(2) {
             std::thread::sleep(remaining - Duration::from_millis(2));
         }
-        while frame_start.elapsed() < FRAME_DURATION {
+        while frame_start.elapsed() < frame_dur {
             std::hint::spin_loop();
         }
         frame_start = Instant::now();

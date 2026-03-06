@@ -166,7 +166,7 @@ impl Bus {
             ppu,
             timer: if boot_rom_active { Timer::reset() } else { Timer::post_boot(model) },
             joypad,
-            apu: Apu::new(),
+            apu: Apu::new(model.cpu_clock_rate()),
             wram: [[0u8; 0x1000]; 8],
             wram_bank: 1,
             hram: [0u8; 0x7F],

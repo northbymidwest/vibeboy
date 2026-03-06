@@ -541,11 +541,6 @@ fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, countdown: &mut u8, lo
 // ── APU top level ──────────────────────────────────────────────────────────
 
 const SAMPLE_RATE: u32 = 96_000;
-const CPU_RATE: u32 = 4_194_304;
-// Cycles per sample as a fixed-point ratio: emit one sample every CPU_RATE/SAMPLE_RATE cycles.
-// Use u64 accumulator: add SAMPLE_RATE each T-cycle; emit when >= CPU_RATE.
-const SAMPLE_ACCUM_TICK: u64 = SAMPLE_RATE as u64;
-const SAMPLE_ACCUM_THRESH: u64 = CPU_RATE as u64;
 
 #[derive(Clone)]
 pub struct Apu {
@@ -589,10 +584,14 @@ pub struct Apu {
     hpf_right: f32,
     hpf_prev_in_l: f32,
     hpf_prev_in_r: f32,
+
+    // Model-dependent clock rate for sample timing
+    sample_accum_tick: u64,
+    sample_accum_thresh: u64,
 }
 
 impl Apu {
-    pub fn new() -> Self {
+    pub fn new(cpu_clock_rate: u32) -> Self {
         let mut apu = Apu {
             ch1: SquareCh::new(),
             sweep: Sweep::new(),
@@ -617,6 +616,8 @@ impl Apu {
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
             hpf_prev_in_r: 0.0,
+            sample_accum_tick: SAMPLE_RATE as u64,
+            sample_accum_thresh: cpu_clock_rate as u64,
         };
         // Post-boot CH1 state: registers match what boot ROM left behind,
         // but the envelope has decayed volume to 0 during the boot animation.
@@ -1197,8 +1198,10 @@ impl Apu {
     }
 
     /// Compute fractional BLIP phase from sample accumulator position.
+    #[inline]
     fn current_blip_phase(&self) -> usize {
-        (self.sample_accum as usize * BLIP_PHASES / SAMPLE_ACCUM_THRESH as usize)
+        let thresh = self.sample_accum_thresh as usize;
+        (self.sample_accum as usize * BLIP_PHASES / thresh)
             .min(BLIP_PHASES * 2 - 1)
     }
 
@@ -1237,11 +1240,14 @@ impl Apu {
     // ── Main step ──────────────────────────────────────────────────────────
 
     pub fn step(&mut self, cycles: u32) {
+        let tick = self.sample_accum_tick;
+        let thresh = self.sample_accum_thresh;
+
         if !self.power {
             // Still need to emit silence at the correct rate
-            self.sample_accum += cycles as u64 * SAMPLE_ACCUM_TICK;
-            while self.sample_accum >= SAMPLE_ACCUM_THRESH {
-                self.sample_accum -= SAMPLE_ACCUM_THRESH;
+            self.sample_accum += cycles as u64 * tick;
+            while self.sample_accum >= thresh {
+                self.sample_accum -= thresh;
                 self.emit_sample();
             }
             return;
@@ -1264,9 +1270,9 @@ impl Apu {
         self.record_mix_delta();
 
         // Sample generation: emit one BLIP sample every CPU_RATE/SAMPLE_RATE T-cycles
-        self.sample_accum += cycles as u64 * SAMPLE_ACCUM_TICK;
-        while self.sample_accum >= SAMPLE_ACCUM_THRESH {
-            self.sample_accum -= SAMPLE_ACCUM_THRESH;
+        self.sample_accum += cycles as u64 * tick;
+        while self.sample_accum >= thresh {
+            self.sample_accum -= thresh;
             self.emit_sample();
         }
     }
