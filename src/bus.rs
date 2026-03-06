@@ -164,13 +164,13 @@ impl Bus {
         Bus {
             cart,
             ppu,
-            timer: Timer::post_boot(model),
+            timer: if boot_rom_active { Timer::reset() } else { Timer::post_boot(model) },
             joypad,
             apu: Apu::new(),
             wram: [[0u8; 0x1000]; 8],
             wram_bank: 1,
             hram: [0u8; 0x7F],
-            if_: 0xE1,
+            if_: if boot_rom_active { 0x00 } else { 0xE1 },
             ie: 0x00,
             serial: Serial::new(model.is_cgb()),
             key1: 0x00,
@@ -413,6 +413,8 @@ impl Bus {
                 if !self.model.is_cgb() { return 0xFF; }
                 self.wram_bank as u8 | 0xF8
             }
+            0xFF76 => if self.model.is_cgb() { self.apu.pcm12() } else { 0xFF },
+            0xFF77 => if self.model.is_cgb() { self.apu.pcm34() } else { 0xFF },
             _ => 0xFF,
         }
     }

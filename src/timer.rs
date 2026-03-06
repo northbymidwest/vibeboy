@@ -30,6 +30,19 @@ impl Timer {
         Self::post_boot(GbModel::Cgb)
     }
 
+    /// Hardware reset state: counter starts at 0, TAC defaults.
+    pub fn reset() -> Self {
+        Timer {
+            counter: 0,
+            tima: 0,
+            tma: 0,
+            tac: 0xF8,
+            interrupt: false,
+            overflow_delay: 0,
+            reload_fired: false,
+        }
+    }
+
     /// Post-boot timer state for the given hardware model.
     pub fn post_boot(model: GbModel) -> Self {
         let counter = match model {

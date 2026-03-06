@@ -795,4 +795,13 @@ impl Apu {
         std::mem::take(&mut self.sample_buf)
     }
 
+    /// CGB PCM12 register (0xFF76): CH1 output in low nibble, CH2 in high nibble.
+    pub fn pcm12(&self) -> u8 {
+        (self.ch1.output() & 0x0F) | ((self.ch2.output() & 0x0F) << 4)
+    }
+
+    /// CGB PCM34 register (0xFF77): CH3 output in low nibble, CH4 in high nibble.
+    pub fn pcm34(&self) -> u8 {
+        (self.ch3.output() & 0x0F) | ((self.ch4.output() & 0x0F) << 4)
+    }
 }

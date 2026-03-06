@@ -228,6 +228,19 @@ pub struct Ppu {
     mode3_start_delay: u8,
     /// Last sprite tile slot for same-slot grouping (or -1 if none)
     last_sprite_slot: i16,
+
+    /// DMG line-start timing: LY value visible via IO register FF44.
+    /// On DMG, delayed from internal ly until dot 4 of the new scanline.
+    visible_ly: u8,
+    /// DMG line-start timing: LY value used for LYC comparison.
+    /// -1 means "no match possible" (preserves existing coincidence bit).
+    ly_for_comparison: i16,
+    /// DMG line-start timing: true during dots 0-4 of a new scanline.
+    line_start_pending: bool,
+    /// DMG line-start timing: true if line_start_pending is for a VBlank line.
+    line_start_is_vblank: bool,
+    /// DMG line-start timing: mode override for STAT IRQ check (-1 = use self.mode).
+    mode_for_interrupt: i8,
 }
 
 impl Ppu {
@@ -308,6 +321,11 @@ impl Ppu {
             window_active: false,
             mode3_start_delay: 0,
             last_sprite_slot: -1,
+            visible_ly: 0,
+            ly_for_comparison: 0,
+            line_start_pending: false,
+            line_start_is_vblank: false,
+            mode_for_interrupt: -1,
         }
     }
 
@@ -351,6 +369,11 @@ impl Ppu {
         self.window_active = false;
         self.mode3_start_delay = 0;
         self.last_sprite_slot = -1;
+        self.visible_ly = 0;
+        self.ly_for_comparison = 0;
+        self.line_start_pending = false;
+        self.line_start_is_vblank = false;
+        self.mode_for_interrupt = -1;
     }
 
     /// Step the PPU by `cycles` T-cycles.
@@ -375,12 +398,21 @@ impl Ppu {
     fn tick(&mut self) {
         self.dot += 1;
 
+        // DMG line-start sequence: handle dots 1-5 of new scanline
+        if !self.cgb_mode && self.line_start_pending {
+            self.handle_dmg_line_start();
+            return;
+        }
+
         match self.mode {
             2 => {
-                // Mode 2 → Mode 3: internal transition at dot 80
-                // CGB: STAT bits update 1T later; DMG: immediate
-                if self.dot >= 80 {
+                // Mode 2 → Mode 3: internal transition
+                // DMG: Mode 2 starts at dot 4, so transition at dot 84
+                // CGB: Mode 2 starts at dot 0, so transition at dot 80
+                let mode2_end = if self.cgb_mode { 80 } else { 84 };
+                if self.dot >= mode2_end {
                     self.mode = 3;
+                    self.mode_for_interrupt = 3;
                     self.oam_accessible = false;
                     self.vram_accessible = false;
                     self.init_fifo();
@@ -403,6 +435,7 @@ impl Ppu {
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
                     self.mode = 0;
+                    self.mode_for_interrupt = 0;
                     if self.cgb_mode {
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
@@ -437,22 +470,57 @@ impl Ppu {
                 if self.dot >= 456 {
                     self.dot = 0;
                     self.ly = self.ly.wrapping_add(1);
-                    self.update_coincidence();
 
-                    if self.ly == 144 {
-                        self.transition_to_mode1();
+                    if self.cgb_mode {
+                        self.visible_ly = self.ly;
+                        self.ly_for_comparison = self.ly as i16;
+                        self.update_coincidence();
+                        if self.ly == 144 {
+                            self.transition_to_mode1();
+                        } else {
+                            self.transition_to_mode2();
+                        }
                     } else {
-                        self.transition_to_mode2();
+                        // DMG: defer to line-start sequence
+                        self.line_start_pending = true;
+                        if self.ly < 144 {
+                            // Prime mode_for_interrupt for next active line.
+                            // Fire STAT update immediately so the Mode 2 rising
+                            // edge is visible to the CPU in the same M-cycle as
+                            // the dot-456 line wrap (matching hardware M-cycle alignment).
+                            self.mode_for_interrupt = 2;
+                            self.update_stat_irq();
+                            self.line_start_is_vblank = false;
+                        } else {
+                            // DMG VBlank entry (ly == 144): fire interrupts immediately
+                            // at the line transition so CPU sees them in the same M-cycle
+                            // as the dot-456 wrap. Visible LY and mode bits update later
+                            // via line_start_pending handler.
+                            self.line_start_is_vblank = true;
+                            self.ly_for_comparison = -1;
+                            // VBlank IF fires immediately
+                            self.if_flags |= 0x01;
+                            // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
+                            if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                                self.if_flags |= 0x02;
+                            }
+                            // Transition to Mode 1
+                            self.stat = (self.stat & !0x03) | 0x01;
+                            self.mode = 1;
+                            self.mode_for_interrupt = 1;
+                            self.update_stat_irq();
+                        }
                     }
                 }
             }
             1 => {
                 // VBlank lines
                 // Line 153 special: LY resets to 0 early (~4T into the line)
-                // This allows LYC=0 STAT interrupts to fire during VBlank,
-                // giving the ISR time to run before LY=0 Mode 3 starts.
-                if self.ly == 153 && self.dot == 4 {
+                // CGB: handled here; DMG: handled in handle_dmg_line_start
+                if self.cgb_mode && self.ly == 153 && self.dot == 4 {
                     self.ly = 0;
+                    self.visible_ly = 0;
+                    self.ly_for_comparison = 0;
                     self.update_coincidence();
                     self.update_stat_irq();
                 }
@@ -464,22 +532,43 @@ impl Ppu {
                         self.frame_ready = true;
                         self.window_line_counter = 0;
                         self.wy_triggered = false;
-                        self.transition_to_mode2();
-                    } else {
-                        self.ly = self.ly.wrapping_add(1);
-                        self.update_coincidence();
-                        if self.ly == 153 {
-                            // Line 153 starts: LY=153 briefly, then resets to 0 at dot 4
-                            self.update_stat_irq();
-                        } else if self.ly > 153 {
-                            // Should not happen with this logic, but safety
-                            self.ly = 0;
-                            self.update_coincidence();
-                            self.frame_ready = true;
-                            self.window_line_counter = 0;
-                            self.wy_triggered = false;
+                        if self.cgb_mode {
+                            self.visible_ly = 0;
+                            self.ly_for_comparison = 0;
                             self.transition_to_mode2();
                         } else {
+                            // DMG: defer to line-start for line 0
+                            self.line_start_pending = true;
+                            self.line_start_is_vblank = false;
+                            self.mode_for_interrupt = 2;
+                            self.update_stat_irq(); // Fire Mode 2 STAT in same M-cycle as wrap
+                            self.ly_for_comparison = 0;
+                        }
+                    } else {
+                        self.ly = self.ly.wrapping_add(1);
+                        if self.cgb_mode {
+                            self.visible_ly = self.ly;
+                            self.ly_for_comparison = self.ly as i16;
+                            self.update_coincidence();
+                            if self.ly == 153 {
+                                self.update_stat_irq();
+                            } else if self.ly > 153 {
+                                self.ly = 0;
+                                self.visible_ly = 0;
+                                self.ly_for_comparison = 0;
+                                self.update_coincidence();
+                                self.frame_ready = true;
+                                self.window_line_counter = 0;
+                                self.wy_triggered = false;
+                                self.transition_to_mode2();
+                            } else {
+                                self.update_stat_irq();
+                            }
+                        } else {
+                            // DMG VBlank line transition
+                            self.line_start_pending = true;
+                            self.line_start_is_vblank = true;
+                            self.ly_for_comparison = -1;
                             self.update_stat_irq();
                         }
                     }
@@ -489,16 +578,82 @@ impl Ppu {
         }
     }
 
+    /// DMG line-start sequence: handles the delayed LY visibility and mode transitions
+    /// that occur during dots 1-5 of each new scanline on DMG hardware.
+    fn handle_dmg_line_start(&mut self) {
+        if !self.line_start_is_vblank {
+            // Active line (0-143)
+            match self.dot {
+                1 | 2 => {} // idle
+                3 => {
+                    self.visible_ly = self.ly;
+                    self.ly_for_comparison = if self.ly == 0 { 0 } else { -1 };
+                    self.update_coincidence();
+                    if self.ly != 0 {
+                        self.mode_for_interrupt = 2;
+                    }
+                    self.stat &= !0x03;
+                    self.update_stat_irq();
+                }
+                4 => {
+                    self.mode = 2;
+                    self.stat = (self.stat & !0x03) | 0x02;
+                    self.mode_for_interrupt = 2;
+                    self.oam_accessible = false;
+                    self.vram_accessible = true;
+                    self.ly_for_comparison = self.ly as i16;
+                    self.update_coincidence();
+                    if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                        self.wy_triggered = true;
+                    }
+                    self.oam_scan();
+                    self.update_stat_irq();
+                    self.mode_for_interrupt = -1;
+                    self.update_stat_irq();
+                    self.line_start_pending = false;
+                }
+                _ => {}
+            }
+        } else {
+            // VBlank line (144-153)
+            match self.dot {
+                1 => {} // idle
+                2 => {
+                    self.visible_ly = self.ly;
+                }
+                3 => {} // idle
+                4 => {
+                    self.ly_for_comparison = self.ly as i16;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                    // Line 153 special: LY resets to 0 at dot 4
+                    if self.ly == 153 {
+                        self.ly = 0;
+                        self.visible_ly = 0;
+                        self.ly_for_comparison = 0;
+                        self.update_coincidence();
+                        self.update_stat_irq();
+                    }
+                }
+                5 => {
+                    // VBlank entry (ly==144) was already handled at line transition.
+                    // For other VBlank lines, nothing special at dot 5.
+                    self.line_start_pending = false;
+                }
+                _ => {}
+            }
+        }
+    }
+
     // ---- Mode transitions ----
 
     fn transition_to_mode2(&mut self) {
         self.mode = 2;
+        self.mode_for_interrupt = 2;
         self.stat = (self.stat & !0x03) | 0x02;
         self.oam_accessible = false;
         self.vram_accessible = true;
-        // OAM scan: collect sprites for this scanline
         self.oam_scan();
-        // Check WY trigger at start of scanline
         if self.lcdc & 0x20 != 0 && self.ly == self.wy {
             self.wy_triggered = true;
         }
@@ -507,6 +662,7 @@ impl Ppu {
 
     fn transition_to_mode3(&mut self) {
         self.mode = 3;
+        self.mode_for_interrupt = 3;
         self.stat = (self.stat & !0x03) | 0x03;
         self.oam_accessible = false;
         self.vram_accessible = false;
@@ -516,12 +672,14 @@ impl Ppu {
 
     fn transition_to_mode1(&mut self) {
         self.mode = 1;
+        self.mode_for_interrupt = 1;
         self.stat = (self.stat & !0x03) | 0x01;
         self.oam_accessible = true;
         self.vram_accessible = true;
         // VBlank interrupt always fires
         self.if_flags |= 0x01;
-        // Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
+        // CGB: Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
+        // DMG: handled by mode_for_interrupt priming in handle_dmg_line_start
         self.update_stat_irq_with_mode2(true);
     }
 
@@ -964,16 +1122,22 @@ impl Ppu {
     // ---- Edge-triggered STAT interrupt ----
 
     fn update_stat_irq(&mut self) {
-        self.update_stat_irq_with_mode2(false);
-    }
-
-    fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
         let coincidence = self.stat & 0x04 != 0;
-        let signal =
-            (self.stat & 0x08 != 0 && self.mode == 0) ||  // bit3: Mode 0
-            (self.stat & 0x10 != 0 && self.mode == 1) ||  // bit4: Mode 1
-            (self.stat & 0x20 != 0 && (self.mode == 2 || force_mode2)) || // bit5: Mode 2
-            (self.stat & 0x40 != 0 && coincidence);        // bit6: LYC=LY
+        let mode_signal = if self.cgb_mode {
+            // CGB: use actual mode (existing behavior)
+            (self.stat & 0x08 != 0 && self.mode == 0) ||
+            (self.stat & 0x10 != 0 && self.mode == 1) ||
+            (self.stat & 0x20 != 0 && self.mode == 2)
+        } else {
+            // DMG: use mode_for_interrupt
+            match self.mode_for_interrupt {
+                0 => self.stat & 0x08 != 0,
+                1 => self.stat & 0x10 != 0,
+                2 => self.stat & 0x20 != 0,
+                _ => false, // 3 or -1: no mode fires
+            }
+        };
+        let signal = mode_signal || (self.stat & 0x40 != 0 && coincidence);
 
         // Fire on rising edge only
         if signal && !self.stat_irq_line {
@@ -982,12 +1146,30 @@ impl Ppu {
         self.stat_irq_line = signal;
     }
 
-    fn update_coincidence(&mut self) {
-        if self.ly == self.lyc {
-            self.stat |= 0x04;
-        } else {
-            self.stat &= !0x04;
+    /// CGB-only: STAT IRQ check with Mode 2 source forced on (VBlank entry quirk).
+    fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
+        let coincidence = self.stat & 0x04 != 0;
+        let signal =
+            (self.stat & 0x08 != 0 && self.mode == 0) ||
+            (self.stat & 0x10 != 0 && self.mode == 1) ||
+            (self.stat & 0x20 != 0 && (self.mode == 2 || force_mode2)) ||
+            (self.stat & 0x40 != 0 && coincidence);
+
+        if signal && !self.stat_irq_line {
+            self.if_flags |= 0x02;
         }
+        self.stat_irq_line = signal;
+    }
+
+    fn update_coincidence(&mut self) {
+        if self.ly_for_comparison >= 0 {
+            if self.ly_for_comparison as u8 == self.lyc {
+                self.stat |= 0x04;
+            } else {
+                self.stat &= !0x04;
+            }
+        }
+        // ly_for_comparison == -1: preserve existing coincidence bit
     }
 
     // ---- OAM scan ----
@@ -1057,7 +1239,7 @@ impl Ppu {
             0xFF41 => self.stat | 0x80,
             0xFF42 => self.scy,
             0xFF43 => self.scx,
-            0xFF44 => self.ly,
+            0xFF44 => self.visible_ly,
             0xFF45 => self.lyc,
             0xFF46 => self.dma,
             0xFF47 => self.bgp,
@@ -1116,6 +1298,11 @@ impl Ppu {
                     // LCD off: reset LY, dot, mode; preserve coincidence bit
                     // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
                     self.ly = 0;
+                    self.visible_ly = 0;
+                    self.ly_for_comparison = 0;
+                    self.line_start_pending = false;
+                    self.line_start_is_vblank = false;
+                    self.mode_for_interrupt = -1;
                     self.dot = 0;
                     self.mode = 0;
                     self.stat = (self.stat & !0x03) | (self.stat & 0x04); // keep bit2
@@ -1127,6 +1314,11 @@ impl Ppu {
                 } else if !lcd_was_on && lcd_now_on {
                     // LCD on: start at line 0, mode reads as 0 initially
                     self.ly = 0;
+                    self.visible_ly = 0;
+                    self.ly_for_comparison = 0;
+                    self.line_start_pending = false;
+                    self.line_start_is_vblank = false;
+                    self.mode_for_interrupt = -1;
                     self.dot = 0;
                     self.mode = 0;
                     self.stat = self.stat & !0x03; // mode bits = 0

@@ -45,14 +45,31 @@ fn mooneye_passed(regs: [u8; 6]) -> bool {
     regs == [3, 5, 8, 13, 21, 34]
 }
 
-fn run_test_mooneye(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>, force_model: Option<GbModel>) -> &'static str {
+/// Load boot ROM for the given model from bootroms/ directory.
+fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
+    let candidates: &[&str] = match model {
+        GbModel::Dmg0 => &["bootroms/dmg0_boot.bin", "bootroms/dmg_boot.bin"],
+        GbModel::Dmg  => &["bootroms/dmg_boot.bin"],
+        GbModel::Mgb  => &["bootroms/mgb_boot.bin", "bootroms/dmg_boot.bin"],
+        GbModel::Sgb  => &["bootroms/sgb_boot.bin"],
+        GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
+        GbModel::Cgb  => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
+    };
+    for path in candidates {
+        if let Ok(data) = fs::read(path) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, use_boot_rom: bool) -> &'static str {
     let rom = match fs::read(path) {
         Ok(r) => r,
         Err(_) => return "ERR",
     };
     let model = force_model.unwrap_or_else(|| detect_model(path));
-    // Only use boot ROM for CGB tests; non-CGB tests use post_boot() state
-    let br = if model.is_cgb() { boot_rom.clone() } else { None };
+    let br = if use_boot_rom { load_boot_rom(model) } else { None };
     let mut emu = Emulator::new(rom, br, None, model, None);
     match emu.run_until_breakpoint(300) {
         Some(regs) => {
@@ -70,13 +87,13 @@ fn run_test_mooneye(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>, forc
     }
 }
 
-fn run_test_blargg(path: &Path, verbose: bool, boot_rom: &Option<Vec<u8>>) -> &'static str {
+fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     let rom = match fs::read(path) {
         Ok(r) => r,
         Err(_) => return "ERR",
     };
     let model = detect_model(path);
-    let br = if model.is_cgb() { boot_rom.clone() } else { None };
+    let br = load_boot_rom(model);
     let mut emu = Emulator::new(rom, br, None, model, None);
     let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
     if verbose && !output.is_empty() {
@@ -104,6 +121,7 @@ fn main() {
 
     let root = Path::new(&args[1]);
     let blargg_mode = args.iter().any(|a| a == "--blargg");
+    let use_boot_rom = args.iter().any(|a| a == "--boot");
     let force_model = if args.iter().any(|a| a == "--dmg") {
         Some(GbModel::Dmg)
     } else if args.iter().any(|a| a == "--dmg0") {
@@ -120,16 +138,10 @@ fn main() {
         None
     };
 
-    // Auto-detect CGB boot ROM in crate root
-    let boot_rom = fs::read("gbc_bios.bin").ok();
-
     let mut roms: Vec<std::path::PathBuf> = Vec::new();
     collect_roms(root, &mut roms);
     roms.sort();
 
-    if boot_rom.is_some() {
-        eprintln!("Using CGB boot ROM");
-    }
     if blargg_mode {
         eprintln!("Blargg mode (serial output detection)");
     }
@@ -140,9 +152,9 @@ fn main() {
 
     for rom in &roms {
         let result = if blargg_mode {
-            run_test_blargg(rom, true, &boot_rom)
+            run_test_blargg(rom, true)
         } else {
-            run_test_mooneye(rom, true, &boot_rom, force_model)
+            run_test_mooneye(rom, true, force_model, use_boot_rom)
         };
         let label = rom.strip_prefix(root).unwrap_or(rom).display().to_string();
         println!("{:<12} {}", result, label);
