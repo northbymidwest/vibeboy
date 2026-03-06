@@ -50,6 +50,10 @@ struct Cli {
     /// Enable SGB Low-Level Emulation (run SNES CPU with BIOS ROM)
     #[arg(long)]
     lle: bool,
+
+    /// Skip boot ROM (start at PC=0x100 with post-boot state)
+    #[arg(long)]
+    no_bootrom: bool,
 }
 
 fn main() {
@@ -73,7 +77,9 @@ fn main() {
     };
 
     // Resolve boot ROM: explicit path, or auto-detect by model
-    let boot_rom: Option<Vec<u8>> = if let Some(ref p) = cli.bootrom {
+    let boot_rom: Option<Vec<u8>> = if cli.no_bootrom {
+        None
+    } else if let Some(ref p) = cli.bootrom {
         Some(fs::read(p).unwrap_or_else(|e| {
             eprintln!("Failed to read boot ROM '{}': {}", p.display(), e);
             std::process::exit(1);

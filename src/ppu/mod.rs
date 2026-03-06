@@ -429,21 +429,40 @@ impl Ppu {
             }
             1 => {
                 // VBlank lines
+                // Line 153 special: LY resets to 0 early (~4T into the line)
+                // This allows LYC=0 STAT interrupts to fire during VBlank,
+                // giving the ISR time to run before LY=0 Mode 3 starts.
+                if self.ly == 153 && self.dot == 4 {
+                    self.ly = 0;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                }
+
                 if self.dot >= 456 {
                     self.dot = 0;
-                    self.ly = self.ly.wrapping_add(1);
-                    self.update_coincidence();
-
-                    if self.ly > 153 {
-                        // End of VBlank, back to line 0
-                        self.ly = 0;
-                        self.update_coincidence();
+                    if self.ly == 0 {
+                        // Line 153 already set LY=0; now start actual line 0
                         self.frame_ready = true;
                         self.window_line_counter = 0;
                         self.wy_triggered = false;
                         self.transition_to_mode2();
                     } else {
-                        self.update_stat_irq();
+                        self.ly = self.ly.wrapping_add(1);
+                        self.update_coincidence();
+                        if self.ly == 153 {
+                            // Line 153 starts: LY=153 briefly, then resets to 0 at dot 4
+                            self.update_stat_irq();
+                        } else if self.ly > 153 {
+                            // Should not happen with this logic, but safety
+                            self.ly = 0;
+                            self.update_coincidence();
+                            self.frame_ready = true;
+                            self.window_line_counter = 0;
+                            self.wy_triggered = false;
+                            self.transition_to_mode2();
+                        } else {
+                            self.update_stat_irq();
+                        }
                     }
                 }
             }
@@ -1062,8 +1081,16 @@ impl Ppu {
         match addr {
             0xFF40 => {
                 let lcd_was_on = self.lcdc & 0x80 != 0;
+                let win_was_on = self.lcdc & 0x20 != 0;
                 self.lcdc = val;
                 let lcd_now_on = self.lcdc & 0x80 != 0;
+                let win_now_on = self.lcdc & 0x20 != 0;
+
+                // Window enable toggled on: check WY condition
+                if !win_was_on && win_now_on && lcd_now_on && self.ly == self.wy {
+                    self.wy_triggered = true;
+                }
+
 
                 if lcd_was_on && !lcd_now_on {
                     // LCD off: reset LY, dot, mode; preserve coincidence bit
@@ -1086,6 +1113,9 @@ impl Ppu {
                     self.oam_accessible = true;
                     self.vram_accessible = true;
                     self.lcd_first_line = true;
+                    self.window_line_counter = 0;
+                    // Check WY trigger for first line (LY=0)
+                    self.wy_triggered = self.lcdc & 0x20 != 0 && self.ly == self.wy;
                     self.update_coincidence();
                     self.update_stat_irq();
                 }
