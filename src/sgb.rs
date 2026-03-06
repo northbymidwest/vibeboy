@@ -81,6 +81,8 @@ pub struct Sgb {
     pub pending_transfer: Option<u8>,
     /// Extra data for pending transfer (e.g. CHR_TRN half select)
     pending_transfer_data: u8,
+    /// Frames remaining before executing the pending transfer (SGB hardware delays ~2 frames)
+    transfer_countdown: u8,
 }
 
 impl Sgb {
@@ -117,6 +119,7 @@ impl Sgb {
             current_player: 0,
             pending_transfer: None,
             pending_transfer_data: 0,
+            transfer_countdown: 0,
         }
     }
 
@@ -530,8 +533,11 @@ impl Sgb {
         let attr_byte = self.packet_buf[9];
         if attr_byte & 0x80 != 0 {
             let file_idx = (attr_byte & 0x3F) as usize;
-            log::trace!("SGB PAL_SET: also applying attr file {}", file_idx);
+            log::debug!("SGB PAL_SET: also applying attr file {}", file_idx);
             self.apply_attr_file(file_idx);
+        }
+        if attr_byte & 0x40 != 0 {
+            self.mask_mode = 0;
         }
         // Ensure color 0 shared
         let c0 = self.palettes[0][0];
@@ -544,6 +550,7 @@ impl Sgb {
     fn cmd_pal_trn(&mut self) {
         self.pending_transfer = Some(0x0B);
         self.pending_transfer_data = 0;
+        self.transfer_countdown = 2;
     }
 
     /// MLT_REQ: Multiplayer request
@@ -564,18 +571,21 @@ impl Sgb {
         let half = self.packet_buf[1] & 0x01;
         self.pending_transfer = Some(0x13);
         self.pending_transfer_data = half;
+        self.transfer_countdown = 2;
     }
 
     /// PCT_TRN: Transfer border map + palettes from VRAM
     fn cmd_pct_trn(&mut self) {
         self.pending_transfer = Some(0x14);
         self.pending_transfer_data = 0;
+        self.transfer_countdown = 2;
     }
 
     /// ATTR_SET: Apply an attribute file
     fn cmd_attr_set(&mut self) {
         let file_idx = (self.packet_buf[1] & 0x3F) as usize;
         let cancel_mask = self.packet_buf[1] & 0x40 != 0;
+        log::debug!("SGB ATTR_SET: file={} cancel_mask={}", file_idx, cancel_mask);
         self.apply_attr_file(file_idx);
         if cancel_mask {
             self.mask_mode = 0;
@@ -586,6 +596,7 @@ impl Sgb {
     fn cmd_attr_trn(&mut self) {
         self.pending_transfer = Some(0x16);
         self.pending_transfer_data = 0;
+        self.transfer_countdown = 2;
     }
 
     /// MASK_EN: Screen masking
@@ -681,9 +692,16 @@ impl Sgb {
         }
     }
 
-    /// Check if a VRAM transfer is pending.
+    /// Check if a VRAM transfer is ready to execute (countdown expired).
     pub fn has_pending_transfer(&self) -> bool {
-        self.pending_transfer.is_some()
+        self.pending_transfer.is_some() && self.transfer_countdown == 0
+    }
+
+    /// Tick the transfer countdown (call once per frame).
+    pub fn tick_transfer(&mut self) {
+        if self.transfer_countdown > 0 {
+            self.transfer_countdown -= 1;
+        }
     }
 
     // ── Rendering ──

@@ -638,42 +638,40 @@ impl Bus {
     /// Check for pending SGB VRAM transfers and execute them.
     /// Call after each frame.
     pub fn check_sgb_transfer(&mut self) {
+        // Tick the transfer countdown
+        if let Some(ref mut sgb) = self.sgb {
+            sgb.tick_transfer();
+        }
         let has_transfer = self.sgb.as_ref().map_or(false, |s: &Sgb| s.has_pending_transfer());
         if !has_transfer { return; }
 
-        // SGB VRAM transfers: the game writes 4KB of data as tiles at 0x8000-0x8FFF,
-        // sets up tilemap with tiles 0x00-0xFF in order, then sends the TRN command.
-        // The SGB SNES reads the screen output and reconstructs the data.
-        //
-        // We emulate this by reading the tilemap at 0x9800 and looking up each tile's
-        // data to reconstruct the linear 4096-byte stream, just like the real SGB hardware.
-        let lcdc = self.ppu.read(0xFF40);
-        let tile_data_base: usize = if lcdc & 0x10 != 0 { 0x0000 } else { 0x0800 };
-        let tile_map_base: usize = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
-        let signed_addr = lcdc & 0x10 == 0;
-
+        // Reconstruct transfer data from the rendered screen buffer (shade_buffer),
+        // matching how real SGB hardware reads the LCD output.
+        // Each 8×8 tile's 2-bit pixel shades are converted back to 2bpp planar format.
         let mut vram_data = vec![0u8; 4096];
-        // Read 256 tiles (20 per row × 13 rows = 260 tiles, but we only need 256)
-        // from the tilemap and reconstruct the linear data
         for tile_idx in 0..256usize {
-            let map_x = tile_idx % 20;
-            let map_y = tile_idx / 20;
-            let map_addr = tile_map_base + map_y * 32 + map_x;
-            let raw_tile = self.ppu.vram[0][map_addr];
-
-            let tile_offset = if signed_addr {
-                // Signed addressing: tile 0 = 0x9000, tile -128 = 0x8800, tile 127 = 0x8FF0
-                let signed_idx = raw_tile as i8 as i16;
-                ((0x1000 + signed_idx * 16) as usize) & 0x1FFF
-            } else {
-                // Unsigned addressing: tile 0 = 0x8000
-                raw_tile as usize * 16
-            };
-
+            let tile_x = (tile_idx % 20) * 8;
+            let tile_y = (tile_idx / 20) * 8;
             let dst_base = tile_idx * 16;
-            for b in 0..16 {
-                if tile_offset + b < self.ppu.vram[0].len() && dst_base + b < 4096 {
-                    vram_data[dst_base + b] = self.ppu.vram[0][tile_offset + b];
+            for row in 0..8usize {
+                let y = tile_y + row;
+                let mut bp0: u8 = 0;
+                let mut bp1: u8 = 0;
+                for px in 0..8usize {
+                    let x = tile_x + px;
+                    let shade = if x < 160 && y < 144 {
+                        self.ppu.shade_buffer[y * 160 + x] & 3
+                    } else {
+                        0
+                    };
+                    let bit = 7 - px;
+                    bp0 |= (shade & 1) << bit;
+                    bp1 |= ((shade >> 1) & 1) << bit;
+                }
+                let byte_off = dst_base + row * 2;
+                if byte_off + 1 < 4096 {
+                    vram_data[byte_off] = bp0;
+                    vram_data[byte_off + 1] = bp1;
                 }
             }
         }
