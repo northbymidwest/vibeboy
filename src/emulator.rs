@@ -21,8 +21,8 @@ pub struct Emulator {
     sgb_output: Vec<u32>,
     /// SNES subsystem for SGB LLE (None = HLE fallback)
     snes: Option<SnesSys>,
-    /// Packets queued while SNES BIOS was initializing
-    snes_packet_queue: Vec<[u8; 16]>,
+    /// Packets queued while SNES BIOS was initializing (with shade buffer snapshots)
+    snes_packet_queue: Vec<([u8; 16], Vec<u8>)>,
     frame_count: u64,
 }
 
@@ -107,52 +107,54 @@ impl Emulator {
             vec![]
         };
 
-        // 2. Feed shade buffer (GB LCD output) to SNES ICD2
-        snes.feed_scanlines(&self.bus.ppu.shade_buffer);
+        // 2. Snapshot current shade buffer for any new packets
+        let shade_snapshot = self.bus.ppu.shade_buffer.clone();
 
         // Queue packets during first ~30 frames (SPC upload + init), then replay
         if snes.frame_count < 32 {
-            self.snes_packet_queue.extend_from_slice(&new_packets);
+            // Store each packet with its shade buffer snapshot
+            for pkt in &new_packets {
+                self.snes_packet_queue.push((*pkt, shade_snapshot.clone()));
+            }
+            // Feed current shade buffer and run one SNES frame (SPC upload)
+            snes.feed_scanlines(&shade_snapshot);
             snes.run_frame();
         } else {
             // Replay any queued packets from during SPC upload
             let queued = std::mem::take(&mut self.snes_packet_queue);
-            let all_packets: Vec<[u8; 16]> = queued.into_iter()
-                .chain(new_packets.into_iter())
+            let new_with_shade: Vec<([u8; 16], Vec<u8>)> = new_packets
+                .into_iter()
+                .map(|pkt| (pkt, shade_snapshot.clone()))
+                .collect();
+
+            let all_packets: Vec<([u8; 16], Vec<u8>)> = queued.into_iter()
+                .chain(new_with_shade.into_iter())
                 .collect();
 
             // Run SNES CPU — one frame per pending packet, minimum one frame
             if all_packets.is_empty() {
+                snes.feed_scanlines(&shade_snapshot);
                 snes.run_frame();
             } else {
-                for pkt in &all_packets {
+                for (pkt, shade) in &all_packets {
+                    snes.feed_scanlines(shade);
                     snes.feed_packet(pkt);
                     snes.run_frame();
                 }
             }
 
-            // 4. Extract palettes from SNES CGRAM and update SGB state
-            let lle_palettes = snes.extract_palettes();
-            let has_pal_data = lle_palettes.iter().any(|p| p.iter().any(|&c| c != 0));
-            if has_pal_data {
-                if let Some(ref mut sgb) = self.bus.sgb {
-                    sgb.palettes = lle_palettes;
-                }
-            }
-
-            // 5. Extract attribute map from SNES VRAM tilemap
+            // Extract attribute map from SNES VRAM tilemap.
+            // This is the key LLE feature — DATA_SND patches modify the BIOS
+            // attribute assignment code, producing per-tile palette variation
+            // that HLE can't replicate.
             if let Some(attr_map) = snes.extract_attr_map() {
                 if let Some(ref mut sgb) = self.bus.sgb {
                     sgb.attr_map = attr_map;
                 }
             }
-
-            // 6. Border: HLE handles CHR_TRN/PCT_TRN correctly.
-            // Don't extract from SNES VRAM — the BIOS default border
-            // would overwrite the game-specific border loaded via HLE.
         }
 
-        // 7. Apply palettes and handle masking (same as HLE path)
+        // Apply palettes and handle masking (same as HLE path)
         self.bus.apply_sgb_palettes();
         self.bus.check_sgb_transfer();
         self.bus.capture_sgb_freeze();

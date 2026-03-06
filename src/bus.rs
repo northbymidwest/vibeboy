@@ -645,33 +645,32 @@ impl Bus {
         let has_transfer = self.sgb.as_ref().map_or(false, |s: &Sgb| s.has_pending_transfer());
         if !has_transfer { return; }
 
-        // Reconstruct transfer data from the rendered screen buffer (shade_buffer),
-        // matching how real SGB hardware reads the LCD output.
-        // Each 8×8 tile's 2-bit pixel shades are converted back to 2bpp planar format.
+        // Read VRAM tiles directly to reconstruct the 4096-byte transfer data.
+        // The game writes data as tiles at $8000-$8FFF, sets up the tilemap with
+        // tiles $00-$FF in order, then sends the TRN command.
+        let lcdc = self.ppu.read(0xFF40);
+        let tile_data_base: usize = if lcdc & 0x10 != 0 { 0x0000 } else { 0x0800 };
+        let tile_map_base: usize = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
+        let signed_addr = lcdc & 0x10 == 0;
+
         let mut vram_data = vec![0u8; 4096];
         for tile_idx in 0..256usize {
-            let tile_x = (tile_idx % 20) * 8;
-            let tile_y = (tile_idx / 20) * 8;
+            let map_x = tile_idx % 20;
+            let map_y = tile_idx / 20;
+            let map_addr = tile_map_base + map_y * 32 + map_x;
+            let raw_tile = self.ppu.vram[0][map_addr];
+
+            let tile_offset = if signed_addr {
+                let signed_idx = raw_tile as i8 as i16;
+                ((0x1000 + signed_idx * 16) as usize) & 0x1FFF
+            } else {
+                raw_tile as usize * 16
+            };
+
             let dst_base = tile_idx * 16;
-            for row in 0..8usize {
-                let y = tile_y + row;
-                let mut bp0: u8 = 0;
-                let mut bp1: u8 = 0;
-                for px in 0..8usize {
-                    let x = tile_x + px;
-                    let shade = if x < 160 && y < 144 {
-                        self.ppu.shade_buffer[y * 160 + x] & 3
-                    } else {
-                        0
-                    };
-                    let bit = 7 - px;
-                    bp0 |= (shade & 1) << bit;
-                    bp1 |= ((shade >> 1) & 1) << bit;
-                }
-                let byte_off = dst_base + row * 2;
-                if byte_off + 1 < 4096 {
-                    vram_data[byte_off] = bp0;
-                    vram_data[byte_off + 1] = bp1;
+            for b in 0..16 {
+                if tile_offset + b < self.ppu.vram[0].len() && dst_base + b < 4096 {
+                    vram_data[dst_base + b] = self.ppu.vram[0][tile_offset + b];
                 }
             }
         }

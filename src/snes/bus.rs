@@ -54,6 +54,9 @@ pub struct SnesBus {
     pub apu_handshake_done: bool,   // True after initial $AA/$BB handshake
     apu_port0_reads: u32,       // Consecutive port 0 reads without a port 0 write
 
+    /// WMADD — 17-bit WRAM address for $2180 access
+    pub wmadd: u32,
+
     /// Set when TIMEUP ($4211) is read, signaling IRQ was acknowledged.
     pub irq_ack: bool,
 }
@@ -88,6 +91,7 @@ impl SnesBus {
             apu_in: [0xAA, 0xBB, 0x00, 0x00], // SPC700 IPL ready handshake
             apu_handshake_done: false,
             apu_port0_reads: 0,
+            wmadd: 0,
             irq_ack: false,
         }
     }
@@ -123,6 +127,13 @@ impl SnesBus {
                     }
                 }
                 self.apu_in[port]
+            }
+            0x2180 if effective_bank <= 0x3F => {
+                // WMDATA read — read WRAM at WMADD, then increment
+                let wram_addr = self.wmadd as usize;
+                let val = if wram_addr < self.wram.len() { self.wram[wram_addr] } else { 0 };
+                self.wmadd = (self.wmadd + 1) & 0x01FFFF;
+                val
             }
             0x2100..=0x21FF if effective_bank <= 0x3F => {
                 self.ppu.read(offset)
@@ -191,8 +202,21 @@ impl SnesBus {
                 self.ppu.write(offset, val);
             }
             0x2180 if effective_bank <= 0x3F => {
-                // WMDATA — write to WRAM at WMADD
-                // We skip tracking WMADD for now (SGB BIOS uses DMA for WRAM writes)
+                // WMDATA — write to WRAM at WMADD, then increment
+                let wram_addr = self.wmadd as usize;
+                if wram_addr < self.wram.len() {
+                    self.wram[wram_addr] = val;
+                }
+                self.wmadd = (self.wmadd + 1) & 0x01FFFF; // 17-bit wrap
+            }
+            0x2181 if effective_bank <= 0x3F => {
+                self.wmadd = (self.wmadd & 0x01FF00) | val as u32;
+            }
+            0x2182 if effective_bank <= 0x3F => {
+                self.wmadd = (self.wmadd & 0x0100FF) | ((val as u32) << 8);
+            }
+            0x2183 if effective_bank <= 0x3F => {
+                self.wmadd = (self.wmadd & 0x00FFFF) | (((val as u32) & 1) << 16);
             }
             0x4200..=0x42FF if effective_bank <= 0x3F => {
                 self.write_cpu_io(offset, val);
@@ -336,8 +360,8 @@ impl SnesBus {
         }
     }
 
-    /// DMA A-bus read (ROM, WRAM, etc.)
-    fn dma_read_a(&self, addr: u32) -> u8 {
+    /// DMA A-bus read (ROM, WRAM, ICD2, etc.)
+    fn dma_read_a(&mut self, addr: u32) -> u8 {
         let bank = ((addr >> 16) & 0xFF) as u8;
         let offset = (addr & 0xFFFF) as u16;
         let effective_bank = bank & 0x7F;
@@ -349,7 +373,10 @@ impl SnesBus {
 
         match offset {
             0x0000..=0x1FFF if effective_bank <= 0x3F => self.wram[offset as usize],
-            0x6000..=0x7FFF if effective_bank <= 0x3F => 0, // ICD2 read during DMA — not typical
+            0x6000..=0x7FFF if effective_bank <= 0x3F => {
+                // ICD2 read during DMA — the BIOS DMAs pixel data from $7800+
+                self.icd2.read(offset)
+            }
             0x8000..=0xFFFF if effective_bank <= 0x7D => self.read_rom(effective_bank, offset),
             _ => 0,
         }
