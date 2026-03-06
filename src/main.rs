@@ -59,7 +59,7 @@ struct Cli {
     #[arg(long)]
     bootrom: Option<PathBuf>,
 
-    /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc
+    /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc, agb/gba
     #[arg(long, default_value = "auto")]
     model: String,
 
@@ -115,7 +115,7 @@ fn main() {
             GbModel::Mgb => &["mgb_boot.bin", "bootroms/mgb_boot.bin", "gb_bios.bin"],
             GbModel::Sgb => &["sgb_boot.bin", "bootroms/sgb_boot.bin", "sgb_bios.bin"],
             GbModel::Sgb2 => &["sgb2_boot.bin", "bootroms/sgb2_boot.bin", "sgb2_bios.bin"],
-            GbModel::Cgb => &["cgb_boot.bin", "bootroms/cgb_boot.bin", "gbc_bios.bin"],
+            GbModel::Cgb | GbModel::Agb => &["cgb_boot.bin", "bootroms/cgb_boot.bin", "gbc_bios.bin"],
         };
         candidates.iter().find_map(|name| fs::read(name).ok())
     };
@@ -135,7 +135,8 @@ fn main() {
             // Auto-detect: try sgb1.program.rom, sgb2.program.rom, sgb.sfc, sgb2.sfc
             let candidates = match model {
                 GbModel::Sgb2 => vec!["sgb2.program.rom", "sgb2.sfc"],
-                _ => vec!["sgb1.program.rom", "sgb.sfc"],
+                GbModel::Sgb => vec!["sgb1.program.rom", "sgb.sfc"],
+                _ => vec![],
             };
             candidates.iter().find_map(|name| fs::read(name).ok())
         }

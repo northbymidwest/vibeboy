@@ -6,11 +6,16 @@ pub enum GbModel {
     Sgb,
     Sgb2,
     Cgb,
+    Agb,
 }
 
 impl GbModel {
     pub fn is_cgb(self) -> bool {
-        self == GbModel::Cgb
+        self == GbModel::Cgb || self == GbModel::Agb
+    }
+
+    pub fn is_agb(self) -> bool {
+        self == GbModel::Agb
     }
 
     pub fn is_sgb(self) -> bool {
@@ -27,6 +32,7 @@ impl std::fmt::Display for GbModel {
             GbModel::Sgb => write!(f, "sgb"),
             GbModel::Sgb2 => write!(f, "sgb2"),
             GbModel::Cgb => write!(f, "cgb"),
+            GbModel::Agb => write!(f, "agb"),
         }
     }
 }
@@ -42,8 +48,9 @@ impl std::str::FromStr for GbModel {
             "sgb" => Ok(GbModel::Sgb),
             "sgb2" => Ok(GbModel::Sgb2),
             "cgb" | "gbc" => Ok(GbModel::Cgb),
+            "agb" | "gba" => Ok(GbModel::Agb),
             _ => Err(format!(
-                "unknown model '{}' (expected: dmg0, dmg, mgb, sgb, sgb2, cgb/gbc)",
+                "unknown model '{}' (expected: dmg0, dmg, mgb, sgb, sgb2, cgb/gbc, agb/gba)",
                 s
             )),
         }

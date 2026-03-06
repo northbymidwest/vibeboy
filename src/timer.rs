@@ -46,7 +46,7 @@ impl Timer {
     /// Post-boot timer state for the given hardware model.
     pub fn post_boot(model: GbModel) -> Self {
         let counter = match model {
-            GbModel::Cgb => 0x2670,
+            GbModel::Cgb | GbModel::Agb => 0x2670,
             GbModel::Dmg0 => 0x182C,
             GbModel::Dmg | GbModel::Mgb => 0xABC8,
             GbModel::Sgb | GbModel::Sgb2 => 0xD85C,

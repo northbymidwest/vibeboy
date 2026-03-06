@@ -32,6 +32,8 @@ fn detect_model(path: &Path) -> GbModel {
         GbModel::Sgb2
     } else if stem.ends_with("-sgb") || stem.ends_with("-S") {
         GbModel::Sgb
+    } else if stem.ends_with("-A") {
+        GbModel::Agb
     } else if stem.ends_with("-GS") || stem.ends_with("-G") {
         GbModel::Dmg
     } else {
@@ -53,7 +55,7 @@ fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
         GbModel::Mgb  => &["bootroms/mgb_boot.bin", "bootroms/dmg_boot.bin"],
         GbModel::Sgb  => &["bootroms/sgb_boot.bin"],
         GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
-        GbModel::Cgb  => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
+        GbModel::Cgb | GbModel::Agb => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
     };
     for path in candidates {
         if let Ok(data) = fs::read(path) {
@@ -235,6 +237,8 @@ fn main() {
         Some(GbModel::Sgb2)
     } else if args.iter().any(|a| a == "--cgb") {
         Some(GbModel::Cgb)
+    } else if args.iter().any(|a| a == "--agb") {
+        Some(GbModel::Agb)
     } else {
         None
     };
