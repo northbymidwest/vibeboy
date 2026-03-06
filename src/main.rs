@@ -141,6 +141,7 @@ fn main() {
     eprintln!("  Enter       — Start");
     eprintln!("  Right Shift — Select");
     eprintln!("  Backspace   — Rewind");
+    eprintln!("  Tab         — Fast forward (4x)");
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  1-9         — Select state slot");
     eprintln!("  Escape      — Quit");
@@ -257,14 +258,23 @@ fn main() {
             }
         }
 
-        // ── Rewind ─────────────────────────────────────────────────────────────
-        let backspace_held = event_pump.keyboard_state().is_scancode_pressed(Scancode::Backspace);
+        // ── Rewind / Fast-forward ─────────────────────────────────────────────
+        let ks = event_pump.keyboard_state();
+        let backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
+        let fast_forward = ks.is_scancode_pressed(Scancode::Tab);
+        drop(ks);
         emu.rewinding = backspace_held;
 
         if backspace_held {
             emu.rewind_one_frame();
-            // Drain any leftover audio samples during rewind
             emu.bus.apu.drain_samples();
+        } else if fast_forward {
+            // Run 4 frames, discard audio from the first 3
+            for _ in 0..3 {
+                emu.step_frame();
+                emu.bus.apu.drain_samples();
+            }
+            emu.step_frame();
         } else {
             // ── Emulate one frame ─────────────────────────────────────────────
             emu.step_frame();
@@ -272,7 +282,7 @@ fn main() {
 
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();
-        if !samples.is_empty() {
+        if !samples.is_empty() && !fast_forward {
             // Cap audio per frame to ~1 frame worth (stereo f32 at 44100/60 ≈ 1478 floats).
             // The first frame can generate 0.78s of audio during LCD-off init; discard excess.
             let max_samples = 1478 * 2; // Allow up to ~2 frames of audio
@@ -341,14 +351,15 @@ fn main() {
             fps_timer = Instant::now();
         }
 
-        // ── Frame rate cap ────────────────────────────────────────────────────
-        // Sleep for the bulk, then spin-wait for precision (thread::sleep overshoots on macOS)
-        let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
-        if remaining > Duration::from_millis(2) {
-            std::thread::sleep(remaining - Duration::from_millis(2));
-        }
-        while frame_start.elapsed() < FRAME_DURATION {
-            std::hint::spin_loop();
+        // ── Frame rate cap (skip during fast-forward) ────────────────────────
+        if !fast_forward {
+            let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
+            if remaining > Duration::from_millis(2) {
+                std::thread::sleep(remaining - Duration::from_millis(2));
+            }
+            while frame_start.elapsed() < FRAME_DURATION {
+                std::hint::spin_loop();
+            }
         }
         frame_start = Instant::now();
     }
