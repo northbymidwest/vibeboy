@@ -23,6 +23,7 @@ pub struct Emulator {
     snes: Option<SnesSys>,
     /// Packets queued while SNES BIOS was initializing
     snes_packet_queue: Vec<[u8; 16]>,
+    frame_count: u64,
 }
 
 impl Emulator {
@@ -65,6 +66,7 @@ impl Emulator {
             sgb_output: vec![0u32; 256 * 224],
             snes,
             snes_packet_queue: Vec::new(),
+            frame_count: 0,
         }
     }
 
@@ -76,6 +78,7 @@ impl Emulator {
     /// Run until one full frame has been rendered (VBlank).
     pub fn step_frame(&mut self) {
         self.bus.clear_frame_ready();
+        self.frame_count += 1;
         while !self.bus.frame_ready() {
             self.step();
         }
@@ -89,6 +92,7 @@ impl Emulator {
                 self.bus.check_sgb_transfer();
                 self.bus.capture_sgb_freeze();
             }
+
         }
     }
 

@@ -284,8 +284,9 @@ impl Sgb {
             0x15 => self.cmd_attr_set(),
             0x16 => self.cmd_attr_trn(),
             0x17 => self.cmd_mask_en(),
-            0x08 | 0x09 | 0x0C | 0x0D | 0x0E | 0x0F | 0x19 => {
-                // OBJ_TRN, ICON_EN, ATRC_EN, TEST_EN, ICON_TRN, DATA_SND, SOUND
+            0x0F => self.cmd_data_snd(),
+            0x08 | 0x09 | 0x0C | 0x0D | 0x0E | 0x19 => {
+                // OBJ_TRN, ICON_EN, ATRC_EN, TEST_EN, ICON_TRN, SOUND
                 // These commands control SNES-side features we don't emulate
             }
             _ => {
@@ -458,12 +459,12 @@ impl Sgb {
     /// ATTR_DIV: Divide screen horizontally or vertically
     fn cmd_attr_div(&mut self) {
         let data = self.packet_buf[1];
-        // Bits 0-1: palette below/right of line
-        // Bits 2-3: palette on the line
-        // Bits 4-5: palette above/left of line
+        // Bits 0-1: palette below/right of line (high coords)
+        // Bits 2-3: palette above/left of line (low coords)
+        // Bits 4-5: palette on the dividing line itself
         let pal_below_right = data & 0x03;
-        let pal_line = (data >> 2) & 0x03;
-        let pal_above_left = (data >> 4) & 0x03;
+        let pal_above_left = (data >> 2) & 0x03;
+        let pal_line = (data >> 4) & 0x03;
         let horizontal = data & 0x40 != 0;
         let line = (self.packet_buf[2] & 0x1F) as usize;
 
@@ -596,6 +597,15 @@ impl Sgb {
         self.pending_transfer = Some(0x16);
         self.pending_transfer_data = 0;
         self.transfer_countdown = 2;
+    }
+
+    /// DATA_SND: Write data to SNES WRAM (used for BIOS hotpatching)
+    fn cmd_data_snd(&mut self) {
+        let addr_lo = self.packet_buf[1] as u16;
+        let addr_hi = self.packet_buf[2] as u16;
+        let bank = self.packet_buf[3];
+        let snes_addr = (addr_hi << 8) | addr_lo;
+        log::debug!("SGB DATA_SND: bank=${:02X} addr=${:04X}", bank, snes_addr);
     }
 
     /// MASK_EN: Screen masking
