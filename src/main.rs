@@ -46,7 +46,7 @@ const SCALE: u32 = 3;
 /// Target frame time for ~59.73 fps.
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
 
-const AUDIO_SAMPLE_RATE: u32 = 44_100;
+const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
 #[derive(Parser)]
 #[command(name = "gbcemu", about = "Game Boy / Game Boy Color emulator")]
@@ -335,9 +335,9 @@ fn main() {
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();
         if !samples.is_empty() && !fast_forward {
-            // Cap audio per frame to ~1 frame worth (stereo f32 at 44100/60 ≈ 1478 floats).
-            // The first frame can generate 0.78s of audio during LCD-off init; discard excess.
-            let max_samples = 1478 * 2; // Allow up to ~2 frames of audio
+            // Cap audio per frame to ~1 frame worth (stereo f32 at 96000/60 ≈ 3200 floats).
+            // The first frame can generate excess audio during LCD-off init; discard excess.
+            let max_samples = 3200 * 2; // Allow up to ~2 frames of audio
             if samples.len() <= max_samples {
                 let _ = audio_stream.put_data_f32(&samples);
             } else {

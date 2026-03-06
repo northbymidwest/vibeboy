@@ -359,7 +359,7 @@ impl NoiseCh {
 
 // ── APU top level ──────────────────────────────────────────────────────────
 
-const SAMPLE_RATE: u32 = 44_100;
+const SAMPLE_RATE: u32 = 96_000;
 const CPU_RATE: u32 = 4_194_304;
 // Cycles per sample as a fixed-point ratio: emit one sample every CPU_RATE/SAMPLE_RATE cycles.
 // Use u64 accumulator: add SAMPLE_RATE each T-cycle; emit when >= CPU_RATE.
@@ -749,8 +749,8 @@ impl Apu {
         let r = right * rvol / 240.0;
 
         // High-pass filter (coupling capacitor): removes DC offset from bipolar DAC.
-        // Cutoff ~10 Hz at 44.1 kHz: alpha = 1 - (1 / (44100 / (2π * 10))) ≈ 0.9986
-        const HPF_ALPHA: f32 = 0.9986;
+        // Cutoff ~10 Hz at 96 kHz: alpha = 1 - (2π × 10 / 96000) ≈ 0.9993
+        const HPF_ALPHA: f32 = 0.9993;
         self.hpf_left  = HPF_ALPHA * (self.hpf_left + l - self.hpf_prev_in_l);
         self.hpf_right = HPF_ALPHA * (self.hpf_right + r - self.hpf_prev_in_r);
         self.hpf_prev_in_l = l;
