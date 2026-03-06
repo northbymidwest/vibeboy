@@ -26,8 +26,6 @@ const SCALE: u32 = 3;
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
-/// Max queued audio bytes before we stop pushing (~100 ms of stereo f32).
-const MAX_QUEUED_BYTES: u32 = (AUDIO_SAMPLE_RATE / 10) * 2 * 4;
 
 #[derive(Parser)]
 #[command(name = "gbcemu", about = "Game Boy / Game Boy Color emulator")]
@@ -152,14 +150,17 @@ fn main() {
     let mut event_pump = sdl.event_pump().unwrap();
 
     // ── Audio ─────────────────────────────────────────────────────────────────
+    sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "512");
     let spec = AudioSpec {
         freq:     Some(AUDIO_SAMPLE_RATE as i32),
         channels: Some(2),
         format:   Some(AudioFormat::F32LE),
     };
     let audio_device = audio.open_playback_device(&spec).unwrap();
-    let audio_stream = audio_device.open_device_stream(Some(&spec)).unwrap();
-    audio_stream.resume().unwrap();
+    let audio_stream = audio.new_playback_stream(&spec, None).unwrap();
+    audio_device.bind_stream(&audio_stream).unwrap();
+    audio_device.resume();
+    audio_stream.clear().unwrap();
 
     let mut frame_start = Instant::now();
     let mut fps_timer = Instant::now();
@@ -185,8 +186,14 @@ fn main() {
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();
         if !samples.is_empty() {
-            if audio_stream.queued_bytes().unwrap_or(0) < MAX_QUEUED_BYTES as i32 {
+            // Cap audio per frame to ~1 frame worth (stereo f32 at 44100/60 ≈ 1478 floats).
+            // The first frame can generate 0.78s of audio during LCD-off init; discard excess.
+            let max_samples = 1478 * 2; // Allow up to ~2 frames of audio
+            if samples.len() <= max_samples {
                 let _ = audio_stream.put_data_f32(&samples);
+            } else {
+                // Push only the tail (most recent audio) to stay in sync
+                let _ = audio_stream.put_data_f32(&samples[samples.len() - max_samples..]);
             }
         }
 

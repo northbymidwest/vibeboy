@@ -400,13 +400,14 @@ impl Apu {
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
         };
-        // Post-boot CH1 state (playing a short beep on startup)
+        // Post-boot CH1 state: registers match what boot ROM left behind,
+        // but the envelope has decayed volume to 0 during the boot animation.
         apu.ch1.duty = 2;
         apu.ch1.env_init_vol = 0xF;
         apu.ch1.env_period = 3;
         apu.ch1.dac_on = true;
         apu.ch1.enabled = true;
-        apu.ch1.volume = 0xF;
+        apu.ch1.volume = 0;
         apu
     }
 
