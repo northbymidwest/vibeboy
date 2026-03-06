@@ -17,6 +17,13 @@ use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::PixelFormat;
+use sdl3::sys::camera::{
+    SDL_AcquireCameraFrame, SDL_Camera, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
+    SDL_OpenCamera, SDL_ReleaseCameraFrame,
+};
+use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
+use sdl3::sys::stdinc::SDL_free;
+use sdl3::sys::surface::SDL_Surface;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -162,6 +169,14 @@ fn main() {
     audio_device.resume();
     audio_stream.clear().unwrap();
 
+    // ── Camera (webcam for Pocket Camera mapper, only if cart has camera) ──
+    let (_camera_subsystem, camera_ptr) = if emu.bus.cart.has_camera() {
+        init_camera(&sdl)
+    } else {
+        (None, std::ptr::null_mut())
+    };
+    let mut camera_buf = [0u8; 128 * 112];
+
     let mut frame_start = Instant::now();
     let mut fps_timer = Instant::now();
     let mut fps_count = 0u32;
@@ -179,6 +194,13 @@ fn main() {
 
         // ── Input ─────────────────────────────────────────────────────────────
         handle_input(&mut emu, &event_pump.keyboard_state());
+
+        // ── Webcam → Pocket Camera ────────────────────────────────────────────
+        if !camera_ptr.is_null() {
+            if acquire_camera_frame(camera_ptr, &mut camera_buf) {
+                emu.bus.cart.set_camera_image(&camera_buf);
+            }
+        }
 
         // ── Emulate one frame ─────────────────────────────────────────────────
         emu.step_frame();
@@ -262,6 +284,10 @@ fn main() {
         frame_start = Instant::now();
     }
 
+    if !camera_ptr.is_null() {
+        unsafe { SDL_CloseCamera(camera_ptr); }
+    }
+
     emu.save();
 }
 
@@ -278,5 +304,103 @@ fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {
     ];
     for (sc, btn) in map {
         emu.set_button(*btn, ks.is_scancode_pressed(*sc));
+    }
+}
+
+// ── Webcam helpers ───────────────────────────────────────────────────────────
+
+/// Try to open the first available webcam.
+/// Returns (subsystem handle to keep alive, camera pointer). Camera pointer is null on failure.
+fn init_camera(sdl: &sdl3::Sdl) -> (Option<sdl3::CameraSubsystem>, *mut SDL_Camera) {
+    // Init camera subsystem (failure is non-fatal)
+    let cam_sys = match sdl.camera() {
+        Ok(cs) => cs,
+        Err(e) => {
+            log::warn!("SDL camera subsystem init failed: {} — webcam disabled", e);
+            return (None, std::ptr::null_mut());
+        }
+    };
+
+    unsafe {
+        let mut count: std::ffi::c_int = 0;
+        let ids = SDL_GetCameras(&mut count);
+        if ids.is_null() || count <= 0 {
+            log::info!("No cameras found — using noise generator for Pocket Camera");
+            if !ids.is_null() { SDL_free(ids as *mut _); }
+            return (Some(cam_sys), std::ptr::null_mut());
+        }
+
+        let first_id = *ids;
+        SDL_free(ids as *mut _);
+
+        // Request RGBA32 at a small resolution; SDL will convert for us
+        let spec = SDL_CameraSpec {
+            format: SysPixelFormat::RGBA32,
+            colorspace: SDL_Colorspace::SRGB,
+            width: 160,
+            height: 120,
+            framerate_numerator: 30,
+            framerate_denominator: 1,
+        };
+        let cam = SDL_OpenCamera(first_id, &spec);
+        if cam.is_null() {
+            log::warn!("Failed to open camera — webcam disabled");
+            return (Some(cam_sys), std::ptr::null_mut());
+        }
+        log::info!("Webcam opened for Pocket Camera");
+        (Some(cam_sys), cam)
+    }
+}
+
+/// Try to acquire a webcam frame and downsample it to 128×112 grayscale.
+/// Returns true if a new frame was captured.
+fn acquire_camera_frame(camera: *mut SDL_Camera, buf: &mut [u8; 128 * 112]) -> bool {
+    unsafe {
+        let mut ts: u64 = 0;
+        let surface = SDL_AcquireCameraFrame(camera, &mut ts);
+        if surface.is_null() || ts == 0 {
+            return false;
+        }
+
+        let surf: &SDL_Surface = &*surface;
+        let src_w = surf.w as usize;
+        let src_h = surf.h as usize;
+        let pitch = surf.pitch as usize;
+        let pixels = surf.pixels as *const u8;
+
+        if !pixels.is_null() && src_w > 0 && src_h > 0 {
+            // Bilinear downsample to 128×112, convert to grayscale
+            for dy in 0..112usize {
+                // Map destination pixel center to source coordinate
+                let src_yf = (dy as f32 + 0.5) * (src_h as f32 / 112.0) - 0.5;
+                let sy0 = (src_yf.floor() as isize).max(0) as usize;
+                let sy1 = (sy0 + 1).min(src_h - 1);
+                let fy = src_yf - sy0 as f32;
+
+                for dx in 0..128usize {
+                    let src_xf = (dx as f32 + 0.5) * (src_w as f32 / 128.0) - 0.5;
+                    let sx0 = (src_xf.floor() as isize).max(0) as usize;
+                    let sx1 = (sx0 + 1).min(src_w - 1);
+                    let fx = src_xf - sx0 as f32;
+
+                    // Sample four corners, convert each to grayscale, then blend
+                    let sample = |sx: usize, sy: usize| -> f32 {
+                        let off = sy * pitch + sx * 4;
+                        let r = *pixels.add(off) as f32;
+                        let g = *pixels.add(off + 1) as f32;
+                        let b = *pixels.add(off + 2) as f32;
+                        r * 0.299 + g * 0.587 + b * 0.114
+                    };
+
+                    let top = sample(sx0, sy0) * (1.0 - fx) + sample(sx1, sy0) * fx;
+                    let bot = sample(sx0, sy1) * (1.0 - fx) + sample(sx1, sy1) * fx;
+                    let val = top * (1.0 - fy) + bot * fy;
+                    buf[dy * 128 + dx] = val.round() as u8;
+                }
+            }
+        }
+
+        SDL_ReleaseCameraFrame(camera, surface);
+        true
     }
 }
