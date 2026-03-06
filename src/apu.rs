@@ -114,12 +114,25 @@ impl BlipBuf {
     }
 }
 
-// ── Envelope clock tracking (SameBoy-style) ──────────────────────────────
+// ── Envelope clock tracking ───────────────────────────────────────────────
 
 #[derive(Clone, Default)]
 struct EnvelopeClock {
     clock: bool,
     locked: bool,
+    should_lock: bool,
+}
+
+/// Update envelope clock state machine.
+fn set_envelope_clock(ec: &mut EnvelopeClock, value: bool, direction: bool, volume: u8) {
+    if ec.clock == value { return; }
+    if value {
+        ec.clock = true;
+        ec.should_lock = (volume == 0xF && direction) || (volume == 0x0 && !direction);
+    } else {
+        ec.clock = false;
+        ec.locked |= ec.should_lock;
+    }
 }
 
 // ── Square channel ─────────────────────────────────────────────────────────
@@ -139,11 +152,13 @@ struct SquareCh {
     // Internal
     enabled: bool,
     dac_on: bool,
-    freq_timer: u32,   // T-cycle countdown; reload = (2048 - freq) * 4
+    freq_timer: u32,   // T-cycle countdown; reload = (freq ^ 0x7FF) * 4 + 2
     duty_pos: u8,
     length_counter: u16,
     volume: u8,
     env_timer: u8,
+    volume_countdown: u8, // separate from env_timer, decremented when envelope_clock is not set
+    sample_suppressed: bool, // first sample after trigger is suppressed (outputs 0)
 
     // Envelope clock tracking
     envelope_clock: EnvelopeClock,
@@ -168,6 +183,8 @@ impl SquareCh {
             length_counter: 64,
             volume: 0,
             env_timer: 0,
+            volume_countdown: 0,
+            sample_suppressed: false,
             envelope_clock: EnvelopeClock::default(),
             nrx2_raw: 0,
         }
@@ -185,6 +202,7 @@ impl SquareCh {
             }
             cycles -= self.freq_timer;
             self.duty_pos = (self.duty_pos + 1) & 7;
+            self.sample_suppressed = false;
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
                 self.freq_timer = 1;
@@ -193,7 +211,7 @@ impl SquareCh {
     }
 
     fn output(&self) -> u8 {
-        if !self.enabled || !self.dac_on {
+        if !self.enabled || !self.dac_on || self.sample_suppressed {
             return 0;
         }
         DUTY_TABLE[self.duty as usize][self.duty_pos as usize] * self.volume
@@ -208,20 +226,19 @@ impl SquareCh {
         }
     }
 
-    fn clock_envelope(&mut self) {
-        if self.env_period == 0 {
-            return;
-        }
-        if self.env_timer > 0 {
-            self.env_timer -= 1;
-        }
-        if self.env_timer == 0 {
-            self.env_timer = self.env_period;
-            if self.env_add && self.volume < 15 {
-                self.volume += 1;
-            } else if !self.env_add && self.volume > 0 {
-                self.volume -= 1;
-            }
+    /// Tick envelope: adjust volume unconditionally (after checking locked and env_period).
+    /// Called when envelope_clock is set during div_event envelope step.
+    /// Does NOT touch volume_countdown — that's handled separately in div_event.
+    fn tick_envelope(&mut self) {
+        set_envelope_clock(&mut self.envelope_clock, false, false, 0);
+        if self.envelope_clock.locked { return; }
+        if self.env_period == 0 { return; }
+        // Second set_envelope_clock call (needed for PCM mask timing in double speed)
+        set_envelope_clock(&mut self.envelope_clock, false, false, 0);
+        if self.env_add {
+            self.volume = (self.volume + 1) & 0xF;
+        } else {
+            self.volume = self.volume.wrapping_sub(1) & 0xF;
         }
     }
 }
@@ -378,6 +395,7 @@ struct NoiseCh {
     length_counter: u16,
     volume: u8,
     env_timer: u8,
+    volume_countdown: u8,
 
     // Envelope clock tracking
     envelope_clock: EnvelopeClock,
@@ -403,6 +421,7 @@ impl NoiseCh {
             length_counter: 64,
             volume: 0,
             env_timer: 0,
+            volume_countdown: 0,
             envelope_clock: EnvelopeClock::default(),
             nrx2_raw: 0,
         }
@@ -456,29 +475,25 @@ impl NoiseCh {
         }
     }
 
-    fn clock_envelope(&mut self) {
-        if self.env_period == 0 {
-            return;
-        }
-        if self.env_timer > 0 {
-            self.env_timer -= 1;
-        }
-        if self.env_timer == 0 {
-            self.env_timer = self.env_period;
-            if self.env_add && self.volume < 15 {
-                self.volume += 1;
-            } else if !self.env_add && self.volume > 0 {
-                self.volume -= 1;
-            }
+    /// Tick envelope: adjust volume unconditionally (after checking locked and env_period).
+    fn tick_envelope(&mut self) {
+        set_envelope_clock(&mut self.envelope_clock, false, false, 0);
+        if self.envelope_clock.locked { return; }
+        if self.env_period == 0 { return; }
+        set_envelope_clock(&mut self.envelope_clock, false, false, 0);
+        if self.env_add {
+            self.volume = (self.volume + 1) & 0xF;
+        } else {
+            self.volume = self.volume.wrapping_sub(1) & 0xF;
         }
     }
 }
 
-// ── NRx2 glitch helper (SameBoy CGB-D/E behavior) ────────────────────────
+// ── NRx2 glitch helper (CGB-D/E behavior) ────────────────────────────────
 
-fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, env_timer: &mut u8, lock: &mut EnvelopeClock) {
+fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, countdown: &mut u8, lock: &mut EnvelopeClock) {
     if lock.clock {
-        *env_timer = value & 7;
+        *countdown = value & 7;
     }
     let mut should_tick = (value & 7) != 0 && (old_value & 7) == 0 && !lock.locked;
     let should_invert = (value & 8) ^ (old_value & 8) != 0;
@@ -506,8 +521,7 @@ fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, env_timer: &mut u8, lo
             *volume = volume.wrapping_sub(1) & 0xF;
         }
     } else if (value & 7) == 0 && lock.clock {
-        lock.clock = false;
-        lock.locked = false;
+        set_envelope_clock(lock, false, false, 0);
     }
 }
 
@@ -539,6 +553,9 @@ pub struct Apu {
     // Current DIV counter (updated from bus each tick)
     div_counter: u16,
     double_speed: bool,
+
+    // Sub-2MHz phase tracker (toggles each T-cycle)
+    lf_div: bool,
 
     // PCM masking (for envelope glitch behavior)
     pcm_mask: [u8; 2],
@@ -576,6 +593,7 @@ impl Apu {
             skip_div_event: 0,
             div_counter: 0,
             double_speed: false,
+            lf_div: true,
             pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
@@ -722,7 +740,7 @@ impl Apu {
                 if !self.ch1.dac_on {
                     self.ch1.enabled = false;
                 } else if self.ch1.enabled {
-                    nrx2_glitch(&mut self.ch1.volume, val, old_value, &mut self.ch1.env_timer, &mut self.ch1.envelope_clock);
+                    nrx2_glitch(&mut self.ch1.volume, val, old_value, &mut self.ch1.volume_countdown, &mut self.ch1.envelope_clock);
                     // PCM mask: CH1 is low nibble of pcm_mask[0]
                     self.pcm_mask[0] &= self.ch1.volume | 0xF0;
                 }
@@ -756,7 +774,7 @@ impl Apu {
                 if !self.ch2.dac_on {
                     self.ch2.enabled = false;
                 } else if self.ch2.enabled {
-                    nrx2_glitch(&mut self.ch2.volume, val, old_value, &mut self.ch2.env_timer, &mut self.ch2.envelope_clock);
+                    nrx2_glitch(&mut self.ch2.volume, val, old_value, &mut self.ch2.volume_countdown, &mut self.ch2.envelope_clock);
                     // PCM mask: CH2 is high nibble of pcm_mask[0]
                     self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
                 }
@@ -804,7 +822,7 @@ impl Apu {
                 if !self.ch4.dac_on {
                     self.ch4.enabled = false;
                 } else if self.ch4.enabled {
-                    nrx2_glitch(&mut self.ch4.volume, val, old_value, &mut self.ch4.env_timer, &mut self.ch4.envelope_clock);
+                    nrx2_glitch(&mut self.ch4.volume, val, old_value, &mut self.ch4.volume_countdown, &mut self.ch4.envelope_clock);
                     // PCM mask: CH4 is high nibble of pcm_mask[1]
                     self.pcm_mask[1] &= (self.ch4.volume << 4) | 0x0F;
                 }
@@ -840,14 +858,29 @@ impl Apu {
     // ── Channel triggers ───────────────────────────────────────────────────
 
     fn trigger_ch1(&mut self) {
+        let was_active = self.ch1.enabled;
         self.ch1.enabled = true;
         if self.ch1.length_counter == 0 {
             self.ch1.length_counter = 64;
         }
-        self.ch1.freq_timer = self.ch1.reload_period();
         self.ch1.volume    = self.ch1.env_init_vol;
         self.ch1.env_timer = self.ch1.env_period;
-        self.ch1.envelope_clock = EnvelopeClock::default();
+        self.ch1.volume_countdown = self.ch1.env_period;
+        self.ch1.envelope_clock.locked = false;
+        self.ch1.envelope_clock.clock = false;
+        // Note: should_lock is NOT reset on trigger (hardware behavior)
+
+        // Trigger delay: lf_div-dependent initial countdown
+        // Not active: delay = 6 - lf_div (2MHz ticks) → (6 - lf_div) * 2 T-cycles
+        // Already active: delay = 4 - lf_div (2MHz ticks) → (4 - lf_div) * 2 T-cycles
+        let lf = if self.lf_div { 1u32 } else { 0 };
+        let base = (self.ch1.freq ^ 0x7FF) as u32 * 4;
+        if !was_active {
+            self.ch1.freq_timer = base + (6 - lf) * 2;
+            self.ch1.sample_suppressed = true;
+        } else {
+            self.ch1.freq_timer = base + (4 - lf) * 2;
+        }
 
         self.sweep.shadow   = self.ch1.freq;
         self.sweep.neg_used = false;
@@ -864,14 +897,26 @@ impl Apu {
     }
 
     fn trigger_ch2(&mut self) {
+        let was_active = self.ch2.enabled;
         self.ch2.enabled = true;
         if self.ch2.length_counter == 0 {
             self.ch2.length_counter = 64;
         }
-        self.ch2.freq_timer = self.ch2.reload_period();
         self.ch2.volume    = self.ch2.env_init_vol;
         self.ch2.env_timer = self.ch2.env_period;
-        self.ch2.envelope_clock = EnvelopeClock::default();
+        self.ch2.volume_countdown = self.ch2.env_period;
+        self.ch2.envelope_clock.locked = false;
+        self.ch2.envelope_clock.clock = false;
+
+        let lf = if self.lf_div { 1u32 } else { 0 };
+        let base = (self.ch2.freq ^ 0x7FF) as u32 * 4;
+        if !was_active {
+            self.ch2.freq_timer = base + (6 - lf) * 2;
+            self.ch2.sample_suppressed = true;
+        } else {
+            self.ch2.freq_timer = base + (4 - lf) * 2;
+        }
+
         if !self.ch2.dac_on {
             self.ch2.enabled = false;
         }
@@ -884,7 +929,7 @@ impl Apu {
         }
         self.ch3.freq_timer  = self.ch3.reload_period() + 6;
         self.ch3.sample_pos  = 0;
-        self.ch3.last_nibble = 0;
+        // Note: do NOT reset last_nibble — hardware keeps the last-read sample byte
     }
 
     fn trigger_ch4(&mut self) {
@@ -894,7 +939,9 @@ impl Apu {
         }
         self.ch4.volume    = self.ch4.env_init_vol;
         self.ch4.env_timer = self.ch4.env_period;
-        self.ch4.envelope_clock = EnvelopeClock::default();
+        self.ch4.volume_countdown = self.ch4.env_period;
+        self.ch4.envelope_clock.locked = false;
+        self.ch4.envelope_clock.clock = false;
         self.ch4.lfsr      = 0x7FFF;
         self.ch4.freq_timer = self.ch4.reload_period();
     }
@@ -921,6 +968,7 @@ impl Apu {
         self.nr51 = 0;
         self.div_divider = 0;
         self.skip_div_event = 0;
+        self.lf_div = true; // re-init to 1 on power on
     }
 
     // ── DIV-coupled frame sequencer ─────────────────────────────────────────
@@ -932,9 +980,6 @@ impl Apu {
         // Handle skip_div_event state machine
         if self.skip_div_event == 1 {
             self.skip_div_event = 2;
-            // Reset PCM mask each div event
-            self.pcm_mask = [0xFF, 0xFF];
-            self.update_envelope_clocks_secondary();
             return;
         }
         if self.skip_div_event == 2 {
@@ -961,15 +1006,30 @@ impl Apu {
             self.sweep.clock(ch1);
         }
 
-        // Envelope: when div_divider & 7 == 7 (every 8th event)
+        // Envelope volume_countdown: only on envelope steps (div_divider & 7 == 7)
+        // Decrement for channels where clock is NOT set
         if self.div_divider & 7 == 7 {
-            self.ch1.clock_envelope();
-            self.ch2.clock_envelope();
-            self.ch4.clock_envelope();
+            if !self.ch1.envelope_clock.clock {
+                self.ch1.volume_countdown = self.ch1.volume_countdown.wrapping_sub(1) & 7;
+            }
+            if !self.ch2.envelope_clock.clock {
+                self.ch2.volume_countdown = self.ch2.volume_countdown.wrapping_sub(1) & 7;
+            }
+            if !self.ch4.envelope_clock.clock {
+                self.ch4.volume_countdown = self.ch4.volume_countdown.wrapping_sub(1) & 7;
+            }
         }
 
-        // Envelope clock update
-        self.update_envelope_clocks();
+        // Envelope tick: on EVERY div event, tick channels where clock IS set
+        if self.ch1.envelope_clock.clock {
+            self.ch1.tick_envelope();
+        }
+        if self.ch2.envelope_clock.clock {
+            self.ch2.tick_envelope();
+        }
+        if self.ch4.envelope_clock.clock {
+            self.ch4.tick_envelope();
+        }
     }
 
     /// Called by Bus when DIV bit 12 (or 13 in double speed) has a rising edge.
@@ -979,37 +1039,19 @@ impl Apu {
         // Reset PCM mask
         self.pcm_mask = [0xFF, 0xFF];
 
-        self.update_envelope_clocks_secondary();
-    }
-
-    fn update_envelope_clocks(&mut self) {
-        // CH1
-        if self.ch1.enabled {
-            self.ch1.envelope_clock.locked = self.ch1.envelope_clock.clock;
-            self.ch1.envelope_clock.clock = self.ch1.env_period != 0;
+        // On secondary event: for active channels with volume_countdown == 0,
+        // reload countdown from env_period and set envelope clock
+        if self.ch1.enabled && self.ch1.volume_countdown == 0 {
+            self.ch1.volume_countdown = self.ch1.env_period;
+            set_envelope_clock(&mut self.ch1.envelope_clock, self.ch1.env_period != 0, self.ch1.env_add, self.ch1.volume);
         }
-        // CH2
-        if self.ch2.enabled {
-            self.ch2.envelope_clock.locked = self.ch2.envelope_clock.clock;
-            self.ch2.envelope_clock.clock = self.ch2.env_period != 0;
+        if self.ch2.enabled && self.ch2.volume_countdown == 0 {
+            self.ch2.volume_countdown = self.ch2.env_period;
+            set_envelope_clock(&mut self.ch2.envelope_clock, self.ch2.env_period != 0, self.ch2.env_add, self.ch2.volume);
         }
-        // CH4
-        if self.ch4.enabled {
-            self.ch4.envelope_clock.locked = self.ch4.envelope_clock.clock;
-            self.ch4.envelope_clock.clock = self.ch4.env_period != 0;
-        }
-    }
-
-    fn update_envelope_clocks_secondary(&mut self) {
-        // On secondary event, update clock state for active channels
-        if self.ch1.enabled && self.ch1.env_timer == 0 {
-            self.ch1.envelope_clock.clock = self.ch1.env_period != 0;
-        }
-        if self.ch2.enabled && self.ch2.env_timer == 0 {
-            self.ch2.envelope_clock.clock = self.ch2.env_period != 0;
-        }
-        if self.ch4.enabled && self.ch4.env_timer == 0 {
-            self.ch4.envelope_clock.clock = self.ch4.env_period != 0;
+        if self.ch4.enabled && self.ch4.volume_countdown == 0 {
+            self.ch4.volume_countdown = self.ch4.env_period;
+            set_envelope_clock(&mut self.ch4.envelope_clock, self.ch4.env_period != 0, self.ch4.env_add, self.ch4.volume);
         }
     }
 
@@ -1097,6 +1139,11 @@ impl Apu {
             return;
         }
 
+        // Toggle lf_div (sub-2MHz phase) — flips when cycles is odd
+        if cycles & 1 != 0 {
+            self.lf_div = !self.lf_div;
+        }
+
         // Advance all frequency timers
         self.ch1.tick_freq(cycles);
         self.ch2.tick_freq(cycles);
@@ -1124,14 +1171,18 @@ impl Apu {
     }
 
     /// CGB PCM12 register (0xFF76): CH1 output in low nibble, CH2 in high nibble.
+    /// Inactive channels read as 0. PCM mask only applies to CGB<=C (not our target CGB-D/E).
     pub fn pcm12(&self) -> u8 {
-        let raw = (self.ch1.output() & 0x0F) | ((self.ch2.output() & 0x0F) << 4);
-        raw & self.pcm_mask[0]
+        let ch1 = if self.ch1.enabled { self.ch1.output() & 0x0F } else { 0 };
+        let ch2 = if self.ch2.enabled { self.ch2.output() & 0x0F } else { 0 };
+        ch1 | (ch2 << 4)
     }
 
     /// CGB PCM34 register (0xFF77): CH3 output in low nibble, CH4 in high nibble.
+    /// Inactive channels read as 0. PCM mask only applies to CGB<=C (not our target CGB-D/E).
     pub fn pcm34(&self) -> u8 {
-        let raw = (self.ch3.output() & 0x0F) | ((self.ch4.output() & 0x0F) << 4);
-        raw & self.pcm_mask[1]
+        let ch3 = if self.ch3.enabled { self.ch3.output() & 0x0F } else { 0 };
+        let ch4 = if self.ch4.enabled { self.ch4.output() & 0x0F } else { 0 };
+        ch3 | (ch4 << 4)
     }
 }
