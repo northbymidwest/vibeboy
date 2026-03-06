@@ -449,7 +449,6 @@ dependencies = [
 name = "gbcemu"
 version = "0.1.0"
 dependencies = [
- "cc",
  "clap",
  "env_logger",
  "image",

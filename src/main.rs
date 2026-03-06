@@ -12,6 +12,8 @@ mod sgb;
 mod snapshot;
 mod snes;
 mod timer;
+#[cfg(target_os = "macos")]
+mod macos_accel;
 
 use clap::Parser;
 use emulator::Emulator;
@@ -31,13 +33,6 @@ use sdl3::sys::surface::SDL_Surface;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn macos_accel_init() -> bool;
-    fn macos_accel_close();
-    fn macos_accel_poll(x: *mut f32, y: *mut f32, z: *mut f32) -> bool;
-}
 
 /// Which accelerometer source is active.
 enum AccelSource {
@@ -292,9 +287,9 @@ fn main() {
             match accel_source {
                 #[cfg(target_os = "macos")]
                 AccelSource::MacosNative => {
-                    let mut z: f32 = 0.0;
-                    if unsafe { macos_accel_poll(&mut gx, &mut gy, &mut z) } {
-                        gx = -gx; // MacBook X axis is opposite to MBC7 convention
+                    if let Some((x, y, _z)) = macos_accel::poll() {
+                        gx = -x; // MacBook X axis is opposite to MBC7 convention
+                        gy = y;
                         got = true;
                     }
                 }
@@ -424,7 +419,7 @@ fn main() {
     // Cleanup accelerometer
     #[cfg(target_os = "macos")]
     if matches!(accel_source, AccelSource::MacosNative) {
-        unsafe { macos_accel_close(); }
+        macos_accel::close();
     }
 
     if !camera_ptr.is_null() {
@@ -560,7 +555,7 @@ fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
     // Try macOS native accelerometer first
     #[cfg(target_os = "macos")]
     {
-        if unsafe { macos_accel_init() } {
+        if macos_accel::init() {
             eprintln!("Accelerometer: macOS native (Apple Silicon)");
             return AccelSource::MacosNative;
         }
