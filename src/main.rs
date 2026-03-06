@@ -381,35 +381,39 @@ fn acquire_camera_frame(camera: *mut SDL_Camera, buf: &mut [u8; 128 * 112]) -> b
         let pixels = surf.pixels as *const u8;
 
         if !pixels.is_null() && src_w > 0 && src_h > 0 {
-            // Bilinear downsample to 128×112, convert to grayscale
-            for dy in 0..112usize {
-                // Map destination pixel center to source coordinate
-                let src_yf = (dy as f32 + 0.5) * (src_h as f32 / 112.0) - 0.5;
-                let sy0 = (src_yf.floor() as isize).max(0) as usize;
-                let sy1 = (sy0 + 1).min(src_h - 1);
-                let fy = src_yf - sy0 as f32;
-
-                for dx in 0..128usize {
-                    let src_xf = (dx as f32 + 0.5) * (src_w as f32 / 128.0) - 0.5;
-                    let sx0 = (src_xf.floor() as isize).max(0) as usize;
-                    let sx1 = (sx0 + 1).min(src_w - 1);
-                    let fx = src_xf - sx0 as f32;
-
-                    // Sample four corners, convert each to grayscale, then blend
-                    let sample = |sx: usize, sy: usize| -> f32 {
-                        let off = sy * pitch + sx * 4;
-                        let r = *pixels.add(off) as f32;
-                        let g = *pixels.add(off + 1) as f32;
-                        let b = *pixels.add(off + 2) as f32;
-                        r * 0.299 + g * 0.587 + b * 0.114
-                    };
-
-                    let top = sample(sx0, sy0) * (1.0 - fx) + sample(sx1, sy0) * fx;
-                    let bot = sample(sx0, sy1) * (1.0 - fx) + sample(sx1, sy1) * fx;
-                    let val = top * (1.0 - fy) + bot * fy;
-                    buf[dy * 128 + dx] = val.round() as u8;
-                }
+            // Build RGBA image from SDL surface (may have row padding)
+            let mut rgba = vec![0u8; src_w * src_h * 4];
+            for y in 0..src_h {
+                let src_row = pixels.add(y * pitch);
+                let dst_off = y * src_w * 4;
+                std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4);
             }
+
+            let img = image::RgbaImage::from_raw(src_w as u32, src_h as u32, rgba)
+                .expect("camera frame size mismatch");
+
+            // Crop to 8:7 aspect ratio (128:112) before resizing
+            let target_ratio = 128.0 / 112.0;
+            let src_ratio = src_w as f64 / src_h as f64;
+            let (crop_w, crop_h) = if src_ratio > target_ratio {
+                let cw = (src_h as f64 * target_ratio) as u32;
+                (cw, src_h as u32)
+            } else {
+                let ch = (src_w as f64 / target_ratio) as u32;
+                (src_w as u32, ch)
+            };
+            let crop_x = (src_w as u32 - crop_w) / 2;
+            let crop_y = (src_h as u32 - crop_h) / 2;
+            let cropped = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h)
+                .to_image();
+
+            // Convert to grayscale and resize with Lanczos3
+            let gray = image::imageops::grayscale(&cropped);
+            let resized = image::imageops::resize(
+                &gray, 128, 112, image::imageops::FilterType::Lanczos3,
+            );
+
+            buf.copy_from_slice(resized.as_raw());
         }
 
         SDL_ReleaseCameraFrame(camera, surface);
