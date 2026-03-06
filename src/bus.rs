@@ -453,9 +453,27 @@ impl Bus {
                     self.if_ |= 0x08;
                     self.serial.interrupt = false;
                 }
+                // APU: DIV write can create falling/rising edge on APU bit
+                if addr == 0xFF04 {
+                    let apu_bit: u16 = if self.double_speed { 0x2000 } else { 0x1000 };
+                    let triggers = old_div & !new_div;
+                    if triggers & apu_bit != 0 {
+                        self.apu.div_event();
+                    } else {
+                        let secondary = !old_div & new_div;
+                        if secondary & apu_bit != 0 {
+                            self.apu.div_secondary_event();
+                        }
+                    }
+                    self.apu.set_div_counter(new_div);
+                }
             }
             0xFF0F => self.if_ = val | 0xE0,
-            0xFF10..=0xFF3F => self.apu.write(addr, val),
+            0xFF10..=0xFF3F => {
+                self.apu.set_div_counter(self.timer.counter());
+                self.apu.set_double_speed(self.double_speed);
+                self.apu.write(addr, val);
+            }
             0xFF46 => self.start_oam_dma(val),
             0xFF4F | 0xFF68..=0xFF6B if !self.model.is_cgb() => {} // ignore on DMG
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
@@ -617,7 +635,7 @@ impl Bus {
     /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
     /// `bus_cycles` is 4MHz-rate T-cycles (4 normal, 2 double-speed).
     pub fn tick(&mut self, timer_cycles: u32, bus_cycles: u32) {
-        // Capture DIV counter before and after timer step for serial edge detection
+        // Capture DIV counter before and after timer step for serial/APU edge detection
         let old_div = self.timer.counter();
         self.timer.step(timer_cycles);
         let new_div = self.timer.counter();
@@ -632,6 +650,20 @@ impl Bus {
             self.if_ |= 0x08;
             self.serial.interrupt = false;
         }
+
+        // APU frame sequencer is clocked by DIV bit 12 (or 13 in double speed)
+        let apu_bit: u16 = if self.double_speed { 0x2000 } else { 0x1000 };
+        let triggers = old_div & !new_div; // bits that fell
+        if triggers & apu_bit != 0 {
+            self.apu.div_event();
+        } else {
+            let secondary = !old_div & new_div; // bits that rose
+            if secondary & apu_bit != 0 {
+                self.apu.div_secondary_event();
+            }
+        }
+        self.apu.set_div_counter(new_div);
+        self.apu.set_double_speed(self.double_speed);
 
         let ppu_flags = self.ppu.step(bus_cycles);
         self.if_ |= ppu_flags;

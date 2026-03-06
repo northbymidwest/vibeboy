@@ -6,10 +6,11 @@
 ///   CH3 — Wave output (custom waveform)    (NR30-NR34, 0xFF1A-0xFF1E)
 ///   CH4 — Noise (LFSR)                     (NR41-NR44, 0xFF20-0xFF23)
 ///
-/// Frame sequencer runs at 512 Hz (every 8192 T-cycles), 8-step sequence:
-///   Steps 0,2,4,6 → length counters
-///   Steps 2,6     → CH1 sweep
-///   Step  7       → volume envelopes
+/// Frame sequencer is clocked by falling edge of DIV bit 12 (normal speed)
+/// or bit 13 (double speed). The div_divider counter maps to FS steps:
+///   div_divider & 1 == 1 → length counters
+///   div_divider & 3 == 3 → CH1 sweep
+///   div_divider & 7 == 7 → volume envelopes
 
 use std::sync::Arc;
 
@@ -113,6 +114,14 @@ impl BlipBuf {
     }
 }
 
+// ── Envelope clock tracking (SameBoy-style) ──────────────────────────────
+
+#[derive(Clone, Default)]
+struct EnvelopeClock {
+    clock: bool,
+    locked: bool,
+}
+
 // ── Square channel ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -135,6 +144,12 @@ struct SquareCh {
     length_counter: u16,
     volume: u8,
     env_timer: u8,
+
+    // Envelope clock tracking
+    envelope_clock: EnvelopeClock,
+
+    // Raw NRx2 value for glitch detection
+    nrx2_raw: u8,
 }
 
 impl SquareCh {
@@ -153,6 +168,8 @@ impl SquareCh {
             length_counter: 64,
             volume: 0,
             env_timer: 0,
+            envelope_clock: EnvelopeClock::default(),
+            nrx2_raw: 0,
         }
     }
 
@@ -361,6 +378,12 @@ struct NoiseCh {
     length_counter: u16,
     volume: u8,
     env_timer: u8,
+
+    // Envelope clock tracking
+    envelope_clock: EnvelopeClock,
+
+    // Raw NR42 value for glitch detection
+    nrx2_raw: u8,
 }
 
 impl NoiseCh {
@@ -380,6 +403,8 @@ impl NoiseCh {
             length_counter: 64,
             volume: 0,
             env_timer: 0,
+            envelope_clock: EnvelopeClock::default(),
+            nrx2_raw: 0,
         }
     }
 
@@ -449,6 +474,43 @@ impl NoiseCh {
     }
 }
 
+// ── NRx2 glitch helper (SameBoy CGB-D/E behavior) ────────────────────────
+
+fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, env_timer: &mut u8, lock: &mut EnvelopeClock) {
+    if lock.clock {
+        *env_timer = value & 7;
+    }
+    let mut should_tick = (value & 7) != 0 && (old_value & 7) == 0 && !lock.locked;
+    let should_invert = (value & 8) ^ (old_value & 8) != 0;
+
+    if (value & 0xF) == 8 && (old_value & 0xF) == 8 && !lock.locked {
+        should_tick = true;
+    }
+
+    if should_invert {
+        if value & 8 != 0 {
+            if (old_value & 7) == 0 && !lock.locked {
+                *volume ^= 0xF;
+            } else {
+                *volume = (0xE_u8.wrapping_sub(*volume)) & 0xF;
+            }
+            should_tick = false;
+        } else {
+            *volume = (0x10_u8.wrapping_sub(*volume)) & 0xF;
+        }
+    }
+    if should_tick {
+        if value & 8 != 0 {
+            *volume = (*volume + 1) & 0xF;
+        } else {
+            *volume = volume.wrapping_sub(1) & 0xF;
+        }
+    } else if (value & 7) == 0 && lock.clock {
+        lock.clock = false;
+        lock.locked = false;
+    }
+}
+
 // ── APU top level ──────────────────────────────────────────────────────────
 
 const SAMPLE_RATE: u32 = 96_000;
@@ -470,9 +532,16 @@ pub struct Apu {
     nr51: u8, // panning
     power: bool,
 
-    // Frame sequencer
-    fs_counter: u32,
-    fs_step: u8,
+    // DIV-coupled frame sequencer
+    div_divider: u8,
+    skip_div_event: u8, // 0=inactive, 1=skip next, 2=skipped (resume normal)
+
+    // Current DIV counter (updated from bus each tick)
+    div_counter: u16,
+    double_speed: bool,
+
+    // PCM masking (for envelope glitch behavior)
+    pcm_mask: [u8; 2],
 
     // Sample timing
     sample_accum: u64,
@@ -503,8 +572,11 @@ impl Apu {
             nr50: 0x77,
             nr51: 0xF3,
             power: true,
-            fs_counter: 0,
-            fs_step: 0,
+            div_divider: 0,
+            skip_div_event: 0,
+            div_counter: 0,
+            double_speed: false,
+            pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
             blip: BlipBuf::new(),
@@ -523,7 +595,22 @@ impl Apu {
         apu.ch1.dac_on = true;
         apu.ch1.enabled = true;
         apu.ch1.volume = 0;
+        apu.ch1.nrx2_raw = 0xF3;
         apu
+    }
+
+    /// Update the DIV counter from the bus (called each tick).
+    pub fn set_div_counter(&mut self, counter: u16) {
+        self.div_counter = counter;
+    }
+
+    /// Update double-speed mode from the bus.
+    pub fn set_double_speed(&mut self, ds: bool) {
+        self.double_speed = ds;
+    }
+
+    fn apu_bit(&self) -> u16 {
+        if self.double_speed { 0x2000 } else { 0x1000 }
     }
 
     // ── Register read ──────────────────────────────────────────────────────
@@ -533,13 +620,13 @@ impl Apu {
             // CH1
             0xFF10 => 0x80 | (self.sweep.period << 4) | (if self.sweep.negate { 0x08 } else { 0 }) | self.sweep.shift,
             0xFF11 => 0x3F | (self.ch1.duty << 6),
-            0xFF12 => (self.ch1.env_init_vol << 4) | (if self.ch1.env_add { 0x08 } else { 0 }) | self.ch1.env_period,
+            0xFF12 => self.ch1.nrx2_raw,
             0xFF13 => 0xFF,
             0xFF14 => 0xBF | (if self.ch1.len_enable { 0x40 } else { 0 }),
             0xFF15 => 0xFF,
             // CH2
             0xFF16 => 0x3F | (self.ch2.duty << 6),
-            0xFF17 => (self.ch2.env_init_vol << 4) | (if self.ch2.env_add { 0x08 } else { 0 }) | self.ch2.env_period,
+            0xFF17 => self.ch2.nrx2_raw,
             0xFF18 => 0xFF,
             0xFF19 => 0xBF | (if self.ch2.len_enable { 0x40 } else { 0 }),
             // CH3
@@ -551,7 +638,7 @@ impl Apu {
             0xFF1F => 0xFF,
             // CH4
             0xFF20 => 0xFF,
-            0xFF21 => (self.ch4.env_init_vol << 4) | (if self.ch4.env_add { 0x08 } else { 0 }) | self.ch4.env_period,
+            0xFF21 => self.ch4.nrx2_raw,
             0xFF22 => (self.ch4.clock_shift << 4) | (if self.ch4.lfsr_narrow { 0x08 } else { 0 }) | self.ch4.divisor_code,
             0xFF23 => 0xBF | (if self.ch4.len_enable { 0x40 } else { 0 }),
             // Global
@@ -586,6 +673,13 @@ impl Apu {
             self.power = val & 0x80 != 0;
             if was_on && !self.power {
                 self.power_off();
+            } else if !was_on && self.power {
+                // Power on: check if DIV APU bit is high → skip first div event
+                let apu_bit = self.apu_bit();
+                if self.div_counter & apu_bit != 0 {
+                    self.skip_div_event = 1;
+                    self.div_divider = 1;
+                }
             }
             return;
         }
@@ -619,19 +713,28 @@ impl Apu {
                 self.ch1.length_counter = 64 - (val & 0x3F) as u16;
             }
             0xFF12 => {
+                let old_value = self.ch1.nrx2_raw;
+                self.ch1.nrx2_raw = val;
                 self.ch1.env_init_vol = val >> 4;
                 self.ch1.env_add     = val & 0x08 != 0;
                 self.ch1.env_period  = val & 0x07;
                 self.ch1.dac_on = val & 0xF8 != 0;
-                if !self.ch1.dac_on { self.ch1.enabled = false; }
+                if !self.ch1.dac_on {
+                    self.ch1.enabled = false;
+                } else if self.ch1.enabled {
+                    nrx2_glitch(&mut self.ch1.volume, val, old_value, &mut self.ch1.env_timer, &mut self.ch1.envelope_clock);
+                    // PCM mask: CH1 is low nibble of pcm_mask[0]
+                    self.pcm_mask[0] &= self.ch1.volume | 0xF0;
+                }
             }
             0xFF13 => self.ch1.freq = (self.ch1.freq & 0x700) | val as u16,
             0xFF14 => {
                 self.ch1.freq = (self.ch1.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
                 let was_enabled = self.ch1.len_enable;
                 self.ch1.len_enable = val & 0x40 != 0;
-                // Extra length clock on 0→1 transition of length enable on odd fs step
-                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                // Extra length clock when enabling length and div_divider is even
+                // (odd div_divider values clock length, so even = "not about to tick")
+                if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch1.clock_length();
                 }
                 if val & 0x80 != 0 {
@@ -644,18 +747,26 @@ impl Apu {
                 self.ch2.length_counter = 64 - (val & 0x3F) as u16;
             }
             0xFF17 => {
+                let old_value = self.ch2.nrx2_raw;
+                self.ch2.nrx2_raw = val;
                 self.ch2.env_init_vol = val >> 4;
                 self.ch2.env_add     = val & 0x08 != 0;
                 self.ch2.env_period  = val & 0x07;
                 self.ch2.dac_on = val & 0xF8 != 0;
-                if !self.ch2.dac_on { self.ch2.enabled = false; }
+                if !self.ch2.dac_on {
+                    self.ch2.enabled = false;
+                } else if self.ch2.enabled {
+                    nrx2_glitch(&mut self.ch2.volume, val, old_value, &mut self.ch2.env_timer, &mut self.ch2.envelope_clock);
+                    // PCM mask: CH2 is high nibble of pcm_mask[0]
+                    self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
+                }
             }
             0xFF18 => self.ch2.freq = (self.ch2.freq & 0x700) | val as u16,
             0xFF19 => {
                 self.ch2.freq = (self.ch2.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
                 let was_enabled = self.ch2.len_enable;
                 self.ch2.len_enable = val & 0x40 != 0;
-                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch2.clock_length();
                 }
                 if val & 0x80 != 0 {
@@ -674,7 +785,7 @@ impl Apu {
                 self.ch3.freq = (self.ch3.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
                 let was_enabled = self.ch3.len_enable;
                 self.ch3.len_enable = val & 0x40 != 0;
-                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch3.clock_length();
                 }
                 if val & 0x80 != 0 && self.ch3.dac_on {
@@ -684,11 +795,19 @@ impl Apu {
             // ── CH4 ────────────────────────────────────────────────────────
             0xFF20 => self.ch4.length_counter = 64 - (val & 0x3F) as u16,
             0xFF21 => {
+                let old_value = self.ch4.nrx2_raw;
+                self.ch4.nrx2_raw = val;
                 self.ch4.env_init_vol = val >> 4;
                 self.ch4.env_add     = val & 0x08 != 0;
                 self.ch4.env_period  = val & 0x07;
                 self.ch4.dac_on = val & 0xF8 != 0;
-                if !self.ch4.dac_on { self.ch4.enabled = false; }
+                if !self.ch4.dac_on {
+                    self.ch4.enabled = false;
+                } else if self.ch4.enabled {
+                    nrx2_glitch(&mut self.ch4.volume, val, old_value, &mut self.ch4.env_timer, &mut self.ch4.envelope_clock);
+                    // PCM mask: CH4 is high nibble of pcm_mask[1]
+                    self.pcm_mask[1] &= (self.ch4.volume << 4) | 0x0F;
+                }
             }
             0xFF22 => {
                 self.ch4.clock_shift  = val >> 4;
@@ -698,7 +817,7 @@ impl Apu {
             0xFF23 => {
                 let was_enabled = self.ch4.len_enable;
                 self.ch4.len_enable = val & 0x40 != 0;
-                if !was_enabled && val & 0x40 != 0 && self.fs_step & 1 != 0 {
+                if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch4.clock_length();
                 }
                 if val & 0x80 != 0 && self.ch4.dac_on {
@@ -728,6 +847,7 @@ impl Apu {
         self.ch1.freq_timer = self.ch1.reload_period();
         self.ch1.volume    = self.ch1.env_init_vol;
         self.ch1.env_timer = self.ch1.env_period;
+        self.ch1.envelope_clock = EnvelopeClock::default();
 
         self.sweep.shadow   = self.ch1.freq;
         self.sweep.neg_used = false;
@@ -751,6 +871,7 @@ impl Apu {
         self.ch2.freq_timer = self.ch2.reload_period();
         self.ch2.volume    = self.ch2.env_init_vol;
         self.ch2.env_timer = self.ch2.env_period;
+        self.ch2.envelope_clock = EnvelopeClock::default();
         if !self.ch2.dac_on {
             self.ch2.enabled = false;
         }
@@ -773,6 +894,7 @@ impl Apu {
         }
         self.ch4.volume    = self.ch4.env_init_vol;
         self.ch4.env_timer = self.ch4.env_period;
+        self.ch4.envelope_clock = EnvelopeClock::default();
         self.ch4.lfsr      = 0x7FFF;
         self.ch4.freq_timer = self.ch4.reload_period();
     }
@@ -797,35 +919,98 @@ impl Apu {
         self.ch4 = NoiseCh::new();
         self.nr50 = 0;
         self.nr51 = 0;
-        self.fs_step = 0;
+        self.div_divider = 0;
+        self.skip_div_event = 0;
     }
 
-    // ── Frame sequencer ────────────────────────────────────────────────────
+    // ── DIV-coupled frame sequencer ─────────────────────────────────────────
 
-    fn clock_frame_seq(&mut self) {
-        match self.fs_step {
-            0 | 4 => {
-                self.ch1.clock_length();
-                self.ch2.clock_length();
-                self.ch3.clock_length();
-                self.ch4.clock_length();
-            }
-            2 | 6 => {
-                self.ch1.clock_length();
-                self.ch2.clock_length();
-                self.ch3.clock_length();
-                self.ch4.clock_length();
-                let ch1 = &mut self.ch1;
-                self.sweep.clock(ch1);
-            }
-            7 => {
-                self.ch1.clock_envelope();
-                self.ch2.clock_envelope();
-                self.ch4.clock_envelope();
-            }
-            _ => {}
+    /// Called by Bus when DIV bit 12 (or 13 in double speed) has a falling edge.
+    pub fn div_event(&mut self) {
+        if !self.power { return; }
+
+        // Handle skip_div_event state machine
+        if self.skip_div_event == 1 {
+            self.skip_div_event = 2;
+            // Reset PCM mask each div event
+            self.pcm_mask = [0xFF, 0xFF];
+            self.update_envelope_clocks_secondary();
+            return;
         }
-        self.fs_step = (self.fs_step + 1) & 7;
+        if self.skip_div_event == 2 {
+            self.skip_div_event = 0;
+            // Don't increment div_divider on the event after skip
+        } else {
+            self.div_divider = self.div_divider.wrapping_add(1);
+        }
+
+        // Reset PCM mask each div event
+        self.pcm_mask = [0xFF, 0xFF];
+
+        // Length counters: when div_divider & 1 == 1 (every other event)
+        if self.div_divider & 1 == 1 {
+            self.ch1.clock_length();
+            self.ch2.clock_length();
+            self.ch3.clock_length();
+            self.ch4.clock_length();
+        }
+
+        // Sweep: when div_divider & 3 == 3 (every 4th event)
+        if self.div_divider & 3 == 3 {
+            let ch1 = &mut self.ch1;
+            self.sweep.clock(ch1);
+        }
+
+        // Envelope: when div_divider & 7 == 7 (every 8th event)
+        if self.div_divider & 7 == 7 {
+            self.ch1.clock_envelope();
+            self.ch2.clock_envelope();
+            self.ch4.clock_envelope();
+        }
+
+        // Envelope clock update
+        self.update_envelope_clocks();
+    }
+
+    /// Called by Bus when DIV bit 12 (or 13 in double speed) has a rising edge.
+    pub fn div_secondary_event(&mut self) {
+        if !self.power { return; }
+
+        // Reset PCM mask
+        self.pcm_mask = [0xFF, 0xFF];
+
+        self.update_envelope_clocks_secondary();
+    }
+
+    fn update_envelope_clocks(&mut self) {
+        // CH1
+        if self.ch1.enabled {
+            self.ch1.envelope_clock.locked = self.ch1.envelope_clock.clock;
+            self.ch1.envelope_clock.clock = self.ch1.env_period != 0;
+        }
+        // CH2
+        if self.ch2.enabled {
+            self.ch2.envelope_clock.locked = self.ch2.envelope_clock.clock;
+            self.ch2.envelope_clock.clock = self.ch2.env_period != 0;
+        }
+        // CH4
+        if self.ch4.enabled {
+            self.ch4.envelope_clock.locked = self.ch4.envelope_clock.clock;
+            self.ch4.envelope_clock.clock = self.ch4.env_period != 0;
+        }
+    }
+
+    fn update_envelope_clocks_secondary(&mut self) {
+        // On secondary event, update clock state for active channels
+        if self.ch1.enabled && self.ch1.env_timer == 0 {
+            self.ch1.envelope_clock.clock = self.ch1.env_period != 0;
+        }
+        if self.ch2.enabled && self.ch2.env_timer == 0 {
+            self.ch2.envelope_clock.clock = self.ch2.env_period != 0;
+        }
+        if self.ch4.enabled && self.ch4.env_timer == 0 {
+            self.ch4.envelope_clock.clock = self.ch4.env_period != 0;
+        }
     }
 
     // ── Integer mixing (for BLIP delta detection) ─────────────────────────
@@ -918,12 +1103,7 @@ impl Apu {
         self.ch3.tick_freq(cycles);
         self.ch4.tick_freq(cycles);
 
-        // Frame sequencer (512 Hz = every 8192 T-cycles)
-        self.fs_counter += cycles;
-        while self.fs_counter >= 8192 {
-            self.fs_counter -= 8192;
-            self.clock_frame_seq();
-        }
+        // Frame sequencer is now driven by DIV events from Bus, not by counting cycles here.
 
         // Check for amplitude change and record delta to BLIP buffer
         self.record_mix_delta();
@@ -945,11 +1125,13 @@ impl Apu {
 
     /// CGB PCM12 register (0xFF76): CH1 output in low nibble, CH2 in high nibble.
     pub fn pcm12(&self) -> u8 {
-        (self.ch1.output() & 0x0F) | ((self.ch2.output() & 0x0F) << 4)
+        let raw = (self.ch1.output() & 0x0F) | ((self.ch2.output() & 0x0F) << 4);
+        raw & self.pcm_mask[0]
     }
 
     /// CGB PCM34 register (0xFF77): CH3 output in low nibble, CH4 in high nibble.
     pub fn pcm34(&self) -> u8 {
-        (self.ch3.output() & 0x0F) | ((self.ch4.output() & 0x0F) << 4)
+        let raw = (self.ch3.output() & 0x0F) | ((self.ch4.output() & 0x0F) << 4);
+        raw & self.pcm_mask[1]
     }
 }
