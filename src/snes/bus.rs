@@ -51,11 +51,27 @@ pub struct SnesBus {
     // APU I/O ports ($2140-$2143) — SNES→SPC writes, SPC→SNES reads
     pub apu_out: [u8; 4],       // What the SNES writes (CPU→APU)
     pub apu_in: [u8; 4],        // What the SNES reads (APU→CPU)
-    pub apu_handshake_done: bool,   // True after initial $AA/$BB handshake
-    apu_port0_reads: u32,       // Consecutive port 0 reads without a port 0 write
+    /// SPC700 upload protocol state:
+    /// 0 = waiting for handshake ($AA/$BB ready)
+    /// 1 = uploading (echoing counter on port 0)
+    /// 2 = executed (SPC program "running")
+    pub apu_state: u8,
+    /// Last counter value written to port 0 during upload
+    apu_last_counter: u8,
+    /// Track port 1 value to detect execute command (port1=0 → execute)
+    apu_port1_val: u8,
+    /// After execute, echo the final counter once, then switch to $AA/$BB
+    pub apu_echo_pending: bool,
+    /// NMI fire count (diagnostic)
+    pub nmi_fire_count: u64,
 
     /// WMADD — 17-bit WRAM address for $2180 access
     pub wmadd: u32,
+
+    /// Current frame phase cycle tracking for ICD2 tile row simulation
+    pub active_display_start: u64,
+    pub current_cpu_cycles: u64,
+    pub in_vblank: bool,
 
     /// Set when TIMEUP ($4211) is read, signaling IRQ was acknowledged.
     pub irq_ack: bool,
@@ -89,10 +105,38 @@ impl SnesBus {
             memsel: 0,
             apu_out: [0; 4],
             apu_in: [0xAA, 0xBB, 0x00, 0x00], // SPC700 IPL ready handshake
-            apu_handshake_done: false,
-            apu_port0_reads: 0,
+            apu_state: 0, // Waiting for handshake
+            apu_last_counter: 0,
+            apu_port1_val: 0,
+            apu_echo_pending: false,
+            nmi_fire_count: 0,
             wmadd: 0,
+            active_display_start: 0,
+            current_cpu_cycles: 0,
+            in_vblank: true,
             irq_ack: false,
+        }
+    }
+
+    /// Compute the current scanline (VCOUNT) from CPU cycle position.
+    /// Frame layout: VBlank starts at scanline 225, active display at scanline 0.
+    /// Our frame starts at VBlank entry, so:
+    ///   cycles 0..(37*1364) → scanlines 225-261
+    ///   cycles (37*1364)..(262*1364) → scanlines 0-224
+    fn current_vcount(&self) -> u16 {
+        const CYCLES_PER_LINE: u64 = 1364;
+        if self.in_vblank {
+            // VBlank phase: scanlines 225-261
+            let elapsed = self.current_cpu_cycles.saturating_sub(
+                self.active_display_start.saturating_sub(37 * CYCLES_PER_LINE)
+            );
+            let line = elapsed / CYCLES_PER_LINE;
+            (225 + line).min(261) as u16
+        } else {
+            // Active display: scanlines 0-224
+            let elapsed = self.current_cpu_cycles.saturating_sub(self.active_display_start);
+            let line = elapsed / CYCLES_PER_LINE;
+            line.min(224) as u16
         }
     }
 
@@ -116,17 +160,15 @@ impl SnesBus {
             0x2140..=0x2143 if effective_bank <= 0x3F => {
                 // APU I/O ports — read from SPC700 side
                 let port = (offset - 0x2140) as usize;
-                if port == 0 {
-                    self.apu_port0_reads += 1;
-                    // If stuck polling port 0 (>128 reads without a write),
-                    // the upload/execute phase is done. Reset to $AA/$BB
-                    // so the next handshake can proceed.
-                    if self.apu_port0_reads > 128 && self.apu_in[0] != 0xAA {
-                        self.apu_in = [0xAA, 0xBB, 0x00, 0x00];
-                        self.apu_handshake_done = false;
-                    }
+                let val = self.apu_in[port];
+                // After execute command: first read returns the echo,
+                // then switch to $AA/$BB (SPC program "ready" signal)
+                if port == 0 && self.apu_echo_pending {
+                    self.apu_echo_pending = false;
+                    // After this read (the echo), set $AA/$BB for next read
+                    self.apu_in = [0xAA, 0xBB, 0x00, 0x00];
                 }
-                self.apu_in[port]
+                val
             }
             0x2180 if effective_bank <= 0x3F => {
                 // WMDATA read — read WRAM at WMADD, then increment
@@ -136,7 +178,18 @@ impl SnesBus {
                 val
             }
             0x2100..=0x21FF if effective_bank <= 0x3F => {
-                self.ppu.read(offset)
+                match offset {
+                    0x213D => {
+                        // OPVCT — return current scanline based on cycle position
+                        self.current_vcount() as u8
+                    }
+                    0x213F => {
+                        // STAT78 — bit 7 = field (interlace), bits 3-0 = version
+                        // Also resets the OPHCT/OPVCT flipflop
+                        0x01
+                    }
+                    _ => self.ppu.read(offset)
+                }
             }
             0x4016 if effective_bank <= 0x3F => {
                 // Old-style joypad read (not used by SGB BIOS normally)
@@ -180,22 +233,72 @@ impl SnesBus {
             }
             0x2140..=0x2143 if effective_bank <= 0x3F => {
                 // APU I/O ports — SNES→SPC700 write
+                // Simulates the SPC700 IPL upload protocol:
+                //   State 0 (WaitHandshake): ports return $AA/$BB, wait for $CC
+                //   State 1 (Uploading): echo counter on port 0, track port 1
+                //   State 2 (Executed): SPC program "running", ports return last values
                 let port = (offset - 0x2140) as usize;
                 self.apu_out[port] = val;
-                // SPC700 IPL upload protocol simulation:
-                // Before handshake: ignore writes (preserve $AA/$BB)
-                // After handshake ($CC on port 0): echo port 0 writes
-                // Stuck polling is detected on the read side and resets state.
-                if port == 0 {
-                    self.apu_port0_reads = 0; // Reset polling counter
-                }
-                if !self.apu_handshake_done {
-                    if port == 0 && val == 0xCC {
-                        self.apu_handshake_done = true;
-                        self.apu_in[0] = val;
+
+                match self.apu_state {
+                    0 => {
+                        // Waiting for handshake — BIOS writes $CC to port 0
+                        if port == 0 && val == 0xCC {
+                            log::debug!("APU: handshake $CC received, entering upload state");
+                            self.apu_state = 1;
+                            self.apu_in[0] = 0xCC; // Echo $CC
+                            // Set to $FF so first data counter ($00) = $FF+1 is expected
+                            self.apu_last_counter = 0xFF;
+                            self.apu_port1_val = 1; // Non-zero default (not execute)
+                        }
                     }
-                } else if port == 0 {
-                    self.apu_in[0] = val;
+                    1 => {
+                        // Uploading — echo port 0 writes (counter), track port 1
+                        if port == 1 {
+                            self.apu_port1_val = val;
+                        }
+                        if port == 0 {
+                            // Check if this is an execute or new-block command:
+                            // After a block, counter jumps by +2 (not +1).
+                            // If port 1 was 0 → execute. If port 1 != 0 → new block.
+                            let is_transition = val != self.apu_last_counter.wrapping_add(1);
+                            if is_transition && self.apu_port1_val == 0 {
+                                // Execute command — SPC program starts running
+                                log::debug!("APU: execute command (counter=${:02X}), SPC program running", val);
+                                self.apu_in[0] = val; // Echo final counter first
+                                self.apu_state = 2;
+                                // After echo is read, the SPC program "initializes"
+                                // and signals ready with $AA/$BB. We set a flag to
+                                // switch to $AA after the echo read.
+                                self.apu_echo_pending = true;
+                            } else if is_transition {
+                                // New block start — echo counter, reset port1 tracking
+                                log::debug!("APU: new block (counter=${:02X})", val);
+                                self.apu_in[0] = val;
+                                self.apu_last_counter = val;
+                                self.apu_port1_val = 1; // Reset for next transition
+                            } else {
+                                // Normal data byte — echo counter
+                                self.apu_in[0] = val;
+                                self.apu_last_counter = val;
+                            }
+                        }
+                    }
+                    2 => {
+                        // SPC program "running" — the SPC program always presents
+                        // $AA on port 0 when ready. Only $CC starts a new upload.
+                        if port == 0 {
+                            if val == 0xCC {
+                                log::debug!("APU: new upload to SPC program ($CC)");
+                                self.apu_state = 1;
+                                self.apu_in[0] = 0xCC;
+                                self.apu_last_counter = 0xFF;
+                                self.apu_port1_val = 1;
+                            }
+                            // Don't echo other port 0 writes — keep $AA
+                        }
+                    }
+                    _ => {}
                 }
             }
             0x2100..=0x21FF if effective_bank <= 0x3F => {
@@ -267,7 +370,13 @@ impl SnesBus {
 
     fn write_cpu_io(&mut self, addr: u16, val: u8) {
         match addr {
-            0x4200 => self.nmitimen = val,
+            0x4200 => {
+                let old = self.nmitimen;
+                self.nmitimen = val;
+                if val & 0x80 != 0 && old & 0x80 == 0 {
+                    log::debug!("SNES: NMI enabled (NMITIMEN=${:02X}), nmi_fire_count={}", val, self.nmi_fire_count);
+                }
+            }
             0x4201 => self.wrio = val,
             0x4202 => self.wrmpya = val,
             0x4203 => {

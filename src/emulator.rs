@@ -143,15 +143,11 @@ impl Emulator {
                 }
             }
 
-            // Extract attribute map from SNES VRAM tilemap.
-            // This is the key LLE feature — DATA_SND patches modify the BIOS
-            // attribute assignment code, producing per-tile palette variation
-            // that HLE can't replicate.
-            if let Some(attr_map) = snes.extract_attr_map() {
-                if let Some(ref mut sgb) = self.bus.sgb {
-                    sgb.attr_map = attr_map;
-                }
-            }
+            // The BIOS display pipeline doesn't fully reach the DATA_SND patched
+            // code due to incomplete scanline timing, so the SNES VRAM tilemap
+            // doesn't contain meaningful per-tile palette data.
+            // HLE commands (ATTR_SET, PAL_SET+attr file) already set attr_map
+            // correctly via sgb.rs, so we don't override from SNES VRAM.
         }
 
         // Apply palettes and handle masking (same as HLE path)

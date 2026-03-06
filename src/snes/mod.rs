@@ -64,9 +64,13 @@ impl SnesSys {
         // --- Phase 1: VBlank (scanlines 225-261, ~37 scanlines) ---
         self.bus.set_nmi_flag();
         self.bus.hvbjoy = 0x80; // VBlank active, auto-joypad NOT busy
+        self.bus.in_vblank = true;
+        self.bus.active_display_start = frame_start + 37 * CYCLES_PER_SCANLINE;
+        self.bus.icd2.set_tile_row(0x11); // VBlank indicator
 
         if self.bus.nmi_enabled() {
             self.cpu.set_nmi(true);
+            self.bus.nmi_fire_count += 1;
         }
 
         let vblank_end = frame_start + 37 * CYCLES_PER_SCANLINE;
@@ -75,46 +79,92 @@ impl SnesSys {
         // --- Phase 2: Active display (scanlines 0-224) ---
         self.cpu.set_nmi(false);
         self.bus.hvbjoy = 0x00;
+        self.bus.in_vblank = false;
+        self.bus.active_display_start = vblank_end;
 
-        // Compute H/V IRQ fire point if enabled
+        // Simulate GB tile row progression during active display.
+        // Each GB tile row = 8 scanlines ≈ 8 × 456 × 5.12 ≈ 18,678 SNES master cycles.
+        // We run in tile-row-sized chunks so the ICD2 $6000 shows progressive rows.
+        let cycles_per_tile_row = 8 * CYCLES_PER_SCANLINE; // ~10,912 SNES cycles
         let irq_enabled = self.bus.nmitimen & 0x30 != 0;
         let irq_cycle = if irq_enabled {
             let vtime = self.bus.vtime as u64;
-            // IRQ fires at VTIME scanlines into active display
             Some(vblank_end + vtime * CYCLES_PER_SCANLINE)
         } else {
             None
         };
-
         let mut irq_fired = false;
 
-        if let Some(irq_at) = irq_cycle {
-            // Run until IRQ point
-            if irq_at < target {
-                self.run_until(irq_at);
+        for tile_row in 0..18u8 {
+            self.bus.icd2.set_tile_row(tile_row);
+            let row_end = vblank_end + (tile_row as u64 + 1) * cycles_per_tile_row;
+            let row_target = row_end.min(target);
 
-                // Fire H/V IRQ
-                self.bus.timeup = 0x80;
-                self.cpu.irq_line = true;
-                irq_fired = true;
+            // Check for IRQ in this chunk
+            if !irq_fired {
+                if let Some(irq_at) = irq_cycle {
+                    if irq_at <= row_target && irq_at > self.cpu.cycles {
+                        self.run_until(irq_at);
+                        self.bus.timeup = 0x80;
+                        self.cpu.irq_line = true;
+                        irq_fired = true;
+                    }
+                }
+            }
+
+            self.run_until(row_target);
+        }
+
+        // Remaining active display after tile rows (scanlines 144-224)
+        self.bus.icd2.set_tile_row(0x11); // Back to VBlank indicator
+
+        // Check for IRQ in the remaining display period (scanlines 144-224)
+        if !irq_fired {
+            if let Some(irq_at) = irq_cycle {
+                if irq_at <= target && irq_at > self.cpu.cycles {
+                    self.run_until(irq_at);
+                    self.bus.timeup = 0x80;
+                    self.cpu.irq_line = true;
+                    irq_fired = true;
+                }
             }
         }
 
-        // Run remainder of active display
         self.run_until(target);
 
-        // Clear IRQ line if we fired it (the handler should have read $4211)
         if irq_fired {
             self.cpu.irq_line = false;
         }
 
-        // The SGB1 BIOS gates packet reading on WRAM $02F6 being nonzero.
-        // On real hardware, this is set during the BIOS intro animation sequence
-        // (checking cart header bytes at $064C/$0653). Force-enable after the SPC
-        // upload completes and the BIOS reaches its main loop (~30 frames).
-        if self.frame_count > 30 && self.bus.wram[0x02F6] == 0 {
-            self.bus.wram[0x02F6] = 1;
-            log::info!("SNES: force-enabled packet processing (WRAM[$02F6]=1)");
+        // The SGB1 BIOS has several gate flags that gate packet/display processing:
+        //   $02F6: enables packet reading (set during intro animation)
+        //   $02F8: handshake complete (requires 5× $F1 init packets from GB)
+        //   $0C4F: enables DATA_SND patch execution (set during command processing)
+        //   $0C48: enables per-tile attribute assignment in patched code
+        //   $02CA: enables display processing in main loop
+        // Force-enable all after the SPC upload completes.
+        if self.frame_count > 30 {
+            let gates: &[(usize, u8, &str)] = &[
+                (0x02F6, 1, "packet processing"),
+                (0x02F8, 1, "handshake flag"),
+                (0x02CA, 1, "display processing"),
+                (0x0C4F, 0xFF, "DATA_SND patch gate"),
+                (0x0C48, 1, "per-tile attribute gate"),
+            ];
+            for &(addr, val, desc) in gates {
+                if self.bus.wram[addr] == 0 {
+                    self.bus.wram[addr] = val;
+                    log::info!("SNES: force-enabled {} (WRAM[${:04X}]={:02X})", desc, addr, val);
+                }
+            }
+            // The BIOS CLI instruction at $B150 enables IRQ after init.
+            // Force-clear the I flag so IRQ handler ($B50A) can run.
+            self.cpu.p &= !0x04; // Clear FLAG_I
+
+            // Note: DATA_SND patched code at WRAM $0820 would apply per-tile palette
+            // attributes, but the BIOS display pipeline can't reach it without full
+            // scanline-accurate ICD2→DMA→VRAM emulation. The HLE path handles
+            // standard ATTR_SET/PAL_SET commands for per-tile palettes instead.
         }
 
         self.frame_count += 1;
@@ -122,9 +172,9 @@ impl SnesSys {
         // Periodic diagnostics (every 300 frames)
         if self.frame_count % 300 == 0 {
             log::debug!(
-                "SNES frame {}: PC={:02X}:{:04X} NMITIMEN=${:02X} bgmode=${:02X}",
+                "SNES frame {}: PC={:02X}:{:04X} NMITIMEN=${:02X} apu_state={}",
                 self.frame_count, self.cpu.pbr, self.cpu.pc,
-                self.bus.nmitimen, self.bus.ppu.bgmode,
+                self.bus.nmitimen, self.bus.apu_state,
             );
         }
     }
@@ -152,6 +202,8 @@ impl SnesSys {
 
     /// Step the CPU one instruction using raw pointer bus access.
     fn step_cpu(&mut self) {
+        // Update bus cycle counter so VCOUNT reads return correct scanline
+        self.bus.current_cpu_cycles = self.cpu.cycles;
         let bus_ptr = &mut self.bus as *mut SnesBus;
         let read_fn = move |addr: u32| -> u8 {
             unsafe { (*bus_ptr).read(addr) }
@@ -185,21 +237,21 @@ impl SnesSys {
         // so we apply WRAM patches immediately.
         if cmd == 0x0F {
             // DATA_SND format: byte0=cmd|len, byte1=addr_lo, byte2=addr_hi,
-            // byte3=bank, byte4..byte15=data (up to 11 bytes)
+            // byte3=bank, byte4=num_bytes, byte5..byte15=data (up to 11 bytes)
             let addr_lo = data[1] as u16;
             let addr_hi = data[2] as u16;
             let bank = data[3];
             let snes_addr = (addr_hi << 8) | addr_lo;
-            // DATA_SND always sends 11 data bytes (bytes 4-14) per packet
-            let num_bytes = 11;
+            let num_bytes = (data[4] as usize).min(11); // byte 4 is the count
             // DATA_SND writes to SNES WRAM (bank $00/$7E)
             if bank == 0x00 || bank == 0x7E {
                 for i in 0..num_bytes {
                     let wram_addr = snes_addr as usize + i;
                     if wram_addr < self.bus.wram.len() {
-                        self.bus.wram[wram_addr] = data[4 + i];
+                        self.bus.wram[wram_addr] = data[5 + i];
                     }
                 }
+                log::debug!("SNES: DATA_SND wrote {} bytes to WRAM ${:04X}", num_bytes, snes_addr);
             }
         }
 
