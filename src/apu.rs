@@ -159,6 +159,9 @@ struct SquareCh {
     env_timer: u8,
     volume_countdown: u8, // separate from env_timer, decremented when envelope_clock is not set
     sample_suppressed: bool, // first sample after trigger is suppressed (outputs 0)
+    just_reloaded: bool,     // true when last tick consumed all cycles exactly
+    did_tick: bool,          // true when duty_pos advanced, cleared on trigger
+    delay: u32,              // startup delay metadata (not consumed from cycles)
 
     // Envelope clock tracking
     envelope_clock: EnvelopeClock,
@@ -185,6 +188,9 @@ impl SquareCh {
             env_timer: 0,
             volume_countdown: 0,
             sample_suppressed: false,
+            just_reloaded: false,
+            did_tick: false,
+            delay: 0,
             envelope_clock: EnvelopeClock::default(),
             nrx2_raw: 0,
         }
@@ -195,6 +201,8 @@ impl SquareCh {
     }
 
     fn tick_freq(&mut self, mut cycles: u32) {
+        self.just_reloaded = false;
+        self.delay = self.delay.saturating_sub(cycles);
         loop {
             if self.freq_timer > cycles {
                 self.freq_timer -= cycles;
@@ -202,10 +210,15 @@ impl SquareCh {
             }
             cycles -= self.freq_timer;
             self.duty_pos = (self.duty_pos + 1) & 7;
+            self.did_tick = true;
             self.sample_suppressed = false;
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
                 self.freq_timer = 1;
+            }
+            if cycles == 0 {
+                self.just_reloaded = true;
+                return;
             }
         }
     }
@@ -670,8 +683,14 @@ impl Apu {
                 if self.ch4.enabled { v |= 0x08; }
                 v
             }
-            // Wave RAM
-            0xFF30..=0xFF3F => self.ch3.wave_ram[(addr - 0xFF30) as usize],
+            // Wave RAM: when CH3 is active, redirect to current sample position
+            0xFF30..=0xFF3F => {
+                if self.ch3.enabled {
+                    self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize]
+                } else {
+                    self.ch3.wave_ram[(addr - 0xFF30) as usize]
+                }
+            }
             _ => 0xFF,
         }
     }
@@ -679,9 +698,13 @@ impl Apu {
     // ── Register write ─────────────────────────────────────────────────────
 
     pub fn write(&mut self, addr: u16, val: u8) {
-        // Wave RAM always accessible
+        // Wave RAM: when CH3 is active, redirect write to current sample position
         if (0xFF30..=0xFF3F).contains(&addr) {
-            self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
+            if self.ch3.enabled {
+                self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize] = val;
+            } else {
+                self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
+            }
             return;
         }
 
@@ -745,18 +768,36 @@ impl Apu {
                     self.pcm_mask[0] &= self.ch1.volume | 0xF0;
                 }
             }
-            0xFF13 => self.ch1.freq = (self.ch1.freq & 0x700) | val as u16,
+            0xFF13 => {
+                self.ch1.freq = (self.ch1.freq & 0x700) | val as u16;
+                if self.ch1.just_reloaded {
+                    self.ch1.freq_timer = self.ch1.reload_period();
+                }
+            }
             0xFF14 => {
+                let old_freq = self.ch1.freq;
                 self.ch1.freq = (self.ch1.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                if self.ch1.just_reloaded {
+                    self.ch1.freq_timer = self.ch1.reload_period();
+                }
+                // did_tick frequency change edge case
+                if val & 0x80 == 0 && self.ch1.enabled {
+                    let old_hi = (old_freq >> 8) & 7;
+                    let new_hi = (self.ch1.freq >> 8) & 7;
+                    if old_hi == 7 && new_hi != 7 && self.ch1.did_tick {
+                        if (self.ch1.freq_timer.wrapping_sub(2)) / 4 == (self.ch1.freq ^ 0x7FF) as u32 {
+                            self.ch1.duty_pos = self.ch1.duty_pos.wrapping_sub(1) & 7;
+                            self.ch1.sample_suppressed = false;
+                        }
+                    }
+                }
                 let was_enabled = self.ch1.len_enable;
                 self.ch1.len_enable = val & 0x40 != 0;
-                // Extra length clock when enabling length and div_divider is even
-                // (odd div_divider values clock length, so even = "not about to tick")
                 if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch1.clock_length();
                 }
                 if val & 0x80 != 0 {
-                    self.trigger_ch1();
+                    self.trigger_ch1(val);
                 }
             }
             // ── CH2 ────────────────────────────────────────────────────────
@@ -779,16 +820,36 @@ impl Apu {
                     self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
                 }
             }
-            0xFF18 => self.ch2.freq = (self.ch2.freq & 0x700) | val as u16,
+            0xFF18 => {
+                self.ch2.freq = (self.ch2.freq & 0x700) | val as u16;
+                if self.ch2.just_reloaded {
+                    self.ch2.freq_timer = self.ch2.reload_period();
+                }
+            }
             0xFF19 => {
+                let old_freq = self.ch2.freq;
                 self.ch2.freq = (self.ch2.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                if self.ch2.just_reloaded {
+                    self.ch2.freq_timer = self.ch2.reload_period();
+                }
+                // did_tick frequency change edge case
+                if val & 0x80 == 0 && self.ch2.enabled {
+                    let old_hi = (old_freq >> 8) & 7;
+                    let new_hi = (self.ch2.freq >> 8) & 7;
+                    if old_hi == 7 && new_hi != 7 && self.ch2.did_tick {
+                        if (self.ch2.freq_timer.wrapping_sub(2)) / 4 == (self.ch2.freq ^ 0x7FF) as u32 {
+                            self.ch2.duty_pos = self.ch2.duty_pos.wrapping_sub(1) & 7;
+                            self.ch2.sample_suppressed = false;
+                        }
+                    }
+                }
                 let was_enabled = self.ch2.len_enable;
                 self.ch2.len_enable = val & 0x40 != 0;
                 if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch2.clock_length();
                 }
                 if val & 0x80 != 0 {
-                    self.trigger_ch2();
+                    self.trigger_ch2(val);
                 }
             }
             // ── CH3 ────────────────────────────────────────────────────────
@@ -857,7 +918,7 @@ impl Apu {
 
     // ── Channel triggers ───────────────────────────────────────────────────
 
-    fn trigger_ch1(&mut self) {
+    fn trigger_ch1(&mut self, val: u8) {
         let was_active = self.ch1.enabled;
         self.ch1.enabled = true;
         if self.ch1.length_counter == 0 {
@@ -870,17 +931,39 @@ impl Apu {
         self.ch1.envelope_clock.clock = false;
         // Note: should_lock is NOT reset on trigger (hardware behavior)
 
-        // Trigger delay: lf_div-dependent initial countdown
-        // Not active: delay = 6 - lf_div (2MHz ticks) → (6 - lf_div) * 2 T-cycles
-        // Already active: delay = 4 - lf_div (2MHz ticks) → (4 - lf_div) * 2 T-cycles
         let lf = if self.lf_div { 1u32 } else { 0 };
         let base = (self.ch1.freq ^ 0x7FF) as u32 * 4;
+        let mut force_unsuppressed = false;
+
         if !was_active {
-            self.ch1.freq_timer = base + (6 - lf) * 2;
-            self.ch1.sample_suppressed = true;
+            // Retrigger duty advance (not active → active)
+            if val & 4 == 0
+                && ((self.ch1.freq_timer.wrapping_sub(self.ch1.delay).wrapping_sub(2)) / 4) & 0x400 == 0
+            {
+                self.ch1.duty_pos = (self.ch1.duty_pos + 1) & 7;
+                force_unsuppressed = true;
+            }
+            self.ch1.delay = (7 - lf) * 2;
+            self.ch1.freq_timer = base + self.ch1.delay;
+            self.ch1.sample_suppressed = !force_unsuppressed;
         } else {
-            self.ch1.freq_timer = base + (4 - lf) * 2;
+            // Retrigger duty advance (already active)
+            let old_freq = self.ch1.freq;
+            if !self.ch1.just_reloaded
+                && val & 4 == 0
+                && ((self.ch1.freq_timer.wrapping_sub(self.ch1.delay).wrapping_sub(4)) / 4) & 0x400 == 0
+            {
+                self.ch1.duty_pos = (self.ch1.duty_pos + 1) & 7;
+                self.ch1.sample_suppressed = false;
+            }
+            let mut extra_delay = 0u32;
+            if self.ch1.freq == 0x7FF && old_freq != 0x7FF && self.ch1.sample_suppressed {
+                extra_delay = 4;
+            }
+            self.ch1.delay = (5 - lf + extra_delay) * 2;
+            self.ch1.freq_timer = base + self.ch1.delay;
         }
+        self.ch1.did_tick = false;
 
         self.sweep.shadow   = self.ch1.freq;
         self.sweep.neg_used = false;
@@ -896,7 +979,7 @@ impl Apu {
         }
     }
 
-    fn trigger_ch2(&mut self) {
+    fn trigger_ch2(&mut self, val: u8) {
         let was_active = self.ch2.enabled;
         self.ch2.enabled = true;
         if self.ch2.length_counter == 0 {
@@ -910,12 +993,37 @@ impl Apu {
 
         let lf = if self.lf_div { 1u32 } else { 0 };
         let base = (self.ch2.freq ^ 0x7FF) as u32 * 4;
+        let mut force_unsuppressed = false;
+
         if !was_active {
-            self.ch2.freq_timer = base + (6 - lf) * 2;
-            self.ch2.sample_suppressed = true;
+            // Retrigger duty advance (not active → active)
+            if val & 4 == 0
+                && ((self.ch2.freq_timer.wrapping_sub(self.ch2.delay).wrapping_sub(2)) / 4) & 0x400 == 0
+            {
+                self.ch2.duty_pos = (self.ch2.duty_pos + 1) & 7;
+                force_unsuppressed = true;
+            }
+            self.ch2.delay = (7 - lf) * 2;
+            self.ch2.freq_timer = base + self.ch2.delay;
+            self.ch2.sample_suppressed = !force_unsuppressed;
         } else {
-            self.ch2.freq_timer = base + (4 - lf) * 2;
+            // Retrigger duty advance (already active)
+            let old_freq = self.ch2.freq;
+            if !self.ch2.just_reloaded
+                && val & 4 == 0
+                && ((self.ch2.freq_timer.wrapping_sub(self.ch2.delay).wrapping_sub(4)) / 4) & 0x400 == 0
+            {
+                self.ch2.duty_pos = (self.ch2.duty_pos + 1) & 7;
+                self.ch2.sample_suppressed = false;
+            }
+            let mut extra_delay = 0u32;
+            if self.ch2.freq == 0x7FF && old_freq != 0x7FF && self.ch2.sample_suppressed {
+                extra_delay = 4;
+            }
+            self.ch2.delay = (5 - lf + extra_delay) * 2;
+            self.ch2.freq_timer = base + self.ch2.delay;
         }
+        self.ch2.did_tick = false;
 
         if !self.ch2.dac_on {
             self.ch2.enabled = false;
@@ -1145,8 +1253,8 @@ impl Apu {
         }
 
         // Advance all frequency timers
-        self.ch1.tick_freq(cycles);
-        self.ch2.tick_freq(cycles);
+        if self.ch1.enabled { self.ch1.tick_freq(cycles); }
+        if self.ch2.enabled { self.ch2.tick_freq(cycles); }
         self.ch3.tick_freq(cycles);
         self.ch4.tick_freq(cycles);
 
