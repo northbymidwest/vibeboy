@@ -351,15 +351,15 @@ fn main() {
             fps_timer = Instant::now();
         }
 
-        // ── Frame rate cap (skip during fast-forward) ────────────────────────
-        if !fast_forward {
-            let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
-            if remaining > Duration::from_millis(2) {
-                std::thread::sleep(remaining - Duration::from_millis(2));
-            }
-            while frame_start.elapsed() < FRAME_DURATION {
-                std::hint::spin_loop();
-            }
+        // ── Frame rate cap ────────────────────────────────────────────────────
+        // Normal: cap to ~59.73 fps. Fast-forward: same wall-clock cap but we
+        // ran 4 emulated frames, so effective speed is 4×.
+        let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
+        if remaining > Duration::from_millis(2) {
+            std::thread::sleep(remaining - Duration::from_millis(2));
+        }
+        while frame_start.elapsed() < FRAME_DURATION {
+            std::hint::spin_loop();
         }
         frame_start = Instant::now();
     }
