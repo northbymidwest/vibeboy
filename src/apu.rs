@@ -382,6 +382,12 @@ pub struct Apu {
 
     // Output buffer (interleaved L/R f32 pairs)
     pub sample_buf: Vec<f32>,
+
+    // High-pass filter state (models the coupling capacitor on real hardware)
+    hpf_left: f32,
+    hpf_right: f32,
+    hpf_prev_in_l: f32,
+    hpf_prev_in_r: f32,
 }
 
 impl Apu {
@@ -399,6 +405,10 @@ impl Apu {
             fs_step: 0,
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
+            hpf_left: 0.0,
+            hpf_right: 0.0,
+            hpf_prev_in_l: 0.0,
+            hpf_prev_in_r: 0.0,
         };
         // Post-boot CH1 state: registers match what boot ROM left behind,
         // but the envelope has decayed volume to 0 during the boot animation.
@@ -700,13 +710,20 @@ impl Apu {
     // ── Sample output ──────────────────────────────────────────────────────
 
     fn emit_sample(&mut self) {
-        let o1 = self.ch1.output() as i32;
-        let o2 = self.ch2.output() as i32;
-        let o3 = self.ch3.output() as i32;
-        let o4 = self.ch4.output() as i32;
+        // Bipolar DAC model: digital 0-15 maps to -7.5..+7.5.
+        // When DAC is on, digital 0 contributes a negative DC offset.
+        // This enables the NR50 PCM technique (e.g. Warlocked voice samples).
+        let dac_output = |digital: u8, dac_on: bool| -> f32 {
+            if dac_on { digital as f32 - 7.5 } else { 0.0 }
+        };
 
-        let mut left = 0i32;
-        let mut right = 0i32;
+        let o1 = dac_output(self.ch1.output(), self.ch1.dac_on);
+        let o2 = dac_output(self.ch2.output(), self.ch2.dac_on);
+        let o3 = dac_output(self.ch3.output(), self.ch3.dac_on);
+        let o4 = dac_output(self.ch4.output(), self.ch4.dac_on);
+
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
 
         // NR51: bits 7-4 = left (CH4,CH3,CH2,CH1), bits 3-0 = right
         if self.nr51 & 0x10 != 0 { left  += o1; }
@@ -719,15 +736,23 @@ impl Apu {
         if self.nr51 & 0x08 != 0 { right += o4; }
 
         // NR50 volume 0-7 → multiplier 1-8
-        let lvol = ((self.nr50 >> 4) & 0x07) as i32 + 1;
-        let rvol = (self.nr50 & 0x07) as i32 + 1;
+        let lvol = ((self.nr50 >> 4) & 0x07) as f32 + 1.0;
+        let rvol = (self.nr50 & 0x07) as f32 + 1.0;
 
-        // Normalize: 4 channels × 15 peak × 8 max vol = 480
-        let l = (left  * lvol) as f32 / 480.0;
-        let r = (right * rvol) as f32 / 480.0;
+        // Normalize: 4 channels × 7.5 peak × 8 max vol = 240
+        let l = left  * lvol / 240.0;
+        let r = right * rvol / 240.0;
 
-        self.sample_buf.push(l);
-        self.sample_buf.push(r);
+        // High-pass filter (coupling capacitor): removes DC offset from bipolar DAC.
+        // Cutoff ~10 Hz at 44.1 kHz: alpha = 1 - (1 / (44100 / (2π * 10))) ≈ 0.9986
+        const HPF_ALPHA: f32 = 0.9986;
+        self.hpf_left  = HPF_ALPHA * (self.hpf_left + l - self.hpf_prev_in_l);
+        self.hpf_right = HPF_ALPHA * (self.hpf_right + r - self.hpf_prev_in_r);
+        self.hpf_prev_in_l = l;
+        self.hpf_prev_in_r = r;
+
+        self.sample_buf.push(self.hpf_left);
+        self.sample_buf.push(self.hpf_right);
     }
 
     // ── Main step ──────────────────────────────────────────────────────────
@@ -764,4 +789,5 @@ impl Apu {
     pub fn drain_samples(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.sample_buf)
     }
+
 }
