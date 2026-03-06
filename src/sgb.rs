@@ -383,33 +383,43 @@ impl Sgb {
             let pal_border = (pal_data >> 2) & 0x03;
             let pal_outside = (pal_data >> 4) & 0x03;
 
-            let set_inside = ctrl & 0x01 != 0;
-            let set_border = ctrl & 0x02 != 0;
+            let mut set_inside = ctrl & 0x01 != 0;
+            let mut set_border = ctrl & 0x02 != 0;
             let set_outside = ctrl & 0x04 != 0;
 
-            // Edge case: if x1==x2 or y1==y2, there's no "inside"
-            let has_inside = x2 > x1 + 1 || (x2 > x1 && y2 > y1 + 1);
+            // SameBoy behavior: when only inside is set (no border/outside),
+            // automatically extend inside palette to the border.
+            // When only outside is set (no border/inside), extend to border.
+            let mut pal_border_eff = pal_border;
+            if set_inside && !set_border && !set_outside {
+                set_border = true;
+                pal_border_eff = pal_inside;
+            } else if set_outside && !set_border && !set_inside {
+                set_border = true;
+                pal_border_eff = pal_outside;
+            }
+
+            let x1 = x1 & 0x1F;
+            let y1 = y1 & 0x1F;
+            let x2 = x2 & 0x1F;
+            let y2 = y2 & 0x1F;
 
             for ty in 0..18usize {
                 for tx in 0..20usize {
-                    let in_x = tx >= x1 && tx <= x2;
-                    let in_y = ty >= y1 && ty <= y2;
-
-                    if !in_x || !in_y {
+                    if tx < x1 || tx > x2 || ty < y1 || ty > y2 {
                         // Outside the rectangle
                         if set_outside {
                             self.attr_map[ty][tx] = pal_outside;
                         }
+                    } else if tx > x1 && tx < x2 && ty > y1 && ty < y2 {
+                        // Inside the rectangle (strictly)
+                        if set_inside {
+                            self.attr_map[ty][tx] = pal_inside;
+                        }
                     } else {
-                        let on_border = tx == x1 || tx == x2 || ty == y1 || ty == y2;
-                        if on_border || !has_inside {
-                            if set_border {
-                                self.attr_map[ty][tx] = pal_border;
-                            }
-                        } else {
-                            if set_inside {
-                                self.attr_map[ty][tx] = pal_inside;
-                            }
+                        // Border (on the edges)
+                        if set_border {
+                            self.attr_map[ty][tx] = pal_border_eff;
                         }
                     }
                 }
@@ -427,7 +437,7 @@ impl Sgb {
             let data = self.packet_buf[idx];
             let line = (data & 0x1F) as usize;
             let pal = (data >> 5) & 0x03;
-            let horizontal = data & 0x80 == 0;
+            let horizontal = data & 0x80 != 0;
 
             if horizontal {
                 if line < 18 {
@@ -448,37 +458,26 @@ impl Sgb {
     /// ATTR_DIV: Divide screen horizontally or vertically
     fn cmd_attr_div(&mut self) {
         let data = self.packet_buf[1];
-        let pal_above_left = data & 0x03;
+        // Bits 0-1: palette below/right of line
+        // Bits 2-3: palette on the line
+        // Bits 4-5: palette above/left of line
+        let pal_below_right = data & 0x03;
         let pal_line = (data >> 2) & 0x03;
-        let pal_below_right = (data >> 4) & 0x03;
-        let horizontal = data & 0x40 == 0;
-        let line = self.packet_buf[2] as usize;
+        let pal_above_left = (data >> 4) & 0x03;
+        let horizontal = data & 0x40 != 0;
+        let line = (self.packet_buf[2] & 0x1F) as usize;
 
-        if horizontal {
-            for ty in 0..18usize {
-                let pal = if ty < line {
-                    pal_above_left
-                } else if ty == line {
-                    pal_line
-                } else {
-                    pal_below_right
-                };
-                for tx in 0..20 {
-                    self.attr_map[ty][tx] = pal;
-                }
-            }
-        } else {
+        for ty in 0..18usize {
             for tx in 0..20usize {
-                let pal = if tx < line {
+                let coord = if horizontal { ty } else { tx };
+                let pal = if coord < line {
                     pal_above_left
-                } else if tx == line {
+                } else if coord == line {
                     pal_line
                 } else {
                     pal_below_right
                 };
-                for ty in 0..18 {
-                    self.attr_map[ty][tx] = pal;
-                }
+                self.attr_map[ty][tx] = pal;
             }
         }
     }
@@ -498,7 +497,7 @@ impl Sgb {
             if ty >= 18 || tx >= 20 { break; }
             let byte_idx = 6 + i / 4;
             if byte_idx >= self.packet_buf.len() { break; }
-            let shift = (i % 4) * 2;
+            let shift = (3 - (i % 4)) * 2;
             let pal = (self.packet_buf[byte_idx] >> shift) & 0x03;
             self.attr_map[ty][tx] = pal;
 
