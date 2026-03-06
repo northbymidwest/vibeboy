@@ -11,6 +11,8 @@
 ///   Steps 2,6     → CH1 sweep
 ///   Step  7       → volume envelopes
 
+use std::sync::Arc;
+
 const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
     [1, 0, 0, 0, 0, 0, 0, 1], // 25%
@@ -20,6 +22,96 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
 
 // Noise divisor table (for NR43 bits 2-0)
 const NOISE_DIVISORS: [u32; 8] = [8, 16, 32, 48, 64, 80, 96, 112];
+
+// ── BLIP buffer (band-limited synthesis) ──────────────────────────────────
+
+const BLIP_WIDTH: usize = 64;
+const BLIP_PHASES: usize = 256;
+const BLIP_BUF_SIZE: usize = BLIP_WIDTH * 2; // 128
+const BLIP_ONE: i32 = 0x10000; // 65536
+
+#[derive(Clone)]
+struct BlipBuf {
+    steps: Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>,
+    buf_l: [i32; BLIP_BUF_SIZE],
+    buf_r: [i32; BLIP_BUF_SIZE],
+    pos: usize,
+    out_l: i32,
+    out_r: i32,
+}
+
+impl BlipBuf {
+    fn new() -> Self {
+        // Compute Blackman-windowed sinc filter
+        let n = BLIP_WIDTH * BLIP_PHASES; // 16384 points
+        let lowpass = 15.0_f64 / 16.0;
+        let mut master = vec![0.0_f64; n];
+
+        for i in 0..n {
+            // Center the sinc at n/2
+            let x = (i as f64 - n as f64 / 2.0) * std::f64::consts::PI * 2.0 * lowpass / BLIP_PHASES as f64;
+            let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
+
+            // Blackman window
+            let theta = 2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64;
+            let a0 = 7938.0 / 18608.0;
+            let a1 = 9240.0 / 18608.0;
+            let a2 = 1430.0 / 18608.0;
+            let window = a0 - a1 * theta.cos() + a2 * (2.0 * theta).cos();
+
+            master[i] = sinc * window;
+        }
+
+        // Normalize so each phase's taps sum to ~1.0 (total master sums to BLIP_PHASES)
+        let sum: f64 = master.iter().sum();
+        let inv = BLIP_PHASES as f64 / sum;
+        for v in &mut master {
+            *v *= inv;
+        }
+
+        // Extract phases: phase p, tap t → master[t * BLIP_PHASES + p]
+        let mut steps = Box::new([[0i32; BLIP_WIDTH]; BLIP_PHASES]);
+        for p in 0..BLIP_PHASES {
+            for t in 0..BLIP_WIDTH {
+                steps[p][t] = (master[t * BLIP_PHASES + p] * BLIP_ONE as f64) as i32;
+            }
+        }
+
+        BlipBuf {
+            steps: Arc::from(steps),
+            buf_l: [0; BLIP_BUF_SIZE],
+            buf_r: [0; BLIP_BUF_SIZE],
+            pos: 0,
+            out_l: 0,
+            out_r: 0,
+        }
+    }
+
+    /// Record an amplitude transition (delta) at a fractional output position.
+    fn update(&mut self, delta_l: i32, delta_r: i32, phase: usize) {
+        let phase_idx = phase & (BLIP_PHASES - 1);
+        let delay = phase / BLIP_PHASES;
+        let coeffs = &self.steps[phase_idx];
+        for i in 0..BLIP_WIDTH {
+            let offset = (self.pos + i + delay) & (BLIP_BUF_SIZE - 1);
+            self.buf_l[offset] += delta_l * coeffs[i];
+            self.buf_r[offset] += delta_r * coeffs[i];
+        }
+    }
+
+    /// Read one output sample from the circular buffer.
+    fn read(&mut self) -> (f32, f32) {
+        self.out_l += self.buf_l[self.pos];
+        self.buf_l[self.pos] = 0;
+        self.out_r += self.buf_r[self.pos];
+        self.buf_r[self.pos] = 0;
+        self.pos = (self.pos + 1) & (BLIP_BUF_SIZE - 1);
+        (
+            self.out_l as f32 / BLIP_ONE as f32,
+            self.out_r as f32 / BLIP_ONE as f32,
+        )
+    }
+}
 
 // ── Square channel ─────────────────────────────────────────────────────────
 
@@ -388,6 +480,11 @@ pub struct Apu {
     // Output buffer (interleaved L/R f32 pairs)
     pub sample_buf: Vec<f32>,
 
+    // BLIP buffer for band-limited resampling
+    blip: BlipBuf,
+    prev_left: i32,
+    prev_right: i32,
+
     // High-pass filter state (models the coupling capacitor on real hardware)
     hpf_left: f32,
     hpf_right: f32,
@@ -410,6 +507,9 @@ impl Apu {
             fs_step: 0,
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
+            blip: BlipBuf::new(),
+            prev_left: 0,
+            prev_right: 0,
             hpf_left: 0.0,
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
@@ -606,8 +706,14 @@ impl Apu {
                 }
             }
             // ── Global ─────────────────────────────────────────────────────
-            0xFF24 => self.nr50 = val,
-            0xFF25 => self.nr51 = val,
+            0xFF24 => {
+                self.nr50 = val;
+                self.record_mix_delta();
+            }
+            0xFF25 => {
+                self.nr51 = val;
+                self.record_mix_delta();
+            }
             _ => {}
         }
     }
@@ -674,6 +780,16 @@ impl Apu {
     // ── Power off ──────────────────────────────────────────────────────────
 
     fn power_off(&mut self) {
+        // Record delta to silence before resetting channels
+        let phase = self.current_blip_phase();
+        let dl = -self.prev_left;
+        let dr = -self.prev_right;
+        if dl != 0 || dr != 0 {
+            self.blip.update(dl, dr, phase);
+        }
+        self.prev_left = 0;
+        self.prev_right = 0;
+
         self.ch1 = SquareCh::new();
         self.sweep = Sweep::new();
         self.ch2 = SquareCh::new();
@@ -712,25 +828,24 @@ impl Apu {
         self.fs_step = (self.fs_step + 1) & 7;
     }
 
-    // ── Sample output ──────────────────────────────────────────────────────
+    // ── Integer mixing (for BLIP delta detection) ─────────────────────────
 
-    fn emit_sample(&mut self) {
-        // Bipolar DAC model: digital 0-15 maps to -7.5..+7.5.
-        // When DAC is on, digital 0 contributes a negative DC offset.
-        // This enables the NR50 PCM technique (e.g. Warlocked voice samples).
-        let dac_output = |digital: u8, dac_on: bool| -> f32 {
-            if dac_on { digital as f32 - 7.5 } else { 0.0 }
+    /// Compute current mixed L/R as integers.
+    /// DAC: digital 0-15 → bipolar -15..+15 (×2-15), DAC off → 0.
+    /// After panning sum: range ±60. After NR50 volume (×1-8): range ±480.
+    fn mix_integer(&self) -> (i32, i32) {
+        let dac = |digital: u8, dac_on: bool| -> i32 {
+            if dac_on { digital as i32 * 2 - 15 } else { 0 }
         };
 
-        let o1 = dac_output(self.ch1.output(), self.ch1.dac_on);
-        let o2 = dac_output(self.ch2.output(), self.ch2.dac_on);
-        let o3 = dac_output(self.ch3.output(), self.ch3.dac_on);
-        let o4 = dac_output(self.ch4.output(), self.ch4.dac_on);
+        let o1 = dac(self.ch1.output(), self.ch1.dac_on);
+        let o2 = dac(self.ch2.output(), self.ch2.dac_on);
+        let o3 = dac(self.ch3.output(), self.ch3.dac_on);
+        let o4 = dac(self.ch4.output(), self.ch4.dac_on);
 
-        let mut left = 0.0f32;
-        let mut right = 0.0f32;
+        let mut left = 0i32;
+        let mut right = 0i32;
 
-        // NR51: bits 7-4 = left (CH4,CH3,CH2,CH1), bits 3-0 = right
         if self.nr51 & 0x10 != 0 { left  += o1; }
         if self.nr51 & 0x20 != 0 { left  += o2; }
         if self.nr51 & 0x40 != 0 { left  += o3; }
@@ -740,13 +855,37 @@ impl Apu {
         if self.nr51 & 0x04 != 0 { right += o3; }
         if self.nr51 & 0x08 != 0 { right += o4; }
 
-        // NR50 volume 0-7 → multiplier 1-8
-        let lvol = ((self.nr50 >> 4) & 0x07) as f32 + 1.0;
-        let rvol = (self.nr50 & 0x07) as f32 + 1.0;
+        let lvol = ((self.nr50 >> 4) & 0x07) as i32 + 1;
+        let rvol = (self.nr50 & 0x07) as i32 + 1;
 
-        // Normalize: 4 channels × 7.5 peak × 8 max vol = 240
-        let l = left  * lvol / 240.0;
-        let r = right * rvol / 240.0;
+        (left * lvol, right * rvol)
+    }
+
+    /// Compute fractional BLIP phase from sample accumulator position.
+    fn current_blip_phase(&self) -> usize {
+        (self.sample_accum as usize * BLIP_PHASES / SAMPLE_ACCUM_THRESH as usize)
+            .min(BLIP_PHASES * 2 - 1)
+    }
+
+    /// Record a mix delta to the BLIP buffer if the mixed output has changed.
+    fn record_mix_delta(&mut self) {
+        let (new_l, new_r) = self.mix_integer();
+        let dl = new_l - self.prev_left;
+        let dr = new_r - self.prev_right;
+        if dl != 0 || dr != 0 {
+            let phase = self.current_blip_phase();
+            self.blip.update(dl, dr, phase);
+            self.prev_left = new_l;
+            self.prev_right = new_r;
+        }
+    }
+
+    /// Emit one 96 kHz sample from the BLIP buffer, then apply HPF.
+    fn emit_sample(&mut self) {
+        let (l, r) = self.blip.read();
+        // Normalize ±480 → ±1.0
+        let l = l / 480.0;
+        let r = r / 480.0;
 
         // High-pass filter (coupling capacitor): removes DC offset from bipolar DAC.
         // Cutoff ~10 Hz at 96 kHz: alpha = 1 - (2π × 10 / 96000) ≈ 0.9993
@@ -764,6 +903,12 @@ impl Apu {
 
     pub fn step(&mut self, cycles: u32) {
         if !self.power {
+            // Still need to emit silence at the correct rate
+            self.sample_accum += cycles as u64 * SAMPLE_ACCUM_TICK;
+            while self.sample_accum >= SAMPLE_ACCUM_THRESH {
+                self.sample_accum -= SAMPLE_ACCUM_THRESH;
+                self.emit_sample();
+            }
             return;
         }
 
@@ -780,7 +925,10 @@ impl Apu {
             self.clock_frame_seq();
         }
 
-        // Sample generation: emit one sample every CPU_RATE/SAMPLE_RATE T-cycles
+        // Check for amplitude change and record delta to BLIP buffer
+        self.record_mix_delta();
+
+        // Sample generation: emit one BLIP sample every CPU_RATE/SAMPLE_RATE T-cycles
         self.sample_accum += cycles as u64 * SAMPLE_ACCUM_TICK;
         while self.sample_accum >= SAMPLE_ACCUM_THRESH {
             self.sample_accum -= SAMPLE_ACCUM_THRESH;
