@@ -45,7 +45,41 @@ pub struct Serial {
     pub serial_output: Vec<u8>,
 }
 
+#[derive(Clone)]
+pub struct SerialSnapshot {
+    pub sb: u8,
+    pub sc: u8,
+    pub interrupt: bool,
+    pub serial_count: u8,
+    pub master_clock: bool,
+    pub serial_mask: u16,
+    pub cgb_mode: bool,
+}
+
 impl Serial {
+    pub fn take_snapshot(&self) -> SerialSnapshot {
+        SerialSnapshot {
+            sb: self.sb,
+            sc: self.sc,
+            interrupt: self.interrupt,
+            serial_count: self.serial_count,
+            master_clock: self.master_clock,
+            serial_mask: self.serial_mask,
+            cgb_mode: self.cgb_mode,
+        }
+    }
+
+    pub fn apply_snapshot(&mut self, s: &SerialSnapshot) {
+        self.sb = s.sb;
+        self.sc = s.sc;
+        self.interrupt = s.interrupt;
+        self.serial_count = s.serial_count;
+        self.master_clock = s.master_clock;
+        self.serial_mask = s.serial_mask;
+        self.cgb_mode = s.cgb_mode;
+        // device and serial_output are transient — not restored
+    }
+
     pub fn new(cgb_mode: bool) -> Self {
         Serial {
             sb: 0x00,

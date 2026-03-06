@@ -21,6 +21,7 @@ struct FifoPixel {
     bg_palette: u8,         // original BG palette underneath sprite
 }
 
+#[derive(Clone)]
 struct PixelFifo {
     buf: [FifoPixel; 16],
     head: usize,
@@ -113,6 +114,7 @@ impl Fetcher {
     }
 }
 
+#[derive(Clone)]
 pub struct Ppu {
     /// VRAM banks 0 and 1 (8 KiB each)
     pub vram: [[u8; 0x2000]; 2],

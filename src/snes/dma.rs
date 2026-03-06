@@ -28,6 +28,7 @@ impl DmaChannel {
     }
 }
 
+#[derive(Clone)]
 pub struct DmaController {
     pub channels: [DmaChannel; 8],
 }

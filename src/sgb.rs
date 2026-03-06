@@ -14,6 +14,7 @@ enum PacketState {
     ReceivingBits,
 }
 
+#[derive(Clone)]
 pub struct Sgb {
     // ── Packet protocol state ──
     state: PacketState,

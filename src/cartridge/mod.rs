@@ -16,6 +16,10 @@ pub trait Cartridge: Send {
     fn has_camera(&self) -> bool { false }
     /// Feed a 128×112 grayscale image from a webcam into the camera sensor.
     fn set_camera_image(&mut self, _grayscale: &[u8; 128 * 112]) {}
+    /// Snapshot mutable cartridge state (registers + RAM, not ROM) for save states / rewind.
+    fn snapshot_state(&self) -> Vec<u8> { Vec::new() }
+    /// Restore mutable cartridge state from a previous snapshot.
+    fn restore_state(&mut self, _data: &[u8]) {}
 }
 
 // ── ROM-only ──────────────────────────────────────────────────────────────────
@@ -131,6 +135,25 @@ impl Cartridge for Mbc1 {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.ram_enabled as u8);
+        s.push(self.banking_mode);
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 10 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.ram_enabled = d[8] != 0;
+        self.banking_mode = d[9];
+        let ram = &d[10..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
+    }
 }
 
 // ── MBC2 ──────────────────────────────────────────────────────────────────────
@@ -188,6 +211,21 @@ impl Cartridge for Mbc2 {
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
+    }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.push(self.ram_enabled as u8);
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 5 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_enabled = d[4] != 0;
+        let ram = &d[5..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
     }
 }
 
@@ -391,6 +429,30 @@ impl Cartridge for Mbc3 {
             self.rtc_base = Instant::now();
         }
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.ram_enabled as u8);
+        s.push(self.rtc_latch_ready as u8);
+        s.extend_from_slice(&self.rtc_regs);
+        s.extend_from_slice(&self.rtc_latched);
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 20 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.ram_enabled = d[8] != 0;
+        self.rtc_latch_ready = d[9] != 0;
+        self.rtc_regs.copy_from_slice(&d[10..15]);
+        self.rtc_latched.copy_from_slice(&d[15..20]);
+        self.rtc_base = Instant::now();
+        let ram = &d[20..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
+    }
 }
 
 // ── MBC5 ──────────────────────────────────────────────────────────────────────
@@ -455,6 +517,23 @@ impl Cartridge for Mbc5 {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.ram_enabled as u8);
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 9 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.ram_enabled = d[8] != 0;
+        let ram = &d[9..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
+    }
 }
 
 // ── ROM+RAM ──────────────────────────────────────────────────────────────────
@@ -487,6 +566,11 @@ impl Cartridge for RomRam {
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
+    }
+    fn snapshot_state(&self) -> Vec<u8> { self.ram.clone() }
+    fn restore_state(&mut self, d: &[u8]) {
+        let len = self.ram.len().min(d.len());
+        self.ram[..len].copy_from_slice(&d[..len]);
     }
 }
 
@@ -620,6 +704,43 @@ impl Cartridge for Mbc6 {
         if data.len() > ram_len {
             let flash_len = self.flash.len().min(data.len() - ram_len);
             self.flash[..flash_len].copy_from_slice(&data[ram_len..ram_len + flash_len]);
+        }
+    }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank_a as u32).to_le_bytes());
+        s.extend_from_slice(&(self.rom_bank_b as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank_a as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank_b as u32).to_le_bytes());
+        s.push(self.ram_enabled_a as u8);
+        s.push(self.ram_enabled_b as u8);
+        s.push(self.flash_enabled as u8);
+        s.push(self.flash_write_enabled as u8);
+        s.push(self.bank_a_is_flash as u8);
+        s.push(self.bank_b_is_flash as u8);
+        s.extend_from_slice(&self.ram);
+        s.extend_from_slice(&self.flash);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 22 { return; }
+        self.rom_bank_a = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.rom_bank_b = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.ram_bank_a = u32::from_le_bytes([d[8],d[9],d[10],d[11]]) as usize;
+        self.ram_bank_b = u32::from_le_bytes([d[12],d[13],d[14],d[15]]) as usize;
+        self.ram_enabled_a = d[16] != 0;
+        self.ram_enabled_b = d[17] != 0;
+        self.flash_enabled = d[18] != 0;
+        self.flash_write_enabled = d[19] != 0;
+        self.bank_a_is_flash = d[20] != 0;
+        self.bank_b_is_flash = d[21] != 0;
+        let rest = &d[22..];
+        let ram_len = self.ram.len().min(rest.len());
+        self.ram[..ram_len].copy_from_slice(&rest[..ram_len]);
+        if rest.len() > ram_len {
+            let flash = &rest[ram_len..];
+            let flash_len = self.flash.len().min(flash.len());
+            self.flash[..flash_len].copy_from_slice(&flash[..flash_len]);
         }
     }
 }
@@ -886,6 +1007,62 @@ impl Cartridge for Mbc7 {
             self.eeprom[i] = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
         }
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.push(self.enable_a as u8);
+        s.push(self.enable_b as u8);
+        s.push(self.accel_latched as u8);
+        s.extend_from_slice(&self.accel_x.to_le_bytes());
+        s.extend_from_slice(&self.accel_y.to_le_bytes());
+        // EEPROM: 128 words × 2 bytes
+        for &w in &self.eeprom {
+            s.extend_from_slice(&w.to_le_bytes());
+        }
+        s.push(self.eeprom_cs as u8);
+        s.push(self.eeprom_clk as u8);
+        s.push(self.eeprom_di as u8);
+        s.push(self.eeprom_do as u8);
+        s.push(self.eeprom_state as u8);
+        s.push(self.eeprom_cmd);
+        s.push(self.eeprom_addr);
+        s.extend_from_slice(&self.eeprom_shift.to_le_bytes());
+        s.push(self.eeprom_bit_count);
+        s.push(self.eeprom_write_enable as u8);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 7 + 256 + 10 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.enable_a = d[4] != 0;
+        self.enable_b = d[5] != 0;
+        self.accel_latched = d[6] != 0;
+        self.accel_x = u16::from_le_bytes([d[7],d[8]]);
+        self.accel_y = u16::from_le_bytes([d[9],d[10]]);
+        let ee = &d[11..];
+        for i in 0..128 {
+            self.eeprom[i] = u16::from_le_bytes([ee[i*2], ee[i*2+1]]);
+        }
+        let r = &ee[256..];
+        if r.len() >= 10 {
+            self.eeprom_cs = r[0] != 0;
+            self.eeprom_clk = r[1] != 0;
+            self.eeprom_di = r[2] != 0;
+            self.eeprom_do = r[3] != 0;
+            self.eeprom_state = match r[4] {
+                1 => EepromState::Command,
+                2 => EepromState::Address,
+                3 => EepromState::ReadData,
+                4 => EepromState::WriteData,
+                _ => EepromState::Idle,
+            };
+            self.eeprom_cmd = r[5];
+            self.eeprom_addr = r[6];
+            self.eeprom_shift = u16::from_le_bytes([r[7],r[8]]);
+            self.eeprom_bit_count = r[9];
+            if r.len() > 10 { self.eeprom_write_enable = r[10] != 0; }
+        }
+    }
 }
 
 // ── MMM01 ────────────────────────────────────────────────────────────────────
@@ -1018,6 +1195,35 @@ impl Cartridge for Mmm01 {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.push(self.mapped as u8);
+        s.extend_from_slice(&(self.rom_base as u32).to_le_bytes());
+        s.extend_from_slice(&(self.rom_bank_mask as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank_mask as u32).to_le_bytes());
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.ram_enabled as u8);
+        s.push(self.banking_mode);
+        s.extend_from_slice(&(self.upper as u32).to_le_bytes());
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 27 { return; }
+        self.mapped = d[0] != 0;
+        self.rom_base = u32::from_le_bytes([d[1],d[2],d[3],d[4]]) as usize;
+        self.rom_bank_mask = u32::from_le_bytes([d[5],d[6],d[7],d[8]]) as usize;
+        self.ram_bank_mask = u32::from_le_bytes([d[9],d[10],d[11],d[12]]) as usize;
+        self.rom_bank = u32::from_le_bytes([d[13],d[14],d[15],d[16]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[17],d[18],d[19],d[20]]) as usize;
+        self.ram_enabled = d[21] != 0;
+        self.banking_mode = d[22];
+        self.upper = u32::from_le_bytes([d[23],d[24],d[25],d[26]]) as usize;
+        let ram = &d[27..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
+    }
 }
 
 // ── HuC1 ─────────────────────────────────────────────────────────────────────
@@ -1089,6 +1295,25 @@ impl Cartridge for HuC1 {
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
+    }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.ir_mode as u8);
+        s.push(self.ir_led as u8);
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 10 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.ir_mode = d[8] != 0;
+        self.ir_led = d[9] != 0;
+        let ram = &d[10..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
     }
 }
 
@@ -1295,6 +1520,34 @@ impl Cartridge for HuC3 {
             self.rtc_base = Instant::now();
         }
     }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.mode);
+        s.extend_from_slice(&self.rtc_mem);
+        s.push(self.rtc_addr);
+        s.push(self.rtc_data_out);
+        s.extend_from_slice(&self.rtc_minutes.to_le_bytes());
+        s.extend_from_slice(&self.rtc_days.to_le_bytes());
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 9 + 128 + 2 + 8 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.mode = d[8];
+        self.rtc_mem.copy_from_slice(&d[9..137]);
+        self.rtc_addr = d[137];
+        self.rtc_data_out = d[138];
+        self.rtc_minutes = u32::from_le_bytes([d[139],d[140],d[141],d[142]]);
+        self.rtc_days = u32::from_le_bytes([d[143],d[144],d[145],d[146]]);
+        self.rtc_base = Instant::now();
+        let ram = &d[147..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
+    }
 }
 
 // ── TAMA5 ────────────────────────────────────────────────────────────────────
@@ -1464,6 +1717,32 @@ impl Cartridge for Tama5 {
             let elapsed = (now_ts - saved_ts).max(0) as u32;
             self.rtc_seconds += elapsed;
         }
+        self.rtc_base = Instant::now();
+    }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&self.tama_ram);
+        s.push(self.reg_select);
+        s.push(self.data_in_lo);
+        s.push(self.data_in_hi);
+        s.push(self.data_out_lo);
+        s.push(self.data_out_hi);
+        s.extend_from_slice(&self.rtc_regs);
+        s.extend_from_slice(&self.rtc_seconds.to_le_bytes());
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 4 + 32 + 5 + 52 + 4 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.tama_ram.copy_from_slice(&d[4..36]);
+        self.reg_select = d[36];
+        self.data_in_lo = d[37];
+        self.data_in_hi = d[38];
+        self.data_out_lo = d[39];
+        self.data_out_hi = d[40];
+        self.rtc_regs.copy_from_slice(&d[41..93]);
+        self.rtc_seconds = u32::from_le_bytes([d[93],d[94],d[95],d[96]]);
         self.rtc_base = Instant::now();
     }
 }
@@ -1675,6 +1954,30 @@ impl Cartridge for PocketCamera {
     fn set_camera_image(&mut self, grayscale: &[u8; 128 * 112]) {
         let img = self.camera_image.get_or_insert_with(|| Box::new([0u8; 128 * 112]));
         img.copy_from_slice(grayscale);
+    }
+    fn snapshot_state(&self) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&(self.rom_bank as u32).to_le_bytes());
+        s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
+        s.push(self.camera_regs_mapped as u8);
+        s.extend_from_slice(&self.camera_regs);
+        s.push(self.image_ready as u8);
+        s.extend_from_slice(&self.noise_seed.to_le_bytes());
+        s.extend_from_slice(&self.ram);
+        s
+    }
+    fn restore_state(&mut self, d: &[u8]) {
+        if d.len() < 9 + 0x36 + 1 + 4 { return; }
+        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        self.camera_regs_mapped = d[8] != 0;
+        self.camera_regs.copy_from_slice(&d[9..9+0x36]);
+        let o = 9 + 0x36;
+        self.image_ready = d[o] != 0;
+        self.noise_seed = u32::from_le_bytes([d[o+1],d[o+2],d[o+3],d[o+4]]);
+        let ram = &d[o+5..];
+        let len = self.ram.len().min(ram.len());
+        self.ram[..len].copy_from_slice(&ram[..len]);
     }
 }
 

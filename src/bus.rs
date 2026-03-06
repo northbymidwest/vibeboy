@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 ///     (false for fresh start → accessible; true for restart → still blocked)
 ///   - After first byte (progress>0 while active): always blocking
 ///   - After DMA finishes (active==false): never blocking
-struct OamDma {
+#[derive(Clone)]
+pub(crate) struct OamDma {
     active: bool,
     source: u16,        // source base address (source_page << 8)
     progress: u8,       // bytes copied so far (0–159)
@@ -50,7 +51,8 @@ impl OamDma {
 }
 
 /// HDMA state (0xFF51–0xFF55).
-struct Hdma {
+#[derive(Clone)]
+pub(crate) struct Hdma {
     src: u16,
     dst: u16,
     /// Remaining blocks (each block = 16 bytes). 0 = inactive.
@@ -74,10 +76,10 @@ pub struct Bus {
     pub apu: Apu,
 
     /// WRAM: bank 0 (0xC000–0xCFFF) + banks 1-7 (0xD000–0xDFFF)
-    wram: [[u8; 0x1000]; 8],
-    wram_bank: usize, // SVBK register (0xFF70), bank 1-7
+    pub(crate) wram: [[u8; 0x1000]; 8],
+    pub(crate) wram_bank: usize, // SVBK register (0xFF70), bank 1-7
 
-    hram: [u8; 0x7F],
+    pub(crate) hram: [u8; 0x7F],
 
     /// Interrupt Flags (0xFF0F)
     pub if_: u8,
@@ -92,19 +94,19 @@ pub struct Bus {
     /// Double-speed mode active
     pub double_speed: bool,
 
-    oam_dma: OamDma,
-    hdma: Hdma,
+    pub(crate) oam_dma: OamDma,
+    pub(crate) hdma: Hdma,
 
     /// Boot ROM bytes (up to 0x900 for CGB). None = skip boot ROM.
     boot_rom: Option<Vec<u8>>,
     /// Whether the boot ROM is still mapped (cleared by writing 0xFF50).
-    boot_rom_active: bool,
+    pub(crate) boot_rom_active: bool,
 
     /// Path to .sav file (set when cartridge has battery).
     save_path: Option<PathBuf>,
 
     /// Hardware model (DMG, CGB, etc.)
-    model: GbModel,
+    pub(crate) model: GbModel,
 
     /// SGB command processor (only present for SGB/SGB2 models)
     pub sgb: Option<Sgb>,
@@ -193,6 +195,54 @@ impl Bus {
 
     pub fn has_boot_rom(&self) -> bool {
         self.boot_rom.is_some()
+    }
+
+    /// Create a snapshot of the bus state for rewind / save states.
+    pub fn take_snapshot(&self) -> crate::snapshot::BusSnapshot {
+        let mut apu_clone = self.apu.clone();
+        apu_clone.sample_buf.clear();
+        crate::snapshot::BusSnapshot {
+            ppu: self.ppu.clone(),
+            timer: self.timer.clone(),
+            joypad: self.joypad.clone(),
+            apu: apu_clone,
+            wram: self.wram,
+            wram_bank: self.wram_bank,
+            hram: self.hram,
+            if_: self.if_,
+            ie: self.ie,
+            serial: self.serial.take_snapshot(),
+            key1: self.key1,
+            double_speed: self.double_speed,
+            oam_dma: self.oam_dma.clone(),
+            hdma: self.hdma.clone(),
+            boot_rom_active: self.boot_rom_active,
+            model: self.model,
+            sgb: self.sgb.clone(),
+            cart_state: self.cart.snapshot_state(),
+        }
+    }
+
+    /// Restore the bus state from a snapshot.
+    pub fn apply_snapshot(&mut self, s: &crate::snapshot::BusSnapshot) {
+        self.ppu = s.ppu.clone();
+        self.timer = s.timer.clone();
+        self.joypad = s.joypad.clone();
+        self.apu = s.apu.clone();
+        self.apu.sample_buf.clear();
+        self.wram = s.wram;
+        self.wram_bank = s.wram_bank;
+        self.hram = s.hram;
+        self.if_ = s.if_;
+        self.ie = s.ie;
+        self.serial.apply_snapshot(&s.serial);
+        self.key1 = s.key1;
+        self.double_speed = s.double_speed;
+        self.oam_dma = s.oam_dma.clone();
+        self.hdma = s.hdma.clone();
+        self.boot_rom_active = s.boot_rom_active;
+        self.sgb = s.sgb.clone();
+        self.cart.restore_state(&s.cart_state);
     }
 
     /// Write cartridge RAM to .sav file if battery-backed.

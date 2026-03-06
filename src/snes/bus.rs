@@ -17,6 +17,7 @@ use super::dma::DmaController;
 use super::icd2::Icd2;
 use super::ppu_regs::SnesPpuRegs;
 
+#[derive(Clone)]
 pub struct SnesBus {
     pub rom: Vec<u8>,
     pub wram: Vec<u8>,          // 128KB
@@ -57,9 +58,9 @@ pub struct SnesBus {
     /// 2 = executed (SPC program "running")
     pub apu_state: u8,
     /// Last counter value written to port 0 during upload
-    apu_last_counter: u8,
+    pub apu_last_counter: u8,
     /// Track port 1 value to detect execute command (port1=0 → execute)
-    apu_port1_val: u8,
+    pub apu_port1_val: u8,
     /// After execute, echo the final counter once, then switch to $AA/$BB
     pub apu_echo_pending: bool,
     /// NMI fire count (diagnostic)

@@ -13,6 +13,7 @@ const FLAG_M: u8 = 0x20; // Memory/Accumulator size (0=16, 1=8) [native only]
 const FLAG_V: u8 = 0x40; // Overflow
 const FLAG_N: u8 = 0x80; // Negative
 
+#[derive(Clone)]
 pub struct Cpu65816 {
     pub a: u16,   // Accumulator (full 16-bit; use low 8 when M=1)
     pub x: u16,   // Index X

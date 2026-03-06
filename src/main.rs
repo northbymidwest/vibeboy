@@ -9,6 +9,7 @@ mod ppu;
 mod printer;
 mod serial;
 mod sgb;
+mod snapshot;
 mod snes;
 mod timer;
 
@@ -134,6 +135,17 @@ fn main() {
         eprintln!("SNES program ROM loaded — SGB LLE mode active.");
     }
 
+    eprintln!("\nControls:");
+    eprintln!("  Arrow keys  — D-pad");
+    eprintln!("  Z / X       — A / B");
+    eprintln!("  Enter       — Start");
+    eprintln!("  Right Shift — Select");
+    eprintln!("  Backspace   — Rewind");
+    eprintln!("  F5 / F7     — Save / Load state");
+    eprintln!("  1-9         — Select state slot");
+    eprintln!("  Escape      — Quit");
+    eprintln!();
+
     let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model, snes_rom);
 
     if cli.printer {
@@ -189,6 +201,8 @@ fn main() {
     };
     let mut camera_buf = [0u8; 128 * 112];
 
+    let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
+
     let mut frame_start = Instant::now();
     let mut fps_timer = Instant::now();
     let mut fps_count = 0u32;
@@ -200,6 +214,35 @@ fn main() {
             match event {
                 Event::Quit { .. }
                 | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'running,
+                Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
+                    emu.save_state(current_slot);
+                    eprintln!("State saved to slot {}", current_slot + 1);
+                }
+                Event::KeyDown { keycode: Some(Keycode::F7), .. } => {
+                    if emu.load_state(current_slot) {
+                        eprintln!("State loaded from slot {}", current_slot + 1);
+                    } else {
+                        eprintln!("Slot {} is empty", current_slot + 1);
+                    }
+                }
+                Event::KeyDown { keycode: Some(k), .. } => {
+                    let slot = match k {
+                        Keycode::_1 => Some(0),
+                        Keycode::_2 => Some(1),
+                        Keycode::_3 => Some(2),
+                        Keycode::_4 => Some(3),
+                        Keycode::_5 => Some(4),
+                        Keycode::_6 => Some(5),
+                        Keycode::_7 => Some(6),
+                        Keycode::_8 => Some(7),
+                        Keycode::_9 => Some(8),
+                        _ => None,
+                    };
+                    if let Some(s) = slot {
+                        current_slot = s;
+                        eprintln!("Slot {} selected", current_slot + 1);
+                    }
+                }
                 _ => {}
             }
         }
@@ -214,8 +257,18 @@ fn main() {
             }
         }
 
-        // ── Emulate one frame ─────────────────────────────────────────────────
-        emu.step_frame();
+        // ── Rewind ─────────────────────────────────────────────────────────────
+        let backspace_held = event_pump.keyboard_state().is_scancode_pressed(Scancode::Backspace);
+        emu.rewinding = backspace_held;
+
+        if backspace_held {
+            emu.rewind_one_frame();
+            // Drain any leftover audio samples during rewind
+            emu.bus.apu.drain_samples();
+        } else {
+            // ── Emulate one frame ─────────────────────────────────────────────
+            emu.step_frame();
+        }
 
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();

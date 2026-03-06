@@ -5,11 +5,16 @@ use crate::joypad::{
 };
 use crate::model::GbModel;
 use crate::sgb::Sgb;
+use crate::snapshot::Snapshot;
 use crate::snes::SnesSys;
+use std::collections::VecDeque;
 use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
 pub const CYCLES_PER_FRAME: u32 = 70_224;
+
+/// Maximum rewind buffer depth (~10 seconds at 60fps).
+const REWIND_BUFFER_CAPACITY: usize = 600;
 
 pub struct Emulator {
     pub cpu: Cpu,
@@ -24,6 +29,12 @@ pub struct Emulator {
     /// Packets queued while SNES BIOS was initializing (with shade buffer snapshots)
     snes_packet_queue: Vec<([u8; 16], Vec<u8>)>,
     frame_count: u64,
+    /// Ring buffer of snapshots for rewind (most recent at back).
+    rewind_buffer: VecDeque<Snapshot>,
+    /// In-memory save state slots (1-9, index 0 = slot 1).
+    save_slots: [Option<Box<Snapshot>>; 9],
+    /// True while the user is holding the rewind key.
+    pub rewinding: bool,
 }
 
 impl Emulator {
@@ -67,6 +78,9 @@ impl Emulator {
             snes,
             snes_packet_queue: Vec::new(),
             frame_count: 0,
+            rewind_buffer: VecDeque::with_capacity(REWIND_BUFFER_CAPACITY),
+            save_slots: Default::default(),
+            rewinding: false,
         }
     }
 
@@ -77,6 +91,15 @@ impl Emulator {
 
     /// Run until one full frame has been rendered (VBlank).
     pub fn step_frame(&mut self) {
+        // Push a snapshot for rewind (before emulating this frame)
+        if !self.rewinding {
+            let snap = self.save_snapshot();
+            if self.rewind_buffer.len() >= REWIND_BUFFER_CAPACITY {
+                self.rewind_buffer.pop_front();
+            }
+            self.rewind_buffer.push_back(snap);
+        }
+
         self.bus.clear_frame_ready();
         self.frame_count += 1;
         while !self.bus.frame_ready() {
@@ -94,6 +117,63 @@ impl Emulator {
             }
 
         }
+    }
+
+    // ── Snapshot / Rewind / Save State ─────────────────────────────────────────
+
+    /// Capture the full emulator state into a Snapshot.
+    pub fn save_snapshot(&self) -> Snapshot {
+        Snapshot {
+            cpu: self.cpu.clone(),
+            bus: self.bus.take_snapshot(),
+            snes: self.snes.as_ref().map(|s| s.take_snapshot()),
+            frame_count: self.frame_count,
+        }
+    }
+
+    /// Restore full emulator state from a Snapshot.
+    pub fn restore_snapshot(&mut self, snap: &Snapshot) {
+        self.cpu = snap.cpu.clone();
+        self.bus.apply_snapshot(&snap.bus);
+        self.frame_count = snap.frame_count;
+        if let Some(ref snes_snap) = snap.snes {
+            if let Some(ref mut snes) = self.snes {
+                snes.apply_snapshot(snes_snap);
+            }
+        }
+        self.snes_packet_queue.clear();
+    }
+
+    /// Pop one frame from the rewind buffer and restore it. Returns true if rewound.
+    pub fn rewind_one_frame(&mut self) -> bool {
+        if let Some(snap) = self.rewind_buffer.pop_back() {
+            self.restore_snapshot(&snap);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Save current state to the given slot (0-indexed, 0-8 for slots 1-9).
+    pub fn save_state(&mut self, slot: usize) {
+        if slot < 9 {
+            self.save_slots[slot] = Some(Box::new(self.save_snapshot()));
+            log::info!("State saved to slot {}", slot + 1);
+        }
+    }
+
+    /// Load state from the given slot. Returns true if a state was loaded.
+    pub fn load_state(&mut self, slot: usize) -> bool {
+        if slot < 9 {
+            if let Some(ref snap) = self.save_slots[slot] {
+                let snap = snap.clone();
+                self.restore_snapshot(&snap);
+                self.rewind_buffer.clear();
+                log::info!("State loaded from slot {}", slot + 1);
+                return true;
+            }
+        }
+        false
     }
 
     /// Run the SNES subsystem for one frame (LLE mode).

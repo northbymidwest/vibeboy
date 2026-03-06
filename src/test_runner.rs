@@ -9,6 +9,7 @@ mod ppu;
 mod printer;
 mod serial;
 mod sgb;
+mod snapshot;
 mod snes;
 mod timer;
 

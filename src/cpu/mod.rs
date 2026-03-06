@@ -2,6 +2,7 @@ mod registers;
 pub use registers::Registers;
 use crate::bus::Bus;
 
+#[derive(Clone)]
 pub struct Cpu {
     pub regs: Registers,
     pub ime: bool,

@@ -12,6 +12,7 @@ pub const BTN_B:      u8 = 0x20;
 pub const BTN_SELECT: u8 = 0x40;
 pub const BTN_START:  u8 = 0x80;
 
+#[derive(Clone)]
 pub struct Joypad {
     /// Which button groups to read: bit5=actions, bit4=dpad (0=selected)
     p1_select: u8,

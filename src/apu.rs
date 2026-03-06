@@ -23,6 +23,7 @@ const NOISE_DIVISORS: [u32; 8] = [8, 16, 32, 48, 64, 80, 96, 112];
 
 // ── Square channel ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct SquareCh {
     // NRx1
     duty: u8,
@@ -118,6 +119,7 @@ impl SquareCh {
 
 // ── CH1 sweep ──────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Sweep {
     period: u8,
     negate: bool,
@@ -170,6 +172,7 @@ impl Sweep {
 
 // ── Wave channel (CH3) ─────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct WaveCh {
     dac_on: bool,
     vol_code: u8,  // 0=mute, 1=100%, 2=50%, 3=25%
@@ -249,6 +252,7 @@ impl WaveCh {
 
 // ── Noise channel (CH4) ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct NoiseCh {
     env_init_vol: u8,
     env_add: bool,
@@ -362,6 +366,7 @@ const CPU_RATE: u32 = 4_194_304;
 const SAMPLE_ACCUM_TICK: u64 = SAMPLE_RATE as u64;
 const SAMPLE_ACCUM_THRESH: u64 = CPU_RATE as u64;
 
+#[derive(Clone)]
 pub struct Apu {
     ch1: SquareCh,
     sweep: Sweep,

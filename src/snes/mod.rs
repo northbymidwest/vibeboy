@@ -20,6 +20,7 @@ const CYCLES_PER_SCANLINE: u64 = 1364;
 /// Scanline where VBlank starts (NTSC).
 const VBLANK_START_LINE: u64 = 225;
 
+#[derive(Clone)]
 pub struct SnesSys {
     pub cpu: Cpu65816,
     pub bus: SnesBus,
@@ -256,6 +257,88 @@ impl SnesSys {
         }
 
         self.bus.icd2.feed_packet(data);
+    }
+
+    /// Create a snapshot of the SNES subsystem (excluding ROM).
+    pub fn take_snapshot(&self) -> crate::snapshot::SnesSnapshot {
+        crate::snapshot::SnesSnapshot {
+            cpu: self.cpu.clone(),
+            bus_wram: self.bus.wram.clone(),
+            bus_ppu: self.bus.ppu.clone(),
+            bus_dma: self.bus.dma.clone(),
+            bus_icd2: self.bus.icd2.clone(),
+            nmitimen: self.bus.nmitimen,
+            rdnmi: self.bus.rdnmi,
+            timeup: self.bus.timeup,
+            hvbjoy: self.bus.hvbjoy,
+            joy1: self.bus.joy1,
+            joy2: self.bus.joy2,
+            wrmpya: self.bus.wrmpya,
+            wrmpyb: self.bus.wrmpyb,
+            wrdiv: self.bus.wrdiv,
+            wrdivb: self.bus.wrdivb,
+            rddiv: self.bus.rddiv,
+            rdmpy: self.bus.rdmpy,
+            wrio: self.bus.wrio,
+            htime: self.bus.htime,
+            vtime: self.bus.vtime,
+            mdmaen: self.bus.mdmaen,
+            hdmaen: self.bus.hdmaen,
+            memsel: self.bus.memsel,
+            apu_out: self.bus.apu_out,
+            apu_in: self.bus.apu_in,
+            apu_state: self.bus.apu_state,
+            apu_last_counter: self.bus.apu_last_counter,
+            apu_port1_val: self.bus.apu_port1_val,
+            apu_echo_pending: self.bus.apu_echo_pending,
+            nmi_fire_count: self.bus.nmi_fire_count,
+            wmadd: self.bus.wmadd,
+            active_display_start: self.bus.active_display_start,
+            current_cpu_cycles: self.bus.current_cpu_cycles,
+            in_vblank: self.bus.in_vblank,
+            irq_ack: self.bus.irq_ack,
+            frame_count: self.frame_count,
+        }
+    }
+
+    /// Restore the SNES subsystem from a snapshot.
+    pub fn apply_snapshot(&mut self, s: &crate::snapshot::SnesSnapshot) {
+        self.cpu = s.cpu.clone();
+        self.bus.wram = s.bus_wram.clone();
+        self.bus.ppu = s.bus_ppu.clone();
+        self.bus.dma = s.bus_dma.clone();
+        self.bus.icd2 = s.bus_icd2.clone();
+        self.bus.nmitimen = s.nmitimen;
+        self.bus.rdnmi = s.rdnmi;
+        self.bus.timeup = s.timeup;
+        self.bus.hvbjoy = s.hvbjoy;
+        self.bus.joy1 = s.joy1;
+        self.bus.joy2 = s.joy2;
+        self.bus.wrmpya = s.wrmpya;
+        self.bus.wrmpyb = s.wrmpyb;
+        self.bus.wrdiv = s.wrdiv;
+        self.bus.wrdivb = s.wrdivb;
+        self.bus.rddiv = s.rddiv;
+        self.bus.rdmpy = s.rdmpy;
+        self.bus.wrio = s.wrio;
+        self.bus.htime = s.htime;
+        self.bus.vtime = s.vtime;
+        self.bus.mdmaen = s.mdmaen;
+        self.bus.hdmaen = s.hdmaen;
+        self.bus.memsel = s.memsel;
+        self.bus.apu_out = s.apu_out;
+        self.bus.apu_in = s.apu_in;
+        self.bus.apu_state = s.apu_state;
+        self.bus.apu_last_counter = s.apu_last_counter;
+        self.bus.apu_port1_val = s.apu_port1_val;
+        self.bus.apu_echo_pending = s.apu_echo_pending;
+        self.bus.nmi_fire_count = s.nmi_fire_count;
+        self.bus.wmadd = s.wmadd;
+        self.bus.active_display_start = s.active_display_start;
+        self.bus.current_cpu_cycles = s.current_cpu_cycles;
+        self.bus.in_vblank = s.in_vblank;
+        self.bus.irq_ack = s.irq_ack;
+        self.frame_count = s.frame_count;
     }
 
     /// Feed scanline shade data from the GB PPU.
