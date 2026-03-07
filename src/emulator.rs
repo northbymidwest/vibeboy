@@ -299,11 +299,15 @@ impl Emulator {
 
             // Detect Blargg done loop: JR -2 (opcode 18 FE)
             if self.bus.read_byte(pc) == 0x18 && self.bus.read_byte(pc.wrapping_add(1)) == 0xFE {
+                let serial = String::from_utf8_lossy(&self.bus.serial.serial_output).into_owned();
+                log::warn!("JR-2 loop detected. Serial buffer ({} bytes): {:?}", self.bus.serial.serial_output.len(), &self.bus.serial.serial_output[..std::cmp::min(80, self.bus.serial.serial_output.len())]);
                 let result = self.bus.read_byte(0xA000);
                 if result == 0 {
-                    return "Passed".to_string();
+                    if serial.is_empty() { return "Passed".to_string(); }
+                    return format!("Passed\n{}", serial);
                 } else {
-                    return format!("Failed #{}", result);
+                    if serial.is_empty() { return format!("Failed #{}", result); }
+                    return format!("Failed #{}\n{}", result, serial);
                 }
             }
 

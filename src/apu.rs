@@ -296,11 +296,14 @@ impl Sweep {
                 match self.calc() {
                     None => ch.enabled = false,
                     Some(f) => {
-                        self.shadow = f;
-                        ch.freq = f;
-                        // overflow check with new shadow
-                        if self.calc().is_none() {
-                            ch.enabled = false;
+                        // Only write back frequency if shift != 0
+                        if self.shift != 0 {
+                            self.shadow = f;
+                            ch.freq = f;
+                            // overflow check with new shadow
+                            if self.calc().is_none() {
+                                ch.enabled = false;
+                            }
                         }
                     }
                 }
@@ -323,6 +326,7 @@ struct WaveCh {
     sample_pos: u8,   // 0-31
     length_counter: u16,
     last_nibble: u8,
+    wave_form_just_read: bool,
     pub wave_ram: [u8; 16],
 }
 
@@ -338,6 +342,7 @@ impl WaveCh {
             sample_pos: 0,
             length_counter: 256,
             last_nibble: 0,
+            wave_form_just_read: false,
             wave_ram: [0u8; 16],
         }
     }
@@ -350,6 +355,7 @@ impl WaveCh {
         if !self.enabled {
             return;
         }
+        self.wave_form_just_read = false;
         loop {
             if self.freq_timer > cycles {
                 self.freq_timer -= cycles;
@@ -359,6 +365,7 @@ impl WaveCh {
             self.sample_pos = (self.sample_pos + 1) & 31;
             let byte = self.wave_ram[(self.sample_pos >> 1) as usize];
             self.last_nibble = if self.sample_pos & 1 == 0 { byte >> 4 } else { byte & 0xF };
+            self.wave_form_just_read = cycles == 0;
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
                 self.freq_timer = 1;
@@ -588,10 +595,13 @@ pub struct Apu {
     // Model-dependent clock rate for sample timing
     sample_accum_tick: u64,
     sample_accum_thresh: u64,
+
+    // CGB mode flag (affects power-off behavior)
+    is_cgb: bool,
 }
 
 impl Apu {
-    pub fn new(cpu_clock_rate: u32) -> Self {
+    pub fn new(cpu_clock_rate: u32, is_cgb: bool) -> Self {
         let mut apu = Apu {
             ch1: SquareCh::new(),
             sweep: Sweep::new(),
@@ -618,6 +628,7 @@ impl Apu {
             hpf_prev_in_r: 0.0,
             sample_accum_tick: SAMPLE_RATE as u64,
             sample_accum_thresh: cpu_clock_rate as u64,
+            is_cgb,
         };
         // Post-boot CH1 state: registers match what boot ROM left behind,
         // but the envelope has decayed volume to 0 during the boot animation.
@@ -687,6 +698,9 @@ impl Apu {
             // Wave RAM: when CH3 is active, redirect to current sample position
             0xFF30..=0xFF3F => {
                 if self.ch3.enabled {
+                    if !self.is_cgb && !self.ch3.wave_form_just_read {
+                        return 0xFF;
+                    }
                     self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize]
                 } else {
                     self.ch3.wave_ram[(addr - 0xFF30) as usize]
@@ -702,6 +716,9 @@ impl Apu {
         // Wave RAM: when CH3 is active, redirect write to current sample position
         if (0xFF30..=0xFF3F).contains(&addr) {
             if self.ch3.enabled {
+                if !self.is_cgb && !self.ch3.wave_form_just_read {
+                    return;
+                }
                 self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize] = val;
             } else {
                 self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
@@ -726,14 +743,17 @@ impl Apu {
             return;
         }
 
-        // Length counters writable even when powered off
+        // On DMG, length counters are writable even when powered off.
+        // On CGB, all writes (except NR52 and wave RAM) are ignored when off.
         if !self.power {
-            match addr {
-                0xFF11 => self.ch1.length_counter = 64 - (val & 0x3F) as u16,
-                0xFF16 => self.ch2.length_counter = 64 - (val & 0x3F) as u16,
-                0xFF1B => self.ch3.length_counter = 256 - val as u16,
-                0xFF20 => self.ch4.length_counter = 64 - (val & 0x3F) as u16,
-                _ => {}
+            if !self.is_cgb {
+                match addr {
+                    0xFF11 => self.ch1.length_counter = 64 - (val & 0x3F) as u16,
+                    0xFF16 => self.ch2.length_counter = 64 - (val & 0x3F) as u16,
+                    0xFF1B => self.ch3.length_counter = 256 - val as u16,
+                    0xFF20 => self.ch4.length_counter = 64 - (val & 0x3F) as u16,
+                    _ => {}
+                }
             }
             return;
         }
@@ -868,7 +888,7 @@ impl Apu {
                 if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch3.clock_length();
                 }
-                if val & 0x80 != 0 && self.ch3.dac_on {
+                if val & 0x80 != 0 {
                     self.trigger_ch3();
                 }
             }
@@ -900,7 +920,7 @@ impl Apu {
                 if !was_enabled && val & 0x40 != 0 && self.div_divider & 1 != 0 {
                     self.ch4.clock_length();
                 }
-                if val & 0x80 != 0 && self.ch4.dac_on {
+                if val & 0x80 != 0 {
                     self.trigger_ch4();
                 }
             }
@@ -924,6 +944,9 @@ impl Apu {
         self.ch1.enabled = true;
         if self.ch1.length_counter == 0 {
             self.ch1.length_counter = 64;
+            if self.ch1.len_enable && self.div_divider & 1 == 1 {
+                self.ch1.length_counter -= 1;
+            }
         }
         self.ch1.volume    = self.ch1.env_init_vol;
         self.ch1.env_timer = self.ch1.env_period;
@@ -985,6 +1008,9 @@ impl Apu {
         self.ch2.enabled = true;
         if self.ch2.length_counter == 0 {
             self.ch2.length_counter = 64;
+            if self.ch2.len_enable && self.div_divider & 1 == 1 {
+                self.ch2.length_counter -= 1;
+            }
         }
         self.ch2.volume    = self.ch2.env_init_vol;
         self.ch2.env_timer = self.ch2.env_period;
@@ -1032,19 +1058,49 @@ impl Apu {
     }
 
     fn trigger_ch3(&mut self) {
+        let was_enabled = self.ch3.enabled;
         self.ch3.enabled = true;
         if self.ch3.length_counter == 0 {
             self.ch3.length_counter = 256;
+            if self.ch3.len_enable && self.div_divider & 1 == 1 {
+                self.ch3.length_counter -= 1;
+            }
+        }
+        // DMG wave RAM corruption on retrigger when channel is active
+        // and sample_countdown == 0 (our freq_timer == 1)
+        if !self.is_cgb && was_enabled && self.ch3.freq_timer <= 2 {
+            let offset = (((self.ch3.sample_pos + 1) >> 1) & 0xF) as usize;
+            if offset < 4 {
+                self.ch3.wave_ram[0] = self.ch3.wave_ram[offset];
+            } else {
+                let base = offset & !3;
+                let src = [
+                    self.ch3.wave_ram[base],
+                    self.ch3.wave_ram[base + 1],
+                    self.ch3.wave_ram[base + 2],
+                    self.ch3.wave_ram[base + 3],
+                ];
+                self.ch3.wave_ram[0] = src[0];
+                self.ch3.wave_ram[1] = src[1];
+                self.ch3.wave_ram[2] = src[2];
+                self.ch3.wave_ram[3] = src[3];
+            }
         }
         self.ch3.freq_timer  = self.ch3.reload_period() + 6;
         self.ch3.sample_pos  = 0;
         // Note: do NOT reset last_nibble — hardware keeps the last-read sample byte
+        if !self.ch3.dac_on {
+            self.ch3.enabled = false;
+        }
     }
 
     fn trigger_ch4(&mut self) {
         self.ch4.enabled = true;
         if self.ch4.length_counter == 0 {
             self.ch4.length_counter = 64;
+            if self.ch4.len_enable && self.div_divider & 1 == 1 {
+                self.ch4.length_counter -= 1;
+            }
         }
         self.ch4.volume    = self.ch4.env_init_vol;
         self.ch4.env_timer = self.ch4.env_period;
@@ -1053,6 +1109,9 @@ impl Apu {
         self.ch4.envelope_clock.clock = false;
         self.ch4.lfsr      = 0x7FFF;
         self.ch4.freq_timer = self.ch4.reload_period();
+        if !self.ch4.dac_on {
+            self.ch4.enabled = false;
+        }
     }
 
     // ── Power off ──────────────────────────────────────────────────────────
@@ -1068,11 +1127,28 @@ impl Apu {
         self.prev_left = 0;
         self.prev_right = 0;
 
+        // Hardware preserves wave RAM across power cycles.
+        // On DMG, length counters are also preserved; on CGB they are reset.
+        let wave_ram = self.ch3.wave_ram;
+        let len1 = self.ch1.length_counter;
+        let len2 = self.ch2.length_counter;
+        let len3 = self.ch3.length_counter;
+        let len4 = self.ch4.length_counter;
+
         self.ch1 = SquareCh::new();
         self.sweep = Sweep::new();
         self.ch2 = SquareCh::new();
         self.ch3 = WaveCh::new();
         self.ch4 = NoiseCh::new();
+
+        self.ch3.wave_ram = wave_ram;
+        if !self.is_cgb {
+            self.ch1.length_counter = len1;
+            self.ch2.length_counter = len2;
+            self.ch3.length_counter = len3;
+            self.ch4.length_counter = len4;
+        }
+
         self.nr50 = 0;
         self.nr51 = 0;
         self.div_divider = 0;

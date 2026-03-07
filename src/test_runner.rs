@@ -20,7 +20,16 @@ use std::path::Path;
 
 /// Detect hardware model from test filename suffix.
 fn detect_model(path: &Path) -> GbModel {
+    detect_model_with_rom(path, None)
+}
+
+fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let path_str = path.to_str().unwrap_or("");
+    // OAM bug tests are DMG-specific despite having CGB flag 0x80
+    if path_str.contains("oam_bug") {
+        return GbModel::Dmg;
+    }
     // Check longer suffixes first to avoid partial matches
     if stem.ends_with("-dmgABCmgb") || stem.ends_with("-dmgABC") {
         GbModel::Dmg
@@ -36,6 +45,14 @@ fn detect_model(path: &Path) -> GbModel {
         GbModel::Agb
     } else if stem.ends_with("-GS") || stem.ends_with("-G") {
         GbModel::Dmg
+    } else if let Some(data) = rom {
+        // Auto-detect from cart header CGB flag
+        let cgb_flag = data.get(0x0143).copied().unwrap_or(0);
+        if cgb_flag == 0x80 || cgb_flag == 0xC0 {
+            GbModel::Cgb
+        } else {
+            GbModel::Dmg
+        }
     } else {
         GbModel::Cgb
     }
@@ -94,8 +111,8 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
         Ok(r) => r,
         Err(_) => return "ERR",
     };
-    let model = detect_model(path);
-    let br = load_boot_rom(model);
+    let model = detect_model_with_rom(path, Some(&rom));
+    let br: Option<Vec<u8>> = None; // temporarily skip boot ROM for debugging
     let mut emu = Emulator::new(rom, br, None, model, None);
     let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
     if verbose && !output.is_empty() {
@@ -197,27 +214,27 @@ fn main() {
             .position(|a| a == "--out")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.clone())
-            .unwrap_or_else(|| "screenshot.ppm".to_string());
+            .unwrap_or_else(|| "screenshot.png".to_string());
         let rom = fs::read(path).expect("Failed to read ROM");
-        let model = GbModel::Cgb;
-        let br = load_boot_rom(model);
+        let model = detect_model_with_rom(path, Some(&rom));
+        let br: Option<Vec<u8>> = None;
         let mut emu = Emulator::new(rom, br, None, model, None);
         for _ in 0..frames {
             emu.step_frame();
         }
         let fb = emu.frame_buffer();
-        let mut ppm = format!("P3\n160 144\n255\n");
+        // Write as PNG using image crate
+        let mut rgb = Vec::with_capacity(160 * 144 * 3);
         for y in 0..144 {
             for x in 0..160 {
                 let pixel = fb[y * 160 + x];
-                let r = (pixel >> 16) & 0xFF;
-                let g = (pixel >> 8) & 0xFF;
-                let b = pixel & 0xFF;
-                ppm.push_str(&format!("{} {} {} ", r, g, b));
+                rgb.push(((pixel >> 16) & 0xFF) as u8);
+                rgb.push(((pixel >> 8) & 0xFF) as u8);
+                rgb.push((pixel & 0xFF) as u8);
             }
-            ppm.push('\n');
         }
-        fs::write(&out_path, ppm).expect("Failed to write PPM");
+        image::save_buffer(&out_path, &rgb, 160, 144, image::ColorType::Rgb8)
+            .expect("Failed to write PNG");
         eprintln!("Wrote {} (frame {})", out_path, frames);
         return;
     }

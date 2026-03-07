@@ -24,7 +24,7 @@ type IOOptionBits = u32;
 type MachPort = u32;
 
 #[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     static kCFAllocatorDefault: CFAllocatorRef;
     static kCFRunLoopDefaultMode: CFStringRef;
 
@@ -46,7 +46,7 @@ extern "C" {
 }
 
 #[link(name = "IOKit", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     static kIOMainPortDefault: MachPort;
 
     fn IOServiceMatching(name: *const u8) -> CFMutableDictionaryRef;
