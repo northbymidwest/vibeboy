@@ -363,7 +363,7 @@ impl Bus {
         match addr {
             0x0000..=0x7FFF => self.cart.write_rom(addr, val),
             0x8000..=0x9FFF => {
-                if self.ppu.vram_accessible { self.ppu.write_vram(addr, val); }
+                if self.ppu.vram_write_accessible { self.ppu.write_vram(addr, val); }
             }
             0xA000..=0xBFFF => self.cart.write_ram(addr, val),
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = val,
@@ -371,7 +371,7 @@ impl Bus {
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize] = val,
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize] = val,
             0xFE00..=0xFE9F => {
-                if self.ppu.oam_accessible { self.ppu.write_oam(addr, val); }
+                if self.ppu.oam_write_accessible { self.ppu.write_oam(addr, val); }
             }
             0xFEA0..=0xFEFF => {} // unusable
             0xFF00..=0xFF7F => self.write_io(addr, val),

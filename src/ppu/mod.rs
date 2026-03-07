@@ -158,10 +158,14 @@ pub struct Ppu {
     /// Sprites collected during Mode 2 OAM scan: (y, x, tile, attrs)
     scanline_sprites: Vec<(u8, u8, u8, u8)>,
 
-    /// VRAM accessible (false during Mode 3)
+    /// VRAM read accessible (false during Mode 3, and late Mode 2 on DMG)
     pub vram_accessible: bool,
-    /// OAM accessible (false during Modes 2 and 3)
+    /// VRAM write accessible (false during Mode 3 only)
+    pub vram_write_accessible: bool,
+    /// OAM read accessible (false during Modes 2 and 3)
     pub oam_accessible: bool,
+    /// OAM write accessible (false during Mode 2 early and Mode 3; unblocked at Mode 2 index 37)
+    pub oam_write_accessible: bool,
 
     // Output
     pub frame_buffer: Vec<u32>,
@@ -303,7 +307,9 @@ impl Ppu {
             scanline_sprites: Vec::with_capacity(10),
 
             vram_accessible: true,
+            vram_write_accessible: true,
             oam_accessible: true, // VBlank: accessible
+            oam_write_accessible: true,
 
             frame_buffer: vec![0u32; 160 * 144],
             frame_ready: false,
@@ -374,7 +380,9 @@ impl Ppu {
         self.dot = 0;
         self.stat_irq_line = false;
         self.vram_accessible = true;
+        self.vram_write_accessible = true;
         self.oam_accessible = true;
+        self.oam_write_accessible = true;
         self.frame_ready = false;
         self.hblank_entered = false;
         self.lcd_first_line = false;
@@ -461,6 +469,14 @@ impl Ppu {
                 if !self.cgb_mode && self.dot >= 6 {
                     let oam_search_index = ((self.dot - 6) / 2) as i16;
                     self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
+
+                    // SameBoy: at OAM search index 37 (~dot 80):
+                    // VRAM reads blocked, VRAM writes still allowed
+                    // OAM writes unblocked (reads stay blocked)
+                    if oam_search_index >= 37 {
+                        self.vram_accessible = false;
+                        self.oam_write_accessible = true;
+                    }
                 }
 
                 // Mode 2 → Mode 3: internal transition
@@ -472,7 +488,9 @@ impl Ppu {
                     self.mode = 3;
                     self.mode_for_interrupt = 3;
                     self.oam_accessible = false;
+                    self.oam_write_accessible = false;
                     self.vram_accessible = false;
+                    self.vram_write_accessible = false;
                     self.init_fifo();
                     if self.cgb_mode {
                         self.mode3_stat_dot = self.dot + 1;
@@ -499,7 +517,9 @@ impl Ppu {
                     } else {
                         self.stat = self.stat & !0x03;
                         self.oam_accessible = true;
+                        self.oam_write_accessible = true;
                         self.vram_accessible = true;
+                        self.vram_write_accessible = true;
                         self.hblank_entered = true;
                     }
                     self.update_stat_irq();
@@ -514,12 +534,17 @@ impl Ppu {
                     self.mode0_stat_dot = 0;
                     self.stat = self.stat & !0x03; // mode bits = 0
                     self.oam_accessible = true;
+                    self.oam_write_accessible = true;
                     self.vram_accessible = true;
+                    self.vram_write_accessible = true;
                     self.hblank_entered = true;
                 }
-                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 84
-                // (matches SameBoy: 1T initial + 76T mode2 + 2T + 2T + 3T = 84T before mode 3)
-                if self.lcd_first_line && self.dot >= 84 {
+                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 78
+                // SameBoy: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
+                // In our model (no 1T sleep offset): transition at dot 78 so CPU sees
+                // mode 3 at dot 80 (after the batch 77-80). mode3_start_delay=5 ensures
+                // actual pixel rendering starts at dot 84, matching SameBoy's T=84.
+                if self.lcd_first_line && self.dot >= 78 {
                     self.lcd_first_line = false;
                     if !self.cgb_mode {
                         self.lcd_first_line_short = true;
@@ -668,6 +693,9 @@ impl Ppu {
                     if self.ly != 0 {
                         self.mode_for_interrupt = 2;
                     }
+                    // OAM reads blocked 1T before mode 2 (matches SameBoy T=3)
+                    // OAM writes remain accessible until mode 2 proper
+                    self.oam_accessible = false;
                     self.stat &= !0x03;
                     self.update_stat_irq();
                 }
@@ -676,7 +704,9 @@ impl Ppu {
                     self.stat = (self.stat & !0x03) | 0x02;
                     self.mode_for_interrupt = 2;
                     self.oam_accessible = false;
+                    self.oam_write_accessible = false;
                     self.vram_accessible = true;
+                    self.vram_write_accessible = true;
                     self.accessed_oam_row = 0;
                     self.ly_for_comparison = self.ly as i16;
                     self.update_coincidence();
@@ -733,7 +763,9 @@ impl Ppu {
         self.mode_for_interrupt = 2;
         self.stat = (self.stat & !0x03) | 0x02;
         self.oam_accessible = false;
+        self.oam_write_accessible = false;
         self.vram_accessible = true;
+        self.vram_write_accessible = true;
         self.accessed_oam_row = 0;
         self.oam_scan();
         if self.lcdc & 0x20 != 0 && self.ly == self.wy {
@@ -747,7 +779,9 @@ impl Ppu {
         self.mode_for_interrupt = 3;
         self.stat = (self.stat & !0x03) | 0x03;
         self.oam_accessible = false;
+        self.oam_write_accessible = false;
         self.vram_accessible = false;
+        self.vram_write_accessible = false;
         self.init_fifo();
         self.update_stat_irq();
     }
@@ -757,7 +791,9 @@ impl Ppu {
         self.mode_for_interrupt = 1;
         self.stat = (self.stat & !0x03) | 0x01;
         self.oam_accessible = true;
+        self.oam_write_accessible = true;
         self.vram_accessible = true;
+        self.vram_write_accessible = true;
         // VBlank interrupt always fires
         self.if_flags |= 0x01;
         // CGB: Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
@@ -1245,14 +1281,11 @@ impl Ppu {
     }
 
     fn update_coincidence(&mut self) {
-        if self.ly_for_comparison >= 0 {
-            if self.ly_for_comparison as u8 == self.lyc {
-                self.stat |= 0x04;
-            } else {
-                self.stat &= !0x04;
-            }
+        if self.ly_for_comparison >= 0 && self.ly_for_comparison as u8 == self.lyc {
+            self.stat |= 0x04;
+        } else {
+            self.stat &= !0x04;
         }
-        // ly_for_comparison == -1: preserve existing coincidence bit
     }
 
     // ---- OAM scan ----
@@ -1395,12 +1428,13 @@ impl Ppu {
                     self.mode = 0;
                     self.stat = (self.stat & !0x03) | (self.stat & 0x04); // keep bit2
                     self.oam_accessible = true;
+                    self.oam_write_accessible = true;
                     self.vram_accessible = true;
+                    self.vram_write_accessible = true;
                     for p in self.frame_buffer.iter_mut() {
                         *p = 0x00FFFFFF;
                     }
                 } else if !lcd_was_on && lcd_now_on {
-                    log::trace!("LCD_ON: tt_before={}", self.total_ticks);
                     // LCD on: start at line 0, mode reads as 0 initially
                     // DMG first line is ~449T (7T shorter): SameBoy has 1T initial
                     // sleep + 8T phantom cycles_for_line adjustment that shortens Mode 0.
@@ -1417,7 +1451,9 @@ impl Ppu {
                     self.mode = 0;
                     self.stat = self.stat & !0x03; // mode bits = 0
                     self.oam_accessible = true;
+                    self.oam_write_accessible = true;
                     self.vram_accessible = true;
+                    self.vram_write_accessible = true;
                     self.lcd_first_line = true;
                     self.total_ticks = 0;
                     self.window_line_counter = 0;
