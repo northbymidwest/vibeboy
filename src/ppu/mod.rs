@@ -259,8 +259,8 @@ pub struct Ppu {
     pub accessed_oam_row: i16,
 
     /// OAM bug row captured after the 1st T-cycle of each step(4) call.
-    /// SameBoy's cycle_oam_bug advances 1T before checking, so we emulate
-    /// that by capturing the row state after 1T rather than after all 4T.
+    /// On hardware, the OAM bug check happens 1T into the M-cycle, so we
+    /// capture the row state after 1T rather than after all 4T.
     pub oam_bug_row: i16,
 }
 
@@ -439,9 +439,8 @@ impl Ppu {
         for _i in 0..cycles {
             self.tick();
         }
-        // Capture accessed_oam_row after full step to match SameBoy's
-        // GB_trigger_oam_bug which calls GB_display_sync (catches up all
-        // accumulated cycles) before checking the row.
+        // Capture accessed_oam_row after full step — the CPU checks the
+        // OAM bug row after the display has caught up all accumulated cycles.
         self.oam_bug_row = self.accessed_oam_row;
 
         let flags = self.if_flags;
@@ -463,14 +462,14 @@ impl Ppu {
         match self.mode {
             2 => {
                 // DMG OAM bug: track which OAM row the PPU is accessing.
-                // In SameBoy, accessed_oam_row updates AFTER each 2T sleep in the search loop.
+                // accessed_oam_row updates AFTER each 2T sleep in the OAM search loop.
                 // The search loop starts at dot 4 (DMG line-start offset), with 2T per entry.
                 // Entry N's row is set at dot (6 + N*2), right after the 2T sleep.
                 if !self.cgb_mode && self.dot >= 6 {
                     let oam_search_index = ((self.dot - 6) / 2) as i16;
                     self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
 
-                    // SameBoy: at OAM search index 37 (~dot 80):
+                    // At OAM search index 37 (~dot 80) on DMG:
                     // VRAM reads blocked, VRAM writes still allowed
                     // OAM writes unblocked (reads stay blocked)
                     if oam_search_index >= 37 {
@@ -539,11 +538,11 @@ impl Ppu {
                     self.vram_write_accessible = true;
                     self.hblank_entered = true;
                 }
-                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 78
-                // SameBoy: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
+                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 78.
+                // Hardware: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
                 // In our model (no 1T sleep offset): transition at dot 78 so CPU sees
                 // mode 3 at dot 80 (after the batch 77-80). mode3_start_delay=5 ensures
-                // actual pixel rendering starts at dot 84, matching SameBoy's T=84.
+                // actual pixel rendering starts at dot 84.
                 if self.lcd_first_line && self.dot >= 78 {
                     self.lcd_first_line = false;
                     if !self.cgb_mode {
@@ -554,8 +553,8 @@ impl Ppu {
                     return;
                 }
                 // Mode 0 → end of scanline at dot 456 (or dot 449 for first line after LCD enable)
-                // SameBoy's first line is 7T shorter: Mode 0 is shortened by 8T
-                // due to cycles_for_line += 8 adjustment, plus 1T initial DMG sleep.
+                // First line is 7T shorter: Mode 0 is shortened by 8T due to phantom
+                // cycles_for_line adjustment, plus 1T initial DMG sleep.
                 let line_end = if self.lcd_first_line_short { 449 } else { 456 };
                 if self.dot >= line_end {
                     self.lcd_first_line_short = false;
@@ -693,7 +692,7 @@ impl Ppu {
                     if self.ly != 0 {
                         self.mode_for_interrupt = 2;
                     }
-                    // OAM reads blocked 1T before mode 2 (matches SameBoy T=3)
+                    // OAM reads blocked 1T before mode 2 (T=3 of line start)
                     // OAM writes remain accessible until mode 2 proper
                     self.oam_accessible = false;
                     self.stat &= !0x03;
@@ -1016,7 +1015,7 @@ impl Ppu {
         let lo = self.sprite_tile_data_low;
         let hi = self.sprite_tile_data_high;
 
-        // Pad OAM FIFO to exactly 8 entries (matching SameBoy's fifo_overlay_object_row).
+        // Pad OAM FIFO to exactly 8 entries for sprite overlay.
         while self.oam_fifo.len() < 8 {
             self.oam_fifo.push_back(FifoPixel::default());
         }
@@ -1436,9 +1435,8 @@ impl Ppu {
                     }
                 } else if !lcd_was_on && lcd_now_on {
                     // LCD on: start at line 0, mode reads as 0 initially
-                    // DMG first line is ~449T (7T shorter): SameBoy has 1T initial
-                    // sleep + 8T phantom cycles_for_line adjustment that shortens Mode 0.
-                    // We match this by starting dot at 7 on DMG.
+                    // DMG first line is ~449T (7T shorter): 1T initial sleep + 8T
+                    // phantom cycles_for_line adjustment that shortens Mode 0.
                     log::trace!("LY_RESET: LCD ON at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;

@@ -646,8 +646,8 @@ impl Bus {
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         let row = self.ppu.oam_bug_row;
 
-        // SameBoy only checks: row != 0xFF && row >= 8
-        // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
+        // Row must be valid (not 0xFF) and >= 8 for corruption to occur.
+        // No upper bound check — hardware allows corruption even at accessed_oam_row >= 160.
         if row == 0xFF || row < 8 {
             return;
         }
@@ -679,8 +679,8 @@ impl Bus {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         let row = self.ppu.oam_bug_row;
-        // SameBoy only checks: row != 0xFF && row >= 8
-        // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
+        // Row must be valid (not 0xFF) and >= 8 for corruption to occur.
+        // No upper bound check — hardware allows corruption even at accessed_oam_row >= 160.
         if row == 0xFF || row < 8 { return; }
         let row = row as usize;
         log::debug!("OAM_BUG_R: addr={:04X} row={:02X} ly={} pc={:04X}",

@@ -389,8 +389,8 @@ impl Sgb {
             let mut set_border = ctrl & 0x02 != 0;
             let set_outside = ctrl & 0x04 != 0;
 
-            // SameBoy behavior: when only inside is set (no border/outside),
-            // automatically extend inside palette to the border.
+            // When only inside is set (no border/outside), automatically extend
+            // inside palette to the border.
             // When only outside is set (no border/inside), extend to border.
             let mut pal_border_eff = pal_border;
             if set_inside && !set_border && !set_outside {

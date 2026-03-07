@@ -126,8 +126,8 @@ impl Cpu {
     }
 
     fn pop(&mut self, bus: &mut Bus) -> u16 {
-        // SameBoy: POP has no cycle_oam_bug. OAM bug triggers only through
-        // the memory read path (GB_trigger_oam_bug_read in GB_read_memory).
+        // POP has no write-style OAM bug. OAM bug triggers only through
+        // the memory read path (read-style OAM corruption).
         bus.tick_mcycle();
         bus.trigger_oam_bug_read(self.regs.sp);
         let lo = bus.read_byte(self.regs.sp) as u16;
