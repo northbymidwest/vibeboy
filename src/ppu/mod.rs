@@ -530,7 +530,7 @@ impl Ppu {
                     let old_ly = self.ly;
                     self.ly = self.ly.wrapping_add(1);
                     if old_ly == 143 || self.ly == 144 {
-                        eprintln!("LY_INCR: Mode 0 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
+                        log::trace!("LY_INCR: Mode 0 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
                     }
 
                     if self.cgb_mode {
@@ -580,7 +580,7 @@ impl Ppu {
                 // Line 153 special: LY resets to 0 early (~4T into the line)
                 // CGB: handled here; DMG: handled in handle_dmg_line_start
                 if self.cgb_mode && self.ly == 153 && self.dot == 4 {
-                    eprintln!("LY_RESET: CGB ly==153 at tt={}", self.total_ticks);
+                    log::trace!("LY_RESET: CGB ly==153 at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
@@ -611,7 +611,7 @@ impl Ppu {
                         let old_ly = self.ly;
                         self.ly = self.ly.wrapping_add(1);
                         if old_ly == 152 || self.ly == 153 || self.ly == 0 {
-                            eprintln!("LY_INCR: Mode 1 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
+                            log::trace!("LY_INCR: Mode 1 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
                         }
                         if self.cgb_mode {
                             self.visible_ly = self.ly;
@@ -620,7 +620,7 @@ impl Ppu {
                             if self.ly == 153 {
                                 self.update_stat_irq();
                             } else if self.ly > 153 {
-                                eprintln!("LY_RESET: CGB ly={} > 153 at tt={}", self.ly, self.total_ticks);
+                                log::trace!("LY_RESET: CGB ly={} > 153 at tt={}", self.ly, self.total_ticks);
                                 self.ly = 0;
                                 self.visible_ly = 0;
                                 self.ly_for_comparison = 0;
@@ -690,7 +690,7 @@ impl Ppu {
                 2 => {
                     self.visible_ly = self.ly;
                     if self.ly == 144 {
-                        eprintln!("VISIBLE_LY_SET: ly={} at tt={}", self.ly, self.total_ticks);
+                        log::trace!("VISIBLE_LY_SET: ly={} at tt={}", self.ly, self.total_ticks);
                     }
                 }
                 3 => {} // idle
@@ -700,7 +700,7 @@ impl Ppu {
                     self.update_stat_irq();
                     // Line 153 special: LY resets to 0 at dot 4
                     if self.ly == 153 {
-                        eprintln!("LY_RESET: DMG ly==153 at tt={}", self.total_ticks);
+                        log::trace!("LY_RESET: DMG ly==153 at tt={}", self.total_ticks);
                         self.ly = 0;
                         self.visible_ly = 0;
                         self.ly_for_comparison = 0;
@@ -1375,7 +1375,7 @@ impl Ppu {
                     log::warn!("LCD OFF: oam[24..31]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}  oam[56..63]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
                         self.oam[24], self.oam[25], self.oam[26], self.oam[27], self.oam[28], self.oam[29], self.oam[30], self.oam[31],
                         self.oam[56], self.oam[57], self.oam[58], self.oam[59], self.oam[60], self.oam[61], self.oam[62], self.oam[63]);
-                    eprintln!("LY_RESET: LCD OFF at tt={}", self.total_ticks);
+                    log::trace!("LY_RESET: LCD OFF at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
@@ -1392,12 +1392,12 @@ impl Ppu {
                         *p = 0x00FFFFFF;
                     }
                 } else if !lcd_was_on && lcd_now_on {
-                    eprintln!("LCD_ON: tt_before={}", self.total_ticks);
+                    log::trace!("LCD_ON: tt_before={}", self.total_ticks);
                     // LCD on: start at line 0, mode reads as 0 initially
                     // DMG first line is ~449T (7T shorter): SameBoy has 1T initial
                     // sleep + 8T phantom cycles_for_line adjustment that shortens Mode 0.
                     // We match this by starting dot at 7 on DMG.
-                    eprintln!("LY_RESET: LCD ON at tt={}", self.total_ticks);
+                    log::trace!("LY_RESET: LCD ON at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;

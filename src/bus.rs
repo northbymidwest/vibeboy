@@ -645,6 +645,7 @@ impl Bus {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         let row = self.ppu.accessed_oam_row;
+
         // SameBoy only checks: row != 0xFF && row >= 8
         // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
         if row == 0xFF || row < 8 {
@@ -652,7 +653,7 @@ impl Bus {
         }
         let row = row as usize;
         let variant = if source == "INSTR" { "W" } else { "R" };
-        eprintln!("OAM_BUG_{}: addr={:04X} row={:02X} ly={} dot={} tt={} pc={:04X}",
+        log::debug!("OAM_BUG_{}: addr={:04X} row={:02X} ly={} dot={} tt={} pc={:04X}",
             variant, addr, row, self.ppu.ly, self.ppu.dot, self.ppu.total_ticks, self.debug_oam_pc);
         // Bytes 0-1: bitwise glitch (operate as u16 little-endian)
         let a = u16::from_le_bytes([self.ppu.oam[row], self.ppu.oam[row + 1]]);
@@ -678,9 +679,11 @@ impl Bus {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         let row = self.ppu.accessed_oam_row;
-        if row < 8 || row > 152 { return; }
+        // SameBoy only checks: row != 0xFF && row >= 8
+        // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
+        if row == 0xFF || row < 8 { return; }
         let row = row as usize;
-        eprintln!("OAM_BUG_R: addr={:04X} row={:02X} ly={} pc={:04X}",
+        log::debug!("OAM_BUG_R: addr={:04X} row={:02X} ly={} pc={:04X}",
             addr, row, self.ppu.ly, self.debug_oam_pc);
 
         if (row & 0x18) == 0x10 {
