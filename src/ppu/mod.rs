@@ -428,14 +428,13 @@ impl Ppu {
             return 0;
         }
 
-        for i in 0..cycles {
+        for _i in 0..cycles {
             self.tick();
-            // Capture accessed_oam_row after 1st T-cycle to match SameBoy's
-            // cycle_oam_bug which advances 1T before checking the row.
-            if i == 0 {
-                self.oam_bug_row = self.accessed_oam_row;
-            }
         }
+        // Capture accessed_oam_row after full step to match SameBoy's
+        // GB_trigger_oam_bug which calls GB_display_sync (catches up all
+        // accumulated cycles) before checking the row.
+        self.oam_bug_row = self.accessed_oam_row;
 
         let flags = self.if_flags;
         self.if_flags = 0;
