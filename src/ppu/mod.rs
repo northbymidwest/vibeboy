@@ -120,8 +120,9 @@ pub struct Ppu {
     pub vram: [[u8; 0x2000]; 2],
     /// Current VRAM bank (0 or 1), controlled by 0xFF4F (VBK)
     pub vram_bank: usize,
-    /// Object Attribute Memory (40 sprites x 4 bytes)
-    pub oam: [u8; 0xA0],
+    /// Object Attribute Memory (40 sprites x 4 bytes = 160 bytes).
+    /// Extended to 192 bytes to handle OAM bug corruption at accessed_oam_row > 152
+    pub oam: [u8; 192],
 
     // PPU registers
     pub lcdc: u8, // 0xFF40
@@ -146,7 +147,10 @@ pub struct Ppu {
     // Internal state
     mode: u8,
     /// T-cycle counter within the current scanline (0..455)
-    dot: u32,
+    pub(crate) dot: u32,
+
+    /// Debug: total ticks since LCD enable
+    pub(crate) total_ticks: u64,
 
     /// Previous state of internal STAT IRQ signal (for edge detection)
     stat_irq_line: bool,
@@ -175,6 +179,8 @@ pub struct Ppu {
 
     /// True on the first scanline after LCD is enabled (special timing).
     lcd_first_line: bool,
+    /// True during Mode 0 of the first line after LCD enable (shortens line by 7T).
+    lcd_first_line_short: bool,
 
     /// CGB: dot at which Mode 0 becomes visible in STAT (0 = not pending).
     mode0_stat_dot: u32,
@@ -244,6 +250,9 @@ pub struct Ppu {
     /// DMG line-start timing: mode override for STAT IRQ check (-1 = use self.mode).
     mode_for_interrupt: i8,
 
+    /// DMG OAM bug: the OAM row currently being accessed by the PPU during Mode 2.
+    /// 0xFF = not in Mode 2 (no OAM bug possible). Only used on DMG models.
+    pub accessed_oam_row: i16,
 }
 
 impl Ppu {
@@ -261,7 +270,7 @@ impl Ppu {
         Ppu {
             vram: [[0u8; 0x2000]; 2],
             vram_bank: 0,
-            oam: [0u8; 0xA0],
+            oam: [0u8; 192],
 
             lcdc: 0x91,
             stat: 0x85,
@@ -283,6 +292,7 @@ impl Ppu {
 
             mode: 1, // Post-boot: VBlank
             dot: 0,
+            total_ticks: 0,
 
             stat_irq_line: false,
             scanline_sprites: Vec::with_capacity(10),
@@ -299,6 +309,7 @@ impl Ppu {
             if_flags: 0,
             hblank_entered: false,
             lcd_first_line: false,
+            lcd_first_line_short: false,
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
             cgb_mode: true,
@@ -330,6 +341,7 @@ impl Ppu {
             line_start_pending: false,
             line_start_is_vblank: false,
             mode_for_interrupt: -1,
+            accessed_oam_row: 0xFF,
         }
     }
 
@@ -360,6 +372,7 @@ impl Ppu {
         self.frame_ready = false;
         self.hblank_entered = false;
         self.lcd_first_line = false;
+        self.lcd_first_line_short = false;
         self.mode0_stat_dot = 0;
         self.mode3_stat_dot = 0;
         self.window_line_counter = 0;
@@ -379,6 +392,24 @@ impl Ppu {
         self.line_start_pending = false;
         self.line_start_is_vblank = false;
         self.mode_for_interrupt = -1;
+        self.accessed_oam_row = 0xFF;
+    }
+
+    /// Current dot position (for debug)
+    pub fn current_dot(&self) -> u32 { self.dot }
+    /// Current mode (for debug)
+    pub fn current_mode(&self) -> u8 { self.mode }
+
+    /// Compute the accessed OAM row at a given dot position during Mode 2.
+    /// Returns the row byte offset (8, 16, 24, ..., 152) or 0xFF if not in Mode 2
+    /// or if the dot is before OAM search starts.
+    pub fn oam_row_at_dot(&self, dot: u32) -> i16 {
+        if self.mode != 2 || self.cgb_mode { return 0xFF; }
+        if dot < 6 { return 0; }
+        let mode2_end = 84u32; // DMG mode 2 ends at dot 84
+        if dot >= mode2_end { return 0xFF; }
+        let oam_search_index = ((dot - 6) / 2) as i16;
+        (oam_search_index & !1) * 4 + 8
     }
 
     /// Step the PPU by `cycles` T-cycles.
@@ -402,6 +433,7 @@ impl Ppu {
     /// Advance the PPU by one T-cycle.
     fn tick(&mut self) {
         self.dot += 1;
+        self.total_ticks += 1;
 
         // DMG line-start sequence: handle dots 1-5 of new scanline
         if !self.cgb_mode && self.line_start_pending {
@@ -409,13 +441,26 @@ impl Ppu {
             return;
         }
 
+        if self.mode == 2 && self.ly == 0 && self.dot <= 10 && self.total_ticks < 100000 {
+        }
         match self.mode {
             2 => {
+                // DMG OAM bug: track which OAM row the PPU is accessing.
+                // In SameBoy, accessed_oam_row updates AFTER each 2T sleep in the search loop.
+                // The search loop starts at dot 4 (DMG line-start offset), with 2T per entry.
+                // Entry N's row is set at dot (6 + N*2), right after the 2T sleep.
+                if !self.cgb_mode && self.dot >= 2 {
+                    let oam_search_index = ((self.dot - 2) / 2) as i16;
+                    let new_row = (oam_search_index & !1) * 4 + 8;
+                    self.accessed_oam_row = new_row;
+                }
+
                 // Mode 2 → Mode 3: internal transition
                 // DMG: Mode 2 starts at dot 4, so transition at dot 84
                 // CGB: Mode 2 starts at dot 0, so transition at dot 80
                 let mode2_end = if self.cgb_mode { 80 } else { 84 };
                 if self.dot >= mode2_end {
+                    self.accessed_oam_row = 0xFF;
                     self.mode = 3;
                     self.mode_for_interrupt = 3;
                     self.oam_accessible = false;
@@ -464,17 +509,29 @@ impl Ppu {
                     self.vram_accessible = true;
                     self.hblank_entered = true;
                 }
-                // LCD first-line: STAT mode bits stay 0 for ~80 dots, then skip to mode 3
-                if self.lcd_first_line && self.dot >= 80 {
+                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 84
+                // (matches SameBoy: 1T initial + 76T mode2 + 2T + 2T + 3T = 84T before mode 3)
+                if self.lcd_first_line && self.dot >= 84 {
                     self.lcd_first_line = false;
+                    if !self.cgb_mode {
+                        self.lcd_first_line_short = true;
+                    }
                     self.oam_scan(); // collect sprites
                     self.transition_to_mode3();
                     return;
                 }
-                // Mode 0 → end of scanline at dot 456
-                if self.dot >= 456 {
+                // Mode 0 → end of scanline at dot 456 (or dot 449 for first line after LCD enable)
+                // SameBoy's first line is 7T shorter: Mode 0 is shortened by 8T
+                // due to cycles_for_line += 8 adjustment, plus 1T initial DMG sleep.
+                let line_end = if self.lcd_first_line_short { 449 } else { 456 };
+                if self.dot >= line_end {
+                    self.lcd_first_line_short = false;
                     self.dot = 0;
+                    let old_ly = self.ly;
                     self.ly = self.ly.wrapping_add(1);
+                    if old_ly == 143 || self.ly == 144 {
+                        eprintln!("LY_INCR: Mode 0 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
+                    }
 
                     if self.cgb_mode {
                         self.visible_ly = self.ly;
@@ -523,6 +580,7 @@ impl Ppu {
                 // Line 153 special: LY resets to 0 early (~4T into the line)
                 // CGB: handled here; DMG: handled in handle_dmg_line_start
                 if self.cgb_mode && self.ly == 153 && self.dot == 4 {
+                    eprintln!("LY_RESET: CGB ly==153 at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
@@ -550,7 +608,11 @@ impl Ppu {
                             self.ly_for_comparison = 0;
                         }
                     } else {
+                        let old_ly = self.ly;
                         self.ly = self.ly.wrapping_add(1);
+                        if old_ly == 152 || self.ly == 153 || self.ly == 0 {
+                            eprintln!("LY_INCR: Mode 1 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
+                        }
                         if self.cgb_mode {
                             self.visible_ly = self.ly;
                             self.ly_for_comparison = self.ly as i16;
@@ -558,6 +620,7 @@ impl Ppu {
                             if self.ly == 153 {
                                 self.update_stat_irq();
                             } else if self.ly > 153 {
+                                eprintln!("LY_RESET: CGB ly={} > 153 at tt={}", self.ly, self.total_ticks);
                                 self.ly = 0;
                                 self.visible_ly = 0;
                                 self.ly_for_comparison = 0;
@@ -606,6 +669,7 @@ impl Ppu {
                     self.mode_for_interrupt = 2;
                     self.oam_accessible = false;
                     self.vram_accessible = true;
+                    self.accessed_oam_row = 0;
                     self.ly_for_comparison = self.ly as i16;
                     self.update_coincidence();
                     if self.lcdc & 0x20 != 0 && self.ly == self.wy {
@@ -625,6 +689,9 @@ impl Ppu {
                 1 => {} // idle
                 2 => {
                     self.visible_ly = self.ly;
+                    if self.ly == 144 {
+                        eprintln!("VISIBLE_LY_SET: ly={} at tt={}", self.ly, self.total_ticks);
+                    }
                 }
                 3 => {} // idle
                 4 => {
@@ -633,6 +700,7 @@ impl Ppu {
                     self.update_stat_irq();
                     // Line 153 special: LY resets to 0 at dot 4
                     if self.ly == 153 {
+                        eprintln!("LY_RESET: DMG ly==153 at tt={}", self.total_ticks);
                         self.ly = 0;
                         self.visible_ly = 0;
                         self.ly_for_comparison = 0;
@@ -658,6 +726,7 @@ impl Ppu {
         self.stat = (self.stat & !0x03) | 0x02;
         self.oam_accessible = false;
         self.vram_accessible = true;
+        self.accessed_oam_row = 0;
         self.oam_scan();
         if self.lcdc & 0x20 != 0 && self.ly == self.wy {
             self.wy_triggered = true;
@@ -1303,12 +1372,17 @@ impl Ppu {
                 if lcd_was_on && !lcd_now_on {
                     // LCD off: reset LY, dot, mode; preserve coincidence bit
                     // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
+                    log::warn!("LCD OFF: oam[24..31]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}  oam[56..63]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                        self.oam[24], self.oam[25], self.oam[26], self.oam[27], self.oam[28], self.oam[29], self.oam[30], self.oam[31],
+                        self.oam[56], self.oam[57], self.oam[58], self.oam[59], self.oam[60], self.oam[61], self.oam[62], self.oam[63]);
+                    eprintln!("LY_RESET: LCD OFF at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
                     self.line_start_pending = false;
                     self.line_start_is_vblank = false;
                     self.mode_for_interrupt = -1;
+                    self.accessed_oam_row = 0xFF;
                     self.dot = 0;
                     self.mode = 0;
                     self.stat = (self.stat & !0x03) | (self.stat & 0x04); // keep bit2
@@ -1318,19 +1392,26 @@ impl Ppu {
                         *p = 0x00FFFFFF;
                     }
                 } else if !lcd_was_on && lcd_now_on {
+                    eprintln!("LCD_ON: tt_before={}", self.total_ticks);
                     // LCD on: start at line 0, mode reads as 0 initially
+                    // DMG first line is ~449T (7T shorter): SameBoy has 1T initial
+                    // sleep + 8T phantom cycles_for_line adjustment that shortens Mode 0.
+                    // We match this by starting dot at 7 on DMG.
+                    eprintln!("LY_RESET: LCD ON at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
                     self.line_start_pending = false;
                     self.line_start_is_vblank = false;
                     self.mode_for_interrupt = -1;
+                    self.accessed_oam_row = 0xFF;
                     self.dot = 0;
                     self.mode = 0;
                     self.stat = self.stat & !0x03; // mode bits = 0
                     self.oam_accessible = true;
                     self.vram_accessible = true;
                     self.lcd_first_line = true;
+                    self.total_ticks = 0;
                     self.window_line_counter = 0;
                     // Check WY trigger for first line (LY=0)
                     self.wy_triggered = self.lcdc & 0x20 != 0 && self.ly == self.wy;
