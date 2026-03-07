@@ -644,7 +644,7 @@ impl Bus {
     fn trigger_oam_bug_inner(&mut self, addr: u16, source: &str) {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
-        let row = self.ppu.accessed_oam_row;
+        let row = self.ppu.oam_bug_row;
 
         // SameBoy only checks: row != 0xFF && row >= 8
         // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
@@ -678,7 +678,7 @@ impl Bus {
     pub fn trigger_oam_bug_read(&mut self, addr: u16) {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
-        let row = self.ppu.accessed_oam_row;
+        let row = self.ppu.oam_bug_row;
         // SameBoy only checks: row != 0xFF && row >= 8
         // No upper bound check (hardware allows corruption even at accessed_oam_row >= 160)
         if row == 0xFF || row < 8 { return; }

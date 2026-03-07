@@ -448,8 +448,8 @@ impl Cpu {
             0x03 => {
                 // INC BC
                 let v = self.regs.bc();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_bc(v.wrapping_add(1));
                 8
             }
@@ -502,8 +502,8 @@ impl Cpu {
             0x0B => {
                 // DEC BC
                 let v = self.regs.bc();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_bc(v.wrapping_sub(1));
                 8
             }
@@ -554,8 +554,8 @@ impl Cpu {
             0x13 => {
                 // INC DE
                 let v = self.regs.de();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_de(v.wrapping_add(1));
                 8
             }
@@ -587,8 +587,8 @@ impl Cpu {
             0x18 => {
                 // JR e8: unconditional relative jump
                 let e = self.fetch_byte(bus) as i8;
-                bus.trigger_oam_bug(self.regs.pc);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.pc);
                 self.regs.pc = self.regs.pc.wrapping_add(e as u16);
                 12
             }
@@ -608,8 +608,8 @@ impl Cpu {
             0x1B => {
                 // DEC DE
                 let v = self.regs.de();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_de(v.wrapping_sub(1));
                 8
             }
@@ -644,8 +644,8 @@ impl Cpu {
                 // JR NZ, e8
                 let e = self.fetch_byte(bus) as i8;
                 if !self.regs.flag_z() {
-                    bus.trigger_oam_bug(self.regs.pc);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.pc);
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
                     12
                 } else {
@@ -669,8 +669,8 @@ impl Cpu {
             0x23 => {
                 // INC HL
                 let v = self.regs.hl();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_hl(v.wrapping_add(1));
                 8
             }
@@ -700,8 +700,8 @@ impl Cpu {
                 // JR Z, e8
                 let e = self.fetch_byte(bus) as i8;
                 if self.regs.flag_z() {
-                    bus.trigger_oam_bug(self.regs.pc);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.pc);
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
                     12
                 } else {
@@ -718,8 +718,8 @@ impl Cpu {
             0x2A => {
                 // LD A, (HL+)
                 let hl = self.regs.hl();
-                bus.trigger_oam_bug_read(hl);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug_read(hl);
                 self.regs.a = bus.read_byte(hl);
                 self.regs.set_hl(hl.wrapping_add(1));
                 8
@@ -727,8 +727,8 @@ impl Cpu {
             0x2B => {
                 // DEC HL
                 let v = self.regs.hl();
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.set_hl(v.wrapping_sub(1));
                 8
             }
@@ -761,8 +761,8 @@ impl Cpu {
                 // JR NC, e8
                 let e = self.fetch_byte(bus) as i8;
                 if !self.regs.flag_c() {
-                    bus.trigger_oam_bug(self.regs.pc);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.pc);
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
                     12
                 } else {
@@ -785,8 +785,8 @@ impl Cpu {
             0x33 => {
                 // INC SP
                 let v = self.regs.sp;
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.sp = v.wrapping_add(1);
                 8
             }
@@ -827,8 +827,8 @@ impl Cpu {
                 // JR C, e8
                 let e = self.fetch_byte(bus) as i8;
                 if self.regs.flag_c() {
-                    bus.trigger_oam_bug(self.regs.pc);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.pc);
                     self.regs.pc = self.regs.pc.wrapping_add(e as u16);
                     12
                 } else {
@@ -845,8 +845,8 @@ impl Cpu {
             0x3A => {
                 // LD A, (HL-)
                 let hl = self.regs.hl();
-                bus.trigger_oam_bug_read(hl);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug_read(hl);
                 self.regs.a = bus.read_byte(hl);
                 self.regs.set_hl(hl.wrapping_sub(1));
                 8
@@ -854,8 +854,8 @@ impl Cpu {
             0x3B => {
                 // DEC SP
                 let v = self.regs.sp;
-                bus.trigger_oam_bug(v);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(v);
                 self.regs.sp = v.wrapping_sub(1);
                 8
             }
@@ -999,8 +999,8 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_z() {
                     let pc = self.regs.pc;
-                    bus.trigger_oam_bug(self.regs.sp);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.sp);
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1011,8 +1011,8 @@ impl Cpu {
             0xC5 => {
                 // PUSH BC
                 let v = self.regs.bc();
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, v);
                 16
             }
@@ -1025,8 +1025,8 @@ impl Cpu {
             0xC7 => {
                 // RST 00H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0000;
                 16
@@ -1070,8 +1070,8 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_z() {
                     let pc = self.regs.pc;
-                    bus.trigger_oam_bug(self.regs.sp);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.sp);
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1083,8 +1083,8 @@ impl Cpu {
                 // CALL a16
                 let addr = self.fetch_word(bus);
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = addr;
                 24
@@ -1099,8 +1099,8 @@ impl Cpu {
             0xCF => {
                 // RST 08H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0008;
                 16
@@ -1141,8 +1141,8 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if !self.regs.flag_c() {
                     let pc = self.regs.pc;
-                    bus.trigger_oam_bug(self.regs.sp);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.sp);
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1153,8 +1153,8 @@ impl Cpu {
             0xD5 => {
                 // PUSH DE
                 let v = self.regs.de();
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, v);
                 16
             }
@@ -1168,8 +1168,8 @@ impl Cpu {
             0xD7 => {
                 // RST 10H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0010;
                 16
@@ -1211,8 +1211,8 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_c() {
                     let pc = self.regs.pc;
-                    bus.trigger_oam_bug(self.regs.sp);
                     bus.tick_mcycle();
+                    bus.trigger_oam_bug(self.regs.sp);
                     self.push(bus, pc);
                     self.regs.pc = addr;
                     24
@@ -1232,8 +1232,8 @@ impl Cpu {
             0xDF => {
                 // RST 18H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0018;
                 16
@@ -1263,8 +1263,8 @@ impl Cpu {
             0xE5 => {
                 // PUSH HL
                 let v = self.regs.hl();
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, v);
                 16
             }
@@ -1277,8 +1277,8 @@ impl Cpu {
             0xE7 => {
                 // RST 20H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0020;
                 16
@@ -1315,8 +1315,8 @@ impl Cpu {
             0xEF => {
                 // RST 28H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0028;
                 16
@@ -1351,8 +1351,8 @@ impl Cpu {
             0xF5 => {
                 // PUSH AF
                 let v = self.regs.af();
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, v);
                 16
             }
@@ -1365,8 +1365,8 @@ impl Cpu {
             0xF7 => {
                 // RST 30H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0030;
                 16
@@ -1382,8 +1382,8 @@ impl Cpu {
             0xF9 => {
                 // LD SP, HL
                 self.regs.sp = self.regs.hl();
-                bus.trigger_oam_bug(self.regs.hl());
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.hl());
                 8
             }
             0xFA => {
@@ -1409,8 +1409,8 @@ impl Cpu {
             0xFF => {
                 // RST 38H
                 let pc = self.regs.pc;
-                bus.trigger_oam_bug(self.regs.sp);
                 bus.tick_mcycle();
+                bus.trigger_oam_bug(self.regs.sp);
                 self.push(bus, pc);
                 self.regs.pc = 0x0038;
                 16

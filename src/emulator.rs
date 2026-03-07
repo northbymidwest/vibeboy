@@ -289,18 +289,16 @@ impl Emulator {
     /// done loop (JR -2) is hit, or max_frames elapse.
     /// Returns the serial output as a string.
     pub fn run_until_serial_result(&mut self, max_frames: u32) -> String {
-        let cycles_per_frame = 70_224u32;
-        let mut cycles = 0u32;
-        let limit = cycles_per_frame * max_frames;
+        let limit = 70_224u64 * max_frames as u64;
+        let mut step_count = 0u64;
         loop {
             let pc = self.cpu.regs.pc;
             self.cpu.step(&mut self.bus);
-            cycles += 4;
+            step_count += 1;
 
             // Detect Blargg done loop: JR -2 (opcode 18 FE)
             if self.bus.read_byte(pc) == 0x18 && self.bus.read_byte(pc.wrapping_add(1)) == 0xFE {
                 let serial = String::from_utf8_lossy(&self.bus.serial.serial_output).into_owned();
-                log::warn!("JR-2 loop detected. Serial buffer ({} bytes): {:?}", self.bus.serial.serial_output.len(), &self.bus.serial.serial_output[..std::cmp::min(80, self.bus.serial.serial_output.len())]);
                 let result = self.bus.read_byte(0xA000);
                 if result == 0 {
                     if serial.is_empty() { return "Passed".to_string(); }
@@ -311,10 +309,14 @@ impl Emulator {
                 }
             }
 
-            // Check serial output periodically
-            if cycles % 1024 == 0 || cycles >= limit {
+            // Check periodically using PPU total_ticks for accurate timing
+            if step_count % 1024 == 0 {
+                let ticks = self.bus.ppu.total_ticks;
                 let output = String::from_utf8_lossy(&self.bus.serial.serial_output);
-                if output.contains("Passed") || output.contains("Failed") || cycles >= limit {
+                if output.contains("Passed") || output.contains("Failed") {
+                    return output.into_owned();
+                }
+                if ticks >= limit {
                     return output.into_owned();
                 }
             }

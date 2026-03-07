@@ -114,7 +114,7 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     let model = detect_model_with_rom(path, Some(&rom));
     let br: Option<Vec<u8>> = None; // temporarily skip boot ROM for debugging
     let mut emu = Emulator::new(rom, br, None, model, None);
-    let output = emu.run_until_serial_result(1800); // ~30 seconds at 60fps
+    let output = emu.run_until_serial_result(60000); // ~16 minutes at 60fps (oam_bug test 7 prints a lot)
     if verbose && !output.is_empty() {
         // Print serial output indented
         for line in output.lines() {

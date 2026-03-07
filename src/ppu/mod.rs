@@ -253,6 +253,11 @@ pub struct Ppu {
     /// DMG OAM bug: the OAM row currently being accessed by the PPU during Mode 2.
     /// 0xFF = not in Mode 2 (no OAM bug possible). Only used on DMG models.
     pub accessed_oam_row: i16,
+
+    /// OAM bug row captured after the 1st T-cycle of each step(4) call.
+    /// SameBoy's cycle_oam_bug advances 1T before checking, so we emulate
+    /// that by capturing the row state after 1T rather than after all 4T.
+    pub oam_bug_row: i16,
 }
 
 impl Ppu {
@@ -342,6 +347,7 @@ impl Ppu {
             line_start_is_vblank: false,
             mode_for_interrupt: -1,
             accessed_oam_row: 0xFF,
+            oam_bug_row: 0xFF,
         }
     }
 
@@ -393,6 +399,7 @@ impl Ppu {
         self.line_start_is_vblank = false;
         self.mode_for_interrupt = -1;
         self.accessed_oam_row = 0xFF;
+        self.oam_bug_row = 0xFF;
     }
 
     /// Current dot position (for debug)
@@ -421,8 +428,13 @@ impl Ppu {
             return 0;
         }
 
-        for _ in 0..cycles {
+        for i in 0..cycles {
             self.tick();
+            // Capture accessed_oam_row after 1st T-cycle to match SameBoy's
+            // cycle_oam_bug which advances 1T before checking the row.
+            if i == 0 {
+                self.oam_bug_row = self.accessed_oam_row;
+            }
         }
 
         let flags = self.if_flags;
@@ -441,18 +453,15 @@ impl Ppu {
             return;
         }
 
-        if self.mode == 2 && self.ly == 0 && self.dot <= 10 && self.total_ticks < 100000 {
-        }
         match self.mode {
             2 => {
                 // DMG OAM bug: track which OAM row the PPU is accessing.
                 // In SameBoy, accessed_oam_row updates AFTER each 2T sleep in the search loop.
                 // The search loop starts at dot 4 (DMG line-start offset), with 2T per entry.
                 // Entry N's row is set at dot (6 + N*2), right after the 2T sleep.
-                if !self.cgb_mode && self.dot >= 2 {
-                    let oam_search_index = ((self.dot - 2) / 2) as i16;
-                    let new_row = (oam_search_index & !1) * 4 + 8;
-                    self.accessed_oam_row = new_row;
+                if !self.cgb_mode && self.dot >= 6 {
+                    let oam_search_index = ((self.dot - 6) / 2) as i16;
+                    self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
                 }
 
                 // Mode 2 → Mode 3: internal transition
