@@ -22,24 +22,27 @@ Test ROMs live in `test-roms/` (blargg, mooneye-test-suite, SameSuite). The `tes
 
 ```bash
 # Mooneye tests (breakpoint detection, Fibonacci register check)
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/
+cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/
 
 # Blargg tests (serial output detection)
-cargo run --release --bin test_runner -- test-roms/blargg/ --blargg
+cargo run --release --bin test_runner -- test-roms/blargg/ blargg
 
 # Single test
-cargo run --release --bin test_runner -- test-roms/blargg/cpu_instrs/individual/01-special.gb --blargg
+cargo run --release --bin test_runner -- test-roms/blargg/cpu_instrs/individual/01-special.gb blargg
 
 # Screenshot a ROM after N frames
-cargo run --release --bin test_runner -- path/to/rom.gb --screenshot --frames 300 --out screenshot.png
+cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png
 
 # Force a specific model
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/acceptance/ --dmg
+cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/ --model dmg
+
+# Run with boot ROM
+cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/ --boot
 ```
 
 Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag.
 
-**Current test status:** 96/115 mooneye, 51/58 blargg (oam_bug tests remaining), 33/70 SameSuite APU.
+**Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 33/70 SameSuite APU.
 
 ## Architecture
 
