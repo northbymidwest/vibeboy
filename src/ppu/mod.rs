@@ -611,11 +611,12 @@ impl Ppu {
                         self.line_start_pending = true;
                         if self.ly < 144 {
                             // Prime mode_for_interrupt for next active line.
-                            // Fire STAT update immediately so the Mode 2 rising
-                            // edge is visible to the CPU in the same M-cycle as
-                            // the dot-456 line wrap (matching hardware M-cycle alignment).
+                            // Don't fire update_stat_irq here — on hardware, the
+                            // Mode 2 STAT interrupt fires at T=3 from line start
+                            // (in the handle_dmg_line_start dot 3 handler), not
+                            // at the line wrap. Setting mode_for_interrupt now
+                            // ensures the rising edge is detected at dot 3.
                             self.mode_for_interrupt = 2;
-                            self.update_stat_irq();
                             self.line_start_is_vblank = false;
                         } else {
                             // DMG VBlank entry (ly == 144): fire interrupts immediately
@@ -668,7 +669,7 @@ impl Ppu {
                             self.line_start_pending = true;
                             self.line_start_is_vblank = false;
                             self.mode_for_interrupt = 2;
-                            self.update_stat_irq(); // Fire Mode 2 STAT in same M-cycle as wrap
+                            // Don't fire update_stat_irq here — deferred to dot 3
                             self.ly_for_comparison = 0;
                         }
                     } else {
