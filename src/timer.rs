@@ -30,11 +30,11 @@ impl Timer {
         Self::post_boot(GbModel::Cgb, true, &[])
     }
 
-    /// Hardware reset state: counter starts at 4 to account for the internal
-    /// startup M-cycle before the CPU begins executing the first instruction.
+    /// Hardware reset state: counter starts at 8 to account for the two internal
+    /// startup M-cycles before the CPU begins executing the first instruction.
     pub fn reset() -> Self {
         Timer {
-            counter: 4,
+            counter: 8,
             tima: 0,
             tma: 0,
             tac: 0xF8,
