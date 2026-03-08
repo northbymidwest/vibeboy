@@ -30,21 +30,24 @@ impl Cpu {
         // Save pending_ime state before anything else (EI delay)
         let pending_ime = self.ime_pending;
 
-        // Handle halted state: HALT NOP cycle first, then check for wake.
-        // On real hardware, the HALT wake cycle (4T) happens before interrupt
-        // dispatch, giving correct timing from interrupt fire to ISR execution.
+        // Handle halted state: HALT NOP cycle with 2T-split IF check.
+        // Hardware checks IF at the midpoint (2T) of each HALT NOP cycle.
+        // If IF is set in the second half of a HALT NOP, it's not detected
+        // until the NEXT HALT NOP's midpoint check, effectively delaying
+        // detection by 4T compared to a naive post-tick check.
         let halt_wake = if self.halted {
-            bus.tick_mcycle(); // HALT NOP / wake cycle (4T)
+            bus.tick_half_mcycle(); // first 2T of HALT NOP
             let pending = bus.ie() & bus.if_reg() & 0x1F;
+            bus.tick_half_mcycle(); // second 2T of HALT NOP
+            bus.step_oam_dma();
             if pending != 0 {
                 self.halted = false;
                 if self.ime {
-                    // Wake from HALT and dispatch interrupt
                     self.dispatch_interrupt(bus);
                     return 24; // 4T HALT wake + 20T dispatch
                 }
                 // Wake from HALT without dispatch (IME=false, HALT bug behavior)
-                true // fell through — will fetch+execute next instruction
+                true
             } else {
                 return 4; // still halted, NOP cycle
             }
@@ -171,7 +174,12 @@ impl Cpu {
             3 => self.regs.e,
             4 => self.regs.h,
             5 => self.regs.l,
-            6 => { let v = bus.read_byte(self.regs.hl()); bus.tick_mcycle(); v }
+            6 => {
+                let addr = self.regs.hl();
+                let v = bus.read_byte(addr);
+                bus.tick_mcycle();
+                v
+            }
             7 => self.regs.a,
             _ => unreachable!(),
         }

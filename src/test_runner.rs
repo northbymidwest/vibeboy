@@ -90,7 +90,7 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, us
         Ok(r) => r,
         Err(_) => return "ERR",
     };
-    let model = force_model.unwrap_or_else(|| detect_model(path));
+    let model = force_model.unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
     // Auto-enable boot ROM for tests that check post-boot state
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let needs_boot = use_boot_rom;
@@ -320,7 +320,7 @@ fn main() {
                 for _ in 0..100_000_000u64 {
                     if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
                         eprintln!("{:?}: LY={} dot={} mode={} total_ticks={} DIV={:02X} timer_counter={:#06X} regs=A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X}",
-                            model, emu.bus.ppu.ly, emu.bus.ppu.current_dot(), emu.bus.ppu.current_mode(),
+                            model, emu.bus.ppu.ly, emu.bus.ppu.dot, emu.bus.ppu.stat & 0x03,
                             emu.bus.ppu.total_ticks, emu.bus.read_byte(0xFF04), emu.bus.timer.counter(),
                             emu.cpu.regs.a, emu.cpu.regs.f, emu.cpu.regs.b, emu.cpu.regs.c,
                             emu.cpu.regs.d, emu.cpu.regs.e, emu.cpu.regs.h, emu.cpu.regs.l);

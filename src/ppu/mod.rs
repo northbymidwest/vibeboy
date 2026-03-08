@@ -449,11 +449,6 @@ impl Ppu {
         self.lcdc = 0x91;
     }
 
-    /// Current dot position (for debug)
-    pub fn current_dot(&self) -> u32 { self.dot }
-    /// Current mode (for debug)
-    pub fn current_mode(&self) -> u8 { self.mode }
-
     /// Compute the accessed OAM row at a given dot position during Mode 2.
     /// Returns the row byte offset (8, 16, 24, ..., 152) or 0xFF if not in Mode 2
     /// or if the dot is before OAM search starts.
@@ -517,9 +512,7 @@ impl Ppu {
                     }
                 }
 
-                // Mode 2 → Mode 3: internal transition
-                // DMG: Mode 2 starts at dot 4, so transition at dot 84
-                // CGB: Mode 2 starts at dot 0, so transition at dot 80
+                // Mode 2 → Mode 3: internal transition at dot 80
                 let mode2_end = if self.cgb_mode { 80 } else { 84 };
                 if self.dot >= mode2_end {
                     self.accessed_oam_row = 0xFF;

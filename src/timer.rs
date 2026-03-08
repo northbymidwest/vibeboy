@@ -50,12 +50,12 @@ impl Timer {
     /// sends header bytes as SGB packets, and bit values affect branch timing).
     pub fn post_boot(model: GbModel, is_cgb_game: bool, rom: &[u8]) -> Self {
         let counter = match model {
-            GbModel::Cgb if is_cgb_game => 0x1EA0,
-            GbModel::Cgb => 0x2678,
-            GbModel::Agb if is_cgb_game => 0x1EA4,
-            GbModel::Agb => 0x267C,
-            GbModel::Dmg0 => 0x182C,
-            GbModel::Dmg | GbModel::Mgb => 0xABC8,
+            GbModel::Cgb if is_cgb_game => 0x1EA4,
+            GbModel::Cgb => 0x267C,
+            GbModel::Agb if is_cgb_game => 0x1EA8,
+            GbModel::Agb => 0x2680,
+            GbModel::Dmg0 => 0x1830,
+            GbModel::Dmg | GbModel::Mgb => 0xABCC,
             GbModel::Sgb | GbModel::Sgb2 => {
                 // The SGB boot ROM sends 6 packets (96 bytes) built from ROM header
                 // bytes $0104-$014F. Each 1-bit in the packet data takes 4 fewer
@@ -64,7 +64,7 @@ impl Timer {
                 // VBlank waits between packets absorb timing differences.
                 // Formula: counter = BASE - 4 * popcount(all_packet_bytes)
                 let popcount = sgb_packet_popcount(rom);
-                0xDD70u16.wrapping_sub(4 * popcount as u16)
+                0xDD74u16.wrapping_sub(4 * popcount as u16)
             }
         };
         Timer {

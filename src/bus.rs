@@ -276,7 +276,6 @@ impl Bus {
     pub fn ie(&self) -> u8 { self.ie }
     pub fn if_reg(&self) -> u8 { self.if_ }
     pub fn if_mut(&mut self) -> &mut u8 { &mut self.if_ }
-
     // ── Memory read ───────────────────────────────────────────────────────────
 
     /// CPU memory read. On CGB, OAM DMA only blocks OAM (0xFE00–0xFE9F);
@@ -583,7 +582,7 @@ impl Bus {
     }
 
     /// Advance OAM DMA by one M-cycle. Called from tick_mcycle().
-    fn step_oam_dma(&mut self) {
+    pub fn step_oam_dma(&mut self) {
         if !self.oam_dma.active { return; }
         if self.oam_dma.delay > 0 {
             self.oam_dma.delay -= 1;
@@ -814,6 +813,15 @@ impl Bus {
         let bus_cycles = if self.double_speed { 2 } else { 4 };
         self.tick(4, bus_cycles);
         self.step_oam_dma();
+    }
+
+    /// Tick the bus by half an M-cycle (2 T-cycles normal speed, 1 in double-speed).
+    /// Used for HALT wake timing: hardware checks IF at the midpoint of the HALT NOP.
+    pub fn tick_half_mcycle(&mut self) {
+        self.oam_dma.blocking = self.oam_dma.compute_blocking();
+        let bus_cycles = if self.double_speed { 1 } else { 2 };
+        self.tick(2, bus_cycles);
+        // OAM DMA step deferred to the next half or full M-cycle
     }
 
     /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
