@@ -253,6 +253,9 @@ pub struct Ppu {
     line_start_is_vblank: bool,
     /// DMG line-start timing: mode override for STAT IRQ check (-1 = use self.mode).
     mode_for_interrupt: i8,
+    /// Line 153 extended state machine: tracks the multi-step LY 153→0 transition.
+    /// 0 = not active, >0 = active at this step of the sequence.
+    line_153_phase: u8,
 
     /// DMG OAM bug: the OAM row currently being accessed by the PPU during Mode 2.
     /// 0xFF = not in Mode 2 (no OAM bug possible). Only used on DMG models.
@@ -352,6 +355,7 @@ impl Ppu {
             line_start_pending: false,
             line_start_is_vblank: false,
             mode_for_interrupt: -1,
+            line_153_phase: 0,
             accessed_oam_row: 0xFF,
             oam_bug_row: 0xFF,
         }
@@ -406,6 +410,7 @@ impl Ppu {
         self.line_start_pending = false;
         self.line_start_is_vblank = false;
         self.mode_for_interrupt = -1;
+        self.line_153_phase = 0;
         self.accessed_oam_row = 0xFF;
         self.oam_bug_row = 0xFF;
     }
@@ -635,22 +640,12 @@ impl Ppu {
                             self.mode_for_interrupt = 2;
                             self.line_start_is_vblank = false;
                         } else {
-                            // DMG VBlank entry (ly == 144): fire interrupts immediately
-                            // at the line transition so CPU sees them in the same M-cycle
-                            // as the dot-456 wrap. Visible LY and mode bits update later
-                            // via line_start_pending handler.
+                            // DMG VBlank entry (ly == 144): defer mode/IF changes to
+                            // handle_dmg_line_start. On hardware, LY becomes 144 visible
+                            // at dot 2, but mode stays 0 until dot 5.
                             self.line_start_is_vblank = true;
                             self.ly_for_comparison = -1;
-                            // VBlank IF fires immediately
-                            self.if_flags |= 0x01;
-                            // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
-                            if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                                self.if_flags |= 0x02;
-                            }
-                            // Transition to Mode 1
-                            self.stat = (self.stat & !0x03) | 0x01;
-                            self.mode = 1;
-                            self.mode_for_interrupt = 1;
+                            self.update_coincidence();
                             self.update_stat_irq();
                         }
                     }
@@ -658,19 +653,26 @@ impl Ppu {
             }
             1 => {
                 // VBlank lines
-                // Line 153 special: LY resets to 0 early (~4T into the line)
-                // CGB: handled here; DMG: handled in handle_dmg_line_start
-                if self.cgb_mode && self.ly == 153 && self.dot == 4 {
-                    log::trace!("LY_RESET: CGB ly==153 at tt={}", self.total_ticks);
-                    self.ly = 0;
-                    self.visible_ly = 0;
-                    self.ly_for_comparison = 0;
+
+                // Line 153 extended state machine: spreads the LY 153→0
+                // transition across multiple T-cycles (matching hardware timing).
+                if self.line_153_phase > 0 {
+                    self.tick_line_153();
+                }
+
+                // CGB line 153 early handling (non-DMG path)
+                if self.cgb_mode && self.ly == 153 && self.dot == 4 && self.line_153_phase == 0 {
+                    // CGB line 153: ly_for_comparison = 153 at T+4
+                    self.ly_for_comparison = 153;
                     self.update_coincidence();
                     self.update_stat_irq();
+                    // Start extended sequence at phase 1 (next event at dot 8)
+                    self.line_153_phase = 1;
                 }
 
                 if self.dot >= 456 {
                     self.dot = 0;
+                    self.line_153_phase = 0;
                     if self.ly == 0 {
                         // Line 153 already set LY=0; now start actual line 0
                         self.frame_ready = true;
@@ -682,42 +684,28 @@ impl Ppu {
                             self.transition_to_mode2();
                         } else {
                             // DMG: defer to line-start for line 0
+                            // Note: do NOT prime mode_for_interrupt = 2 here.
+                            // On hardware, the mode 2 STAT interrupt fires 1T
+                            // later on line 0 than on lines 1-143 (at T+4 vs T+3).
+                            // Keeping mode_for_interrupt at 1 (from VBlank) ensures
+                            // the mode 2 interrupt is deferred to dot 4.
                             self.line_start_pending = true;
                             self.line_start_is_vblank = false;
-                            self.mode_for_interrupt = 2;
-                            // Don't fire update_stat_irq here — deferred to dot 3
                             self.ly_for_comparison = 0;
                         }
                     } else {
-                        let old_ly = self.ly;
                         self.ly = self.ly.wrapping_add(1);
-                        if old_ly == 152 || self.ly == 153 || self.ly == 0 {
-                            log::trace!("LY_INCR: Mode 1 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
-                        }
                         if self.cgb_mode {
                             self.visible_ly = self.ly;
                             self.ly_for_comparison = self.ly as i16;
                             self.update_coincidence();
-                            if self.ly == 153 {
-                                self.update_stat_irq();
-                            } else if self.ly > 153 {
-                                log::trace!("LY_RESET: CGB ly={} > 153 at tt={}", self.ly, self.total_ticks);
-                                self.ly = 0;
-                                self.visible_ly = 0;
-                                self.ly_for_comparison = 0;
-                                self.update_coincidence();
-                                self.frame_ready = true;
-                                self.window_line_counter = 0;
-                                self.wy_triggered = false;
-                                self.transition_to_mode2();
-                            } else {
-                                self.update_stat_irq();
-                            }
+                            self.update_stat_irq();
                         } else {
                             // DMG VBlank line transition
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
                             self.ly_for_comparison = -1;
+                            self.update_coincidence();
                             self.update_stat_irq();
                         }
                     }
@@ -775,29 +763,98 @@ impl Ppu {
                 1 => {} // idle
                 2 => {
                     self.visible_ly = self.ly;
-                    if self.ly == 144 {
-                        log::trace!("VISIBLE_LY_SET: ly={} at tt={}", self.ly, self.total_ticks);
-                    }
                 }
                 3 => {} // idle
                 4 => {
                     self.ly_for_comparison = self.ly as i16;
                     self.update_coincidence();
                     self.update_stat_irq();
-                    // Line 153 special: LY resets to 0 at dot 4
+                    // Line 153: start extended sequence (LY reset spread across dots 6-12)
                     if self.ly == 153 {
-                        log::trace!("LY_RESET: DMG ly==153 at tt={}", self.total_ticks);
-                        self.ly = 0;
-                        self.visible_ly = 0;
-                        self.ly_for_comparison = 0;
-                        self.update_coincidence();
-                        self.update_stat_irq();
+                        self.line_153_phase = 1;
                     }
                 }
                 5 => {
-                    // VBlank entry (ly==144) was already handled at line transition.
-                    // For other VBlank lines, nothing special at dot 5.
+                    if self.ly == 144 || (self.ly == 0 && self.line_153_phase == 0) {
+                        // VBlank entry: mode 0→1, VBlank IF, Mode 2 STAT quirk.
+                        // Only for line 144 (first VBlank line). On subsequent VBlank
+                        // lines (145-153), mode is already 1.
+                        // Note: ly==0 with line_153_phase==0 means we wrapped past 153
+                        // but that shouldn't happen here.
+                        if self.mode != 1 {
+                            // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
+                            if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                                self.if_flags |= 0x02;
+                            }
+                            self.stat = (self.stat & !0x03) | 0x01;
+                            self.mode = 1;
+                            self.if_flags |= 0x01; // VBlank IF
+                            self.mode_for_interrupt = 1;
+                            self.oam_accessible = true;
+                            self.oam_write_accessible = true;
+                            self.vram_accessible = true;
+                            self.vram_write_accessible = true;
+                            self.update_stat_irq();
+                        }
+                    }
                     self.line_start_pending = false;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Line 153 extended state machine: spreads LY 153→0 transition across
+    /// multiple T-cycles to match hardware timing verified by mooneye tests.
+    ///
+    /// DMG timing (from line 153 start):
+    ///   dot 4: ly_for_comparison=153 (handled in line_start handler)
+    ///   dot 6: LY=0, visible_ly=0
+    ///   dot 8: ly_for_comparison=-1; STAT update
+    ///   dot 12: ly_for_comparison=0; STAT update
+    ///
+    /// CGB timing (from line 153 start):
+    ///   dot 4: ly_for_comparison=153 (handled in mode 1 handler)
+    ///   dot 8: LY=0, visible_ly=0; ly_for_comparison stays 153; STAT update
+    ///   dot 12: ly_for_comparison=0; STAT update
+    fn tick_line_153(&mut self) {
+        if self.cgb_mode {
+            match self.dot {
+                8 => {
+                    // CGB: LY resets to 0; ly_for_comparison stays at 153
+                    self.ly = 0;
+                    self.visible_ly = 0;
+                    self.update_stat_irq();
+                }
+                12 => {
+                    // CGB: ly_for_comparison transitions to 0
+                    self.ly_for_comparison = 0;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                    self.line_153_phase = 0;
+                }
+                _ => {}
+            }
+        } else {
+            // DMG
+            match self.dot {
+                6 => {
+                    // DMG: LY resets to 0 (visible)
+                    self.ly = 0;
+                    self.visible_ly = 0;
+                }
+                8 => {
+                    // DMG: ly_for_comparison clears to -1 (brief gap)
+                    self.ly_for_comparison = -1;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                }
+                12 => {
+                    // DMG: ly_for_comparison transitions to 0
+                    self.ly_for_comparison = 0;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                    self.line_153_phase = 0;
                 }
                 _ => {}
             }
@@ -1507,6 +1564,7 @@ impl Ppu {
                     self.line_start_pending = false;
                     self.line_start_is_vblank = false;
                     self.mode_for_interrupt = -1;
+                    self.line_153_phase = 0;
                     self.accessed_oam_row = 0xFF;
                     self.dot = 0;
                     self.mode = 0;
@@ -1529,6 +1587,7 @@ impl Ppu {
                     self.line_start_pending = false;
                     self.line_start_is_vblank = false;
                     self.mode_for_interrupt = -1;
+                    self.line_153_phase = 0;
                     self.accessed_oam_row = 0xFF;
                     self.dot = 0;
                     self.mode = 0;
