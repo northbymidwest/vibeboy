@@ -151,9 +151,15 @@ impl Bus {
 
         let mut joypad = Joypad::new();
         if !boot_rom_active {
-            // Post-boot P1: boot ROM writes 0x00, clearing both select bits.
-            // This makes P1 read as 0xCF (both groups selected, no buttons pressed).
-            joypad.write(0x00);
+            if model.is_sgb() {
+                // SGB boot ROM finishes with P1=0x30 (both select lines deselected),
+                // so P1 reads as 0xFF (no buttons visible).
+                joypad.write(0x30);
+            } else {
+                // DMG/CGB boot ROM writes 0x00, clearing both select bits.
+                // This makes P1 read as 0xCF (both groups selected, no buttons pressed).
+                joypad.write(0x00);
+            }
         }
 
         // Compute timer before rom is moved into cartridge
@@ -589,7 +595,12 @@ impl Bus {
             return;
         }
         // Copy one byte from source to OAM.
-        let src = self.oam_dma.source + self.oam_dma.progress as u16;
+        // On DMG, DMA reads from the external bus. Addresses $FE00-$FFFF
+        // map to echo WRAM ($DE00-$DFFF), not to OAM/IO/HRAM.
+        let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
+        if !self.model.is_cgb() && src >= 0xFE00 {
+            src -= 0x2000;
+        }
         let byte = self.read_byte_raw(src);
         self.ppu.oam[self.oam_dma.progress as usize] = byte;
         self.oam_dma.progress += 1;

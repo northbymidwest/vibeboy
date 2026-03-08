@@ -467,8 +467,8 @@ impl Cpu {
             0x03 => {
                 // INC BC
                 let v = self.regs.bc();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_bc(v.wrapping_add(1));
                 8
             }
@@ -521,8 +521,8 @@ impl Cpu {
             0x0B => {
                 // DEC BC
                 let v = self.regs.bc();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_bc(v.wrapping_sub(1));
                 8
             }
@@ -573,8 +573,8 @@ impl Cpu {
             0x13 => {
                 // INC DE
                 let v = self.regs.de();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_de(v.wrapping_add(1));
                 8
             }
@@ -627,8 +627,8 @@ impl Cpu {
             0x1B => {
                 // DEC DE
                 let v = self.regs.de();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_de(v.wrapping_sub(1));
                 8
             }
@@ -688,8 +688,8 @@ impl Cpu {
             0x23 => {
                 // INC HL
                 let v = self.regs.hl();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_hl(v.wrapping_add(1));
                 8
             }
@@ -746,8 +746,8 @@ impl Cpu {
             0x2B => {
                 // DEC HL
                 let v = self.regs.hl();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.set_hl(v.wrapping_sub(1));
                 8
             }
@@ -804,8 +804,8 @@ impl Cpu {
             0x33 => {
                 // INC SP
                 let v = self.regs.sp;
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.sp = v.wrapping_add(1);
                 8
             }
@@ -873,8 +873,8 @@ impl Cpu {
             0x3B => {
                 // DEC SP
                 let v = self.regs.sp;
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(v);
+                bus.tick_mcycle();
                 self.regs.sp = v.wrapping_sub(1);
                 8
             }
@@ -1030,8 +1030,8 @@ impl Cpu {
             0xC5 => {
                 // PUSH BC
                 let v = self.regs.bc();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(self.regs.sp);
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1172,8 +1172,8 @@ impl Cpu {
             0xD5 => {
                 // PUSH DE
                 let v = self.regs.de();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(self.regs.sp);
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1282,8 +1282,8 @@ impl Cpu {
             0xE5 => {
                 // PUSH HL
                 let v = self.regs.hl();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(self.regs.sp);
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }
@@ -1370,8 +1370,8 @@ impl Cpu {
             0xF5 => {
                 // PUSH AF
                 let v = self.regs.af();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug(self.regs.sp);
+                bus.tick_mcycle();
                 self.push(bus, v);
                 16
             }

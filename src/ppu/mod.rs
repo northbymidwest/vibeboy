@@ -258,9 +258,9 @@ pub struct Ppu {
     /// 0xFF = not in Mode 2 (no OAM bug possible). Only used on DMG models.
     pub accessed_oam_row: i16,
 
-    /// OAM bug row captured after the 1st T-cycle of each step(4) call.
-    /// On hardware, the OAM bug check happens 1T into the M-cycle, so we
-    /// capture the row state after 1T rather than after all 4T.
+    /// OAM bug row captured at the end of each step(4) call.
+    /// The CPU checks this value BEFORE the next tick_mcycle(), so it
+    /// reflects the PPU state after the previous M-cycle's advancement.
     pub oam_bug_row: i16,
 }
 
@@ -473,8 +473,8 @@ impl Ppu {
         for _i in 0..cycles {
             self.tick();
         }
-        // Capture accessed_oam_row after full step — the CPU checks the
-        // OAM bug row after the display has caught up all accumulated cycles.
+        // Capture accessed_oam_row after full step — CPU reads this BEFORE
+        // the next tick_mcycle, matching hardware's M-cycle boundary check.
         self.oam_bug_row = self.accessed_oam_row;
 
         let flags = self.if_flags;
@@ -501,7 +501,14 @@ impl Ppu {
                 // Entry N's row is set at dot (6 + N*2), right after the 2T sleep.
                 if !self.cgb_mode && self.dot >= 6 {
                     let oam_search_index = ((self.dot - 6) / 2) as i16;
-                    self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
+                    if oam_search_index >= 38 {
+                        // OAM scan loop has logically completed (40 entries processed).
+                        // Entries 38-39 would produce row >= 160 (beyond OAM), but
+                        // hardware resets accessed_oam_row atomically at loop exit.
+                        self.accessed_oam_row = 0xFF;
+                    } else {
+                        self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
+                    }
 
                     // At OAM search index 37 (~dot 80) on DMG:
                     // VRAM reads blocked, VRAM writes still allowed
