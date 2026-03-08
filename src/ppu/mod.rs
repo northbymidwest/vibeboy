@@ -546,6 +546,29 @@ impl Ppu {
                     if self.cgb_mode {
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
+                        // DMG: STAT mode bits and accessibility change immediately,
+                        // but the STAT interrupt fires 1T later (deferred via
+                        // mode0_stat_dot, matching hardware behavior where
+                        // GB_STAT_update runs after a 1T sleep post-mode-3).
+                        self.stat = self.stat & !0x03;
+                        self.oam_accessible = true;
+                        self.oam_write_accessible = true;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.hblank_entered = true;
+                        self.mode0_stat_dot = self.dot + 1;
+                    }
+                    if self.window_active {
+                        self.window_line_counter = self.window_line_counter.wrapping_add(1);
+                    }
+                }
+            }
+            0 => {
+                // Delayed mode 0 STAT IRQ (both DMG and CGB)
+                if self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
+                    self.mode0_stat_dot = 0;
+                    if self.cgb_mode {
+                        // CGB: STAT bits and accessibility also deferred
                         self.stat = self.stat & !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
@@ -553,22 +576,8 @@ impl Ppu {
                         self.vram_write_accessible = true;
                         self.hblank_entered = true;
                     }
+                    // Fire the mode 0 STAT interrupt
                     self.update_stat_irq();
-                    if self.window_active {
-                        self.window_line_counter = self.window_line_counter.wrapping_add(1);
-                    }
-                }
-            }
-            0 => {
-                // CGB: delayed mode bit update for Mode 0
-                if self.cgb_mode && self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
-                    self.mode0_stat_dot = 0;
-                    self.stat = self.stat & !0x03; // mode bits = 0
-                    self.oam_accessible = true;
-                    self.oam_write_accessible = true;
-                    self.vram_accessible = true;
-                    self.vram_write_accessible = true;
-                    self.hblank_entered = true;
                 }
                 // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 78.
                 // Hardware: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
