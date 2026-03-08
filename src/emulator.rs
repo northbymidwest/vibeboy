@@ -295,11 +295,11 @@ impl Emulator {
     /// Returns the serial output as a string.
     pub fn run_until_serial_result(&mut self, max_frames: u32) -> String {
         let limit = 70_224u64 * max_frames as u64;
-        let mut step_count = 0u64;
+        let mut total_cycles = 0u64;
         loop {
             let pc = self.cpu.regs.pc;
             self.cpu.step(&mut self.bus);
-            step_count += 1;
+            total_cycles += 4; // approximate; good enough for timeout
 
             // Detect Blargg done loop: JR -2 (opcode 18 FE)
             if self.bus.read_byte(pc) == 0x18 && self.bus.read_byte(pc.wrapping_add(1)) == 0xFE {
@@ -314,14 +314,13 @@ impl Emulator {
                 }
             }
 
-            // Check periodically using PPU total_ticks for accurate timing
-            if step_count % 1024 == 0 {
-                let ticks = self.bus.ppu.total_ticks;
+            // Check periodically for serial output or timeout
+            if total_cycles % 4096 == 0 {
                 let output = String::from_utf8_lossy(&self.bus.serial.serial_output);
                 if output.contains("Passed") || output.contains("Failed") {
                     return output.into_owned();
                 }
-                if ticks >= limit {
+                if total_cycles >= limit {
                     return output.into_owned();
                 }
             }

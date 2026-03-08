@@ -292,7 +292,7 @@ impl Ppu {
             obp1: 0xFF,
             wy: 0,
             wx: 0,
-            dma: 0,
+            dma: 0xFF,
 
             bcps: 0,
             bcpd,
@@ -367,11 +367,11 @@ impl Ppu {
         self.ly = 0;
         self.lyc = 0;
         self.bgp = 0;
-        self.obp0 = 0;
-        self.obp1 = 0;
+        self.obp0 = 0xFF;
+        self.obp1 = 0xFF;
         self.wy = 0;
         self.wx = 0;
-        self.dma = 0;
+        self.dma = 0xFF;
         self.bcps = 0;
         self.bcpd = [0u8; 64];
         self.ocps = 0;
@@ -847,6 +847,10 @@ impl Ppu {
         // CGB: Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
         // DMG: handled by mode_for_interrupt priming in handle_dmg_line_start
         self.update_stat_irq_with_mode2(true);
+        // Immediately re-evaluate without forced mode 2 so stat_irq_line reflects
+        // the normal mode 1 state. Without this, the forced mode 2 signal lingers
+        // until the next update_stat_irq call (dot 456 of next VBlank line).
+        self.update_stat_irq();
     }
 
     // ---- Pixel FIFO ----
@@ -862,8 +866,9 @@ impl Ppu {
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
-        // Hardware pipeline priming: 5T delay before fetcher starts
-        self.mode3_start_delay = 5;
+        // Hardware pipeline priming delay before fetcher starts.
+        // CGB: 8T (extra 3T vs DMG due to different internal pipeline).
+        self.mode3_start_delay = if self.cgb_mode { 8 } else { 5 };
         self.last_sprite_slot = -1;
     }
 
@@ -985,6 +990,11 @@ impl Ppu {
             // New slot: full alignment penalty
             let alignment = (adjusted & 7) as u8;
             self.sprite_alignment_delay = 5 - std::cmp::min(5, alignment);
+            // Special case: sprite at OAM X=0 (completely off-screen left) always
+            // gets full 5T alignment penalty regardless of SCX.
+            if sprite_x == 0 {
+                self.sprite_alignment_delay = 5;
+            }
             self.last_sprite_slot = slot;
         }
     }
@@ -1328,6 +1338,32 @@ impl Ppu {
         self.stat_irq_line = signal;
     }
 
+    /// CGB-only: STAT IRQ re-evaluation triggered by a CPU write to STAT.
+    /// Mode sources (bits 3-5) are suppressed during mode 2/3; only LYC
+    /// source (bit 6) can trigger during those modes.
+    fn update_stat_irq_on_write(&mut self) {
+        let coincidence = self.stat & 0x04 != 0;
+        // Full signal: used to update stat_irq_line (prevents spurious
+        // rising edges on the next normal PPU tick).
+        let full_signal =
+            (self.stat & 0x08 != 0 && self.mode == 0) ||
+            (self.stat & 0x10 != 0 && self.mode == 1) ||
+            (self.stat & 0x20 != 0 && self.mode == 2) ||
+            (self.stat & 0x40 != 0 && coincidence);
+        // Write signal: during mode 2/3, only LYC source can trigger an
+        // interrupt from a STAT write. Mode sources are suppressed.
+        let write_signal = if self.mode <= 1 {
+            full_signal
+        } else {
+            self.stat & 0x40 != 0 && coincidence
+        };
+
+        if write_signal && !self.stat_irq_line {
+            self.if_flags |= 0x02;
+        }
+        self.stat_irq_line = full_signal;
+    }
+
     fn update_coincidence(&mut self) {
         if self.ly_for_comparison >= 0 && self.ly_for_comparison as u8 == self.lyc {
             self.stat |= 0x04;
@@ -1511,21 +1547,25 @@ impl Ppu {
                 }
             }
             0xFF41 => {
-                // DMG STAT write bug: writing STAT during Mode 0 or Mode 1
-                // causes a glitch that briefly drives the STAT IRQ line high,
-                // firing a spurious interrupt if the line was previously low.
-                let glitch = !self.cgb_mode
-                    && self.lcdc & 0x80 != 0
-                    && (self.mode == 0 || self.mode == 1)
-                    && !self.stat_irq_line;
                 // Lower 3 bits (mode flags + coincidence) are read-only
                 self.stat = (self.stat & 0x07) | (val & 0x78);
-                if glitch {
-                    self.if_flags |= 0x02;
-                }
-                // Writing STAT can change which sources are enabled → re-check edge
                 if self.lcdc & 0x80 != 0 {
-                    self.update_stat_irq();
+                    if self.cgb_mode {
+                        // CGB: STAT writes re-evaluate IRQ, but mode sources
+                        // (bits 3-5) are suppressed during mode 2/3. Only LYC
+                        // source (bit 6) triggers during mode 2/3.
+                        self.update_stat_irq_on_write();
+                    } else {
+                        // DMG STAT write bug: writing STAT during Mode 0 or 1
+                        // briefly drives the STAT IRQ line high, firing a
+                        // spurious interrupt if the line was previously low.
+                        if (self.mode == 0 || self.mode == 1)
+                            && !self.stat_irq_line
+                        {
+                            self.if_flags |= 0x02;
+                        }
+                        self.update_stat_irq();
+                    }
                 }
             }
             0xFF42 => self.scy = val,

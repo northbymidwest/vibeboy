@@ -365,10 +365,6 @@ impl Bus {
         if !self.ppu.oam_accessible && addr >= 0xFE00 && addr < 0xFF00 {
             self.trigger_oam_bug_from_write(addr);
         }
-        // Debug: log OAM writes
-        if addr >= 0xFE00 && addr <= 0xFE9F && self.ppu.oam_accessible {
-            log::trace!("OAM write OK: addr={:04X} val={:02X}", addr, val);
-        }
         self.write_byte_raw(addr, val);
     }
 

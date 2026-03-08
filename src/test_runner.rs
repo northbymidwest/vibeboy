@@ -173,12 +173,28 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, bo
                     eprintln!("  regs: B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X}",
                         regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
                     if stem.contains("boot_hwio") {
-                        let addr_lo = emu.bus.read_byte(0xFF80);
-                        let addr_hi = emu.bus.read_byte(0xFF81);
-                        let expected = emu.bus.read_byte(0xFF82);
-                        let actual = emu.bus.read_byte(0xFF83);
-                        eprintln!("  boot_hwio mismatch: addr=${:02X}{:02X} expected=0x{:02X} got=0x{:02X}",
-                            addr_hi, addr_lo, expected, actual);
+                        // Expected values from boot_hwio-G.s
+                        let expected: &[(u16, u8)] = &[
+                            (0xFF00, 0xCF), (0xFF01, 0x00), (0xFF02, 0x7E), (0xFF03, 0xFF),
+                            (0xFF05, 0x00), (0xFF06, 0x00), (0xFF07, 0xF8),
+                            (0xFF0F, 0xE1),
+                            (0xFF10, 0x80), (0xFF11, 0xBF), (0xFF12, 0xF3), (0xFF13, 0xFF),
+                            (0xFF14, 0xBF), (0xFF15, 0xFF), (0xFF16, 0x3F), (0xFF17, 0x00),
+                            (0xFF18, 0xFF), (0xFF19, 0xBF), (0xFF1A, 0x7F), (0xFF1B, 0xFF),
+                            (0xFF1C, 0x9F), (0xFF1D, 0xFF), (0xFF1E, 0xBF), (0xFF1F, 0xFF),
+                            (0xFF20, 0xFF), (0xFF21, 0x00), (0xFF22, 0x00), (0xFF23, 0xBF),
+                            (0xFF24, 0x77), (0xFF25, 0xF3), (0xFF26, 0xF1),
+                            (0xFF42, 0x00), (0xFF43, 0x00), (0xFF45, 0x00),
+                            (0xFF46, 0xFF), (0xFF47, 0xFC),
+                            (0xFF48, 0xFF), (0xFF49, 0xFF), (0xFF4A, 0x00), (0xFF4B, 0x00),
+                            (0xFF50, 0xFF),
+                        ];
+                        for &(addr, exp) in expected {
+                            let got = emu.bus.read_byte(addr);
+                            if got != exp {
+                                eprintln!("  boot_hwio mismatch: ${:04X} expected=${:02X} got=${:02X}", addr, exp, got);
+                            }
+                        }
                     }
                 }
                 "FAIL"
@@ -196,7 +212,7 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     let model = detect_model_with_rom(path, Some(&rom));
     let br: Option<Vec<u8>> = None;
     let mut emu = Emulator::new(rom, br, None, model, None);
-    let output = emu.run_until_serial_result(60000);
+    let output = emu.run_until_serial_result(6000);
     if verbose && !output.is_empty() {
         for line in output.lines() {
             eprintln!("  {}", line);
