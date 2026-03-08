@@ -1597,6 +1597,7 @@ impl Ppu {
                     self.vram_accessible = true;
                     self.vram_write_accessible = true;
                     self.lcd_first_line = true;
+                    self.lcd_first_line_short = false;
                     self.total_ticks = 0;
                     self.window_line_counter = 0;
                     // Check WY trigger for first line (LY=0)
