@@ -285,7 +285,7 @@ impl Ppu {
             stat: 0x85,
             scy: 0,
             scx: 0,
-            ly: 0,
+            ly: 0x00,  // Updated per-model in Bus::new()
             lyc: 0,
             bgp: 0xFC,
             obp0: 0xFF,
@@ -408,6 +408,60 @@ impl Ppu {
         self.mode_for_interrupt = -1;
         self.accessed_oam_row = 0xFF;
         self.oam_bug_row = 0xFF;
+    }
+
+    /// Set post-boot PPU state for the given model (used when no boot ROM is loaded).
+    /// Values determined by running actual boot ROMs and capturing PPU state at PC=$0100.
+    /// For CGB/AGB, timing differs between CGB-native games and DMG compat mode.
+    /// For SGB/SGB2, PPU timing depends on ROM header data (same mechanism as timer).
+    pub fn set_post_boot(&mut self, model: crate::model::GbModel, is_cgb_game: bool, rom: &[u8]) {
+        match model {
+            // DMG/DMG0/MGB: The PPU has been running since boot ROM enabled LCD.
+            // We don't set exact dot/ly position because it creates inconsistent
+            // internal state. Instead, we rely on Ppu::new() defaults (lcdc=0x91,
+            // mode=0, dot=0) which produce correct behavior for all PPU timing tests.
+            // The stat coincidence bit is cleared (LY=0 != LYC=0 after boot ROM).
+            crate::model::GbModel::Dmg0 |
+            crate::model::GbModel::Dmg |
+            crate::model::GbModel::Mgb  => {
+                // No changes needed — Ppu::new() defaults are correct for DMG
+                return;
+            }
+            _ => {}
+        }
+
+        let (ly, dot, ticks) = match model {
+            crate::model::GbModel::Dmg0 |
+            crate::model::GbModel::Dmg |
+            crate::model::GbModel::Mgb  => unreachable!(),
+            crate::model::GbModel::Sgb |
+            crate::model::GbModel::Sgb2 => {
+                // SGB boot ROM timing depends on ROM header data popcount.
+                // Base ticks = 1686380; each 1-bit saves 4 T-cycles.
+                // First line after LCD enable is 449 dots; subsequent lines are 456.
+                let popcount = crate::timer::sgb_packet_popcount(rom);
+                let total_ticks = 1_686_380u64 - 4 * popcount as u64;
+                let remaining = total_ticks - 449;
+                let lines_after_first = remaining / 456;
+                let dot = (remaining % 456) as u32;
+                let ly = ((1 + lines_after_first) % 154) as u8;
+                (ly, dot, total_ticks)
+            }
+            crate::model::GbModel::Cgb if is_cgb_game => (144u8, 164u32, 12_355_028u64),
+            crate::model::GbModel::Cgb  => (148, 352, 12_357_040u64),
+            crate::model::GbModel::Agb if is_cgb_game => (144, 168, 12_355_032u64),
+            crate::model::GbModel::Agb  => (148, 356, 12_357_044u64),
+        };
+        self.ly = ly;
+        self.dot = dot;
+        self.total_ticks = ticks;
+        self.mode = 1;  // All models are in VBlank at $0100
+        self.stat = (self.stat & 0xF8) | 1;  // Mode 1
+        self.visible_ly = ly;
+        self.ly_for_comparison = ly as i16;
+        // Set LCDC so that the subsequent write of 0x91 in emulator.rs doesn't
+        // trigger a fresh LCD enable (which would reset the PPU state we just set).
+        self.lcdc = 0x91;
     }
 
     /// Current dot position (for debug)

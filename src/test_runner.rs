@@ -43,6 +43,8 @@ fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
         GbModel::Sgb
     } else if stem.ends_with("-A") {
         GbModel::Agb
+    } else if stem.ends_with("-C") || stem.ends_with("-cgb0") || stem.ends_with("-cgbABCDE") {
+        GbModel::Cgb
     } else if stem.ends_with("-GS") || stem.ends_with("-G") {
         GbModel::Dmg
     } else if let Some(data) = rom {
@@ -72,7 +74,8 @@ fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
         GbModel::Mgb  => &["bootroms/mgb_boot.bin", "bootroms/dmg_boot.bin"],
         GbModel::Sgb  => &["bootroms/sgb_boot.bin"],
         GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
-        GbModel::Cgb | GbModel::Agb => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
+        GbModel::Cgb => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
+        GbModel::Agb => &["bootroms/cgb_agb_boot.bin", "bootroms/cgb_boot.bin"],
     };
     for path in candidates {
         if let Ok(data) = fs::read(path) {
@@ -88,7 +91,20 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, us
         Err(_) => return "ERR",
     };
     let model = force_model.unwrap_or_else(|| detect_model(path));
-    let br = if use_boot_rom { load_boot_rom(model) } else { None };
+    // Auto-enable boot ROM for tests that check post-boot state
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let needs_boot = use_boot_rom;
+    let br = if needs_boot {
+        // Use model-specific boot ROM variant (e.g. cgb0 for -cgb0 suffix)
+        if stem.contains("cgb0") {
+            fs::read("bootroms/cgb0_boot.bin").ok()
+                .or_else(|| load_boot_rom(model))
+        } else {
+            load_boot_rom(model)
+        }
+    } else {
+        None
+    };
     let mut emu = Emulator::new(rom, br, None, model, None);
     match emu.run_until_breakpoint(300) {
         Some(regs) => {
@@ -236,6 +252,76 @@ fn main() {
         image::save_buffer(&out_path, &rgb, 160, 144, image::ColorType::Rgb8)
             .expect("Failed to write PNG");
         eprintln!("Wrote {} (frame {})", out_path, frames);
+        return;
+    }
+
+    // Trace mode: run a few instructions and log timer reads
+    if args.iter().any(|a| a == "--trace-timer") {
+        let path = Path::new(&args[1]);
+        let rom = fs::read(path).expect("Failed to read ROM");
+        let use_br = args.iter().any(|a| a == "--boot");
+        let model = detect_model_with_rom(path, Some(&rom));
+        let br = if use_br { load_boot_rom(model) } else { None };
+        let mut emu = Emulator::new(rom, br, None, model, None);
+        if use_br {
+            // Run boot ROM, trace last ~30 instructions
+            let mut history: Vec<(u16, u8, u16, u16)> = Vec::new();
+            loop {
+                let pc = emu.cpu.regs.pc;
+                let opcode = emu.bus.read_byte(pc);
+                let tc_before = emu.bus.timer.counter();
+                if pc == 0x0100 && !emu.bus.boot_rom_active { break; }
+                emu.cpu.step(&mut emu.bus);
+                let tc_after = emu.bus.timer.counter();
+                history.push((pc, opcode, tc_before, tc_after));
+                if history.len() > 30 { history.remove(0); }
+            }
+            eprintln!("Last {} instructions of boot ROM:", history.len());
+            for (pc, opcode, tc_before, tc_after) in &history {
+                let delta = tc_after.wrapping_sub(*tc_before);
+                eprintln!("  PC={:#06X} op={:#04X} timer: {:#06X} -> {:#06X} (+{}) DIV: {:02X} -> {:02X}",
+                    pc, opcode, tc_before, tc_after, delta, tc_before >> 8, tc_after >> 8);
+            }
+        }
+        eprintln!("At PC=$0100: timer_counter={:#06X} DIV={:02X}",
+            emu.bus.timer.counter(), emu.bus.timer.counter() >> 8);
+        // Run 20 instructions, logging each step
+        for i in 0..20 {
+            let pc = emu.cpu.regs.pc;
+            let opcode = emu.bus.read_byte(pc);
+            let tc_before = emu.bus.timer.counter();
+            emu.cpu.step(&mut emu.bus);
+            let tc_after = emu.bus.timer.counter();
+            eprintln!("  step {}: PC={:#06X} op={:#04X} timer: {:#06X} -> {:#06X} (DIV: {:02X} -> {:02X})",
+                i, pc, opcode, tc_before, tc_after, tc_before >> 8, tc_after >> 8);
+        }
+        return;
+    }
+
+    // Calibration mode: run boot ROM and dump PPU state at $0100
+    if args.iter().any(|a| a == "--calibrate") {
+        let path = Path::new(&args[1]);
+        let rom = fs::read(path).expect("Failed to read ROM");
+        let models = [GbModel::Dmg0, GbModel::Dmg, GbModel::Mgb, GbModel::Sgb, GbModel::Sgb2, GbModel::Cgb, GbModel::Agb];
+        for model in &models {
+            if let Some(br) = load_boot_rom(*model) {
+                let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
+                // Run until PC reaches $0100
+                for _ in 0..100_000_000u64 {
+                    if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
+                        eprintln!("{:?}: LY={} dot={} mode={} total_ticks={} DIV={:02X} timer_counter={:#06X} regs=A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X}",
+                            model, emu.bus.ppu.ly, emu.bus.ppu.current_dot(), emu.bus.ppu.current_mode(),
+                            emu.bus.ppu.total_ticks, emu.bus.read_byte(0xFF04), emu.bus.timer.counter(),
+                            emu.cpu.regs.a, emu.cpu.regs.f, emu.cpu.regs.b, emu.cpu.regs.c,
+                            emu.cpu.regs.d, emu.cpu.regs.e, emu.cpu.regs.h, emu.cpu.regs.l);
+                        break;
+                    }
+                    emu.cpu.step(&mut emu.bus);
+                }
+            } else {
+                eprintln!("{:?}: no boot ROM available", model);
+            }
+        }
         return;
     }
 

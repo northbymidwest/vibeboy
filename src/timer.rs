@@ -27,13 +27,14 @@ pub struct Timer {
 
 impl Timer {
     pub fn new() -> Self {
-        Self::post_boot(GbModel::Cgb)
+        Self::post_boot(GbModel::Cgb, true, &[])
     }
 
-    /// Hardware reset state: counter starts at 0, TAC defaults.
+    /// Hardware reset state: counter starts at 4 to account for the internal
+    /// startup M-cycle before the CPU begins executing the first instruction.
     pub fn reset() -> Self {
         Timer {
-            counter: 0,
+            counter: 4,
             tima: 0,
             tma: 0,
             tac: 0xF8,
@@ -44,12 +45,27 @@ impl Timer {
     }
 
     /// Post-boot timer state for the given hardware model.
-    pub fn post_boot(model: GbModel) -> Self {
+    /// For CGB/AGB, timing differs between CGB-native games and DMG compat mode.
+    /// For SGB/SGB2, the timer counter depends on ROM header data (the boot ROM
+    /// sends header bytes as SGB packets, and bit values affect branch timing).
+    pub fn post_boot(model: GbModel, is_cgb_game: bool, rom: &[u8]) -> Self {
         let counter = match model {
-            GbModel::Cgb | GbModel::Agb => 0x2670,
+            GbModel::Cgb if is_cgb_game => 0x1EA0,
+            GbModel::Cgb => 0x2678,
+            GbModel::Agb if is_cgb_game => 0x1EA4,
+            GbModel::Agb => 0x267C,
             GbModel::Dmg0 => 0x182C,
             GbModel::Dmg | GbModel::Mgb => 0xABC8,
-            GbModel::Sgb | GbModel::Sgb2 => 0xD85C,
+            GbModel::Sgb | GbModel::Sgb2 => {
+                // The SGB boot ROM sends 6 packets (96 bytes) built from ROM header
+                // bytes $0104-$014F. Each 1-bit in the packet data takes 4 fewer
+                // T-cycles than a 0-bit (JR NZ taken vs not-taken + extra LD).
+                // Only the last packet's timing affects the final counter because
+                // VBlank waits between packets absorb timing differences.
+                // Formula: counter = BASE - 4 * popcount(all_packet_bytes)
+                let popcount = sgb_packet_popcount(rom);
+                0xDD70u16.wrapping_sub(4 * popcount as u16)
+            }
         };
         Timer {
             counter,
@@ -193,4 +209,35 @@ impl Timer {
     pub fn counter(&self) -> u16 {
         self.counter
     }
+}
+
+/// Compute the popcount of the 96-byte SGB packet buffer that the SGB boot ROM
+/// builds from ROM header bytes $0104-$014F. This mirrors the boot ROM code at
+/// $002F-$004A which reads header data into 6 groups with running checksums.
+pub fn sgb_packet_popcount(rom: &[u8]) -> u32 {
+    let mut packet_data = [0u8; 96];
+    let mut de: usize = 0x14F;
+    let mut hl: usize = 0x57;
+    let mut a: u8 = 0xFB;
+    let mut c: u8 = 6;
+    loop {
+        let mut b: u8 = 0;
+        for _ in 0..c {
+            let byte = if de < rom.len() { rom[de] } else { 0 };
+            packet_data[hl] = byte;
+            b = b.wrapping_add(byte);
+            de = de.wrapping_sub(1);
+            hl = hl.wrapping_sub(1);
+        }
+        packet_data[hl] = b;
+        hl = hl.wrapping_sub(1);
+        packet_data[hl] = a;
+        hl = hl.wrapping_sub(1);
+        c = 14;
+        a = a.wrapping_sub(2);
+        if a == 0xEF {
+            break;
+        }
+    }
+    packet_data.iter().map(|b| b.count_ones()).sum()
 }

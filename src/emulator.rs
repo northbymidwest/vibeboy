@@ -53,7 +53,7 @@ impl Emulator {
         if has_boot {
             cpu.regs = Registers::reset();
         } else {
-            cpu.regs = Registers::post_boot(model);
+            cpu.regs = Registers::post_boot_with_rom(model, Some(&rom));
         }
         let mut bus = Bus::new(rom, boot_rom, rom_path, model);
 
@@ -63,11 +63,16 @@ impl Emulator {
             bus.write_byte(0xFF40, 0x91);
             // BGP=0xFC (standard DMG palette)
             bus.write_byte(0xFF47, 0xFC);
-            // NR52=$F1 (sound on), NR11=$BF, NR12=$F3, NR14=$BF, NR50=$77, NR51=$F3
-            bus.write_byte(0xFF26, 0xF1);
-            bus.write_byte(0xFF11, 0xBF);
-            bus.write_byte(0xFF12, 0xF3);
-            bus.write_byte(0xFF14, 0xBF);
+            // SGB boot ROM doesn't trigger CH1, so NR52=$F0; all others NR52=$F1
+            if model.is_sgb() {
+                bus.write_byte(0xFF26, 0xF0);
+            } else {
+                // NR52=$F1 (sound on, CH1 active)
+                bus.write_byte(0xFF26, 0xF1);
+                bus.write_byte(0xFF11, 0xBF);
+                bus.write_byte(0xFF12, 0xF3);
+                bus.write_byte(0xFF14, 0xBF);
+            }
             bus.write_byte(0xFF24, 0x77);
             bus.write_byte(0xFF25, 0xF3);
         }

@@ -25,7 +25,7 @@ pub struct Joypad {
 impl Joypad {
     pub fn new() -> Self {
         Joypad {
-            p1_select: 0x30, // nothing selected
+            p1_select: 0x00, // hardware reset: both select lines LOW (active)
             buttons: 0,
             interrupt: false,
         }

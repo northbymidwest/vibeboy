@@ -125,13 +125,18 @@ impl Bus {
         if model.is_sgb() {
             ppu.cgb_mode = false;
         }
+        // Detect DMG game running on CGB hardware
+        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
+        let is_cgb_game = cgb_flag == 0x80 || cgb_flag == 0xC0;
+        let is_dmg_game = !is_cgb_game;
+
         if boot_rom_active {
             ppu.reset();
+        } else {
+            // Set post-boot PPU position (LY, dot, mode) for all models.
+            // SGB/SGB2 timing depends on ROM header data; CGB/AGB differs for native vs compat.
+            ppu.set_post_boot(model, is_cgb_game, &rom);
         }
-
-        // Detect DMG game running on CGB hardware (no boot ROM)
-        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
-        let is_dmg_game = cgb_flag != 0x80 && cgb_flag != 0xC0;
         if model.is_cgb() && is_dmg_game && !boot_rom_active {
             ppu.dmg_compat = true;
             // Default grayscale reference colors (no boot ROM to set real ones)
@@ -151,6 +156,9 @@ impl Bus {
             joypad.write(0x00);
         }
 
+        // Compute timer before rom is moved into cartridge
+        let timer = if boot_rom_active { Timer::reset() } else { Timer::post_boot(model, is_cgb_game, &rom) };
+
         let mut cart = make_cartridge(rom);
 
         // Compute .sav path and load existing save data
@@ -167,9 +175,9 @@ impl Bus {
         Bus {
             cart,
             ppu,
-            timer: if boot_rom_active { Timer::reset() } else { Timer::post_boot(model) },
+            timer,
             joypad,
-            apu: Apu::new(model.cpu_clock_rate(), model.is_cgb()),
+            apu: if boot_rom_active { Apu::reset(model.cpu_clock_rate(), model.is_cgb()) } else { Apu::new(model.cpu_clock_rate(), model.is_cgb(), model.is_sgb()) },
             wram: [[0u8; 0x1000]; 8],
             wram_bank: 1,
             hram: [0u8; 0x7F],

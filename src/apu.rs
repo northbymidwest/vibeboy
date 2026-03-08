@@ -601,7 +601,7 @@ pub struct Apu {
 }
 
 impl Apu {
-    pub fn new(cpu_clock_rate: u32, is_cgb: bool) -> Self {
+    pub fn new(cpu_clock_rate: u32, is_cgb: bool, is_sgb: bool) -> Self {
         let mut apu = Apu {
             ch1: SquareCh::new(),
             sweep: Sweep::new(),
@@ -632,14 +632,49 @@ impl Apu {
         };
         // Post-boot CH1 state: registers match what boot ROM left behind,
         // but the envelope has decayed volume to 0 during the boot animation.
-        apu.ch1.duty = 2;
-        apu.ch1.env_init_vol = 0xF;
-        apu.ch1.env_period = 3;
-        apu.ch1.dac_on = true;
-        apu.ch1.enabled = true;
-        apu.ch1.volume = 0;
-        apu.ch1.nrx2_raw = 0xF3;
+        // SGB boot ROM doesn't trigger CH1, so leave it disabled for SGB models.
+        if !is_sgb {
+            apu.ch1.duty = 2;
+            apu.ch1.env_init_vol = 0xF;
+            apu.ch1.env_period = 3;
+            apu.ch1.dac_on = true;
+            apu.ch1.enabled = true;
+            apu.ch1.volume = 0;
+            apu.ch1.nrx2_raw = 0xF3;
+        }
         apu
+    }
+
+    /// Hardware reset state for use with boot ROM execution.
+    pub fn reset(cpu_clock_rate: u32, is_cgb: bool) -> Self {
+        Apu {
+            ch1: SquareCh::new(),
+            sweep: Sweep::new(),
+            ch2: SquareCh::new(),
+            ch3: WaveCh::new(),
+            ch4: NoiseCh::new(),
+            nr50: 0x00,
+            nr51: 0x00,
+            power: false,
+            div_divider: 0,
+            skip_div_event: 0,
+            div_counter: 0,
+            double_speed: false,
+            lf_div: true,
+            pcm_mask: [0xFF, 0xFF],
+            sample_accum: 0,
+            sample_buf: Vec::with_capacity(1024),
+            blip: BlipBuf::new(),
+            prev_left: 0,
+            prev_right: 0,
+            hpf_left: 0.0,
+            hpf_right: 0.0,
+            hpf_prev_in_l: 0.0,
+            hpf_prev_in_r: 0.0,
+            sample_accum_tick: SAMPLE_RATE as u64,
+            sample_accum_thresh: cpu_clock_rate as u64,
+            is_cgb,
+        }
     }
 
     /// Update the DIV counter from the bus (called each tick).
