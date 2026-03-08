@@ -30,32 +30,43 @@ impl Cpu {
         // Save pending_ime state before anything else (EI delay)
         let pending_ime = self.ime_pending;
 
-        // Check for interrupt dispatch
-        if self.ime {
-            let pending = bus.ie() & bus.if_reg() & 0x1F;
-            if pending != 0 {
-                self.dispatch_interrupt(bus);
-                return 20;
-            }
-        }
-
-        // Handle halted state
-        if self.halted {
+        // Handle halted state: HALT NOP cycle first, then check for wake.
+        // On real hardware, the HALT wake cycle (4T) happens before interrupt
+        // dispatch, giving correct timing from interrupt fire to ISR execution.
+        let halt_wake = if self.halted {
+            bus.tick_mcycle(); // HALT NOP / wake cycle (4T)
             let pending = bus.ie() & bus.if_reg() & 0x1F;
             if pending != 0 {
                 self.halted = false;
+                if self.ime {
+                    // Wake from HALT and dispatch interrupt
+                    self.dispatch_interrupt(bus);
+                    return 24; // 4T HALT wake + 20T dispatch
+                }
+                // Wake from HALT without dispatch (IME=false, HALT bug behavior)
+                true // fell through — will fetch+execute next instruction
             } else {
-                bus.tick_mcycle(); // halted NOP
-                return 4;
+                return 4; // still halted, NOP cycle
             }
-        }
+        } else {
+            // Not halted: check for interrupt dispatch
+            if self.ime {
+                let pending = bus.ie() & bus.if_reg() & 0x1F;
+                if pending != 0 {
+                    self.dispatch_interrupt(bus);
+                    return 20;
+                }
+            }
+            false
+        };
 
         // Fetch opcode
         let op = if self.halt_bug {
             // Halt bug: PC is not incremented for the next byte
             self.halt_bug = false;
+            let v = bus.read_byte(self.regs.pc);
             bus.tick_mcycle();
-            bus.read_byte(self.regs.pc)
+            v
         } else {
             self.fetch_byte(bus)
         };
@@ -70,7 +81,7 @@ impl Cpu {
             self.ime_pending = false;
         }
 
-        cycles
+        cycles + if halt_wake { 4 } else { 0 }
     }
 
     fn dispatch_interrupt(&mut self, bus: &mut Bus) {
@@ -86,8 +97,8 @@ impl Cpu {
         // Push high byte of PC. If SP-1 happens to be 0xFFFF (IE register),
         // this write can change which interrupt is pending or cancel the dispatch.
         self.regs.sp = self.regs.sp.wrapping_sub(1);
-        bus.tick_mcycle();
         bus.write_byte(self.regs.sp, (pc >> 8) as u8);
+        bus.tick_mcycle();
 
         // Re-read pending AFTER the high-byte push (IE may have changed).
         let pending = bus.ie() & bus.if_reg() & 0x1F;
@@ -109,8 +120,8 @@ impl Cpu {
 
         // Push low byte of PC (may also land on 0xFFFF, but we don't re-check).
         self.regs.sp = self.regs.sp.wrapping_sub(1);
-        bus.tick_mcycle();
         bus.write_byte(self.regs.sp, (pc & 0xFF) as u8);
+        bus.tick_mcycle();
 
         bus.tick_mcycle(); // vector fetch (internal)
         self.regs.pc = vector;
@@ -118,17 +129,16 @@ impl Cpu {
 
     fn push(&mut self, bus: &mut Bus, val: u16) {
         self.regs.sp = self.regs.sp.wrapping_sub(1);
-        bus.tick_mcycle();
         bus.write_byte(self.regs.sp, (val >> 8) as u8);
-        self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.tick_mcycle();
+        self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.write_byte(self.regs.sp, (val & 0xFF) as u8);
+        bus.tick_mcycle();
     }
 
     fn pop(&mut self, bus: &mut Bus) -> u16 {
         // POP has no write-style OAM bug. OAM bug triggers only through
         // the memory read path (read-style OAM corruption).
-        bus.tick_mcycle();
         bus.trigger_oam_bug_read(self.regs.sp);
         let lo = bus.read_byte(self.regs.sp) as u16;
         self.regs.sp = self.regs.sp.wrapping_add(1);
@@ -136,13 +146,14 @@ impl Cpu {
         bus.trigger_oam_bug_read(self.regs.sp);
         let hi = bus.read_byte(self.regs.sp) as u16;
         self.regs.sp = self.regs.sp.wrapping_add(1);
+        bus.tick_mcycle();
         (hi << 8) | lo
     }
 
     fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
-        bus.tick_mcycle();
         let v = bus.read_byte(self.regs.pc);
         self.regs.pc = self.regs.pc.wrapping_add(1);
+        bus.tick_mcycle();
         v
     }
 
@@ -160,7 +171,7 @@ impl Cpu {
             3 => self.regs.e,
             4 => self.regs.h,
             5 => self.regs.l,
-            6 => { bus.tick_mcycle(); bus.read_byte(self.regs.hl()) }
+            6 => { let v = bus.read_byte(self.regs.hl()); bus.tick_mcycle(); v }
             7 => self.regs.a,
             _ => unreachable!(),
         }
@@ -174,7 +185,7 @@ impl Cpu {
             3 => self.regs.e = val,
             4 => self.regs.h = val,
             5 => self.regs.l = val,
-            6 => { bus.tick_mcycle(); bus.write_byte(self.regs.hl(), val) }
+            6 => { bus.write_byte(self.regs.hl(), val); bus.tick_mcycle(); }
             7 => self.regs.a = val,
             _ => unreachable!(),
         }
@@ -441,8 +452,8 @@ impl Cpu {
             }
             0x02 => {
                 // LD (BC), A
-                bus.tick_mcycle();
                 bus.write_byte(self.regs.bc(), self.regs.a);
+                bus.tick_mcycle();
                 8
             }
             0x03 => {
@@ -480,10 +491,10 @@ impl Cpu {
             0x08 => {
                 // LD (a16), SP
                 let addr = self.fetch_word(bus);
-                bus.tick_mcycle();
                 bus.write_byte(addr, (self.regs.sp & 0xFF) as u8);
                 bus.tick_mcycle();
                 bus.write_byte(addr.wrapping_add(1), (self.regs.sp >> 8) as u8);
+                bus.tick_mcycle();
                 20
             }
             0x09 => {
@@ -495,8 +506,8 @@ impl Cpu {
             }
             0x0A => {
                 // LD A, (BC)
-                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(self.regs.bc());
+                bus.tick_mcycle();
                 8
             }
             0x0B => {
@@ -547,8 +558,8 @@ impl Cpu {
             }
             0x12 => {
                 // LD (DE), A
-                bus.tick_mcycle();
                 bus.write_byte(self.regs.de(), self.regs.a);
+                bus.tick_mcycle();
                 8
             }
             0x13 => {
@@ -601,8 +612,8 @@ impl Cpu {
             }
             0x1A => {
                 // LD A, (DE)
-                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(self.regs.de());
+                bus.tick_mcycle();
                 8
             }
             0x1B => {
@@ -661,8 +672,8 @@ impl Cpu {
             0x22 => {
                 // LD (HL+), A
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 bus.write_byte(hl, self.regs.a);
+                bus.tick_mcycle();
                 self.regs.set_hl(hl.wrapping_add(1));
                 8
             }
@@ -718,9 +729,9 @@ impl Cpu {
             0x2A => {
                 // LD A, (HL+)
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug_read(hl);
                 self.regs.a = bus.read_byte(hl);
+                bus.tick_mcycle();
                 self.regs.set_hl(hl.wrapping_add(1));
                 8
             }
@@ -777,8 +788,8 @@ impl Cpu {
             0x32 => {
                 // LD (HL-), A
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 bus.write_byte(hl, self.regs.a);
+                bus.tick_mcycle();
                 self.regs.set_hl(hl.wrapping_sub(1));
                 8
             }
@@ -793,28 +804,28 @@ impl Cpu {
             0x34 => {
                 // INC (HL)
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 let v = bus.read_byte(hl);
-                let r = self.inc8(v);
                 bus.tick_mcycle();
+                let r = self.inc8(v);
                 bus.write_byte(hl, r);
+                bus.tick_mcycle();
                 12
             }
             0x35 => {
                 // DEC (HL)
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 let v = bus.read_byte(hl);
-                let r = self.dec8(v);
                 bus.tick_mcycle();
+                let r = self.dec8(v);
                 bus.write_byte(hl, r);
+                bus.tick_mcycle();
                 12
             }
             0x36 => {
                 // LD (HL), n8
                 let n = self.fetch_byte(bus);
-                bus.tick_mcycle();
                 bus.write_byte(self.regs.hl(), n);
+                bus.tick_mcycle();
                 12
             }
             0x37 => {
@@ -845,9 +856,9 @@ impl Cpu {
             0x3A => {
                 // LD A, (HL-)
                 let hl = self.regs.hl();
-                bus.tick_mcycle();
                 bus.trigger_oam_bug_read(hl);
                 self.regs.a = bus.read_byte(hl);
+                bus.tick_mcycle();
                 self.regs.set_hl(hl.wrapping_sub(1));
                 8
             }
@@ -1242,8 +1253,8 @@ impl Cpu {
             0xE0 => {
                 // LDH (a8), A  — write A to 0xFF00 + n
                 let n = self.fetch_byte(bus);
-                bus.tick_mcycle();
                 bus.write_byte(0xFF00 | n as u16, self.regs.a);
+                bus.tick_mcycle();
                 12
             }
             0xE1 => {
@@ -1254,8 +1265,8 @@ impl Cpu {
             }
             0xE2 => {
                 // LD (C), A  — write A to 0xFF00 + C
-                bus.tick_mcycle();
                 bus.write_byte(0xFF00 | self.regs.c as u16, self.regs.a);
+                bus.tick_mcycle();
                 8
             }
             0xE3 => 4, // ILLEGAL
@@ -1299,8 +1310,8 @@ impl Cpu {
             0xEA => {
                 // LD (a16), A
                 let addr = self.fetch_word(bus);
-                bus.tick_mcycle();
                 bus.write_byte(addr, self.regs.a);
+                bus.tick_mcycle();
                 16
             }
             0xEB => 4, // ILLEGAL
@@ -1325,8 +1336,8 @@ impl Cpu {
             0xF0 => {
                 // LDH A, (a8)  — read from 0xFF00 + n into A
                 let n = self.fetch_byte(bus);
-                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(0xFF00 | n as u16);
+                bus.tick_mcycle();
                 12
             }
             0xF1 => {
@@ -1337,8 +1348,8 @@ impl Cpu {
             }
             0xF2 => {
                 // LD A, (C)  — read from 0xFF00 + C into A
-                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(0xFF00 | self.regs.c as u16);
+                bus.tick_mcycle();
                 8
             }
             0xF3 => {
@@ -1389,8 +1400,8 @@ impl Cpu {
             0xFA => {
                 // LD A, (a16)
                 let addr = self.fetch_word(bus);
-                bus.tick_mcycle();
                 self.regs.a = bus.read_byte(addr);
+                bus.tick_mcycle();
                 16
             }
             0xFB => {
