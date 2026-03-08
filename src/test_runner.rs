@@ -114,6 +114,16 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, us
                 if verbose {
                     eprintln!("  regs: B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X}",
                         regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
+                    // For boot_hwio tests: dump mismatch info from HRAM
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if stem.contains("boot_hwio") {
+                        let addr_lo = emu.bus.read_byte(0xFF80);
+                        let addr_hi = emu.bus.read_byte(0xFF81);
+                        let expected = emu.bus.read_byte(0xFF82);
+                        let actual = emu.bus.read_byte(0xFF83);
+                        eprintln!("  boot_hwio mismatch: addr=${:02X}{:02X} expected=0x{:02X} got=0x{:02X}",
+                            addr_hi, addr_lo, expected, actual);
+                    }
                 }
                 "FAIL"
             }

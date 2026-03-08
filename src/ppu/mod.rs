@@ -415,25 +415,10 @@ impl Ppu {
     /// For CGB/AGB, timing differs between CGB-native games and DMG compat mode.
     /// For SGB/SGB2, PPU timing depends on ROM header data (same mechanism as timer).
     pub fn set_post_boot(&mut self, model: crate::model::GbModel, is_cgb_game: bool, rom: &[u8]) {
-        match model {
-            // DMG/DMG0/MGB: The PPU has been running since boot ROM enabled LCD.
-            // We don't set exact dot/ly position because it creates inconsistent
-            // internal state. Instead, we rely on Ppu::new() defaults (lcdc=0x91,
-            // mode=0, dot=0) which produce correct behavior for all PPU timing tests.
-            // The stat coincidence bit is cleared (LY=0 != LYC=0 after boot ROM).
-            crate::model::GbModel::Dmg0 |
-            crate::model::GbModel::Dmg |
-            crate::model::GbModel::Mgb  => {
-                // No changes needed — Ppu::new() defaults are correct for DMG
-                return;
-            }
-            _ => {}
-        }
-
         let (ly, dot, ticks) = match model {
-            crate::model::GbModel::Dmg0 |
+            crate::model::GbModel::Dmg0 => (145u8, 95u32, 24_574_384u64),
             crate::model::GbModel::Dmg |
-            crate::model::GbModel::Mgb  => unreachable!(),
+            crate::model::GbModel::Mgb  => (0, 399, 23_173_856u64),
             crate::model::GbModel::Sgb |
             crate::model::GbModel::Sgb2 => {
                 // SGB boot ROM timing depends on ROM header data popcount.
