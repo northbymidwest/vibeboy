@@ -5,5 +5,8 @@
 *.sav
 test-roms/
 bootroms/
+prints/
+profile.json.gz
+.DS_Store
 *.log
 *.png
