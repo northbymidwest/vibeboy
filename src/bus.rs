@@ -163,15 +163,18 @@ impl Bus {
                 // SGB boot ROM finishes with P1=0x30 (both select lines deselected),
                 // so P1 reads as 0xFF (no buttons visible).
                 joypad.write(0x30);
+            } else if model.is_cgb() {
+                // CGB boot ROM finishes with P1 unselected (reads as $FF).
+                joypad.write(0x30);
             } else {
-                // DMG/CGB boot ROM writes 0x00, clearing both select bits.
+                // DMG boot ROM writes 0x00, clearing both select bits.
                 // This makes P1 read as 0xCF (both groups selected, no buttons pressed).
                 joypad.write(0x00);
             }
         }
 
         // Compute timer before rom is moved into cartridge
-        let timer = if boot_rom_active { Timer::reset() } else { Timer::post_boot(model, is_cgb_game, &rom) };
+        let timer = if boot_rom_active { Timer::reset(model) } else { Timer::post_boot(model, is_cgb_game, &rom) };
 
         let mut cart = make_cartridge(rom);
 

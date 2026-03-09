@@ -30,11 +30,12 @@ impl Timer {
         Self::post_boot(GbModel::Cgb, true, &[])
     }
 
-    /// Hardware reset state: counter starts at 8 to account for the two internal
-    /// startup M-cycles before the CPU begins executing the first instruction.
-    pub fn reset() -> Self {
+    /// Hardware reset state. DMG/MGB/SGB have 2 internal startup M-cycles (8T)
+    /// before the CPU begins executing; CGB/AGB have only 1 (4T).
+    pub fn reset(model: GbModel) -> Self {
+        let counter = if model.is_cgb() { 4 } else { 8 };
         Timer {
-            counter: 8,
+            counter,
             tima: 0,
             tma: 0,
             tac: 0xF8,
@@ -50,10 +51,12 @@ impl Timer {
     /// sends header bytes as SGB packets, and bit values affect branch timing).
     pub fn post_boot(model: GbModel, is_cgb_game: bool, rom: &[u8]) -> Self {
         let counter = match model {
-            GbModel::Cgb if is_cgb_game => 0x1EA4,
-            GbModel::Cgb => 0x267C,
-            GbModel::Agb if is_cgb_game => 0x1EA8,
-            GbModel::Agb => 0x2680,
+            GbModel::Cgb0 if is_cgb_game => 0x1EA0,
+            GbModel::Cgb0 => 0x2884,
+            GbModel::Cgb if is_cgb_game => 0x1EA0,
+            GbModel::Cgb => 0x2678,
+            GbModel::Agb if is_cgb_game => 0x1EA4,
+            GbModel::Agb => 0x267C,
             GbModel::Dmg0 => 0x1830,
             GbModel::Dmg | GbModel::Mgb => 0xABCC,
             GbModel::Sgb | GbModel::Sgb2 => {

@@ -442,7 +442,9 @@ impl Ppu {
                 let ly = ((1 + lines_after_first) % 154) as u8;
                 (ly, dot, total_ticks)
             }
+            crate::model::GbModel::Cgb0 |
             crate::model::GbModel::Cgb if is_cgb_game => (144u8, 164u32, 12_355_028u64),
+            crate::model::GbModel::Cgb0 |
             crate::model::GbModel::Cgb  => (148, 352, 12_357_040u64),
             crate::model::GbModel::Agb if is_cgb_game => (144, 168, 12_355_032u64),
             crate::model::GbModel::Agb  => (148, 356, 12_357_044u64),
@@ -457,6 +459,13 @@ impl Ppu {
         // Set LCDC so that the subsequent write of 0x91 in emulator.rs doesn't
         // trigger a fresh LCD enable (which would reset the PPU state we just set).
         self.lcdc = 0x91;
+        // CGB boot ROM leaves palette index registers at specific values.
+        // BCPS reads as $C8 (auto-increment + index 8), stored as $88 (read OR's bit 6).
+        // OCPS reads as $D0 (auto-increment + index 16), stored as $90.
+        if model.is_cgb() {
+            self.bcps = 0x88;
+            self.ocps = 0x90;
+        }
     }
 
     /// Compute the accessed OAM row at a given dot position during Mode 2.

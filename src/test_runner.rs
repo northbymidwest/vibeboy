@@ -90,7 +90,9 @@ fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
         GbModel::Sgb
     } else if stem.ends_with("-A") {
         GbModel::Agb
-    } else if stem.ends_with("-C") || stem.ends_with("-cgb") || stem.ends_with("-cgb0") || stem.ends_with("-cgbABCDE") {
+    } else if stem.ends_with("-cgb0") {
+        GbModel::Cgb0
+    } else if stem.ends_with("-C") || stem.ends_with("-cgb") || stem.ends_with("-cgbABCDE") {
         GbModel::Cgb
     } else if stem.ends_with("-GS") || stem.ends_with("-G") {
         GbModel::Dmg
@@ -121,6 +123,7 @@ fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
         GbModel::Mgb  => &["bootroms/mgb_boot.bin", "bootroms/dmg_boot.bin"],
         GbModel::Sgb  => &["bootroms/sgb_boot.bin"],
         GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
+        GbModel::Cgb0 => &["bootroms/cgb0_boot.bin", "bootroms/cgb_boot.bin"],
         GbModel::Cgb => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
         GbModel::Agb => &["bootroms/cgb_agb_boot.bin", "bootroms/cgb_boot.bin"],
     };
@@ -173,21 +176,24 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, bo
                     eprintln!("  regs: B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X}",
                         regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
                     if stem.contains("boot_hwio") {
-                        // Expected values from boot_hwio-G.s
+                        // CGB expected values from boot_hwio-C.s
                         let expected: &[(u16, u8)] = &[
-                            (0xFF00, 0xCF), (0xFF01, 0x00), (0xFF02, 0x7E), (0xFF03, 0xFF),
+                            (0xFF00, 0xFF), (0xFF01, 0x00), (0xFF02, 0x7E), (0xFF03, 0xFF),
                             (0xFF05, 0x00), (0xFF06, 0x00), (0xFF07, 0xF8),
-                            (0xFF0F, 0xE1),
+                            (0xFF08, 0xFF), (0xFF09, 0xFF), (0xFF0A, 0xFF), (0xFF0B, 0xFF),
+                            (0xFF0C, 0xFF), (0xFF0D, 0xFF), (0xFF0E, 0xFF), (0xFF0F, 0xE1),
                             (0xFF10, 0x80), (0xFF11, 0xBF), (0xFF12, 0xF3), (0xFF13, 0xFF),
                             (0xFF14, 0xBF), (0xFF15, 0xFF), (0xFF16, 0x3F), (0xFF17, 0x00),
                             (0xFF18, 0xFF), (0xFF19, 0xBF), (0xFF1A, 0x7F), (0xFF1B, 0xFF),
                             (0xFF1C, 0x9F), (0xFF1D, 0xFF), (0xFF1E, 0xBF), (0xFF1F, 0xFF),
                             (0xFF20, 0xFF), (0xFF21, 0x00), (0xFF22, 0x00), (0xFF23, 0xBF),
-                            (0xFF24, 0x77), (0xFF25, 0xF3), (0xFF26, 0xF1),
+                            (0xFF24, 0x77), (0xFF25, 0xF3), (0xFF26, 0xF1), (0xFF27, 0xFF),
                             (0xFF42, 0x00), (0xFF43, 0x00), (0xFF45, 0x00),
-                            (0xFF46, 0xFF), (0xFF47, 0xFC),
-                            (0xFF48, 0xFF), (0xFF49, 0xFF), (0xFF4A, 0x00), (0xFF4B, 0x00),
-                            (0xFF50, 0xFF),
+                            (0xFF47, 0xFC),
+                            (0xFF4A, 0x00), (0xFF4B, 0x00),
+                            // CGB-specific registers
+                            (0xFF68, 0xC8), (0xFF6A, 0xD0),
+                            (0xFF72, 0x00), (0xFF73, 0x00), (0xFF75, 0x8F),
                         ];
                         for &(addr, exp) in expected {
                             let got = emu.bus.read_byte(addr);

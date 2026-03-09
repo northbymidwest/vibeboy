@@ -50,7 +50,7 @@ impl Registers {
             GbModel::Mgb  => (0xFF, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
             GbModel::Sgb  => (0x01, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
             GbModel::Sgb2 => (0xFF, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
-            GbModel::Cgb | GbModel::Agb => {
+            GbModel::Cgb0 | GbModel::Cgb | GbModel::Agb => {
                 let cgb_flag = rom.and_then(|r| r.get(0x0143)).copied().unwrap_or(0xC0);
                 let is_cgb_game = cgb_flag == 0x80 || cgb_flag == 0xC0;
                 let b = if model == GbModel::Agb { 0x01 } else { 0x00 };
