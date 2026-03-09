@@ -18,29 +18,35 @@ cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.
 
 ## Testing
 
-Test ROMs live in `test-roms/` (blargg, mooneye-test-suite, SameSuite). The `test_runner` binary runs them:
+Test ROMs live in `game-boy-test-roms/` (c-sp/game-boy-test-roms v7.0, includes blargg, mooneye, gambatte, bully, and more). The `test_runner` binary runs them:
 
 ```bash
 # Mooneye tests (breakpoint detection, Fibonacci register check)
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/
+cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/
 
 # Blargg tests (serial output detection)
-cargo run --release --bin test_runner -- test-roms/blargg/ blargg
+cargo run --release --bin test_runner -- game-boy-test-roms/blargg/ blargg
+
+# Gambatte tests (hex output comparison, 15-frame capture)
+cargo run --release --bin test_runner -- game-boy-test-roms/gambatte/ gambatte
+
+# Gambatte subcategory
+cargo run --release --bin test_runner -- game-boy-test-roms/gambatte/sprites/ gambatte
 
 # Single test
-cargo run --release --bin test_runner -- test-roms/blargg/cpu_instrs/individual/01-special.gb blargg
+cargo run --release --bin test_runner -- game-boy-test-roms/blargg/cpu_instrs/individual/01-special.gb blargg
 
 # Screenshot a ROM after N frames
 cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png
 
 # Force a specific model
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/ --model dmg
+cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
 
 # Run with boot ROM
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/ --boot
+cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/ --boot
 ```
 
-Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag.
+Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag. Gambatte tests encode expected hex output in filenames after `_out` (e.g. `_out3` expects "3"). DMG tests have `dmg08` in the name, CGB tests have `cgb04c`.
 
 **Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 33/70 SameSuite APU.
 
@@ -55,7 +61,7 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - **APU** (`apu.rs`) uses a DIV-coupled frame sequencer; Bus detects DIV falling edges and calls `apu.div_event()`
 
 ### PPU timing model
-- DMG line-start has a 5-dot state machine (`line_start_pending`, dots 1-5) that delays `visible_ly`, `ly_for_comparison`, and `mode_for_interrupt` transitions to match SameBoy-accurate timing
+- DMG line-start has a 5-dot state machine (`line_start_pending`, dots 1-5) that delays `visible_ly`, `ly_for_comparison`, and `mode_for_interrupt` transitions to match hardware-accurate timing
 - Mode transitions happen internally before STAT register bits update (1T delay)
 - `oam_bug_row` captures `accessed_oam_row` at end of `step()` for CPU-side OAM corruption checks
 
