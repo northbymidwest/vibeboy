@@ -2002,6 +2002,14 @@ impl Ppu {
                     self.wy_triggered = true;
                 }
 
+                // Window enable toggled off during mode 3: deactivate window
+                // immediately so the PPU switches back to BG tiles.
+                if win_was_on && !win_now_on && self.window_active && self.mode == 3 {
+                    self.window_active = false;
+                    self.fetcher.reset(false);
+                    self.bg_fifo.clear();
+                }
+
 
                 if lcd_was_on && !lcd_now_on {
                     // LCD off: reset LY, dot, mode; preserve coincidence bit
