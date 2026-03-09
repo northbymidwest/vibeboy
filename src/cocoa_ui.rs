@@ -739,7 +739,9 @@ fn main() {
             NO,
         );
 
-        window.setTitle_(NSString::alloc(nil).init_str("GBC Emulator"));
+        let title = format!("GBC Emulator — {}",
+            rom_path.file_name().unwrap_or_default().to_string_lossy());
+        window.setTitle_(NSString::alloc(nil).init_str(&title));
         window.center();
 
         // Attach Metal layer to content view
@@ -926,16 +928,11 @@ fn main() {
                     (emu.frame_buffer(), 160usize, 144usize)
                 };
 
-                // Convert 0x00RRGGBB → BGRA8 (LE bytes: B, G, R, A)
+                // Convert 0x00RRGGBB → BGRA8Unorm (just set alpha to 0xFF)
+                // BGRA8 on LE: u32 = A<<24 | R<<16 | G<<8 | B = 0xFF000000 | src
                 let mut bgra = vec![0u32; w * h];
                 for i in 0..(w * h) {
-                    let rgb = src[i];
-                    let r = (rgb >> 16) & 0xFF;
-                    let g = (rgb >> 8) & 0xFF;
-                    let b = rgb & 0xFF;
-                    // BGRA8Unorm on LE: byte0=B byte1=G byte2=R byte3=A
-                    // As u32 LE: value = A<<24 | R<<16 | G<<8 | B
-                    bgra[i] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
+                    bgra[i] = 0xFF00_0000 | src[i];
                 }
 
                 renderer.update_texture(&bgra);
