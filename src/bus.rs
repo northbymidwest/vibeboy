@@ -113,6 +113,14 @@ pub struct Bus {
 
     /// SGB command processor (only present for SGB/SGB2 models)
     pub sgb: Option<Sgb>,
+
+    /// Undocumented CGB registers
+    ff72: u8,
+    ff73: u8,
+    ff75: u8,
+
+    /// True when CGB hardware runs a DMG game (locks CGB-only IO registers)
+    pub(crate) dmg_compat: bool,
 }
 
 impl Bus {
@@ -189,7 +197,7 @@ impl Bus {
             hram: [0u8; 0x7F],
             if_: if boot_rom_active { 0x00 } else { 0xE1 },
             ie: 0x00,
-            serial: Serial::new(model.is_cgb()),
+            serial: Serial::new(model.is_cgb() && is_cgb_game),
             key1: 0x00,
             double_speed: false,
             oam_dma: OamDma::new(),
@@ -208,6 +216,10 @@ impl Bus {
             } else {
                 None
             },
+            ff72: 0,
+            ff73: 0,
+            ff75: 0,
+            dmg_compat: model.is_cgb() && is_dmg_game && !boot_rom_active,
         }
     }
 
@@ -238,6 +250,10 @@ impl Bus {
             model: self.model,
             sgb: self.sgb.clone(),
             cart_state: self.cart.snapshot_state(),
+            ff72: self.ff72,
+            ff73: self.ff73,
+            ff75: self.ff75,
+            dmg_compat: self.dmg_compat,
         }
     }
 
@@ -261,6 +277,10 @@ impl Bus {
         self.boot_rom_active = s.boot_rom_active;
         self.sgb = s.sgb.clone();
         self.cart.restore_state(&s.cart_state);
+        self.ff72 = s.ff72;
+        self.ff73 = s.ff73;
+        self.ff75 = s.ff75;
+        self.dmg_compat = s.dmg_compat;
     }
 
     /// Write cartridge RAM to .sav file if battery-backed.
@@ -418,15 +438,21 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF40..=0xFF4B => self.ppu.read(addr),
             0xFF4D => {
-                if !self.model.is_cgb() { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
                 self.key1 | 0x7E
             }
-            0xFF4F | 0xFF68..=0xFF6B => {
+            // VBK, BGPI, OBPI: accessible on CGB even in DMG-compat mode
+            0xFF4F | 0xFF68 | 0xFF6A => {
                 if !self.model.is_cgb() { return 0xFF; }
                 self.ppu.read(addr)
             }
+            // BGPD, OBPD: blocked in DMG-compat mode
+            0xFF69 | 0xFF6B => {
+                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
+                self.ppu.read(addr)
+            }
             0xFF51..=0xFF55 => {
-                if !self.model.is_cgb() { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
                 match addr {
                     0xFF51 => (self.hdma.src >> 8) as u8,
                     0xFF52 => (self.hdma.src & 0xFF) as u8,
@@ -444,9 +470,12 @@ impl Bus {
             }
             0xFF50 => if self.boot_rom_active { 0xFE } else { 0xFF },
             0xFF70 => {
-                if !self.model.is_cgb() { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
                 self.wram_bank as u8 | 0xF8
             }
+            0xFF72 => if self.model.is_cgb() { self.ff72 } else { 0xFF },
+            0xFF73 => if self.model.is_cgb() { self.ff73 } else { 0xFF },
+            0xFF75 => if self.model.is_cgb() { self.ff75 | 0x8F } else { 0xFF },
             0xFF76 => if self.model.is_cgb() { self.apu.pcm12() } else { 0xFF },
             0xFF77 => if self.model.is_cgb() { self.apu.pcm34() } else { 0xFF },
             _ => 0xFF,
@@ -509,7 +538,10 @@ impl Bus {
                 self.apu.write(addr, val);
             }
             0xFF46 => self.start_oam_dma(val),
-            0xFF4F | 0xFF68..=0xFF6B if !self.model.is_cgb() => {} // ignore on DMG
+            // BGPD ($FF69), OBPD ($FF6B): ignore in DMG-compat mode
+            0xFF69 | 0xFF6B if !self.model.is_cgb() || self.dmg_compat => {}
+            // VBK, BGPI, OBPI: ignore on non-CGB only (accessible in compat)
+            0xFF4F | 0xFF68 | 0xFF6A if !self.model.is_cgb() => {}
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
                 self.ppu.write(addr, val);
                 // Immediately transfer any interrupt flags from register writes
@@ -519,12 +551,12 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
-            0xFF4D if !self.model.is_cgb() => {} // ignore on DMG
+            0xFF4D if !self.model.is_cgb() || self.dmg_compat => {} // ignore on DMG/compat
             0xFF4D => {
                 // KEY1: prepare speed switch (bit 0 = switch request)
                 self.key1 = (self.key1 & 0x80) | (val & 0x01);
             }
-            0xFF51..=0xFF55 if !self.model.is_cgb() => {} // ignore on DMG
+            0xFF51..=0xFF55 if !self.model.is_cgb() || self.dmg_compat => {} // ignore on DMG/compat
             0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | ((val as u16) << 8),
             0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | ((val & 0xF0) as u16),
             0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | (((val & 0x1F) as u16) << 8) | 0x8000,
@@ -542,6 +574,8 @@ impl Bus {
                     let cgb_flag = self.cart.read_rom(0x0143);
                     if self.model.is_cgb() && cgb_flag != 0x80 && cgb_flag != 0xC0 {
                         self.ppu.dmg_compat = true;
+                        self.dmg_compat = true;
+                        self.serial.cgb_mode = false;
                         // Capture current CGB palette RAM as reference colors
                         // (the boot ROM has programmed these)
                         for i in 0..4 {
@@ -556,11 +590,14 @@ impl Bus {
                     }
                 }
             }
-            0xFF70 if !self.model.is_cgb() => {} // ignore on DMG
+            0xFF70 if !self.model.is_cgb() || self.dmg_compat => {} // ignore on DMG/compat
             0xFF70 => {
                 let bank = (val & 0x07) as usize;
                 self.wram_bank = if bank == 0 { 1 } else { bank };
             }
+            0xFF72 if self.model.is_cgb() => { self.ff72 = val; }
+            0xFF73 if self.model.is_cgb() => { self.ff73 = val; }
+            0xFF75 if self.model.is_cgb() => { self.ff75 = val & 0x70; }
             _ => {}
         }
     }

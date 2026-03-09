@@ -90,7 +90,7 @@ fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
         GbModel::Sgb
     } else if stem.ends_with("-A") {
         GbModel::Agb
-    } else if stem.ends_with("-C") || stem.ends_with("-cgb0") || stem.ends_with("-cgbABCDE") {
+    } else if stem.ends_with("-C") || stem.ends_with("-cgb") || stem.ends_with("-cgb0") || stem.ends_with("-cgbABCDE") {
         GbModel::Cgb
     } else if stem.ends_with("-GS") || stem.ends_with("-G") {
         GbModel::Dmg

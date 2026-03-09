@@ -628,14 +628,20 @@ impl Ppu {
                 } else {
                     456
                 };
+                // CGB STAT Mode 2 quirk at line 144: fires 2T before the line
+                // wrap. This ensures it falls in a different HALT half-cycle than
+                // VBlank IF (which fires at dot 2 of line 144), giving the 4T
+                // separation measured by vblank_stat_intr-C.
+                if self.cgb_mode && self.ly == 143 && self.dot == line_end - 2 {
+                    if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                        self.if_flags |= 0x02;
+                    }
+                }
                 if self.dot >= line_end {
                     self.lcd_first_line_short = false;
                     self.dot = 0;
                     let old_ly = self.ly;
                     self.ly = self.ly.wrapping_add(1);
-                    if old_ly == 143 || self.ly == 144 {
-                        log::trace!("LY_INCR: Mode 0 line end: ly {} -> {} at tt={}", old_ly, self.ly, self.total_ticks);
-                    }
 
                     if self.cgb_mode {
                         // CGB: all changes (LY, coincidence, mode) are deferred
@@ -885,7 +891,20 @@ impl Ppu {
                     // LY becomes visible in IO register
                     self.visible_ly = self.ly;
                 }
-                2 => {} // idle
+                2 => {
+                    if self.ly == 144 && self.mode != 1 {
+                        // VBlank entry at dot 2: mode 0→1, VBlank IF.
+                        self.stat = (self.stat & !0x03) | 0x01;
+                        self.mode = 1;
+                        self.if_flags |= 0x01; // VBlank IF
+                        self.mode_for_interrupt = 1;
+                        self.oam_accessible = true;
+                        self.oam_write_accessible = true;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.update_stat_irq();
+                    }
+                }
                 3 => {
                     // Clear ly_for_comparison briefly (creates coincidence gap)
                     self.ly_for_comparison = -1;
@@ -903,22 +922,6 @@ impl Ppu {
                     }
                 }
                 5 => {
-                    if self.ly == 144 && self.mode != 1 {
-                        // VBlank entry: mode 0→1
-                        // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
-                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                            self.if_flags |= 0x02;
-                        }
-                        self.stat = (self.stat & !0x03) | 0x01;
-                        self.mode = 1;
-                        self.if_flags |= 0x01; // VBlank IF
-                        self.mode_for_interrupt = 1;
-                        self.oam_accessible = true;
-                        self.oam_write_accessible = true;
-                        self.vram_accessible = true;
-                        self.vram_write_accessible = true;
-                        self.update_stat_irq();
-                    }
                     self.line_start_pending = false;
                     // Apply lsp-deferred LYC write now that line-start is done
                     if let Some(lyc) = self.pending_lyc.take() {
@@ -1704,7 +1707,6 @@ impl Ppu {
                     log::warn!("LCD OFF: oam[24..31]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}  oam[56..63]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
                         self.oam[24], self.oam[25], self.oam[26], self.oam[27], self.oam[28], self.oam[29], self.oam[30], self.oam[31],
                         self.oam[56], self.oam[57], self.oam[58], self.oam[59], self.oam[60], self.oam[61], self.oam[62], self.oam[63]);
-                    log::trace!("LY_RESET: LCD OFF at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
@@ -1727,7 +1729,6 @@ impl Ppu {
                     // LCD on: start at line 0, mode reads as 0 initially
                     // DMG first line is ~449T (7T shorter): 1T initial sleep + 8T
                     // phantom cycles_for_line adjustment that shortens Mode 0.
-                    log::trace!("LY_RESET: LCD ON at tt={}", self.total_ticks);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;

@@ -37,8 +37,8 @@ pub struct Serial {
     master_clock: bool,
     /// Which DIV bit drives the serial clock (0x80 normal, 0x04 CGB fast)
     serial_mask: u16,
-    /// CGB mode flag
-    cgb_mode: bool,
+    /// CGB game mode flag (false for DMG games on CGB hardware)
+    pub cgb_mode: bool,
     /// Attached serial device
     pub device: Box<dyn SerialDevice>,
     /// Buffer of serial output bytes (for Blargg test detection)

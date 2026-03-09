@@ -34,6 +34,10 @@ pub struct BusSnapshot {
     pub model: GbModel,
     pub sgb: Option<Sgb>,
     pub cart_state: Vec<u8>,
+    pub ff72: u8,
+    pub ff73: u8,
+    pub ff75: u8,
+    pub dmg_compat: bool,
 }
 
 /// Complete emulator snapshot.

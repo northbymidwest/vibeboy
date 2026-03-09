@@ -1396,6 +1396,12 @@ impl Apu {
         std::mem::take(&mut self.sample_buf)
     }
 
+    /// Set CH1 volume to 0 after post-boot trigger. On real hardware, the boot
+    /// ROM's startup sound has fully decayed by the time the game starts.
+    pub fn set_ch1_post_boot_volume(&mut self) {
+        self.ch1.volume = 0;
+    }
+
     /// CGB PCM12 register (0xFF76): CH1 output in low nibble, CH2 in high nibble.
     /// Inactive channels read as 0. PCM mask only applies to CGB<=C (not our target CGB-D/E).
     pub fn pcm12(&self) -> u8 {

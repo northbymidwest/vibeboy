@@ -72,6 +72,9 @@ impl Emulator {
                 bus.write_byte(0xFF11, 0xBF);
                 bus.write_byte(0xFF12, 0xF3);
                 bus.write_byte(0xFF14, 0xBF);
+                // On real hardware, CH1's envelope has fully decayed to 0
+                // by the time the boot ROM finishes, so zero the volume.
+                bus.apu.set_ch1_post_boot_volume();
             }
             bus.write_byte(0xFF24, 0x77);
             bus.write_byte(0xFF25, 0xF3);
