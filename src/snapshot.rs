@@ -36,6 +36,7 @@ pub struct BusSnapshot {
     pub cart_state: Vec<u8>,
     pub ff72: u8,
     pub ff73: u8,
+    pub ff74: u8,
     pub ff75: u8,
     pub dmg_compat: bool,
 }

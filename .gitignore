@@ -4,6 +4,7 @@
 *.bin
 *.sav
 test-roms/
+game-boy-test-roms/
 bootroms/
 prints/
 profile.json.gz

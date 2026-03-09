@@ -117,10 +117,71 @@ pub struct Bus {
     /// Undocumented CGB registers
     ff72: u8,
     ff73: u8,
+    ff74: u8,
     ff75: u8,
 
     /// True when CGB hardware runs a DMG game (locks CGB-only IO registers)
     pub(crate) dmg_compat: bool,
+
+    /// PPU T-cycle debt from mid-M-cycle glitch handling (e.g. tile_sel_glitch).
+    /// Next tick_mcycle advances PPU by (4 - debt) T-cycles instead of 4.
+    ppu_tick_debt: u32,
+}
+
+/// Simple LCG PRNG for RAM initialization (matches SameBoy approach).
+fn ram_random(state: &mut u64) -> u8 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (*state >> 56) as u8
+}
+
+/// Initialize WRAM with hardware-realistic patterns.
+/// DMG: even 256-byte pages biased toward 0xFF (rand|rand), odd pages toward 0x00 (rand&rand).
+/// CGB/AGB: random fill.
+fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
+    let mut wram = [[0u8; 0x1000]; 8];
+    let mut rng: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let bank_count = if model.is_cgb() { 8 } else { 2 };
+    for bank in 0..bank_count {
+        for i in 0..0x1000 {
+            let byte = if model.is_cgb() {
+                ram_random(&mut rng)
+            } else {
+                // DMG: alternating 256-byte pages
+                let even_page = (i & 0x100) == 0;
+                if even_page {
+                    ram_random(&mut rng) | ram_random(&mut rng)
+                } else {
+                    ram_random(&mut rng) & ram_random(&mut rng)
+                }
+            };
+            wram[bank][i] = byte;
+        }
+    }
+    wram
+}
+
+/// Initialize HRAM with hardware-realistic patterns.
+/// DMG: odd bytes biased toward 0xFF, even bytes toward 0x00.
+/// CGB/AGB: random fill.
+fn init_hram(model: GbModel) -> [u8; 0x7F] {
+    let mut hram = [0u8; 0x7F];
+    let mut rng: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    for i in 0..0x7F {
+        hram[i] = if model.is_cgb() {
+            ram_random(&mut rng)
+        } else if (i & 1) != 0 {
+            ram_random(&mut rng) | ram_random(&mut rng) | ram_random(&mut rng)
+        } else {
+            ram_random(&mut rng) & ram_random(&mut rng) & ram_random(&mut rng)
+        };
+    }
+    hram
 }
 
 impl Bus {
@@ -195,9 +256,9 @@ impl Bus {
             timer,
             joypad,
             apu: if boot_rom_active { Apu::reset(model.cpu_clock_rate(), model.is_cgb()) } else { Apu::new(model.cpu_clock_rate(), model.is_cgb(), model.is_sgb()) },
-            wram: [[0u8; 0x1000]; 8],
+            wram: init_wram(model),
             wram_bank: 1,
-            hram: [0u8; 0x7F],
+            hram: init_hram(model),
             if_: if boot_rom_active { 0x00 } else { 0xE1 },
             ie: 0x00,
             serial: Serial::new(model.is_cgb() && is_cgb_game),
@@ -221,8 +282,10 @@ impl Bus {
             },
             ff72: 0,
             ff73: 0,
+            ff74: 0,
             ff75: 0,
             dmg_compat: model.is_cgb() && is_dmg_game && !boot_rom_active,
+            ppu_tick_debt: 0,
         }
     }
 
@@ -255,6 +318,7 @@ impl Bus {
             cart_state: self.cart.snapshot_state(),
             ff72: self.ff72,
             ff73: self.ff73,
+            ff74: self.ff74,
             ff75: self.ff75,
             dmg_compat: self.dmg_compat,
         }
@@ -282,6 +346,7 @@ impl Bus {
         self.cart.restore_state(&s.cart_state);
         self.ff72 = s.ff72;
         self.ff73 = s.ff73;
+        self.ff74 = s.ff74;
         self.ff75 = s.ff75;
         self.dmg_compat = s.dmg_compat;
     }
@@ -307,15 +372,52 @@ impl Bus {
     pub fn if_mut(&mut self) -> &mut u8 { &mut self.if_ }
     // ── Memory read ───────────────────────────────────────────────────────────
 
-    /// CPU memory read. On CGB, OAM DMA only blocks OAM (0xFE00–0xFE9F);
-    /// all other memory (ROM, WRAM, VRAM, I/O, HRAM) remains accessible.
+    /// CPU memory read with DMA bus conflict handling.
+    /// - DMG: OAM reads return 0xFF during active DMA transfer.
+    /// - CGB: DMA blocks reads from the same bus as the source (including during delay).
+    ///   Cart bus (ROM + SRAM) and WRAM bus are separate.
     pub fn read_byte(&self, addr: u16) -> u8 {
-        if self.oam_dma.is_blocking() {
-            if matches!(addr, 0xFE00..=0xFE9F) {
-                return 0xFF;
+        if self.model.is_cgb() {
+            // CGB: same-bus conflict starts immediately when DMA is active (including delay).
+            if self.oam_dma.active && self.oam_dma_same_bus(addr) {
+                return self.oam_dma_conflict_byte();
             }
+            // OAM blocked during active transfer (post-delay)
+            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+                return self.oam_dma_conflict_byte();
+            }
+        } else if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+            // DMG: OAM reads return 0xFF during DMA
+            return 0xFF;
         }
         self.read_byte_raw(addr)
+    }
+
+    /// Check if addr is on the same bus as the OAM DMA source (CGB).
+    fn oam_dma_same_bus(&self, addr: u16) -> bool {
+        let src = self.oam_dma.source;
+        match src {
+            // Cart bus: ROM + SRAM
+            0x0000..=0x7FFF | 0xA000..=0xBFFF => matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF),
+            // VRAM bus
+            0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
+            // WRAM bus (includes echo RAM)
+            0xC000..=0xFDFF => matches!(addr, 0xC000..=0xFDFF),
+            _ => false,
+        }
+    }
+
+    /// Returns the byte currently being transferred by OAM DMA (bus conflict).
+    /// During delay period, progress=0 so this returns byte 0 of the DMA source.
+    fn oam_dma_conflict_byte(&self) -> u8 {
+        if !self.oam_dma.active {
+            return 0xFF;
+        }
+        let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
+        if !self.model.is_cgb() && src >= 0xFE00 {
+            src -= 0x2000;
+        }
+        self.read_byte_raw(src)
     }
 
     /// Raw read bypassing DMA bus-conflict logic (for DMA/HDMA controllers).
@@ -375,14 +477,19 @@ impl Bus {
 
     // ── Memory write ──────────────────────────────────────────────────────────
 
-    /// CPU memory write. On CGB, OAM DMA only blocks OAM writes;
-    /// all other writes (ROM, WRAM, I/O, HRAM) proceed normally.
+    /// CPU memory write with DMA bus conflict handling.
+    /// - DMG: OAM writes blocked during DMA; external bus writes are ignored.
+    /// - CGB: writes to the same bus as DMA source are blocked + OAM.
     pub fn write_byte(&mut self, addr: u16, val: u8) {
-        if self.oam_dma.is_blocking() {
-            if matches!(addr, 0xFE00..=0xFE9F) {
-                log::trace!("OAM write BLOCKED by DMA: addr={:04X} val={:02X}", addr, val);
-                return; // OAM writes ignored during DMA
+        if self.model.is_cgb() {
+            if self.oam_dma.active && self.oam_dma_same_bus(addr) {
+                return;
             }
+            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+                return;
+            }
+        } else if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+            return;
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
         if !self.ppu.oam_accessible && addr >= 0xFE00 && addr < 0xFF00 {
@@ -476,8 +583,10 @@ impl Bus {
                 if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
                 self.wram_bank as u8 | 0xF8
             }
+            0xFF6C => if self.model.is_cgb() { self.ppu.opri | 0xFE } else { 0xFF },
             0xFF72 => if self.model.is_cgb() { self.ff72 } else { 0xFF },
             0xFF73 => if self.model.is_cgb() { self.ff73 } else { 0xFF },
+            0xFF74 => if self.model.is_cgb() { self.ff74 } else { 0xFF },
             0xFF75 => if self.model.is_cgb() { self.ff75 | 0x8F } else { 0xFF },
             0xFF76 => if self.model.is_cgb() { self.apu.pcm12() } else { 0xFF },
             0xFF77 => if self.model.is_cgb() { self.apu.pcm34() } else { 0xFF },
@@ -545,6 +654,26 @@ impl Bus {
             0xFF69 | 0xFF6B if !self.model.is_cgb() || self.dmg_compat => {}
             // VBK, BGPI, OBPI: ignore on non-CGB only (accessible in compat)
             0xFF4F | 0xFF68 | 0xFF6A if !self.model.is_cgb() => {}
+            // CGB LCDC write: handle tile_sel_glitch when TILE_SEL transitions 1→0
+            0xFF40 if self.model.is_cgb() && !self.double_speed => {
+                let old_lcdc = self.ppu.lcdc;
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+                // TILE_SEL (bit 4) transition 1→0: 1T glitch window
+                if (old_lcdc & 0x10) != 0 && (val & 0x10) == 0 {
+                    self.ppu.tile_sel_glitch = true;
+                    self.ppu.step(1);
+                    self.ppu.tile_sel_glitch = false;
+                    self.ppu_tick_debt += 1;
+                    if self.ppu.if_flags != 0 {
+                        self.if_ |= self.ppu.if_flags;
+                        self.ppu.if_flags = 0;
+                    }
+                }
+            }
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
                 self.ppu.write(addr, val);
                 // Immediately transfer any interrupt flags from register writes
@@ -598,8 +727,10 @@ impl Bus {
                 let bank = (val & 0x07) as usize;
                 self.wram_bank = if bank == 0 { 1 } else { bank };
             }
+            0xFF6C if self.model.is_cgb() => { self.ppu.opri = val & 0x01; }
             0xFF72 if self.model.is_cgb() => { self.ff72 = val; }
             0xFF73 if self.model.is_cgb() => { self.ff73 = val; }
+            0xFF74 if self.model.is_cgb() => { self.ff74 = val; }
             0xFF75 if self.model.is_cgb() => { self.ff75 = val & 0x70; }
             _ => {}
         }
@@ -857,7 +988,13 @@ impl Bus {
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         // Timer is clocked by the CPU, so always 4 T-cycles per M-cycle.
         // PPU/APU run at fixed 4MHz, so 2 T-cycles per M-cycle in double-speed.
-        let bus_cycles = if self.double_speed { 2 } else { 4 };
+        let mut bus_cycles = if self.double_speed { 2 } else { 4 };
+        // Apply any PPU tick debt from mid-M-cycle glitch handling
+        if self.ppu_tick_debt > 0 {
+            let debt = self.ppu_tick_debt;
+            self.ppu_tick_debt = 0;
+            bus_cycles -= debt;
+        }
         self.tick(4, bus_cycles);
         self.step_oam_dma();
     }

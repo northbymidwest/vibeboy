@@ -17,6 +17,7 @@ struct FifoPixel {
     bg_priority: bool,      // CGB BG attr bit 7
     sprite_bg_over: bool,   // sprite OAM attr bit 7
     sprite_dmg_palette: u8, // DMG: captured obp0/obp1 value
+    sprite_oam_index: u8,   // OAM entry index (0-39) for CGB priority
     bg_color_index: u8,     // original BG color underneath sprite
     bg_palette: u8,         // original BG palette underneath sprite
 }
@@ -86,6 +87,16 @@ struct Fetcher {
     tile_attrs: u8,
     tile_data_low: u8,
     tile_data_high: u8,
+    /// Latched tile data address (computed at T1 of data fetch, used at T2)
+    latched_addr: usize,
+    latched_bank: usize,
+    /// CGB: fetcher_y latched at ReadTileId T1 (CGB-D+ caches this)
+    fetcher_y: u8,
+    /// CGB: LCDC TILE_SEL (bit 4) latched at ReadTileId T1
+    latched_tile_sel: bool,
+    /// CGB: BG map address latched at ReadTileId T1
+    /// (SameBoy caches this in last_tile_index_address at GET_TILE_T1)
+    latched_map_addr: usize,
 }
 
 impl Fetcher {
@@ -99,6 +110,11 @@ impl Fetcher {
             tile_attrs: 0,
             tile_data_low: 0,
             tile_data_high: 0,
+            latched_addr: 0,
+            latched_bank: 0,
+            fetcher_y: 0,
+            latched_tile_sel: false,
+            latched_map_addr: 0,
         }
     }
 
@@ -111,6 +127,11 @@ impl Fetcher {
         self.tile_attrs = 0;
         self.tile_data_low = 0;
         self.tile_data_high = 0;
+        self.latched_addr = 0;
+        self.latched_bank = 0;
+        self.fetcher_y = 0;
+        self.latched_tile_sel = false;
+        self.latched_map_addr = 0;
     }
 }
 
@@ -148,7 +169,7 @@ pub struct Ppu {
     pub ocpd: [u8; 64], // 0xFF6B: OBJ palette data
 
     // Internal state
-    mode: u8,
+    pub(crate) mode: u8,
     /// T-cycle counter within the current scanline (0..455)
     pub(crate) dot: u32,
 
@@ -158,8 +179,8 @@ pub struct Ppu {
     /// Previous state of internal STAT IRQ signal (for edge detection)
     stat_irq_line: bool,
 
-    /// Sprites collected during Mode 2 OAM scan: (y, x, tile, attrs)
-    scanline_sprites: Vec<(u8, u8, u8, u8)>,
+    /// Sprites collected during Mode 2 OAM scan: (y, x, tile, attrs, oam_index)
+    scanline_sprites: Vec<(u8, u8, u8, u8, u8)>,
 
     /// VRAM read accessible (false during Mode 3, and late Mode 2 on DMG)
     pub vram_accessible: bool,
@@ -208,6 +229,16 @@ pub struct Ppu {
     /// Uses CGB palette RAM but with DMG-style palette selection.
     pub dmg_compat: bool,
 
+    /// $FF6C OPRI: Object priority mode (CGB only)
+    /// bit 0: 0 = OAM index priority (CGB default), 1 = X-coordinate priority (DMG mode)
+    pub opri: u8,
+
+    /// CGB tile_sel_glitch: set for 1T when LCDC bit 4 transitions 1→0.
+    /// Causes tile data fetch to read from a glitched address.
+    pub tile_sel_glitch: bool,
+    /// Latched at T1 if tile_sel_glitch was true; consumed at T2 to apply glitch data.
+    tile_sel_glitch_latched: bool,
+
     /// Reference colors for DMG compat mode (RGB555).
     /// Set by boot ROM or default grayscale when no boot ROM.
     pub dmg_bg_ref: [u16; 4],
@@ -221,7 +252,7 @@ pub struct Ppu {
     oam_fifo: PixelFifo,
     fetcher: Fetcher,
     /// Pixels pushed to framebuffer this scanline (0-160)
-    pixel_x: u8,
+    pub(crate) pixel_x: u8,
     /// SCX%8 pixels to discard from first BG tile
     scx_discard: u8,
     /// SCX/8 tile column offset latched at Mode 3 start
@@ -240,7 +271,7 @@ pub struct Ppu {
     /// Window became active this scanline
     window_active: bool,
     /// Startup delay at beginning of Mode 3 (pipeline priming)
-    mode3_start_delay: u8,
+    pub(crate) mode3_start_delay: u8,
     /// Last sprite tile slot for same-slot grouping (or -1 if none)
     last_sprite_slot: i16,
 
@@ -333,6 +364,9 @@ impl Ppu {
             sgb_mode: false,
             shade_buffer: vec![0u8; 160 * 144],
             dmg_compat: false,
+            opri: 0,
+            tile_sel_glitch: false,
+            tile_sel_glitch_latched: false,
             dmg_bg_ref: [0x7FFF; 4],
             dmg_obj_ref: [[0x7FFF; 4]; 2],
 
@@ -1068,15 +1102,15 @@ impl Ppu {
         self.oam_fifo.clear();
         self.fetcher.reset(false);
         self.pixel_x = 0;
-        self.scx_discard = self.scx & 7;
         self.scx_tile_offset = self.scx / 8;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
-        // Hardware pipeline priming delay before fetcher starts.
-        // CGB: 8T (extra 3T vs DMG due to different internal pipeline).
-        self.mode3_start_delay = if self.cgb_mode { 8 } else { 5 };
         self.last_sprite_slot = -1;
+        self.scx_discard = self.scx & 7;
+        // Hardware pipeline priming delay before fetcher starts.
+        // DMG: 5T; CGB: 8T (different OAM scan / fetcher pipeline)
+        self.mode3_start_delay = if self.cgb_mode { 8 } else { 5 };
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
@@ -1165,7 +1199,7 @@ impl Ppu {
 
     /// Find a sprite that triggers at the current pixel_x
     fn find_sprite_at_pixel_x(&self) -> Option<usize> {
-        for (i, &(_y, x, _tile, _attrs)) in self.scanline_sprites.iter().enumerate() {
+        for (i, &(_y, x, _tile, _attrs, _oam_idx)) in self.scanline_sprites.iter().enumerate() {
             if self.sprites_fetched & (1 << i) != 0 {
                 continue; // already fetched
             }
@@ -1214,7 +1248,7 @@ impl Ppu {
         }
         self.sprite_fetch_tick = 0;
 
-        let &(raw_y, raw_x, mut tile_idx, attrs) = &self.scanline_sprites[self.sprite_fetch_entry];
+        let &(raw_y, raw_x, mut tile_idx, attrs, oam_index) = &self.scanline_sprites[self.sprite_fetch_entry];
         let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
 
         match self.sprite_fetch_step {
@@ -1249,7 +1283,7 @@ impl Ppu {
             }
             2 => {
                 // Data high already read, now mix into FIFO
-                self.mix_sprite_into_fifo(raw_x, attrs);
+                self.mix_sprite_into_fifo(raw_x, attrs, oam_index);
                 self.sprite_fetch_active = false;
 
                 // Check if another sprite triggers at the same pixel_x
@@ -1266,7 +1300,7 @@ impl Ppu {
     /// Mix fetched sprite data into the OAM FIFO.
     /// Sprite pixels are stored separately from BG pixels; priority is resolved
     /// at output time when both FIFOs are popped together.
-    fn mix_sprite_into_fifo(&mut self, sprite_x: u8, attrs: u8) {
+    fn mix_sprite_into_fifo(&mut self, sprite_x: u8, attrs: u8, oam_index: u8) {
         let x_flip = attrs & 0x20 != 0;
         let bg_over = attrs & 0x80 != 0;
         let palette_idx = if self.cgb_mode && !self.dmg_compat {
@@ -1306,7 +1340,12 @@ impl Ppu {
 
             let existing = *self.oam_fifo.get(fifo_pos);
             if existing.color_index != 0 {
-                continue;
+                // CGB with OAM-index priority (OPRI bit 0 = 0): lower OAM index wins
+                if self.cgb_mode && self.opri & 0x01 == 0 && oam_index < existing.sprite_oam_index {
+                    // fall through to overwrite
+                } else {
+                    continue;
+                }
             }
 
             self.oam_fifo.replace(fifo_pos, FifoPixel {
@@ -1316,23 +1355,64 @@ impl Ppu {
                 bg_priority: false,
                 sprite_bg_over: bg_over,
                 sprite_dmg_palette: dmg_pal,
+                sprite_oam_index: oam_index,
                 bg_color_index: 0,
                 bg_palette: 0,
             });
         }
     }
 
-    /// Advance the BG/window tile fetcher by one T-cycle
+    /// Advance the BG/window tile fetcher by one T-cycle.
+    /// SameBoy T1/T2 model: T1 computes & latches addresses, T2 reads VRAM.
     fn tick_bg_fetcher(&mut self) {
         self.fetcher.tick += 1;
         if self.fetcher.tick < 2 {
+            // T1: latch state on CGB (≥CGB-D)
+            if self.cgb_mode {
+                match self.fetcher.state {
+                    FetcherState::ReadTileId => {
+                        // Latch fetcher_y, TILE_SEL, and map address
+                        self.fetcher.fetcher_y = if self.fetcher.fetching_window {
+                            self.window_line_counter as u8
+                        } else {
+                            self.scy.wrapping_add(self.ly)
+                        };
+                        self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                        self.fetcher.latched_map_addr = self.fetcher_map_addr();
+                    }
+                    FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
+                        // SameBoy re-latches TILE_SEL at every data fetch T1
+                        // (GET_TILE_DATA_LOWER_T1 / GET_TILE_DATA_HIGH_T1)
+                        // During tile_sel_glitch, preserve the old latched_tile_sel
+                        // (SameBoy's data_for_tile_sel_glitch uses `last_tileset`
+                        // which was set at the *previous* T1, not the current one)
+                        if self.tile_sel_glitch {
+                            self.tile_sel_glitch_latched = true;
+                        } else if !self.tile_sel_glitch_latched {
+                            // Don't re-latch if glitch is pending consumption
+                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                        }
+                        // Compute and cache tile data address
+                        let (addr, bank) = self.fetcher_tile_data_addr();
+                        self.fetcher.latched_addr = addr;
+                        self.fetcher.latched_bank = bank;
+                    }
+                    _ => {}
+                }
+            }
             return; // each step takes 2T
         }
         self.fetcher.tick = 0;
 
         match self.fetcher.state {
             FetcherState::ReadTileId => {
-                let map_addr = self.fetcher_map_addr();
+                // CGB: use the map address latched at T1 (critical for mid-scanline
+                // LCDC changes that alter BG_MAP between T1 and T2)
+                let map_addr = if self.cgb_mode {
+                    self.fetcher.latched_map_addr
+                } else {
+                    self.fetcher_map_addr()
+                };
                 self.fetcher.tile_id = self.vram[0][map_addr];
                 self.fetcher.tile_attrs = if self.cgb_mode {
                     self.vram[1][map_addr]
@@ -1342,13 +1422,40 @@ impl Ppu {
                 self.fetcher.state = FetcherState::ReadTileDataLow;
             }
             FetcherState::ReadTileDataLow => {
-                let (addr, bank) = self.fetcher_tile_data_addr();
-                self.fetcher.tile_data_low = self.vram[bank][addr];
+                // CGB: use address cached at T1; DMG: compute fresh
+                let (addr, bank) = if self.cgb_mode {
+                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
+                } else {
+                    self.fetcher_tile_data_addr()
+                };
+                // CGB tile_sel_glitch: when TILE_SEL transitions 1→0, the PPU
+                // reads glitched data instead of normal VRAM for 1T.
+                // Check both immediate (T2 hit) and latched (T1 hit, consumed at T2).
+                // tile_sel_glitch only affects HIGH byte (not low), so
+                // don't consume tile_sel_glitch_latched here — carry to HIGH T2.
+                if self.tile_sel_glitch && self.cgb_mode {
+                    self.fetcher.tile_data_low =
+                        self.tile_sel_glitch_data();
+                } else {
+                    self.fetcher.tile_data_low = self.vram[bank][addr];
+                }
                 self.fetcher.state = FetcherState::ReadTileDataHigh;
             }
             FetcherState::ReadTileDataHigh => {
-                let (addr, bank) = self.fetcher_tile_data_addr();
-                self.fetcher.tile_data_high = self.vram[bank][addr + 1];
+                // CGB: use address cached at T1; DMG: compute fresh
+                let (addr, bank) = if self.cgb_mode {
+                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
+                } else {
+                    self.fetcher_tile_data_addr()
+                };
+                // CGB tile_sel_glitch: same as ReadTileDataLow
+                if (self.tile_sel_glitch || self.tile_sel_glitch_latched) && self.cgb_mode {
+                    self.tile_sel_glitch_latched = false;
+                    self.fetcher.tile_data_high =
+                        self.tile_sel_glitch_data();
+                } else {
+                    self.fetcher.tile_data_high = self.vram[bank][addr + 1];
+                }
                 self.fetcher.state = FetcherState::Push;
             }
             FetcherState::Push => {
@@ -1380,11 +1487,18 @@ impl Ppu {
         }
     }
 
-    /// Compute VRAM address and bank for tile data
+    /// Compute VRAM address and bank for tile data.
+    /// On CGB, uses latched fetcher_y and TILE_SEL (cached at ReadTileId T1).
+    /// On DMG, computes fetcher_y fresh from current SCY+LY.
     fn fetcher_tile_data_addr(&self) -> (usize, usize) {
         let tile_id = self.fetcher.tile_id;
         let attrs = self.fetcher.tile_attrs;
-        let tile_data_signed = self.lcdc & 0x10 == 0;
+        // CGB: use latched TILE_SEL from ReadTileId T1; DMG: read LCDC live
+        let tile_data_signed = if self.cgb_mode {
+            !self.fetcher.latched_tile_sel
+        } else {
+            self.lcdc & 0x10 == 0
+        };
 
         let tile_addr: u16 = if !tile_data_signed {
             tile_id as u16 * 16
@@ -1395,7 +1509,10 @@ impl Ppu {
         let y_flip = self.cgb_mode && attrs & 0x40 != 0;
         let bank = if self.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
 
-        let pixel_y = if self.fetcher.fetching_window {
+        let pixel_y = if self.cgb_mode {
+            // CGB (≥CGB-D): use latched fetcher_y
+            self.fetcher.fetcher_y & 7
+        } else if self.fetcher.fetching_window {
             (self.window_line_counter & 7) as u8
         } else {
             self.scy.wrapping_add(self.ly) & 7
@@ -1404,6 +1521,36 @@ impl Ppu {
         let row = if y_flip { 7 - pixel_y } else { pixel_y };
         let addr = (tile_addr + row as u16 * 2) as usize;
         (addr, bank)
+    }
+
+    /// CGB tile_sel_glitch: when LCDC bit 4 transitions 1→0 during Mode 3,
+    /// SameBoy's `data_for_tile_sel_glitch()` replaces tile data with the
+    /// tile INDEX itself for tiles 0-127 (non-CGB_D models).
+    fn tile_sel_glitch_data(&self) -> u8 {
+        if self.fetcher.latched_tile_sel {
+            // last_tileset was true (TILE_SEL=1 at the preceding T1)
+            // For tiles < 128: return the tile index as corrupted data
+            if self.fetcher.tile_id & 0x80 == 0 {
+                self.fetcher.tile_id
+            } else {
+                // tile >= 128: no glitch, use normal VRAM data
+                let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
+                if self.fetcher.state == FetcherState::ReadTileDataLow {
+                    self.vram[bank][addr]
+                } else {
+                    self.vram[bank][addr + 1]
+                }
+            }
+        } else {
+            // last_tileset was false: SameBoy uses a cached `data_for_sel_glitch` value.
+            // For now, use normal VRAM data (this path is less common).
+            let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
+            if self.fetcher.state == FetcherState::ReadTileDataLow {
+                self.vram[bank][addr]
+            } else {
+                self.vram[bank][addr + 1]
+            }
+        }
     }
 
     /// Push 8 pixels from fetcher data into the BG FIFO
@@ -1427,6 +1574,7 @@ impl Ppu {
                 bg_priority: bg_prio,
                 sprite_bg_over: false,
                 sprite_dmg_palette: 0,
+                sprite_oam_index: 0,
                 bg_color_index: 0,
                 bg_palette: 0,
             });
@@ -1480,6 +1628,9 @@ impl Ppu {
             // BG/window pixel
             if self.cgb_mode {
                 self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
+            } else if self.lcdc & 0x01 == 0 {
+                // DMG: LCDC bit 0 off → BG/window draws as color 0
+                Self::dmg_color(self.bgp, 0)
             } else {
                 Self::dmg_color(self.bgp, bg.color_index)
             }
@@ -1602,7 +1753,7 @@ impl Ppu {
             let attrs = self.oam[i * 4 + 3];
 
             if ly >= sprite_y && ly < sprite_y + sprite_height {
-                self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs));
+                self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs, i as u8));
                 if self.scanline_sprites.len() >= 10 {
                     break;
                 }
