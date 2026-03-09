@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicy,
     NSBackingStoreType, NSEvent, NSEventType, NSWindow, NSWindowStyleMask,
+    NSMenu, NSMenuItem,
 };
-use cocoa::base::{id, nil, YES, NO};
+use cocoa::base::{id, nil, YES, NO, SEL};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use core_graphics_types::geometry::CGSize;
 use metal::*;
@@ -397,37 +398,6 @@ fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<core_audio::AudioUnit>
 }
 
 // ── NSOpenPanel ──────────────────────────────────────────────────────────────
-
-fn pick_rom_file() -> PathBuf {
-    unsafe {
-        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
-        let _: () = msg_send![panel, setCanChooseFiles: YES];
-        let _: () = msg_send![panel, setCanChooseDirectories: NO];
-        let _: () = msg_send![panel, setAllowsMultipleSelection: NO];
-
-        // Set allowed file types
-        let gb = NSString::alloc(nil).init_str("gb");
-        let gbc = NSString::alloc(nil).init_str("gbc");
-        let types: id = msg_send![class!(NSMutableArray), arrayWithCapacity: 2usize];
-        let _: () = msg_send![types, addObject: gb];
-        let _: () = msg_send![types, addObject: gbc];
-        let _: () = msg_send![panel, setAllowedFileTypes: types];
-
-        let response: isize = msg_send![panel, runModal];
-        if response != 1 {
-            std::process::exit(0);
-        }
-
-        let url: id = msg_send![panel, URL];
-        let path: id = msg_send![url, path];
-        let path_str: *const i8 = msg_send![path, UTF8String];
-        let path = std::ffi::CStr::from_ptr(path_str)
-            .to_str()
-            .unwrap()
-            .to_string();
-        PathBuf::from(path)
-    }
-}
 
 // ── Key mapping ──────────────────────────────────────────────────────────────
 
@@ -923,6 +893,276 @@ impl MetalRenderer {
     }
 }
 
+// ── Menu bar ─────────────────────────────────────────────────────────────────
+
+// Menu item tags for action detection
+const MENU_TAG_OPEN: isize = 100;
+const MENU_TAG_PAUSE: isize = 101;
+const MENU_TAG_RESET: isize = 102;
+const MENU_TAG_SAVE_STATE: isize = 103;
+const MENU_TAG_LOAD_STATE: isize = 104;
+const MENU_TAG_SLOT_BASE: isize = 200; // 200..208 for slots 1-9
+
+unsafe fn create_menu_bar(app: id) {
+    let main_menu = NSMenu::new(nil).autorelease();
+
+    // ── VibeBoy menu ─────────────────────────────────────────────────────
+    let app_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![app_menu, setTitle: NSString::alloc(nil).init_str("VibeBoy")];
+
+    let about_item = menu_item("About VibeBoy", sel!(orderFrontStandardAboutPanel:), "");
+    let _: () = msg_send![app_menu, addItem: about_item];
+    let _: () = msg_send![app_menu, addItem: NSMenuItem::separatorItem(nil)];
+
+    let quit_item = menu_item("Quit VibeBoy", sel!(terminate:), "q");
+    let _: () = msg_send![app_menu, addItem: quit_item];
+
+    let app_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![app_menu_item, setSubmenu: app_menu];
+    let _: () = msg_send![main_menu, addItem: app_menu_item];
+
+    // ── File menu ────────────────────────────────────────────────────────
+    let file_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![file_menu, setTitle: NSString::alloc(nil).init_str("File")];
+
+    let open_item = menu_item_with_tag("Open ROM\u{2026}", sel!(menuAction:), "o", MENU_TAG_OPEN);
+    let _: () = msg_send![file_menu, addItem: open_item];
+    let _: () = msg_send![file_menu, addItem: NSMenuItem::separatorItem(nil)];
+
+    let close_item = menu_item("Close Window", sel!(performClose:), "w");
+    let _: () = msg_send![file_menu, addItem: close_item];
+
+    let file_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![file_menu_item, setSubmenu: file_menu];
+    let _: () = msg_send![main_menu, addItem: file_menu_item];
+
+    // ── Emulation menu ───────────────────────────────────────────────────
+    let emu_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![emu_menu, setTitle: NSString::alloc(nil).init_str("Emulation")];
+
+    let pause_item = menu_item_with_tag("Pause", sel!(menuAction:), "p", MENU_TAG_PAUSE);
+    let _: () = msg_send![emu_menu, addItem: pause_item];
+
+    let reset_item = menu_item_with_tag("Reset", sel!(menuAction:), "r", MENU_TAG_RESET);
+    let _: () = msg_send![emu_menu, addItem: reset_item];
+
+    let emu_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![emu_menu_item, setSubmenu: emu_menu];
+    let _: () = msg_send![main_menu, addItem: emu_menu_item];
+
+    // ── State menu ───────────────────────────────────────────────────────
+    let state_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![state_menu, setTitle: NSString::alloc(nil).init_str("State")];
+
+    let save_item = menu_item_with_tag_and_key("Save State", sel!(menuAction:), MENU_TAG_SAVE_STATE, K_F5_EQUIV);
+    let _: () = msg_send![state_menu, addItem: save_item];
+    let load_item = menu_item_with_tag_and_key("Load State", sel!(menuAction:), MENU_TAG_LOAD_STATE, K_F7_EQUIV);
+    let _: () = msg_send![state_menu, addItem: load_item];
+    let _: () = msg_send![state_menu, addItem: NSMenuItem::separatorItem(nil)];
+
+    for slot in 1..=9usize {
+        let title = format!("Slot {}", slot);
+        let key = format!("{}", slot);
+        let item = menu_item_with_tag(&title, sel!(menuAction:), &key, MENU_TAG_SLOT_BASE + slot as isize - 1);
+        let _: () = msg_send![item, setKeyEquivalentModifierMask: 0u64]; // no modifier
+        let _: () = msg_send![state_menu, addItem: item];
+    }
+
+    let state_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![state_menu_item, setSubmenu: state_menu];
+    let _: () = msg_send![main_menu, addItem: state_menu_item];
+
+    // ── Window menu ──────────────────────────────────────────────────────
+    let window_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![window_menu, setTitle: NSString::alloc(nil).init_str("Window")];
+
+    let minimize_item = menu_item("Minimize", sel!(performMiniaturize:), "m");
+    let _: () = msg_send![window_menu, addItem: minimize_item];
+    let zoom_item = menu_item("Zoom", sel!(performZoom:), "");
+    let _: () = msg_send![window_menu, addItem: zoom_item];
+    let _: () = msg_send![window_menu, addItem: NSMenuItem::separatorItem(nil)];
+    let front_item = menu_item("Bring All to Front", sel!(arrangeInFront:), "");
+    let _: () = msg_send![window_menu, addItem: front_item];
+
+    let window_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![window_menu_item, setSubmenu: window_menu];
+    let _: () = msg_send![main_menu, addItem: window_menu_item];
+
+    app.setMainMenu_(main_menu);
+    let _: () = msg_send![app, setWindowsMenu: window_menu];
+}
+
+// Function key equivalents use Unicode private-use characters
+const K_F5_EQUIV: &str = "\u{F708}";  // NSF5FunctionKey
+const K_F7_EQUIV: &str = "\u{F70A}";  // NSF7FunctionKey
+
+unsafe fn menu_item(title: &str, action: SEL, key: &str) -> id {
+    NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+        NSString::alloc(nil).init_str(title),
+        action,
+        NSString::alloc(nil).init_str(key),
+    ).autorelease()
+}
+
+unsafe fn menu_item_with_tag(title: &str, action: SEL, key: &str, tag: isize) -> id {
+    let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+        NSString::alloc(nil).init_str(title),
+        action,
+        NSString::alloc(nil).init_str(key),
+    ).autorelease();
+    let _: () = msg_send![item, setTag: tag];
+    // Target the app delegate (first responder chain will route to us)
+    item
+}
+
+unsafe fn menu_item_with_tag_and_key(title: &str, action: SEL, tag: isize, key: &str) -> id {
+    let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+        NSString::alloc(nil).init_str(title),
+        action,
+        NSString::alloc(nil).init_str(key),
+    ).autorelease();
+    let _: () = msg_send![item, setTag: tag];
+    // Function keys need NSFunctionKeyMask
+    let ns_function_key_mask: u64 = 1 << 23;
+    let _: () = msg_send![item, setKeyEquivalentModifierMask: ns_function_key_mask];
+    item
+}
+
+// Register an ObjC class to handle menu actions
+mod menu_handler {
+    use super::*;
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    use std::os::raw::c_void;
+    use std::sync::Once;
+
+    // Action flags polled by the main loop
+    pub struct MenuActions {
+        pub open_rom: bool,
+        pub pause_toggle: bool,
+        pub reset: bool,
+        pub save_state: bool,
+        pub load_state: bool,
+        pub select_slot: Option<usize>,
+    }
+
+    impl MenuActions {
+        pub fn new() -> Self {
+            MenuActions {
+                open_rom: false,
+                pause_toggle: false,
+                reset: false,
+                save_state: false,
+                load_state: false,
+                select_slot: None,
+            }
+        }
+
+        pub fn take_all(&mut self) -> MenuActions {
+            std::mem::replace(self, MenuActions::new())
+        }
+    }
+
+    static REGISTER: Once = Once::new();
+
+    pub fn register_class() -> &'static Class {
+        REGISTER.call_once(|| {
+            let superclass = Class::get("NSObject").unwrap();
+            let mut decl = ClassDecl::new("VBMenuHandler", superclass).unwrap();
+
+            decl.add_ivar::<*mut c_void>("_actions");
+
+            unsafe {
+                decl.add_method(
+                    sel!(menuAction:),
+                    handle_menu_action as extern "C" fn(&Object, Sel, id),
+                );
+                // Respond YES to validateMenuItem: so our items are always enabled
+                decl.add_method(
+                    sel!(validateMenuItem:),
+                    validate_menu_item as extern "C" fn(&Object, Sel, id) -> bool,
+                );
+            }
+
+            decl.register();
+        });
+        Class::get("VBMenuHandler").unwrap()
+    }
+
+    extern "C" fn validate_menu_item(_this: &Object, _sel: Sel, _item: id) -> bool {
+        true
+    }
+
+    extern "C" fn handle_menu_action(this: &Object, _sel: Sel, sender: id) {
+        unsafe {
+            let ctx_ptr: *mut c_void = *this.get_ivar("_actions");
+            if ctx_ptr.is_null() {
+                return;
+            }
+            let actions = &mut *(ctx_ptr as *mut MenuActions);
+
+            let tag: isize = msg_send![sender, tag];
+            match tag {
+                super::MENU_TAG_OPEN => actions.open_rom = true,
+                super::MENU_TAG_PAUSE => actions.pause_toggle = true,
+                super::MENU_TAG_RESET => actions.reset = true,
+                super::MENU_TAG_SAVE_STATE => actions.save_state = true,
+                super::MENU_TAG_LOAD_STATE => actions.load_state = true,
+                t if t >= super::MENU_TAG_SLOT_BASE && t < super::MENU_TAG_SLOT_BASE + 9 => {
+                    actions.select_slot = Some((t - super::MENU_TAG_SLOT_BASE) as usize);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Create a menu handler instance and wire it up. Returns (handler_id, actions_ptr).
+    pub unsafe fn create(app: id) -> (id, *mut MenuActions) {
+        let class = register_class();
+        let handler: id = msg_send![class, new];
+
+        let actions = Box::into_raw(Box::new(MenuActions::new()));
+        (*handler).set_ivar("_actions", actions as *mut c_void);
+
+        // Set as first responder target for menu items that use menuAction: selector.
+        // We do this by making the handler the app's delegate — the responder chain
+        // sends unhandled actions up to the app delegate.
+        let _: () = msg_send![app, setDelegate: handler];
+
+        (handler, actions)
+    }
+}
+
+fn open_rom_dialog() -> Option<PathBuf> {
+    unsafe {
+        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![panel, setCanChooseFiles: YES];
+        let _: () = msg_send![panel, setCanChooseDirectories: NO];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: NO];
+
+        let gb = NSString::alloc(nil).init_str("gb");
+        let gbc = NSString::alloc(nil).init_str("gbc");
+        let types: id = msg_send![class!(NSMutableArray), arrayWithCapacity: 2usize];
+        let _: () = msg_send![types, addObject: gb];
+        let _: () = msg_send![types, addObject: gbc];
+        let _: () = msg_send![panel, setAllowedFileTypes: types];
+
+        let response: isize = msg_send![panel, runModal];
+        if response != 1 {
+            return None;
+        }
+
+        let url: id = msg_send![panel, URL];
+        let path: id = msg_send![url, path];
+        let path_str: *const i8 = msg_send![path, UTF8String];
+        let path = std::ffi::CStr::from_ptr(path_str)
+            .to_str()
+            .unwrap()
+            .to_string();
+        Some(PathBuf::from(path))
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -935,12 +1175,17 @@ fn main() {
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
 
+        // Set up menu bar and action handler
+        create_menu_bar(app);
+        let (_menu_handler, menu_actions_ptr) = menu_handler::create(app);
+        let menu_actions = &mut *menu_actions_ptr;
+
         // Resolve ROM path
         let rom_path: PathBuf = if let Some(ref p) = cli.rom {
             p.clone()
         } else {
             app.activateIgnoringOtherApps_(YES);
-            pick_rom_file()
+            open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
 
         let rom = fs::read(&rom_path).unwrap_or_else(|e| {
@@ -1019,7 +1264,9 @@ fn main() {
         eprintln!("  Escape      — Quit");
         eprintln!();
 
-        let mut emu = Emulator::new(rom, boot_rom, Some(rom_path.as_path()), model, snes_rom);
+        let mut current_rom = rom;
+        let mut current_rom_path = rom_path;
+        let mut emu = Emulator::new(current_rom.clone(), boot_rom, Some(current_rom_path.as_path()), model, snes_rom);
 
         if cli.printer {
             let output_dir = std::path::Path::new("prints");
@@ -1049,8 +1296,8 @@ fn main() {
             NO,
         );
 
-        let title = format!("GBC Emulator — {}",
-            rom_path.file_name().unwrap_or_default().to_string_lossy());
+        let title = format!("VibeBoy \u{2014} {}",
+            current_rom_path.file_name().unwrap_or_default().to_string_lossy());
         window.setTitle_(NSString::alloc(nil).init_str(&title));
         window.center();
 
@@ -1096,6 +1343,7 @@ fn main() {
         // ── Key state + frame loop ───────────────────────────────────────────
         let mut keys_down = std::collections::HashSet::<u16>::new();
         let mut current_slot: usize = 0;
+        let mut paused = false;
         let mut frame_start = Instant::now();
         let mut fps_timer = Instant::now();
         let mut fps_count = 0u32;
@@ -1156,8 +1404,64 @@ fn main() {
                     if let Some(btn) = keycode_to_button(keycode) {
                         emu.set_button(btn, false);
                     }
-                } else {
-                    let _: () = msg_send![app, sendEvent: event];
+                }
+
+                // Always dispatch events so menus and window chrome work
+                let _: () = msg_send![app, sendEvent: event];
+            }
+
+            // ── Handle menu actions ──────────────────────────────────────────
+            {
+                let actions = menu_actions.take_all();
+
+                if actions.open_rom {
+                    if let Some(path) = open_rom_dialog() {
+                        if let Ok(rom_data) = fs::read(&path) {
+                            let title = format!("VibeBoy \u{2014} {}",
+                                path.file_name().unwrap_or_default().to_string_lossy());
+                            window.setTitle_(NSString::alloc(nil).init_str(&title));
+                            current_rom = rom_data;
+                            current_rom_path = path;
+                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), model, None);
+                            paused = false;
+                            eprintln!("Loaded: {}", current_rom_path.display());
+                        }
+                    }
+                }
+
+                if actions.pause_toggle {
+                    paused = !paused;
+                    eprintln!("{}", if paused { "Paused" } else { "Resumed" });
+                    // Update menu item title
+                    let emu_menu: id = msg_send![app.mainMenu(), itemAtIndex: 2isize];
+                    let submenu: id = msg_send![emu_menu, submenu];
+                    let pause_item: id = msg_send![submenu, itemWithTag: MENU_TAG_PAUSE];
+                    let label = if paused { "Resume" } else { "Pause" };
+                    let _: () = msg_send![pause_item, setTitle: NSString::alloc(nil).init_str(label)];
+                }
+
+                if actions.reset {
+                    emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), model, None);
+                    paused = false;
+                    eprintln!("Reset");
+                }
+
+                if actions.save_state {
+                    emu.save_state(current_slot);
+                    eprintln!("State saved to slot {}", current_slot + 1);
+                }
+
+                if actions.load_state {
+                    if emu.load_state(current_slot) {
+                        eprintln!("State loaded from slot {}", current_slot + 1);
+                    } else {
+                        eprintln!("Slot {} is empty", current_slot + 1);
+                    }
+                }
+
+                if let Some(slot) = actions.select_slot {
+                    current_slot = slot;
+                    eprintln!("Slot {} selected", current_slot + 1);
                 }
             }
 
@@ -1188,17 +1492,19 @@ fn main() {
             let fast_forward = keys_down.contains(&K_TAB);
             emu.rewinding = backspace_held;
 
-            if backspace_held {
-                emu.rewind_one_frame();
-                emu.bus.apu.drain_samples();
-            } else if fast_forward {
-                for _ in 0..3 {
-                    emu.step_frame();
+            if !paused {
+                if backspace_held {
+                    emu.rewind_one_frame();
                     emu.bus.apu.drain_samples();
+                } else if fast_forward {
+                    for _ in 0..3 {
+                        emu.step_frame();
+                        emu.bus.apu.drain_samples();
+                    }
+                    emu.step_frame();
+                } else {
+                    emu.step_frame();
                 }
-                emu.step_frame();
-            } else {
-                emu.step_frame();
             }
 
             // ── Audio ────────────────────────────────────────────────────────

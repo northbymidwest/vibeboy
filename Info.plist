@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>VibeBoy</string>
+    <key>CFBundleDisplayName</key>
+    <string>VibeBoy</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.vibeboy.app</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>vibeboy_cocoa</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>VibeBoy uses the camera for Game Boy Camera emulation</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Game Boy ROM</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>gb</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Game Boy Color ROM</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>gbc</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.vibeboy.gameboy-rom</string>
+            <key>UTTypeDescription</key>
+            <string>Game Boy ROM</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>gb</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.vibeboy.gameboy-color-rom</string>
+            <key>UTTypeDescription</key>
+            <string>Game Boy Color ROM</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>gbc</string></array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
