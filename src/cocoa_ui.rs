@@ -39,6 +39,90 @@ use objc::{class, msg_send, sel, sel_impl};
 const SCALE: u32 = 3;
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
+// ── Accelerometer source tracking ─────────────────────────────────────────────
+
+enum AccelSource {
+    None,
+    /// IOKit HID (Apple Silicon built-in accelerometer)
+    IoKit,
+    /// CoreMotion CMMotionManager fallback
+    CoreMotion(id),
+}
+
+#[link(name = "CoreMotion", kind = "framework")]
+unsafe extern "C" {}
+
+fn init_accel() -> AccelSource {
+    // Try IOKit HID first (Apple Silicon native)
+    #[cfg(target_os = "macos")]
+    {
+        if macos_accel::init() {
+            eprintln!("Accelerometer: macOS native (Apple Silicon)");
+            return AccelSource::IoKit;
+        }
+    }
+
+    // Fallback: CMMotionManager
+    unsafe {
+        let cm_class = class!(CMMotionManager);
+        let manager: id = msg_send![cm_class, alloc];
+        let manager: id = msg_send![manager, init];
+        if manager.is_null() {
+            log::info!("CMMotionManager init failed — accelerometer disabled");
+            return AccelSource::None;
+        }
+        let available: bool = msg_send![manager, isAccelerometerAvailable];
+        if !available {
+            let () = msg_send![manager, release];
+            log::info!("CMMotionManager: no accelerometer available");
+            return AccelSource::None;
+        }
+        // Set update interval (~60 Hz)
+        let interval: f64 = 1.0 / 60.0;
+        let () = msg_send![manager, setAccelerometerUpdateInterval: interval];
+        let () = msg_send![manager, startAccelerometerUpdates];
+        eprintln!("Accelerometer: CoreMotion (CMMotionManager)");
+        AccelSource::CoreMotion(manager)
+    }
+}
+
+fn poll_accel(source: &AccelSource) -> Option<(f32, f32, f32)> {
+    match source {
+        AccelSource::None => None,
+        AccelSource::IoKit => macos_accel::poll(),
+        AccelSource::CoreMotion(manager) => unsafe {
+            let data: id = msg_send![*manager, accelerometerData];
+            if data.is_null() {
+                return None;
+            }
+            // CMAcceleration is a struct { x: f64, y: f64, z: f64 }
+            // -[CMAccelerometerData acceleration] returns it by value
+            #[repr(C)]
+            struct CMAcceleration {
+                x: f64,
+                y: f64,
+                z: f64,
+            }
+            let accel: CMAcceleration = msg_send![data, acceleration];
+            Some((accel.x as f32, accel.y as f32, accel.z as f32))
+        },
+    }
+}
+
+fn close_accel(source: &AccelSource) {
+    match source {
+        AccelSource::None => {}
+        AccelSource::IoKit => {
+            #[cfg(target_os = "macos")]
+            macos_accel::close();
+        }
+        AccelSource::CoreMotion(manager) => unsafe {
+            let () = msg_send![*manager, stopAccelerometerUpdates];
+            let () = msg_send![*manager, release];
+        },
+    }
+}
+
 fn frame_duration(model: GbModel) -> Duration {
     let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
     Duration::from_nanos(nanos)
@@ -1003,13 +1087,11 @@ fn main() {
         let mut camera_buf = [0u8; 128 * 112];
 
         // ── Accelerometer ────────────────────────────────────────────────────
-        let has_accel = emu.bus.cart.has_accelerometer();
-        #[cfg(target_os = "macos")]
-        if has_accel {
-            if macos_accel::init() {
-                eprintln!("Accelerometer: macOS native (Apple Silicon)");
-            }
-        }
+        let accel_source = if emu.bus.cart.has_accelerometer() {
+            init_accel()
+        } else {
+            AccelSource::None
+        };
 
         // ── Key state + frame loop ───────────────────────────────────────────
         let mut keys_down = std::collections::HashSet::<u16>::new();
@@ -1093,15 +1175,12 @@ fn main() {
             }
 
             // ── Accelerometer ────────────────────────────────────────────────
-            #[cfg(target_os = "macos")]
-            if has_accel {
-                if let Some((x, y, _z)) = macos_accel::poll() {
-                    const CENTER: f32 = 0x81D0 as u16 as f32;
-                    const RANGE: f32 = 0x70 as u16 as f32;
-                    let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
-                    let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
-                    emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
-                }
+            if let Some((x, y, _z)) = poll_accel(&accel_source) {
+                const CENTER: f32 = 0x81D0 as u16 as f32;
+                const RANGE: f32 = 0x70 as u16 as f32;
+                let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
+                let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
+                emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
             }
 
             // ── Rewind / Fast-forward ────────────────────────────────────────
@@ -1191,10 +1270,7 @@ fn main() {
         }
 
         // Cleanup
-        #[cfg(target_os = "macos")]
-        if has_accel {
-            macos_accel::close();
-        }
+        close_accel(&accel_source);
         drop(camera);
 
         emu.save();
