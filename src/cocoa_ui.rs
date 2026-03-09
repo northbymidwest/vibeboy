@@ -18,6 +18,7 @@ mod macos_accel;
 use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -401,19 +402,6 @@ fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<core_audio::AudioUnit>
 
 // ── Key mapping ──────────────────────────────────────────────────────────────
 
-fn keycode_to_button(keycode: u16) -> Option<u8> {
-    match keycode {
-        6 => Some(Emulator::BTN_B),      // Z
-        7 => Some(Emulator::BTN_A),      // X
-        36 => Some(Emulator::BTN_START), // Return
-        60 => Some(Emulator::BTN_SELECT), // Right Shift
-        124 => Some(Emulator::BTN_RIGHT), // Right arrow
-        123 => Some(Emulator::BTN_LEFT),  // Left arrow
-        126 => Some(Emulator::BTN_UP),    // Up arrow
-        125 => Some(Emulator::BTN_DOWN),  // Down arrow
-        _ => None,
-    }
-}
 
 const K_ESCAPE: u16 = 53;
 const K_F5: u16 = 96;
@@ -902,6 +890,200 @@ const MENU_TAG_RESET: isize = 102;
 const MENU_TAG_SAVE_STATE: isize = 103;
 const MENU_TAG_LOAD_STATE: isize = 104;
 const MENU_TAG_SLOT_BASE: isize = 200; // 200..208 for slots 1-9
+const MENU_TAG_MODEL_AUTO: isize = 300;
+const MENU_TAG_MODEL_DMG0: isize = 301;
+const MENU_TAG_MODEL_DMG: isize = 302;
+const MENU_TAG_MODEL_MGB: isize = 303;
+const MENU_TAG_MODEL_SGB: isize = 304;
+const MENU_TAG_MODEL_SGB2: isize = 305;
+const MENU_TAG_MODEL_CGB: isize = 306;
+const MENU_TAG_MODEL_AGB: isize = 307;
+const MENU_TAG_CONTROLS: isize = 400;
+const MENU_TAG_RECENT_BASE: isize = 500; // 500..509 for recent ROMs
+const MENU_TAG_CLEAR_RECENT: isize = 510;
+
+// ── Custom key mappings ──────────────────────────────────────────────────────
+
+fn default_key_map() -> HashMap<u16, u8> {
+    let mut m = HashMap::new();
+    m.insert(6, Emulator::BTN_B);       // Z
+    m.insert(7, Emulator::BTN_A);       // X
+    m.insert(36, Emulator::BTN_START);   // Return
+    m.insert(60, Emulator::BTN_SELECT);  // Right Shift
+    m.insert(124, Emulator::BTN_RIGHT);  // Right arrow
+    m.insert(123, Emulator::BTN_LEFT);   // Left arrow
+    m.insert(126, Emulator::BTN_UP);     // Up arrow
+    m.insert(125, Emulator::BTN_DOWN);   // Down arrow
+    m
+}
+
+
+fn keycode_name(code: u16) -> &'static str {
+    match code {
+        0 => "A", 1 => "S", 2 => "D", 3 => "F", 4 => "H", 5 => "G",
+        6 => "Z", 7 => "X", 8 => "C", 9 => "V", 11 => "B", 12 => "Q",
+        13 => "W", 14 => "E", 15 => "R", 16 => "Y", 17 => "T",
+        31 => "O", 32 => "U", 34 => "I", 35 => "P", 37 => "L",
+        38 => "J", 40 => "K", 41 => ";", 45 => "N", 46 => "M",
+        36 => "Return", 48 => "Tab", 49 => "Space", 51 => "Delete",
+        53 => "Escape", 56 => "LShift", 60 => "RShift",
+        123 => "Left", 124 => "Right", 125 => "Down", 126 => "Up",
+        96 => "F5", 97 => "F6", 98 => "F7", 99 => "F3",
+        _ => "?",
+    }
+}
+
+
+fn load_key_map() -> HashMap<u16, u8> {
+    unsafe {
+        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::alloc(nil).init_str("ControlMappings");
+        let dict: id = msg_send![defaults, dictionaryForKey: key];
+        if dict == nil {
+            return default_key_map();
+        }
+        let mut map = HashMap::new();
+        let keys: id = msg_send![dict, allKeys];
+        let count: usize = msg_send![keys, count];
+        for i in 0..count {
+            let k: id = msg_send![keys, objectAtIndex: i];
+            let v: id = msg_send![dict, objectForKey: k];
+            let k_str: *const i8 = msg_send![k, UTF8String];
+            let v_int: i64 = msg_send![v, integerValue];
+            let k_val: u16 = std::ffi::CStr::from_ptr(k_str)
+                .to_str().unwrap_or("0").parse().unwrap_or(0);
+            map.insert(k_val, v_int as u8);
+        }
+        if map.is_empty() { default_key_map() } else { map }
+    }
+}
+
+fn save_key_map(map: &HashMap<u16, u8>) {
+    unsafe {
+        let dict: id = msg_send![class!(NSMutableDictionary), new];
+        for (&keycode, &btn) in map {
+            let k = NSString::alloc(nil).init_str(&keycode.to_string());
+            let v: id = msg_send![class!(NSNumber), numberWithInteger: btn as isize];
+            let _: () = msg_send![dict, setObject: v forKey: k];
+        }
+        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::alloc(nil).init_str("ControlMappings");
+        let _: () = msg_send![defaults, setObject: dict forKey: key];
+        let _: () = msg_send![dict, release];
+    }
+}
+
+// ── Recent ROMs ─────────────────────────────────────────────────────────────
+
+fn load_recent_roms() -> Vec<String> {
+    unsafe {
+        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::alloc(nil).init_str("RecentROMs");
+        let arr: id = msg_send![defaults, arrayForKey: key];
+        if arr == nil {
+            return Vec::new();
+        }
+        let count: usize = msg_send![arr, count];
+        let mut result = Vec::new();
+        for i in 0..count {
+            let s: id = msg_send![arr, objectAtIndex: i];
+            let cstr: *const i8 = msg_send![s, UTF8String];
+            let path = std::ffi::CStr::from_ptr(cstr).to_str().unwrap_or("").to_string();
+            if !path.is_empty() {
+                result.push(path);
+            }
+        }
+        result
+    }
+}
+
+fn save_recent_roms(roms: &[String]) {
+    unsafe {
+        let arr: id = msg_send![class!(NSMutableArray), arrayWithCapacity: roms.len()];
+        for path in roms {
+            let s = NSString::alloc(nil).init_str(path);
+            let _: () = msg_send![arr, addObject: s];
+        }
+        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::alloc(nil).init_str("RecentROMs");
+        let _: () = msg_send![defaults, setObject: arr forKey: key];
+    }
+}
+
+fn add_recent_rom(path: &str) {
+    let mut recents = load_recent_roms();
+    recents.retain(|p| p != path);
+    recents.insert(0, path.to_string());
+    recents.truncate(10);
+    save_recent_roms(&recents);
+}
+
+fn model_tag_to_model(tag: isize) -> Option<Option<GbModel>> {
+    match tag {
+        MENU_TAG_MODEL_AUTO => Some(None), // Auto
+        MENU_TAG_MODEL_DMG0 => Some(Some(GbModel::Dmg0)),
+        MENU_TAG_MODEL_DMG => Some(Some(GbModel::Dmg)),
+        MENU_TAG_MODEL_MGB => Some(Some(GbModel::Mgb)),
+        MENU_TAG_MODEL_SGB => Some(Some(GbModel::Sgb)),
+        MENU_TAG_MODEL_SGB2 => Some(Some(GbModel::Sgb2)),
+        MENU_TAG_MODEL_CGB => Some(Some(GbModel::Cgb)),
+        MENU_TAG_MODEL_AGB => Some(Some(GbModel::Agb)),
+        _ => None,
+    }
+}
+
+fn auto_detect_model(rom: &[u8]) -> GbModel {
+    let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
+    if cgb_flag == 0x80 || cgb_flag == 0xC0 {
+        GbModel::Cgb
+    } else {
+        GbModel::Dmg
+    }
+}
+
+fn update_model_checkmarks(app: id, selected_tag: isize) {
+    unsafe {
+        // Emulation menu is at index 2, Hardware submenu is item 2 (0-indexed: after Pause, Reset)
+        let emu_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 2isize];
+        let emu_submenu: id = msg_send![emu_menu_item, submenu];
+        let hw_item: id = msg_send![emu_submenu, itemAtIndex: 3isize]; // after pause, reset, separator
+        let hw_submenu: id = msg_send![hw_item, submenu];
+        if hw_submenu == nil { return; }
+        let count: isize = msg_send![hw_submenu, numberOfItems];
+        for i in 0..count {
+            let item: id = msg_send![hw_submenu, itemAtIndex: i];
+            let tag: isize = msg_send![item, tag];
+            let state: isize = if tag == selected_tag { 1 } else { 0 }; // NSOnState=1, NSOffState=0
+            let _: () = msg_send![item, setState: state];
+        }
+    }
+}
+
+fn rebuild_recent_menu(app: id, recents: &[String]) {
+    unsafe {
+        // File menu is at index 1, "Recent ROMs" submenu is item at index 2 (after Open, separator)
+        let file_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 1isize];
+        let file_submenu: id = msg_send![file_menu_item, submenu];
+        let recent_item: id = msg_send![file_submenu, itemAtIndex: 2isize];
+        let recent_submenu: id = msg_send![recent_item, submenu];
+        if recent_submenu == nil { return; }
+        let _: () = msg_send![recent_submenu, removeAllItems];
+        for (i, path) in recents.iter().enumerate() {
+            let display = PathBuf::from(path);
+            let name = display.file_name().unwrap_or_default().to_string_lossy();
+            let item = menu_item_with_tag(
+                &name, sel!(menuAction:), "",
+                MENU_TAG_RECENT_BASE + i as isize,
+            );
+            let _: () = msg_send![recent_submenu, addItem: item];
+        }
+        if !recents.is_empty() {
+            let _: () = msg_send![recent_submenu, addItem: NSMenuItem::separatorItem(nil)];
+        }
+        let clear = menu_item_with_tag("Clear Recent", sel!(menuAction:), "", MENU_TAG_CLEAR_RECENT);
+        let _: () = msg_send![recent_submenu, addItem: clear];
+    }
+}
 
 unsafe fn create_menu_bar(app: id) {
     let main_menu = NSMenu::new(nil).autorelease();
@@ -929,6 +1111,17 @@ unsafe fn create_menu_bar(app: id) {
     let _: () = msg_send![file_menu, addItem: open_item];
     let _: () = msg_send![file_menu, addItem: NSMenuItem::separatorItem(nil)];
 
+    // Recent ROMs submenu
+    let recent_submenu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![recent_submenu, setTitle: NSString::alloc(nil).init_str("Recent ROMs")];
+    let clear_item = menu_item_with_tag("Clear Recent", sel!(menuAction:), "", MENU_TAG_CLEAR_RECENT);
+    let _: () = msg_send![recent_submenu, addItem: clear_item];
+    let recent_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![recent_menu_item, setTitle: NSString::alloc(nil).init_str("Recent ROMs")];
+    let _: () = msg_send![recent_menu_item, setSubmenu: recent_submenu];
+    let _: () = msg_send![file_menu, addItem: recent_menu_item];
+    let _: () = msg_send![file_menu, addItem: NSMenuItem::separatorItem(nil)];
+
     let close_item = menu_item("Close Window", sel!(performClose:), "w");
     let _: () = msg_send![file_menu, addItem: close_item];
 
@@ -945,6 +1138,36 @@ unsafe fn create_menu_bar(app: id) {
 
     let reset_item = menu_item_with_tag("Reset", sel!(menuAction:), "r", MENU_TAG_RESET);
     let _: () = msg_send![emu_menu, addItem: reset_item];
+    let _: () = msg_send![emu_menu, addItem: NSMenuItem::separatorItem(nil)];
+
+    // Hardware submenu
+    let hw_submenu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![hw_submenu, setTitle: NSString::alloc(nil).init_str("Hardware")];
+    let models = [
+        ("Auto", MENU_TAG_MODEL_AUTO),
+        ("DMG0", MENU_TAG_MODEL_DMG0),
+        ("DMG", MENU_TAG_MODEL_DMG),
+        ("MGB", MENU_TAG_MODEL_MGB),
+        ("SGB", MENU_TAG_MODEL_SGB),
+        ("SGB2", MENU_TAG_MODEL_SGB2),
+        ("CGB", MENU_TAG_MODEL_CGB),
+        ("AGB", MENU_TAG_MODEL_AGB),
+    ];
+    for (name, tag) in &models {
+        let item = menu_item_with_tag(name, sel!(menuAction:), "", *tag);
+        if *tag == MENU_TAG_MODEL_AUTO {
+            let _: () = msg_send![item, setState: 1isize]; // NSOnState — checked by default
+        }
+        let _: () = msg_send![hw_submenu, addItem: item];
+    }
+    let hw_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![hw_menu_item, setTitle: NSString::alloc(nil).init_str("Hardware")];
+    let _: () = msg_send![hw_menu_item, setSubmenu: hw_submenu];
+    let _: () = msg_send![emu_menu, addItem: hw_menu_item];
+
+    let _: () = msg_send![emu_menu, addItem: NSMenuItem::separatorItem(nil)];
+    let controls_item = menu_item_with_tag("Controls\u{2026}", sel!(menuAction:), "", MENU_TAG_CONTROLS);
+    let _: () = msg_send![emu_menu, addItem: controls_item];
 
     let emu_menu_item = NSMenuItem::new(nil).autorelease();
     let _: () = msg_send![emu_menu_item, setSubmenu: emu_menu];
@@ -1044,6 +1267,10 @@ mod menu_handler {
         pub save_state: bool,
         pub load_state: bool,
         pub select_slot: Option<usize>,
+        pub select_model: Option<isize>,  // tag of selected model
+        pub open_controls: bool,
+        pub open_recent: Option<usize>,   // index into recent ROMs list
+        pub clear_recent: bool,
     }
 
     impl MenuActions {
@@ -1055,6 +1282,10 @@ mod menu_handler {
                 save_state: false,
                 load_state: false,
                 select_slot: None,
+                select_model: None,
+                open_controls: false,
+                open_recent: None,
+                clear_recent: false,
             }
         }
 
@@ -1081,6 +1312,10 @@ mod menu_handler {
                 decl.add_method(
                     sel!(validateMenuItem:),
                     validate_menu_item as extern "C" fn(&Object, Sel, id) -> bool,
+                );
+                decl.add_method(
+                    sel!(applicationDockMenu:),
+                    application_dock_menu as extern "C" fn(&Object, Sel, id) -> id,
                 );
             }
 
@@ -1111,8 +1346,36 @@ mod menu_handler {
                 t if t >= super::MENU_TAG_SLOT_BASE && t < super::MENU_TAG_SLOT_BASE + 9 => {
                     actions.select_slot = Some((t - super::MENU_TAG_SLOT_BASE) as usize);
                 }
+                t if t >= super::MENU_TAG_MODEL_AUTO && t <= super::MENU_TAG_MODEL_AGB => {
+                    actions.select_model = Some(t);
+                }
+                super::MENU_TAG_CONTROLS => actions.open_controls = true,
+                t if t >= super::MENU_TAG_RECENT_BASE && t < super::MENU_TAG_RECENT_BASE + 10 => {
+                    actions.open_recent = Some((t - super::MENU_TAG_RECENT_BASE) as usize);
+                }
+                super::MENU_TAG_CLEAR_RECENT => actions.clear_recent = true,
                 _ => {}
             }
+        }
+    }
+
+    extern "C" fn application_dock_menu(_this: &Object, _sel: Sel, _app: id) -> id {
+        unsafe {
+            let recents = super::load_recent_roms();
+            if recents.is_empty() {
+                return nil;
+            }
+            let menu = NSMenu::new(nil).autorelease();
+            for (i, path) in recents.iter().enumerate() {
+                let display = PathBuf::from(path);
+                let name = display.file_name().unwrap_or_default().to_string_lossy();
+                let item = super::menu_item_with_tag(
+                    &name, sel!(menuAction:), "",
+                    super::MENU_TAG_RECENT_BASE + i as isize,
+                );
+                let _: () = msg_send![menu, addItem: item];
+            }
+            menu
         }
     }
 
@@ -1163,6 +1426,211 @@ fn open_rom_dialog() -> Option<PathBuf> {
     }
 }
 
+// ── Controls Panel ───────────────────────────────────────────────────────────
+
+fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
+    unsafe {
+        let panel_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 340.0));
+        let style = NSWindowStyleMask::NSTitledWindowMask
+            | NSWindowStyleMask::NSClosableWindowMask;
+        let panel: id = msg_send![class!(NSPanel),
+            alloc];
+        let panel: id = NSWindow::initWithContentRect_styleMask_backing_defer_(
+            panel, panel_rect, style,
+            NSBackingStoreType::NSBackingStoreBuffered, NO,
+        );
+        let _: () = msg_send![panel, setTitle: NSString::alloc(nil).init_str("Controls")];
+        let _: () = msg_send![panel, center];
+
+        let content: id = msg_send![panel, contentView];
+
+        // Build reverse map: button -> keycode
+        let mut btn_to_key: HashMap<u8, u16> = HashMap::new();
+        for (&keycode, &btn) in key_map.iter() {
+            btn_to_key.insert(btn, keycode);
+        }
+
+        // Create labels for each button
+        let button_order = [
+            (Emulator::BTN_UP, "Up"),
+            (Emulator::BTN_DOWN, "Down"),
+            (Emulator::BTN_LEFT, "Left"),
+            (Emulator::BTN_RIGHT, "Right"),
+            (Emulator::BTN_A, "A"),
+            (Emulator::BTN_B, "B"),
+            (Emulator::BTN_START, "Start"),
+            (Emulator::BTN_SELECT, "Select"),
+        ];
+
+        let header = NSString::alloc(nil).init_str("Click a key binding, then press a new key to reassign.\nPress Escape to cancel.");
+        let header_frame = NSRect::new(NSPoint::new(20.0, 290.0), NSSize::new(320.0, 40.0));
+        let header_label: id = msg_send![class!(NSTextField), alloc];
+        let header_label: id = msg_send![header_label, initWithFrame: header_frame];
+        let _: () = msg_send![header_label, setStringValue: header];
+        let _: () = msg_send![header_label, setBezeled: NO];
+        let _: () = msg_send![header_label, setDrawsBackground: NO];
+        let _: () = msg_send![header_label, setEditable: NO];
+        let _: () = msg_send![header_label, setSelectable: NO];
+        let font: id = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
+        let _: () = msg_send![header_label, setFont: font];
+        let _: () = msg_send![content, addSubview: header_label];
+
+        let mut key_labels: Vec<(u8, id)> = Vec::new();
+
+        for (i, &(btn, name)) in button_order.iter().enumerate() {
+            let y = 250.0 - (i as f64 * 30.0);
+
+            // Action name label
+            let name_frame = NSRect::new(NSPoint::new(30.0, y), NSSize::new(100.0, 24.0));
+            let name_label: id = msg_send![class!(NSTextField), alloc];
+            let name_label: id = msg_send![name_label, initWithFrame: name_frame];
+            let _: () = msg_send![name_label, setStringValue: NSString::alloc(nil).init_str(name)];
+            let _: () = msg_send![name_label, setBezeled: NO];
+            let _: () = msg_send![name_label, setDrawsBackground: NO];
+            let _: () = msg_send![name_label, setEditable: NO];
+            let _: () = msg_send![name_label, setSelectable: NO];
+            let bold_font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 13.0f64];
+            let _: () = msg_send![name_label, setFont: bold_font];
+            let _: () = msg_send![content, addSubview: name_label];
+
+            // Key binding button
+            let key_name = btn_to_key.get(&btn)
+                .map(|&k| keycode_name(k))
+                .unwrap_or("(none)");
+            let btn_frame = NSRect::new(NSPoint::new(150.0, y), NSSize::new(120.0, 24.0));
+            let btn_view: id = msg_send![class!(NSButton), alloc];
+            let btn_view: id = msg_send![btn_view, initWithFrame: btn_frame];
+            let _: () = msg_send![btn_view, setTitle: NSString::alloc(nil).init_str(key_name)];
+            let _: () = msg_send![btn_view, setBezelStyle: 1isize]; // NSRoundedBezelStyle
+            let _: () = msg_send![btn_view, setTag: btn as isize];
+            let _: () = msg_send![content, addSubview: btn_view];
+
+            key_labels.push((btn, btn_view));
+        }
+
+        // Reset to Defaults button
+        let reset_frame = NSRect::new(NSPoint::new(115.0, 10.0), NSSize::new(130.0, 30.0));
+        let reset_btn: id = msg_send![class!(NSButton), alloc];
+        let reset_btn: id = msg_send![reset_btn, initWithFrame: reset_frame];
+        let _: () = msg_send![reset_btn, setTitle: NSString::alloc(nil).init_str("Reset to Defaults")];
+        let _: () = msg_send![reset_btn, setBezelStyle: 1isize];
+        let _: () = msg_send![content, addSubview: reset_btn];
+
+        // Run as modal, handle key presses for remapping
+        let _: () = msg_send![panel, makeKeyAndOrderFront: nil];
+
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+
+        // Simple modal loop: click a button, then press a key
+        let mut waiting_for_key: Option<u8> = None;
+
+        loop {
+            let event: id = msg_send![app,
+                nextEventMatchingMask: u64::MAX
+                untilDate: { let d: id = msg_send![class!(NSDate), distantFuture]; d }
+                inMode: NSString::alloc(nil).init_str("kCFRunLoopDefaultMode")
+                dequeue: YES
+            ];
+
+            if event == nil { continue; }
+
+            let event_type: u64 = msg_send![event, type];
+
+            // Check if panel was closed
+            let visible: bool = msg_send![panel, isVisible];
+            if !visible { break; }
+
+            if event_type == NSEventType::NSKeyDown as u64 {
+                let keycode: u16 = msg_send![event, keyCode];
+
+                if let Some(btn) = waiting_for_key {
+                    if keycode == K_ESCAPE {
+                        // Cancel remapping
+                        waiting_for_key = None;
+                        // Restore button title
+                        for &(b, label) in &key_labels {
+                            if b == btn {
+                                let cur_name = btn_to_key.get(&b)
+                                    .map(|&k| keycode_name(k))
+                                    .unwrap_or("(none)");
+                                let _: () = msg_send![label, setTitle:
+                                    NSString::alloc(nil).init_str(cur_name)];
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Remove old mapping for this button
+                    key_map.retain(|_, &mut v| v != btn);
+                    // Remove any existing mapping for this keycode
+                    key_map.remove(&keycode);
+                    // Set new mapping
+                    key_map.insert(keycode, btn);
+                    btn_to_key.insert(btn, keycode);
+                    save_key_map(key_map);
+
+                    // Update button title
+                    for &(b, label) in &key_labels {
+                        if b == btn {
+                            let _: () = msg_send![label, setTitle:
+                                NSString::alloc(nil).init_str(keycode_name(keycode))];
+                        }
+                    }
+                    waiting_for_key = None;
+                    continue;
+                }
+
+                if keycode == K_ESCAPE {
+                    break;
+                }
+            } else if event_type == NSEventType::NSLeftMouseUp as u64 {
+                // Check if a key label button was clicked
+                let location: NSPoint = msg_send![event, locationInWindow];
+                for &(btn, label) in &key_labels {
+                    let frame: NSRect = msg_send![label, frame];
+                    if location.x >= frame.origin.x
+                        && location.x <= frame.origin.x + frame.size.width
+                        && location.y >= frame.origin.y
+                        && location.y <= frame.origin.y + frame.size.height
+                    {
+                        waiting_for_key = Some(btn);
+                        let _: () = msg_send![label, setTitle:
+                            NSString::alloc(nil).init_str("Press a key...")];
+                        break;
+                    }
+                }
+
+                // Check if Reset to Defaults was clicked
+                let reset_frame: NSRect = msg_send![reset_btn, frame];
+                if location.x >= reset_frame.origin.x
+                    && location.x <= reset_frame.origin.x + reset_frame.size.width
+                    && location.y >= reset_frame.origin.y
+                    && location.y <= reset_frame.origin.y + reset_frame.size.height
+                {
+                    *key_map = default_key_map();
+                    save_key_map(key_map);
+                    btn_to_key.clear();
+                    for (&keycode, &btn) in key_map.iter() {
+                        btn_to_key.insert(btn, keycode);
+                    }
+                    for &(btn, label) in &key_labels {
+                        let name = btn_to_key.get(&btn)
+                            .map(|&k| keycode_name(k))
+                            .unwrap_or("(none)");
+                        let _: () = msg_send![label, setTitle:
+                            NSString::alloc(nil).init_str(name)];
+                    }
+                    waiting_for_key = None;
+                }
+            }
+
+            let _: () = msg_send![app, sendEvent: event];
+        }
+
+        let _: () = msg_send![panel, close];
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -1193,15 +1661,18 @@ fn main() {
             std::process::exit(1);
         });
 
-        let model = if cli.model == "auto" {
-            GbModel::Cgb
+        let cli_model: Option<GbModel> = if cli.model == "auto" {
+            None
         } else {
-            cli.model.parse::<GbModel>().unwrap_or_else(|e| {
+            Some(cli.model.parse::<GbModel>().unwrap_or_else(|e| {
                 eprintln!("{}", e);
                 std::process::exit(1);
-            })
+            }))
         };
 
+        // forced_model: None = auto-detect, Some(m) = user override
+        let mut forced_model: Option<GbModel> = cli_model;
+        let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
         let frame_dur = frame_duration(model);
 
         let boot_rom: Option<Vec<u8>> = if cli.no_bootrom {
@@ -1266,7 +1737,15 @@ fn main() {
 
         let mut current_rom = rom;
         let mut current_rom_path = rom_path;
-        let mut emu = Emulator::new(current_rom.clone(), boot_rom, Some(current_rom_path.as_path()), model, snes_rom);
+        let mut current_model = model;
+        let mut emu = Emulator::new(current_rom.clone(), boot_rom, Some(current_rom_path.as_path()), current_model, snes_rom);
+
+        // Load custom key mappings
+        let mut key_map = load_key_map();
+
+        // Initialize recent ROMs list and populate menu
+        add_recent_rom(&current_rom_path.to_string_lossy());
+        rebuild_recent_menu(app, &load_recent_roms());
 
         if cli.printer {
             let output_dir = std::path::Path::new("prints");
@@ -1396,12 +1875,12 @@ fn main() {
                         eprintln!("Slot {} selected", current_slot + 1);
                     }
 
-                    if let Some(btn) = keycode_to_button(keycode) {
+                    if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, true);
                     }
                 } else if event_type == NSEventType::NSKeyUp as u64 {
                     keys_down.remove(&keycode);
-                    if let Some(btn) = keycode_to_button(keycode) {
+                    if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, false);
                     }
                 }
@@ -1420,9 +1899,12 @@ fn main() {
                             let title = format!("VibeBoy \u{2014} {}",
                                 path.file_name().unwrap_or_default().to_string_lossy());
                             window.setTitle_(NSString::alloc(nil).init_str(&title));
+                            add_recent_rom(&path.to_string_lossy());
+                            rebuild_recent_menu(app, &load_recent_roms());
                             current_rom = rom_data;
                             current_rom_path = path;
-                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), model, None);
+                            current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
+                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
                             paused = false;
                             eprintln!("Loaded: {}", current_rom_path.display());
                         }
@@ -1441,7 +1923,7 @@ fn main() {
                 }
 
                 if actions.reset {
-                    emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), model, None);
+                    emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
                     paused = false;
                     eprintln!("Reset");
                 }
@@ -1462,6 +1944,50 @@ fn main() {
                 if let Some(slot) = actions.select_slot {
                     current_slot = slot;
                     eprintln!("Slot {} selected", current_slot + 1);
+                }
+
+                if let Some(tag) = actions.select_model {
+                    if let Some(new_model) = model_tag_to_model(tag) {
+                        forced_model = new_model;
+                        current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
+                        emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                        update_model_checkmarks(app, tag);
+                        paused = false;
+                        let model_name = forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
+                        eprintln!("Hardware model: {}", model_name);
+                    }
+                }
+
+                if actions.open_controls {
+                    show_controls_panel(&mut key_map);
+                }
+
+                if let Some(idx) = actions.open_recent {
+                    let recents = load_recent_roms();
+                    if let Some(path_str) = recents.get(idx) {
+                        let path = PathBuf::from(path_str);
+                        if let Ok(rom_data) = fs::read(&path) {
+                            let title = format!("VibeBoy \u{2014} {}",
+                                path.file_name().unwrap_or_default().to_string_lossy());
+                            window.setTitle_(NSString::alloc(nil).init_str(&title));
+                            add_recent_rom(path_str);
+                            rebuild_recent_menu(app, &load_recent_roms());
+                            current_rom = rom_data;
+                            current_rom_path = path;
+                            current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
+                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                            paused = false;
+                            eprintln!("Loaded: {}", current_rom_path.display());
+                        } else {
+                            eprintln!("Failed to read: {}", path_str);
+                        }
+                    }
+                }
+
+                if actions.clear_recent {
+                    save_recent_roms(&[]);
+                    rebuild_recent_menu(app, &[]);
+                    eprintln!("Recent ROMs cleared");
                 }
             }
 
