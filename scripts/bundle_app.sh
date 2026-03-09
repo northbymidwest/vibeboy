@@ -22,6 +22,12 @@ cp "$PROJECT_DIR/target/release/vibeboy_cocoa" "$APP_DIR/Contents/MacOS/vibeboy_
 # Copy Info.plist
 cp "$PROJECT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
 
+# Copy app icon
+if [ -f "$PROJECT_DIR/resources/AppIcon.icns" ]; then
+    cp "$PROJECT_DIR/resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+    echo "Copied AppIcon.icns"
+fi
+
 echo "Bundle created at: $APP_DIR"
 echo ""
 echo "To run:  open $APP_DIR"
