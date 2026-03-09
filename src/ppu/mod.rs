@@ -303,6 +303,10 @@ pub struct Ppu {
     /// 0 = not active, >0 = active at this step of the sequence.
     line_153_phase: u8,
 
+    /// Per-entry OAM scan: index of next OAM entry to check (0-40).
+    /// During mode 2, one entry is checked every 2T using the current LCDC bit 2.
+    oam_scan_index: u8,
+
     /// DMG OAM bug: the OAM row currently being accessed by the PPU during Mode 2.
     /// 0xFF = not in Mode 2 (no OAM bug possible). Only used on DMG models.
     pub accessed_oam_row: i16,
@@ -405,6 +409,7 @@ impl Ppu {
             line_start_is_vblank: false,
             mode_for_interrupt: -1,
             line_153_phase: 0,
+            oam_scan_index: 0,
             accessed_oam_row: 0xFF,
             oam_bug_row: 0xFF,
             pending_lyc: None,
@@ -630,6 +635,14 @@ impl Ppu {
 
         match self.mode {
             2 => {
+                // Per-entry OAM scan: check one entry every 2T during mode 2.
+                // DMG scan starts at dot 4 (after line-start offset); CGB at dot 4.
+                // Each entry takes 2T, so entry N is checked at dot (4 + N*2).
+                let scan_start = 4u32;
+                if self.dot >= scan_start && self.dot % 2 == 0 {
+                    self.oam_scan_step();
+                }
+
                 // DMG OAM bug: track which OAM row the PPU is accessing.
                 // accessed_oam_row updates AFTER each 2T sleep in the OAM search loop.
                 // The search loop starts at dot 4 (DMG line-start offset), with 2T per entry.
@@ -637,9 +650,6 @@ impl Ppu {
                 if !self.cgb_mode && self.dot >= 6 {
                     let oam_search_index = ((self.dot - 6) / 2) as i16;
                     if oam_search_index >= 38 {
-                        // OAM scan loop has logically completed (40 entries processed).
-                        // Entries 38-39 would produce row >= 160 (beyond OAM), but
-                        // hardware resets accessed_oam_row atomically at loop exit.
                         self.accessed_oam_row = 0xFF;
                     } else {
                         self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
@@ -886,7 +896,8 @@ impl Ppu {
                     if self.lcdc & 0x20 != 0 && self.ly == self.wy {
                         self.wy_triggered = true;
                     }
-                    self.oam_scan();
+                    self.scanline_sprites.clear();
+                    self.oam_scan_index = 0;
                     self.update_stat_irq();
                     self.mode_for_interrupt = -1;
                     self.update_stat_irq();
@@ -983,7 +994,8 @@ impl Ppu {
                     if self.lcdc & 0x20 != 0 && self.ly == self.wy {
                         self.wy_triggered = true;
                     }
-                    self.oam_scan();
+                    self.scanline_sprites.clear();
+                    self.oam_scan_index = 0;
                     self.update_stat_irq();
                     // Immediately clear mode_for_interrupt
                     self.mode_for_interrupt = -1;
@@ -1829,6 +1841,25 @@ impl Ppu {
                     break;
                 }
             }
+        }
+    }
+
+    /// Scan one OAM entry per call. Called every 2T during mode 2.
+    /// Uses current LCDC bit 2 for sprite height, enabling mid-scan size changes.
+    fn oam_scan_step(&mut self) {
+        if self.oam_scan_index >= 40 || self.scanline_sprites.len() >= 10 {
+            return;
+        }
+        let i = self.oam_scan_index as usize;
+        self.oam_scan_index += 1;
+        let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
+        let ly = self.ly as i16;
+        let sprite_y = self.oam[i * 4] as i16 - 16;
+        let sprite_x = self.oam[i * 4 + 1];
+        let tile_idx = self.oam[i * 4 + 2];
+        let attrs = self.oam[i * 4 + 3];
+        if ly >= sprite_y && ly < sprite_y + sprite_height {
+            self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs, i as u8));
         }
     }
 
