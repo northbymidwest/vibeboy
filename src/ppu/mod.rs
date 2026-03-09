@@ -131,6 +131,9 @@ pub struct Ppu {
     pub scx: u8,  // 0xFF43
     pub ly: u8,   // 0xFF44
     pub lyc: u8,  // 0xFF45
+    /// Deferred LYC value: when CPU writes LYC during CGB line_start_pending,
+    /// the write is deferred until after the current step(4) completes.
+    pending_lyc: Option<u8>,
     pub bgp: u8,  // 0xFF47
     pub obp0: u8, // 0xFF48
     pub obp1: u8, // 0xFF49
@@ -358,6 +361,7 @@ impl Ppu {
             line_153_phase: 0,
             accessed_oam_row: 0xFF,
             oam_bug_row: 0xFF,
+            pending_lyc: None,
         }
     }
 
@@ -413,6 +417,7 @@ impl Ppu {
         self.line_153_phase = 0;
         self.accessed_oam_row = 0xFF;
         self.oam_bug_row = 0xFF;
+        self.pending_lyc = None;
     }
 
     /// Set post-boot PPU state for the given model (used when no boot ROM is loaded).
@@ -478,6 +483,11 @@ impl Ppu {
         for _i in 0..cycles {
             self.tick();
         }
+
+        // Deferred LYC writes are applied inline:
+        // - lsp-deferred: applied in handle_cgb_line_start() when line_start_pending clears
+        // - l153-deferred: applied in tick_line_153() when line_153_phase clears
+
         // Capture accessed_oam_row after full step — CPU reads this BEFORE
         // the next tick_mcycle, matching hardware's M-cycle boundary check.
         self.oam_bug_row = self.accessed_oam_row;
@@ -492,9 +502,13 @@ impl Ppu {
         self.dot += 1;
         self.total_ticks += 1;
 
-        // DMG line-start sequence: handle dots 1-5 of new scanline
-        if !self.cgb_mode && self.line_start_pending {
-            self.handle_dmg_line_start();
+        // Line-start sequence: handle delayed LY/mode transitions
+        if self.line_start_pending {
+            if self.cgb_mode {
+                self.handle_cgb_line_start();
+            } else {
+                self.handle_dmg_line_start();
+            }
             return;
         }
 
@@ -525,7 +539,7 @@ impl Ppu {
                 }
 
                 // Mode 2 → Mode 3: internal transition at dot 80
-                let mode2_end = if self.cgb_mode { 80 } else { 84 };
+                let mode2_end = 84;
                 if self.dot >= mode2_end {
                     self.accessed_oam_row = 0xFF;
                     self.mode = 3;
@@ -598,9 +612,7 @@ impl Ppu {
                 // actual pixel rendering starts at dot 84.
                 if self.lcd_first_line && self.dot >= 78 {
                     self.lcd_first_line = false;
-                    if !self.cgb_mode {
-                        self.lcd_first_line_short = true;
-                    }
+                    self.lcd_first_line_short = true;
                     self.oam_scan(); // collect sprites
                     self.transition_to_mode3();
                     return;
@@ -608,7 +620,14 @@ impl Ppu {
                 // Mode 0 → end of scanline at dot 456 (or dot 449 for first line after LCD enable)
                 // First line is 7T shorter: Mode 0 is shortened by 8T due to phantom
                 // cycles_for_line adjustment, plus 1T initial DMG sleep.
-                let line_end = if self.lcd_first_line_short { 449 } else { 456 };
+                let line_end = if self.lcd_first_line_short {
+                    // CGB: 450T breaks M-cycle alignment so that LY and mode
+                    // changes fall in different step(4) batches.
+                    // DMG: 449T (1T initial sleep + 8T phantom augment)
+                    if self.cgb_mode { 450 } else { 449 }
+                } else {
+                    456
+                };
                 if self.dot >= line_end {
                     self.lcd_first_line_short = false;
                     self.dot = 0;
@@ -619,14 +638,11 @@ impl Ppu {
                     }
 
                     if self.cgb_mode {
-                        self.visible_ly = self.ly;
-                        self.ly_for_comparison = self.ly as i16;
-                        self.update_coincidence();
-                        if self.ly == 144 {
-                            self.transition_to_mode1();
-                        } else {
-                            self.transition_to_mode2();
-                        }
+                        // CGB: all changes (LY, coincidence, mode) are deferred
+                        // to the line-start handler. ly_for_comparison and coincidence
+                        // update happen at dot 3-4, not at the wrap.
+                        self.line_start_pending = true;
+                        self.line_start_is_vblank = self.ly >= 144;
                     } else {
                         // DMG: defer to line-start sequence
                         self.line_start_pending = true;
@@ -679,9 +695,9 @@ impl Ppu {
                         self.window_line_counter = 0;
                         self.wy_triggered = false;
                         if self.cgb_mode {
-                            self.visible_ly = 0;
-                            self.ly_for_comparison = 0;
-                            self.transition_to_mode2();
+                            // CGB: visible_ly already 0 (set by line 153 handler)
+                            self.line_start_pending = true;
+                            self.line_start_is_vblank = false;
                         } else {
                             // DMG: defer to line-start for line 0
                             // Note: do NOT prime mode_for_interrupt = 2 here.
@@ -696,10 +712,9 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            self.visible_ly = self.ly;
-                            self.ly_for_comparison = self.ly as i16;
-                            self.update_coincidence();
-                            self.update_stat_irq();
+                            // CGB: all changes deferred to line-start handler
+                            self.line_start_pending = true;
+                            self.line_start_is_vblank = true;
                         } else {
                             // DMG VBlank line transition
                             self.line_start_pending = true;
@@ -804,6 +819,121 @@ impl Ppu {
         }
     }
 
+    /// CGB line-start sequence: handles the delayed LY visibility and mode transitions
+    /// that occur during dots 1-4 of each new scanline on CGB hardware.
+    /// Matches SameBoy states 35 (2T) → 6 (1T) → 7 (1T).
+    fn handle_cgb_line_start(&mut self) {
+        if !self.line_start_is_vblank {
+            // Active line (0-143)
+            match self.dot {
+                1 => {
+                    // State 35 start: LY becomes visible in IO register
+                    self.visible_ly = self.ly;
+                }
+                2 => {
+                    // State 35 end: idle
+                }
+                3 => {
+                    // State 6 equivalent: ly_for_comparison and mode update
+                    if self.ly == 0 {
+                        self.ly_for_comparison = 0;
+                    } else {
+                        self.ly_for_comparison = -1;
+                        self.mode_for_interrupt = 2;
+                    }
+                    // Clear STAT mode bits (still mode 0 internally)
+                    self.stat &= !0x03;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                }
+                4 => {
+                    // State 7 equivalent: Mode 2 entry
+                    self.mode = 2;
+                    self.stat = (self.stat & !0x03) | 0x02;
+                    self.mode_for_interrupt = 2;
+                    self.oam_accessible = false;
+                    self.oam_write_accessible = false;
+                    self.vram_accessible = true;
+                    self.vram_write_accessible = true;
+                    self.accessed_oam_row = 0;
+                    self.ly_for_comparison = self.ly as i16;
+                    self.update_coincidence();
+                    if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                        self.wy_triggered = true;
+                    }
+                    self.oam_scan();
+                    self.update_stat_irq();
+                    // Immediately clear mode_for_interrupt (matches SameBoy)
+                    self.mode_for_interrupt = -1;
+                    self.update_stat_irq();
+                    self.line_start_pending = false;
+                    // Apply lsp-deferred LYC write now that line-start is done
+                    if let Some(lyc) = self.pending_lyc.take() {
+                        self.lyc = lyc;
+                        if self.lcdc & 0x80 != 0 {
+                            self.update_coincidence();
+                            self.update_stat_irq();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            // VBlank line (144-153)
+            match self.dot {
+                1 => {
+                    // LY becomes visible in IO register
+                    self.visible_ly = self.ly;
+                }
+                2 => {} // idle
+                3 => {
+                    // Clear ly_for_comparison briefly (creates coincidence gap)
+                    self.ly_for_comparison = -1;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                }
+                4 => {
+                    // ly_for_comparison update to actual line
+                    self.ly_for_comparison = self.ly as i16;
+                    self.update_coincidence();
+                    self.update_stat_irq();
+                    // Line 153: start extended sequence
+                    if self.ly == 153 {
+                        self.line_153_phase = 1;
+                    }
+                }
+                5 => {
+                    if self.ly == 144 && self.mode != 1 {
+                        // VBlank entry: mode 0→1
+                        // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
+                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                            self.if_flags |= 0x02;
+                        }
+                        self.stat = (self.stat & !0x03) | 0x01;
+                        self.mode = 1;
+                        self.if_flags |= 0x01; // VBlank IF
+                        self.mode_for_interrupt = 1;
+                        self.oam_accessible = true;
+                        self.oam_write_accessible = true;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.update_stat_irq();
+                    }
+                    self.line_start_pending = false;
+                    // Apply lsp-deferred LYC write now that line-start is done
+                    if let Some(lyc) = self.pending_lyc.take() {
+                        self.lyc = lyc;
+                        if self.lcdc & 0x80 != 0 {
+                            self.update_coincidence();
+                            self.update_stat_irq();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Line 153 extended state machine: spreads LY 153→0 transition across
     /// multiple T-cycles to match hardware timing verified by mooneye tests.
     ///
@@ -832,6 +962,14 @@ impl Ppu {
                     self.update_coincidence();
                     self.update_stat_irq();
                     self.line_153_phase = 0;
+                    // Apply l153-deferred LYC write now that line 153 is done
+                    if let Some(lyc) = self.pending_lyc.take() {
+                        self.lyc = lyc;
+                        if self.lcdc & 0x80 != 0 {
+                            self.update_coincidence();
+                            self.update_stat_irq();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1357,19 +1495,14 @@ impl Ppu {
 
     fn update_stat_irq(&mut self) {
         let coincidence = self.stat & 0x04 != 0;
-        let mode_signal = if self.cgb_mode {
-            // CGB: use actual mode (existing behavior)
-            (self.stat & 0x08 != 0 && self.mode == 0) ||
-            (self.stat & 0x10 != 0 && self.mode == 1) ||
-            (self.stat & 0x20 != 0 && self.mode == 2)
-        } else {
-            // DMG: use mode_for_interrupt
-            match self.mode_for_interrupt {
-                0 => self.stat & 0x08 != 0,
-                1 => self.stat & 0x10 != 0,
-                2 => self.stat & 0x20 != 0,
-                _ => false, // 3 or -1: no mode fires
-            }
+        // Both DMG and CGB use mode_for_interrupt for STAT IRQ edge detection.
+        // This decouples the interrupt source from the visible STAT mode bits,
+        // allowing line-start sequences to control when mode 2 fires.
+        let mode_signal = match self.mode_for_interrupt {
+            0 => self.stat & 0x08 != 0,
+            1 => self.stat & 0x10 != 0,
+            2 => self.stat & 0x20 != 0,
+            _ => false, // 3 or -1: no mode fires
         };
         let signal = mode_signal || (self.stat & 0x40 != 0 && coincidence);
 
@@ -1380,13 +1513,27 @@ impl Ppu {
         self.stat_irq_line = signal;
     }
 
+    /// Update stat_irq_line without generating IF. Used when LYC writes are
+    /// suppressed (CGB line_153_phase / near-line-end) so that subsequent
+    /// update_stat_irq() calls don't see a false rising edge.
+    fn update_stat_irq_silent(&mut self) {
+        let coincidence = self.stat & 0x04 != 0;
+        let mode_signal = match self.mode_for_interrupt {
+            0 => self.stat & 0x08 != 0,
+            1 => self.stat & 0x10 != 0,
+            2 => self.stat & 0x20 != 0,
+            _ => false,
+        };
+        self.stat_irq_line = mode_signal || (self.stat & 0x40 != 0 && coincidence);
+    }
+
     /// CGB-only: STAT IRQ check with Mode 2 source forced on (VBlank entry quirk).
     fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
         let coincidence = self.stat & 0x04 != 0;
         let signal =
-            (self.stat & 0x08 != 0 && self.mode == 0) ||
-            (self.stat & 0x10 != 0 && self.mode == 1) ||
-            (self.stat & 0x20 != 0 && (self.mode == 2 || force_mode2)) ||
+            (self.stat & 0x08 != 0 && self.mode_for_interrupt == 0) ||
+            (self.stat & 0x10 != 0 && self.mode_for_interrupt == 1) ||
+            (self.stat & 0x20 != 0 && (self.mode_for_interrupt == 2 || force_mode2)) ||
             (self.stat & 0x40 != 0 && coincidence);
 
         if signal && !self.stat_irq_line {
@@ -1497,7 +1644,7 @@ impl Ppu {
             0xFF42 => self.scy,
             0xFF43 => self.scx,
             0xFF44 => self.visible_ly,
-            0xFF45 => self.lyc,
+            0xFF45 => self.pending_lyc.unwrap_or(self.lyc),
             0xFF46 => self.dma,
             0xFF47 => self.bgp,
             0xFF48 => self.obp0,
@@ -1632,10 +1779,34 @@ impl Ppu {
             0xFF43 => self.scx = val,
             0xFF44 => {} // LY is read-only
             0xFF45 => {
-                self.lyc = val;
-                if self.lcdc & 0x80 != 0 {
-                    self.update_coincidence();
-                    self.update_stat_irq();
+                if self.cgb_mode && self.line_start_pending {
+                    // Defer until line-start handler completes, so the
+                    // coincidence check at dot 3/4 uses the old LYC value.
+                    self.pending_lyc = Some(val);
+                } else if self.cgb_mode && self.line_153_phase > 0 && self.dot >= 8 {
+                    // After LY=0 in line_153: defer so dot 12 coincidence
+                    // uses the old LYC value.
+                    self.pending_lyc = Some(val);
+                } else if self.cgb_mode && (
+                    self.line_153_phase > 0 ||
+                    ((self.mode == 0 || self.mode == 1) && self.dot >= 452)
+                ) {
+                    // During line_153_phase (before dot 8) or near line end:
+                    // apply value but suppress STAT IRQ (matches SameBoy's
+                    // display_state 15/16 skip behavior).
+                    // Silently update stat_irq_line to prevent false rising
+                    // edge at the next real update_stat_irq() call.
+                    self.lyc = val;
+                    if self.lcdc & 0x80 != 0 {
+                        self.update_coincidence();
+                        self.update_stat_irq_silent();
+                    }
+                } else {
+                    self.lyc = val;
+                    if self.lcdc & 0x80 != 0 {
+                        self.update_coincidence();
+                        self.update_stat_irq();
+                    }
                 }
             }
             0xFF46 => self.dma = val,
