@@ -84,7 +84,11 @@ impl Cpu {
             self.ime_pending = false;
         }
 
-        cycles + if halt_wake { 4 } else { 0 }
+        // Account for extra cycles consumed by GDMA/HDMA (bus already ticked)
+        let dma_extra = bus.dma_halt_cycles;
+        bus.dma_halt_cycles = 0;
+
+        cycles + dma_extra + if halt_wake { 4 } else { 0 }
     }
 
     fn dispatch_interrupt(&mut self, bus: &mut Bus) {
