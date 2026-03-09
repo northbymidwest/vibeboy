@@ -60,11 +60,13 @@ pub(crate) struct Hdma {
     /// 0 = General Purpose DMA, 1 = H-Blank DMA
     mode: u8,
     active: bool,
+    /// True while a DMA block is being transferred (prevents re-entrant hblank trigger)
+    in_transfer: bool,
 }
 
 impl Hdma {
     fn new() -> Self {
-        Hdma { src: 0, dst: 0x8000, blocks: 0, mode: 0, active: false }
+        Hdma { src: 0, dst: 0x8000, blocks: 0, mode: 0, active: false, in_transfer: false }
     }
 }
 
@@ -126,6 +128,11 @@ pub struct Bus {
     /// PPU T-cycle debt from mid-M-cycle glitch handling (e.g. tile_sel_glitch).
     /// Next tick_mcycle advances PPU by (4 - debt) T-cycles instead of 4.
     ppu_tick_debt: u32,
+
+    /// Extra T-cycles consumed by GDMA/HDMA that the CPU must account for.
+    /// Set during DMA transfers, read and cleared by CPU after each instruction.
+    pub(crate) dma_halt_cycles: u32,
+
 }
 
 /// Simple LCG PRNG for RAM initialization.
@@ -286,6 +293,7 @@ impl Bus {
             ff75: 0,
             dmg_compat: model.is_cgb() && is_dmg_game && !boot_rom_active,
             ppu_tick_debt: 0,
+            dma_halt_cycles: 0,
         }
     }
 
@@ -377,20 +385,19 @@ impl Bus {
     /// - CGB: DMA blocks reads from the same bus as the source (including during delay).
     ///   Cart bus (ROM + SRAM) and WRAM bus are separate.
     pub fn read_byte(&self, addr: u16) -> u8 {
+        // OAM bus reads return 0xFF during active DMA (both DMG and CGB)
+        // The entire $FE00-$FEFF range is on the OAM bus
+        if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
+            return 0xFF;
+        }
         if self.model.is_cgb() {
-            // CGB: same-bus conflict starts immediately when DMA is active (including delay).
-            if self.oam_dma.active && self.oam_dma_same_bus(addr) {
-                return self.oam_dma_conflict_byte();
-            }
-            // OAM blocked during active transfer (post-delay)
-            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+            // CGB: same-bus conflict after 2 M-cycle warm-up (delay + first copy at progress=0)
+            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+                && self.oam_dma_same_bus(addr)
+            {
                 return self.oam_dma_conflict_byte();
             }
         } else {
-            // DMG: OAM reads return 0xFF during active DMA
-            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
-                return 0xFF;
-            }
             // DMG: during active DMA transfer (after warm-up), reads from the same bus
             // as the DMA source return the previous byte transferred.
             if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
@@ -410,11 +417,20 @@ impl Bus {
         }
         let src = self.oam_dma.source;
         if self.model.is_cgb() {
-            // CGB: Cart bus, VRAM bus, and WRAM bus are separate
+            // CGB has 3 buses: MAIN (cart ROM+SRAM), VRAM, RAM (WRAM)
+            // WRAM reads conflict unless DMA source is VRAM
+            if addr >= 0xC000 {
+                return !matches!(src, 0x8000..=0x9FFF);
+            }
+            // Echo WRAM source (>= 0xE000) conflicts with everything except VRAM
+            if src >= 0xE000 {
+                return !matches!(addr, 0x8000..=0x9FFF);
+            }
+            // Default: same bus check
             match src {
                 0x0000..=0x7FFF | 0xA000..=0xBFFF => matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF),
                 0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
-                0xC000..=0xFDFF => matches!(addr, 0xC000..=0xFDFF),
+                0xC000..=0xDFFF => matches!(addr, 0xC000..=0xDFFF),
                 _ => false,
             }
         } else {
@@ -431,22 +447,15 @@ impl Bus {
     /// - DMG: returns the *previous* byte transferred (source + progress - 1),
     ///   i.e. reading from (dma_source + progress - 1).
     fn oam_dma_conflict_byte(&self) -> u8 {
-        if !self.oam_dma.active {
+        if !self.oam_dma.active || self.oam_dma.progress == 0 {
             return 0xFF;
         }
-        if self.model.is_cgb() {
-            let src = self.oam_dma.source + self.oam_dma.progress as u16;
-            self.read_byte_raw(src)
-        } else {
-            if self.oam_dma.progress == 0 {
-                return 0xFF;
-            }
-            let mut src = self.oam_dma.source + self.oam_dma.progress as u16 - 1;
-            if src >= 0xFE00 {
-                src -= 0x2000;
-            }
-            self.read_byte_raw(src)
+        // Both DMG and CGB return the last byte transferred (source + progress - 1)
+        let mut src = self.oam_dma.source.wrapping_add(self.oam_dma.progress as u16 - 1);
+        if !self.model.is_cgb() && src >= 0xFE00 {
+            src -= 0x2000;
         }
+        self.read_byte_raw(src)
     }
 
     /// Raw read bypassing DMA bus-conflict logic (for DMA/HDMA controllers).
@@ -502,18 +511,19 @@ impl Bus {
     /// - DMG: OAM writes blocked during DMA; external bus writes are ignored.
     /// - CGB: writes to the same bus as DMA source are blocked + OAM.
     pub fn write_byte(&mut self, addr: u16, val: u8) {
+        // OAM bus writes blocked during active DMA (both DMG and CGB)
+        // The entire $FE00-$FEFF range is on the OAM bus
+        if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
+            return;
+        }
         if self.model.is_cgb() {
-            if self.oam_dma.active && self.oam_dma_same_bus(addr) {
-                return;
-            }
-            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+            // CGB: same-bus conflict after warm-up
+            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+                && self.oam_dma_same_bus(addr)
+            {
                 return;
             }
         } else {
-            // DMG: OAM writes blocked during DMA
-            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
-                return;
-            }
             // DMG: writes to the same bus as DMA source are dropped
             if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
                 && self.oam_dma_same_bus(addr)
@@ -591,21 +601,16 @@ impl Bus {
                 if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
                 self.ppu.read(addr)
             }
-            0xFF51..=0xFF55 => {
+            0xFF51..=0xFF54 => 0xFF, // HDMA src/dst are write-only
+            0xFF55 => {
                 if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
-                match addr {
-                    0xFF51 => (self.hdma.src >> 8) as u8,
-                    0xFF52 => (self.hdma.src & 0xFF) as u8,
-                    0xFF53 => (self.hdma.dst >> 8) as u8,
-                    0xFF54 => (self.hdma.dst & 0xFF) as u8,
-                    0xFF55 => {
-                        if self.hdma.active {
-                            self.hdma.blocks.wrapping_sub(1) & 0x7F
-                        } else {
-                            0xFF
-                        }
-                    }
-                    _ => 0xFF,
+                // Bit 7: 0 = active, 1 = not active
+                // Bits 0-6: remaining blocks minus 1
+                let remaining = self.hdma.blocks.wrapping_sub(1) & 0x7F;
+                if self.hdma.active {
+                    remaining
+                } else {
+                    0x80 | remaining
                 }
             }
             0xFF50 => if self.boot_rom_active { 0xFE } else { 0xFF },
@@ -785,23 +790,34 @@ impl Bus {
     }
 
     /// Advance OAM DMA by one M-cycle. Called from tick_mcycle().
+    /// DMA takes 162 M-cycles total: 1 warmup (delay) + 160 copies + 1 teardown.
+    /// During teardown, bus is still blocked but no data is transferred.
     pub fn step_oam_dma(&mut self) {
         if !self.oam_dma.active { return; }
         if self.oam_dma.delay > 0 {
             self.oam_dma.delay -= 1;
             return;
         }
-        // Copy one byte from source to OAM.
-        // On DMG, DMA reads from the external bus. Addresses $FE00-$FFFF
-        // map to echo WRAM ($DE00-$DFFF), not to OAM/IO/HRAM.
-        let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
-        if !self.model.is_cgb() && src >= 0xFE00 {
-            src -= 0x2000;
+        if self.oam_dma.progress < 160 {
+            // Copy one byte from source to OAM.
+            let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
+            let byte = if self.model.is_cgb() && src >= 0xE000 {
+                // CGB: source >= $E000 reads as 0xFF
+                0xFF
+            } else {
+                // DMG: $FE00-$FFFF maps to echo WRAM ($DE00-$DFFF)
+                if !self.model.is_cgb() && src >= 0xFE00 {
+                    src -= 0x2000;
+                }
+                self.read_byte_raw(src)
+            };
+            self.ppu.oam[self.oam_dma.progress as usize] = byte;
         }
-        let byte = self.read_byte_raw(src);
-        self.ppu.oam[self.oam_dma.progress as usize] = byte;
         self.oam_dma.progress += 1;
-        if self.oam_dma.progress >= 160 {
+        // CGB has a teardown M-cycle at progress=160 (bus still blocked, no copy)
+        // DMG DMA ends immediately after the last byte
+        let end = if self.model.is_cgb() { 161 } else { 160 };
+        if self.oam_dma.progress >= end {
             self.oam_dma.active = false;
         }
     }
@@ -809,39 +825,74 @@ impl Bus {
     // ── HDMA ──────────────────────────────────────────────────────────────────
 
     fn start_hdma(&mut self, val: u8) {
-        if val == 0xFF && self.hdma.active {
-            // Terminate H-Blank DMA
+        let mode = (val >> 7) & 1;
+
+        // Cancel active H-Blank DMA by writing with bit 7 = 0
+        if mode == 0 && self.hdma.active && self.hdma.mode == 1 {
             self.hdma.active = false;
             return;
         }
+
         let blocks = (val & 0x7F) + 1;
-        let mode = (val >> 7) & 1;
         self.hdma.blocks = blocks;
         self.hdma.mode = mode;
         self.hdma.active = true;
 
+        if mode == 1 {
+            // H-Blank DMA: clear stale hblank_entered from the current M-cycle
+            self.ppu.hblank_entered = false;
+        }
+
         if mode == 0 {
-            // General purpose DMA: transfer immediately
-            self.do_hdma_transfer(blocks);
+            // General purpose DMA: transfer all blocks, ticking the bus
+            self.do_gdma(blocks);
             self.hdma.active = false;
         }
         // H-Blank DMA: transfer one block per HBlank, handled in tick()
     }
 
-    fn do_hdma_transfer(&mut self, blocks: u8) {
-        for _ in 0..blocks {
-            for byte_off in 0..16u16 {
-                let src_addr = self.hdma.src + byte_off;
-                let dst_addr = self.hdma.dst + byte_off;
-                let byte = self.read_byte_raw(src_addr);
-                self.ppu.write_vram(dst_addr, byte);
-            }
-            self.hdma.src = self.hdma.src.wrapping_add(16);
-            self.hdma.dst = self.hdma.dst.wrapping_add(16);
-            // Wrap dst within VRAM
-            let dst_off = (self.hdma.dst - 0x8000) % 0x2000;
-            self.hdma.dst = 0x8000 + dst_off;
+    /// GDMA: transfer all blocks immediately, ticking the bus.
+    /// Setup: 2 bus M-cycles (normal) or 1 bus M-cycle (DS).
+    /// Transfer: 8 bus M-cycles per block.
+    fn do_gdma(&mut self, blocks: u8) {
+        let ds = self.double_speed;
+        self.hdma.in_transfer = true;
+        // Setup overhead
+        if ds {
+            self.tick(8, 4);
+        } else {
+            self.tick(4, 4);
+            self.tick(4, 4);
         }
+        for _ in 0..blocks {
+            self.do_hdma_block_ticked();
+        }
+        self.hdma.in_transfer = false;
+        // CPU halt: 8T setup + N * 8 * cpu_t_per_bus_m
+        let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
+        self.dma_halt_cycles += 8 + blocks as u32 * 8 * cpu_t_per_bus_m;
+    }
+
+    /// Transfer one 16-byte HDMA block with bus ticking (2 bytes per bus M-cycle).
+    fn do_hdma_block_ticked(&mut self) {
+        let ds = self.double_speed;
+        for byte_off in (0..16u16).step_by(2) {
+            let src_addr = self.hdma.src.wrapping_add(byte_off);
+            let dst_addr = self.hdma.dst.wrapping_add(byte_off);
+            let b0 = self.read_byte_raw(src_addr);
+            self.ppu.write_vram(dst_addr, b0);
+            let b1 = self.read_byte_raw(src_addr + 1);
+            self.ppu.write_vram(dst_addr + 1, b1);
+            if ds {
+                self.tick(8, 4);
+            } else {
+                self.tick(4, 4);
+            }
+        }
+        self.hdma.src = self.hdma.src.wrapping_add(16);
+        self.hdma.dst = self.hdma.dst.wrapping_add(16);
+        let dst_off = (self.hdma.dst.wrapping_sub(0x8000)) & 0x1FFF;
+        self.hdma.dst = 0x8000 + dst_off;
     }
 
     // ── OAM bug (DMG only) ────────────────────────────────────────────────────
@@ -1082,13 +1133,25 @@ impl Bus {
         }
 
         // H-Blank HDMA: transfer one block each time the PPU enters Mode 0
-        if self.ppu.hblank_entered {
+        // Skip during active DMA transfer to prevent re-entrant cascading
+        if self.ppu.hblank_entered && !self.hdma.in_transfer {
             self.ppu.hblank_entered = false;
             if self.hdma.active && self.hdma.mode == 1 {
-                self.do_hdma_transfer(1);
-                if self.hdma.blocks > 0 {
-                    self.hdma.blocks -= 1;
+                let ds = self.double_speed;
+                self.hdma.in_transfer = true;
+                // Setup: 2 bus M-cycles (normal) or 1 (DS)
+                if ds {
+                    self.tick(8, 4);
+                } else {
+                    self.tick(4, 4);
+                    self.tick(4, 4);
                 }
+                self.do_hdma_block_ticked();
+                self.hdma.in_transfer = false;
+                // CPU halt: 8T setup + 8 bus M-cycles per block
+                let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
+                self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
+                self.hdma.blocks -= 1;
                 if self.hdma.blocks == 0 {
                     self.hdma.active = false;
                 }

@@ -1037,6 +1037,24 @@ impl Ppu {
                     // Clear ly_for_comparison briefly (creates coincidence gap)
                     self.ly_for_comparison = -1;
                     self.update_coincidence();
+                    // Mode 2 STAT source fires briefly at start of VBlank lines 145-151.
+                    // Line 144 gets its mode 2 from the quirk at line 143 dot line_end-2.
+                    // Lines 152-153 do not fire mode 2.
+                    if self.ly >= 145 && self.ly <= 151 {
+                        let old_irq = self.stat_irq_line;
+                        let old_stat = self.stat;
+                        self.mode_for_interrupt = 2;
+                        self.update_stat_irq();
+                        if self.ly == 145 && self.if_flags & 0x02 != 0 {
+                            eprintln!("[DBG] VBlank M2 fired at ly={} dot={} stat={:02X} old_irq={} stat_irq={}",
+                                self.ly, self.dot, old_stat, old_irq, self.stat_irq_line);
+                        }
+                        if self.ly == 145 && self.if_flags & 0x02 == 0 {
+                            eprintln!("[DBG] VBlank M2 NOT fired at ly={} dot={} stat={:02X} old_irq={} stat_irq={}",
+                                self.ly, self.dot, old_stat, old_irq, self.stat_irq_line);
+                        }
+                        self.mode_for_interrupt = 1;
+                    }
                     self.update_stat_irq();
                 }
                 4 => {
