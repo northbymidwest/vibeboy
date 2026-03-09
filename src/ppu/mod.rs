@@ -2125,7 +2125,17 @@ impl Ppu {
                 self.obp1 = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 1); }
             }
-            0xFF4A => self.wy = val,
+            0xFF4A => {
+                self.wy = val;
+                // WY comparison runs continuously until the BG FIFO has
+                // started outputting pixels. In mode 3, this means the
+                // fetcher must have completed its first tile push.
+                let can_trigger = self.mode != 3
+                    || (self.bg_fifo.len() == 0 && self.pixel_x == 0);
+                if self.lcdc & 0x20 != 0 && self.ly == val && can_trigger {
+                    self.wy_triggered = true;
+                }
+            }
             0xFF4B => self.wx = val,
             0xFF4F => self.vram_bank = (val & 0x01) as usize,
             0xFF68 => self.bcps = val & 0xBF,
