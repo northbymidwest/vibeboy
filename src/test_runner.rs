@@ -45,6 +45,8 @@ struct Cli {
 enum Command {
     /// Run in Blargg test mode (serial output detection)
     Blargg,
+    /// Run in Gambatte test mode (hex output comparison after 15 frames)
+    Gambatte,
     /// Take a screenshot after N frames
     Screenshot {
         /// Number of frames to run before capturing
@@ -365,23 +367,175 @@ fn cmd_calibrate(cli: &Cli) {
     }
 }
 
+// Gambatte hex digit tile patterns (8x8 pixels each, bit 7=leftmost pixel)
+// 1 = black (0x000000), 0 = white (0xF8F8F8)
+const GAMBATTE_DIGITS: [[u8; 8]; 16] = [
+    [0x00, 0x7F, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7F], // 0
+    [0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08], // 1
+    [0x00, 0x7F, 0x01, 0x01, 0x7F, 0x40, 0x40, 0x7F], // 2
+    [0x00, 0x7F, 0x01, 0x01, 0x3F, 0x01, 0x01, 0x7F], // 3
+    [0x00, 0x41, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x01], // 4
+    [0x00, 0x7F, 0x40, 0x40, 0x7E, 0x01, 0x01, 0x7E], // 5
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x41, 0x41, 0x7F], // 6
+    [0x00, 0x7F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10], // 7
+    [0x00, 0x3E, 0x41, 0x41, 0x3E, 0x41, 0x41, 0x3E], // 8
+    [0x00, 0x7F, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x7F], // 9
+    [0x00, 0x08, 0x22, 0x41, 0x7F, 0x41, 0x41, 0x41], // A
+    [0x00, 0x7E, 0x41, 0x41, 0x7E, 0x41, 0x41, 0x7E], // B
+    [0x00, 0x3E, 0x41, 0x40, 0x40, 0x40, 0x41, 0x3E], // C
+    [0x00, 0x7E, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7E], // D
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x7F], // E
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x40], // F
+];
+
+fn gambatte_digit_index(c: char) -> Option<usize> {
+    match c {
+        '0'..='9' => Some((c as u8 - b'0') as usize),
+        'A'..='F' => Some((c as u8 - b'A') as usize + 10),
+        'a'..='f' => Some((c as u8 - b'a') as usize + 10),
+        _ => None,
+    }
+}
+
+/// Check if framebuffer tile at (tile_x * 8, 0) matches expected digit pattern.
+fn gambatte_tile_matches(fb: &[u32], tile_x: usize, digit: usize) -> bool {
+    let pattern = &GAMBATTE_DIGITS[digit];
+    for y in 0..8 {
+        for x in 0..8 {
+            let pixel = fb[y * 160 + tile_x * 8 + x];
+            let masked = pixel & 0xF8F8F8;
+            let expected_black = (pattern[y] >> (7 - x)) & 1 == 1;
+            let is_black = masked == 0;
+            if expected_black != is_black {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Parse gambatte test: extract expected hex from filename, determine model(s).
+/// Returns (expected_hex, is_dmg, is_cgb).
+fn parse_gambatte_test(path: &Path) -> Option<(String, bool, bool)> {
+    let stem = path.file_stem()?.to_str()?;
+    // Find _out pattern and extract hex string
+    // Patterns: "dmg08_cgb04c_out<HEX>", "dmg08_out<HEX>", "cgb04c_out<HEX>", "_out<HEX>"
+    let is_dmg;
+    let is_cgb;
+    let hex_str;
+
+    if let Some(pos) = stem.find("dmg08_cgb04c_out") {
+        is_dmg = true;
+        is_cgb = true;
+        hex_str = &stem[pos + 16..];
+    } else if let Some(pos) = stem.find("dmg08_out") {
+        is_dmg = true;
+        is_cgb = stem.contains("cgb04c_out");
+        hex_str = &stem[pos + 9..];
+    } else if let Some(pos) = stem.find("cgb04c_out") {
+        is_dmg = false;
+        is_cgb = true;
+        hex_str = &stem[pos + 10..];
+    } else if let Some(pos) = stem.rfind("_out") {
+        is_dmg = false;
+        is_cgb = true;
+        hex_str = &stem[pos + 4..];
+    } else {
+        return None;
+    }
+
+    // Skip audio tests
+    if hex_str.starts_with("audio") {
+        return None;
+    }
+
+    if hex_str.is_empty() || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some((hex_str.to_uppercase(), is_dmg, is_cgb))
+}
+
+fn run_test_gambatte(path: &Path, verbose: bool, force_model: Option<GbModel>) -> (&'static str, &'static str) {
+    let rom = match fs::read(path) {
+        Ok(r) => r,
+        Err(_) => return ("ERR", ""),
+    };
+
+    let (expected_hex, is_dmg, is_cgb) = match parse_gambatte_test(path) {
+        Some(v) => v,
+        None => return ("SKIP", ""),
+    };
+
+    // Determine which model to test
+    let model = if let Some(m) = force_model {
+        m
+    } else if is_dmg && !is_cgb {
+        GbModel::Dmg
+    } else {
+        // Default to CGB for cgb-only or dual tests
+        GbModel::Cgb
+    };
+
+    let mut emu = Emulator::new(rom, None, None, model, None);
+
+    // Run for 15 frames
+    for _ in 0..15 {
+        emu.step_frame();
+    }
+
+    let fb = emu.frame_buffer();
+
+    // Compare each hex digit
+    for (i, c) in expected_hex.chars().enumerate() {
+        let digit = match gambatte_digit_index(c) {
+            Some(d) => d,
+            None => return ("ERR", "bad hex"),
+        };
+        if !gambatte_tile_matches(fb, i, digit) {
+            if verbose {
+                // Show what we got vs expected
+                let mut actual = String::new();
+                for d in 0..16usize {
+                    if gambatte_tile_matches(fb, i, d) {
+                        actual = format!("{:X}", d);
+                        break;
+                    }
+                }
+                if actual.is_empty() { actual = "?".to_string(); }
+                eprintln!("  digit {}: expected={} got={}", i, c, actual);
+            }
+            return ("FAIL", "");
+        }
+    }
+
+    ("PASS", "")
+}
+
 fn run_tests(cli: &Cli) {
     let blargg_mode = matches!(cli.command, Some(Command::Blargg));
+    let gambatte_mode = matches!(cli.command, Some(Command::Gambatte));
     let mut roms: Vec<PathBuf> = Vec::new();
     collect_roms(&cli.path, &mut roms);
     roms.sort();
 
     if blargg_mode {
         eprintln!("Blargg mode (serial output detection)");
+    } else if gambatte_mode {
+        eprintln!("Gambatte mode (hex output comparison, 15 frames)");
     }
 
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut timeout = 0usize;
+    let mut skipped = 0usize;
 
     for rom in &roms {
         let result = if blargg_mode {
             run_test_blargg(rom, true)
+        } else if gambatte_mode {
+            let (r, _) = run_test_gambatte(rom, true, cli.model);
+            r
         } else {
             let model = cli.model.unwrap_or_else(|| detect_model_with_rom(rom, None));
             let br = if cli.boot || cli.bootrom.is_some() {
@@ -396,6 +550,10 @@ fn run_tests(cli: &Cli) {
             run_test_mooneye(rom, true, cli.model, br)
         };
         let label = rom.strip_prefix(&cli.path).unwrap_or(rom).display().to_string();
+        match result {
+            "SKIP" => { skipped += 1; continue; }
+            _ => {}
+        }
         println!("{:<12} {}", result, label);
         match result {
             "PASS"    => passed += 1,
@@ -405,8 +563,11 @@ fn run_tests(cli: &Cli) {
         }
     }
 
-    println!("\n--- {} passed, {} failed, {} timeout ({} total) ---",
-        passed, failed, timeout, roms.len());
+    print!("\n--- {} passed, {} failed, {} timeout", passed, failed, timeout);
+    if skipped > 0 {
+        print!(", {} skipped", skipped);
+    }
+    println!(" ({} total) ---", passed + failed + timeout);
 }
 
 fn main() {
@@ -418,7 +579,7 @@ fn main() {
         Some(Command::Analyze { frames }) => cmd_analyze(&cli, *frames),
         Some(Command::TraceTimer) => cmd_trace_timer(&cli),
         Some(Command::Calibrate) => cmd_calibrate(&cli),
-        Some(Command::Blargg) | None => run_tests(&cli),
+        Some(Command::Blargg) | Some(Command::Gambatte) | None => run_tests(&cli),
     }
 }
 

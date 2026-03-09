@@ -19,6 +19,7 @@ use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
 use sdl3::audio::{AudioFormat, AudioSpec};
+use sdl3::dialog::{self, DialogFileFilter};
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::PixelFormat;
@@ -33,6 +34,7 @@ use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Which accelerometer source is active.
@@ -56,8 +58,8 @@ const AUDIO_SAMPLE_RATE: u32 = 96_000;
 #[derive(Parser)]
 #[command(name = "gbcemu", about = "Game Boy / Game Boy Color emulator")]
 struct Cli {
-    /// Path to ROM file (.gb / .gbc)
-    rom: PathBuf,
+    /// Path to ROM file (.gb / .gbc). If omitted, a file dialog will open.
+    rom: Option<PathBuf>,
 
     /// Path to boot ROM file (auto-detected if not specified)
     #[arg(long)]
@@ -84,13 +86,77 @@ struct Cli {
     printer: bool,
 }
 
+/// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
+fn pick_rom_file() -> PathBuf {
+    let sdl = sdl3::init().unwrap();
+    let _video = sdl.video().unwrap();
+    let mut event_pump = sdl.event_pump().unwrap();
+
+    let (tx, rx) = mpsc::channel::<Option<PathBuf>>();
+
+    let filters = [
+        DialogFileFilter {
+            name: "Game Boy ROMs",
+            pattern: "gb;gbc",
+        },
+        DialogFileFilter {
+            name: "All files",
+            pattern: "*",
+        },
+    ];
+
+    dialog::show_open_file_dialog(
+        &filters,
+        None::<&str>,
+        false,
+        None::<&sdl3::video::Window>,
+        Box::new(move |result, _filter| {
+            let path = match result {
+                Ok(files) if !files.is_empty() => Some(files[0].clone()),
+                _ => None,
+            };
+            let _ = tx.send(path);
+        }),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to open file dialog: {}", e);
+        std::process::exit(1);
+    });
+
+    // Pump events until the dialog callback fires
+    loop {
+        event_pump.pump_events();
+        match rx.try_recv() {
+            Ok(Some(path)) => return path,
+            Ok(None) => {
+                // User cancelled
+                std::process::exit(0);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                eprintln!("File dialog failed unexpectedly");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
 
-    let rom = fs::read(&cli.rom).unwrap_or_else(|e| {
-        eprintln!("Failed to read ROM '{}': {}", cli.rom.display(), e);
+    // Resolve ROM path: use CLI argument or show a file dialog
+    let rom_path: PathBuf = if let Some(ref p) = cli.rom {
+        p.clone()
+    } else {
+        pick_rom_file()
+    };
+
+    let rom = fs::read(&rom_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
         std::process::exit(1);
     });
 
@@ -167,7 +233,7 @@ fn main() {
     eprintln!("  Escape      — Quit");
     eprintln!();
 
-    let mut emu = Emulator::new(rom, boot_rom, Some(cli.rom.as_path()), model, snes_rom);
+    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path.as_path()), model, snes_rom);
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
