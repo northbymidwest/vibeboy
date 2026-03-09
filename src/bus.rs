@@ -838,6 +838,11 @@ impl Bus {
         self.hdma.mode = mode;
         self.hdma.active = true;
 
+        if mode == 1 {
+            // H-Blank DMA: clear stale hblank_entered from the current M-cycle
+            self.ppu.hblank_entered = false;
+        }
+
         if mode == 0 {
             // General purpose DMA: transfer all blocks, ticking the bus
             self.do_gdma(blocks);
