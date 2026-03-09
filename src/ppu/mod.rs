@@ -1182,8 +1182,8 @@ impl Ppu {
         self.last_sprite_slot = -1;
         self.scx_discard = self.scx & 7;
         // Hardware pipeline priming delay before fetcher starts.
-        // DMG: 5T; CGB: 8T (different OAM scan / fetcher pipeline)
-        self.mode3_start_delay = if self.cgb_mode { 8 } else { 5 };
+        // DMG: 5T; CGB: 4T
+        self.mode3_start_delay = if self.cgb_mode { 4 } else { 5 };
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
