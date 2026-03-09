@@ -1051,6 +1051,7 @@ impl Bus {
     pub fn do_speed_switch(&mut self) {
         if self.key1 & 0x01 != 0 {
             self.double_speed = !self.double_speed;
+            self.ppu.double_speed = self.double_speed;
             if self.double_speed {
                 self.key1 = 0x80; // bit7=1: double speed active, bit0=0: no pending switch
             } else {
