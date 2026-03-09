@@ -1158,7 +1158,14 @@ impl Cpu {
                     12
                 }
             }
-            0xD3 => 4, // ILLEGAL (undefined on SM83)
+            0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD => {
+                // Undefined opcodes lock the CPU permanently
+                self.ime = false;
+                self.ime_pending = false;
+                self.halted = true;
+                bus.ie = 0; // Prevent any interrupt from waking
+                4
+            }
             0xD4 => {
                 // CALL NC, a16
                 let addr = self.fetch_word(bus);
@@ -1228,7 +1235,6 @@ impl Cpu {
                     12
                 }
             }
-            0xDB => 4, // ILLEGAL
             0xDC => {
                 // CALL C, a16
                 let addr = self.fetch_word(bus);
@@ -1243,7 +1249,6 @@ impl Cpu {
                     12
                 }
             }
-            0xDD => 4, // ILLEGAL
             0xDE => {
                 // SBC A, n8
                 let n = self.fetch_byte(bus);
@@ -1281,8 +1286,6 @@ impl Cpu {
                 bus.tick_mcycle();
                 8
             }
-            0xE3 => 4, // ILLEGAL
-            0xE4 => 4, // ILLEGAL
             0xE5 => {
                 // PUSH HL
                 let v = self.regs.hl();
@@ -1326,9 +1329,6 @@ impl Cpu {
                 bus.tick_mcycle();
                 16
             }
-            0xEB => 4, // ILLEGAL
-            0xEC => 4, // ILLEGAL
-            0xED => 4, // ILLEGAL
             0xEE => {
                 // XOR A, n8
                 let n = self.fetch_byte(bus);
@@ -1370,7 +1370,6 @@ impl Cpu {
                 self.ime_pending = false;
                 4
             }
-            0xF4 => 4, // ILLEGAL
             0xF5 => {
                 // PUSH AF
                 let v = self.regs.af();
@@ -1421,8 +1420,6 @@ impl Cpu {
                 self.ime_pending = true;
                 4
             }
-            0xFC => 4, // ILLEGAL
-            0xFD => 4, // ILLEGAL
             0xFE => {
                 // CP A, n8
                 let n = self.fetch_byte(bus);

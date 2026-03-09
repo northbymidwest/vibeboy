@@ -228,9 +228,16 @@ pub struct Ppu {
     /// CGB: dot at which Mode 3 becomes visible in STAT (0 = not pending).
     mode3_stat_dot: u32,
 
+    /// CGB: palette RAM blocked during most of mode 3.
+    pub cgb_palettes_blocked: bool,
+    /// CGB: dot at which palette blocking clears (0 = not pending).
+    cgb_palette_unblock_dot: u32,
 
     /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
     pub cgb_mode: bool,
+
+    /// CGB double-speed mode active.
+    pub double_speed: bool,
 
     /// SGB mode: capture 2-bit shade indices for SGB palette remapping.
     pub sgb_mode: bool,
@@ -376,7 +383,10 @@ impl Ppu {
             lcd_first_line_short: false,
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
+            cgb_palettes_blocked: false,
+            cgb_palette_unblock_dot: 0,
             cgb_mode: true,
+            double_speed: false,
             sgb_mode: false,
             shade_buffer: vec![0u8; 160 * 144],
             dmg_compat: false,
@@ -448,6 +458,8 @@ impl Ppu {
         self.lcd_first_line_short = false;
         self.mode0_stat_dot = 0;
         self.mode3_stat_dot = 0;
+        self.cgb_palettes_blocked = false;
+        self.cgb_palette_unblock_dot = 0;
         self.window_line_counter = 0;
         self.wy_triggered = false;
         self.bg_fifo.clear();
@@ -689,19 +701,30 @@ impl Ppu {
                     self.mode3_stat_dot = 0;
                     self.stat = (self.stat & !0x03) | 0x03;
                 }
+                // CGB: palette RAM blocked 3T after mode 3 start
+                if self.cgb_mode && !self.cgb_palettes_blocked && self.dot >= 87 {
+                    self.cgb_palettes_blocked = true;
+                }
                 // Run per-pixel FIFO logic
                 self.tick_mode3();
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
+                    if self.cgb_mode {
+                        // Palette unblock is deferred 3T after mode 3 ends
+                        self.cgb_palette_unblock_dot = self.dot + 3;
+                    } else {
+                        self.cgb_palettes_blocked = false;
+                    }
                     self.mode = 0;
                     self.mode_for_interrupt = 0;
-                    if self.cgb_mode {
+                    if self.cgb_mode && self.double_speed {
+                        // CGB double-speed: defer STAT bits, accessibility,
+                        // and IRQ by 1T
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
-                        // DMG: STAT mode bits and accessibility change immediately,
-                        // but the STAT interrupt fires 1T later (deferred via
-                        // mode0_stat_dot, matching hardware behavior where
-                        // GB_STAT_update runs after a 1T sleep post-mode-3).
+                        // DMG and CGB normal speed: STAT mode bits and
+                        // accessibility change immediately; only the STAT
+                        // interrupt fires 1T later.
                         self.stat = self.stat & !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
@@ -716,6 +739,11 @@ impl Ppu {
                 }
             }
             0 => {
+                // CGB: deferred palette unblock (3T after mode 3 end)
+                if self.cgb_palette_unblock_dot > 0 && self.dot >= self.cgb_palette_unblock_dot {
+                    self.cgb_palette_unblock_dot = 0;
+                    self.cgb_palettes_blocked = false;
+                }
                 // Delayed mode 0 STAT IRQ (both DMG and CGB)
                 if self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
                     self.mode0_stat_dot = 0;
@@ -1958,9 +1986,15 @@ impl Ppu {
             0xFF4B => self.wx,
             0xFF4F => self.vram_bank as u8 | 0xFE,
             0xFF68 => self.bcps | 0x40,
-            0xFF69 => self.bcpd[(self.bcps & 0x3F) as usize],
+            0xFF69 => {
+                if self.cgb_palettes_blocked { 0xFF }
+                else { self.bcpd[(self.bcps & 0x3F) as usize] }
+            }
             0xFF6A => self.ocps | 0x40,
-            0xFF6B => self.ocpd[(self.ocps & 0x3F) as usize],
+            0xFF6B => {
+                if self.cgb_palettes_blocked { 0xFF }
+                else { self.ocpd[(self.ocps & 0x3F) as usize] }
+            }
             _ => 0xFF,
         }
     }
@@ -2148,9 +2182,12 @@ impl Ppu {
             0xFF4F => self.vram_bank = (val & 0x01) as usize,
             0xFF68 => self.bcps = val & 0xBF,
             0xFF69 => {
-                let idx = (self.bcps & 0x3F) as usize;
-                self.bcpd[idx] = val;
+                if !self.cgb_palettes_blocked {
+                    let idx = (self.bcps & 0x3F) as usize;
+                    self.bcpd[idx] = val;
+                }
                 if self.bcps & 0x80 != 0 {
+                    let idx = (self.bcps & 0x3F) as usize;
                     let next = (idx + 1) & 0x3F;
                     self.bcps = (self.bcps & 0x80) | next as u8;
                 }
@@ -2158,7 +2195,9 @@ impl Ppu {
             0xFF6A => self.ocps = val & 0xBF,
             0xFF6B => {
                 let idx = (self.ocps & 0x3F) as usize;
-                self.ocpd[idx] = val;
+                if !self.cgb_palettes_blocked {
+                    self.ocpd[idx] = val;
+                }
                 if self.ocps & 0x80 != 0 {
                     let next = (idx + 1) & 0x3F;
                     self.ocps = (self.ocps & 0x80) | next as u8;
