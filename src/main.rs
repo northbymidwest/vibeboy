@@ -507,8 +507,8 @@ fn main() {
 
 fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {
     let map: &[(Scancode, u8)] = &[
-        (Scancode::Z,      Emulator::BTN_A),
-        (Scancode::X,      Emulator::BTN_B),
+        (Scancode::Z,      Emulator::BTN_B),
+        (Scancode::X,      Emulator::BTN_A),
         (Scancode::Return, Emulator::BTN_START),
         (Scancode::RShift, Emulator::BTN_SELECT),
         (Scancode::Right,  Emulator::BTN_RIGHT),
