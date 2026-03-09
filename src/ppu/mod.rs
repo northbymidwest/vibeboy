@@ -95,7 +95,7 @@ struct Fetcher {
     /// CGB: LCDC TILE_SEL (bit 4) latched at ReadTileId T1
     latched_tile_sel: bool,
     /// CGB: BG map address latched at ReadTileId T1
-    /// (SameBoy caches this in last_tile_index_address at GET_TILE_T1)
+    /// (cached at GET_TILE T1, used at T2 for VRAM read)
     latched_map_addr: usize,
 }
 
@@ -133,6 +133,18 @@ impl Fetcher {
         self.latched_tile_sel = false;
         self.latched_map_addr = 0;
     }
+}
+
+/// Double each bit in a 4-bit nibble to produce an 8-bit value.
+/// e.g., 0b1010 → 0b11001100. Matches the DMG boot ROM's logo decompression.
+fn double_bits(nibble: u8) -> u8 {
+    let mut result = 0u8;
+    for i in 0..4 {
+        let bit = (nibble >> (3 - i)) & 1;
+        result |= bit << (7 - i * 2);
+        result |= bit << (6 - i * 2);
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -500,6 +512,67 @@ impl Ppu {
             self.bcps = 0x88;
             self.ocps = 0x90;
         }
+
+        // Initialize VRAM with post-boot state (Nintendo logo tiles + tilemap).
+        // The boot ROM decompresses the cart header logo ($0104-$0133) into tiles 1-$18,
+        // writes the ® symbol as tile $19, and sets up the tilemap at $9800.
+        self.init_post_boot_vram(rom);
+    }
+
+    /// Populate VRAM bank 0 with the state left by the boot ROM.
+    fn init_post_boot_vram(&mut self, rom: &[u8]) {
+        // Clear VRAM first (boot ROM does this)
+        for b in self.vram[0].iter_mut() { *b = 0; }
+
+        // Decompress Nintendo logo from cart header $0104-$0133 into tiles 1-$18.
+        // Each input byte encodes two 4-pixel rows (high nibble first).
+        // DoubleBitsAndWriteRow doubles each bit horizontally (4px → 8px)
+        // and writes the same byte to two consecutive rows (vertical doubling).
+        // Only the lo plane is written; hi plane stays 0 (1bpp tiles).
+        let logo_start = 0x0104;
+        let logo_end = 0x0134;
+        let mut vram_addr: usize = 0x10; // tile 1 starts at VRAM $8010 = offset $10
+        for i in logo_start..logo_end {
+            if i >= rom.len() { break; }
+            let byte = rom[i];
+            // High nibble → rows 0,1
+            let doubled_hi = double_bits((byte >> 4) & 0x0F);
+            self.vram[0][vram_addr] = doubled_hi;     // row 0 lo
+            // vram_addr+1 = row 0 hi (stays 0)
+            self.vram[0][vram_addr + 2] = doubled_hi;  // row 1 lo
+            // vram_addr+3 = row 1 hi (stays 0)
+            vram_addr += 4;
+            // Low nibble → rows 2,3
+            let doubled_lo = double_bits(byte & 0x0F);
+            self.vram[0][vram_addr] = doubled_lo;     // row 2 lo
+            self.vram[0][vram_addr + 2] = doubled_lo;  // row 3 lo
+            vram_addr += 4;
+        }
+
+        // Trademark symbol (®) as tile $19 (VRAM offset $190)
+        const TRADEMARK: [u8; 8] = [
+            0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C,
+        ];
+        let tm_offset = 0x190; // tile $19 = 25 * 16 = 0x190
+        for (row, &byte) in TRADEMARK.iter().enumerate() {
+            self.vram[0][tm_offset + row * 2] = byte; // lo plane only
+        }
+
+        // Set up tilemap at $9800 (VRAM offset $1800).
+        // Logo is 12 tiles wide × 2 tiles tall, centered at row 8-9, cols 4-15.
+        // Tiles are numbered 1-$18: top row = 1,2,...,12; bottom row = 13,14,...,24.
+        // Trademark (®) tile $19 at row 8, col 16.
+        let scrn0 = 0x1800usize; // tilemap base
+        // Top row of logo: tiles 1-12 at tilemap row 8, cols 4-15
+        for i in 0..12u8 {
+            self.vram[0][scrn0 + 8 * 32 + 4 + i as usize] = i + 1;
+        }
+        // Bottom row of logo: tiles 13-24 at tilemap row 9, cols 4-15
+        for i in 0..12u8 {
+            self.vram[0][scrn0 + 9 * 32 + 4 + i as usize] = i + 13;
+        }
+        // Trademark symbol at row 8, col 16
+        self.vram[0][scrn0 + 8 * 32 + 16] = 0x19;
     }
 
     /// Compute the accessed OAM row at a given dot position during Mode 2.
@@ -870,7 +943,7 @@ impl Ppu {
 
     /// CGB line-start sequence: handles the delayed LY visibility and mode transitions
     /// that occur during dots 1-4 of each new scanline on CGB hardware.
-    /// Matches SameBoy states 35 (2T) → 6 (1T) → 7 (1T).
+    /// State machine: 2T idle → 1T ly_for_comp/-1+mode2 → 1T oam_scan+lsp_clear.
     fn handle_cgb_line_start(&mut self) {
         if !self.line_start_is_vblank {
             // Active line (0-143)
@@ -912,7 +985,7 @@ impl Ppu {
                     }
                     self.oam_scan();
                     self.update_stat_irq();
-                    // Immediately clear mode_for_interrupt (matches SameBoy)
+                    // Immediately clear mode_for_interrupt
                     self.mode_for_interrupt = -1;
                     self.update_stat_irq();
                     self.line_start_pending = false;
@@ -1363,7 +1436,7 @@ impl Ppu {
     }
 
     /// Advance the BG/window tile fetcher by one T-cycle.
-    /// SameBoy T1/T2 model: T1 computes & latches addresses, T2 reads VRAM.
+    /// T1/T2 model: T1 computes & latches addresses, T2 reads VRAM.
     fn tick_bg_fetcher(&mut self) {
         self.fetcher.tick += 1;
         if self.fetcher.tick < 2 {
@@ -1381,11 +1454,9 @@ impl Ppu {
                         self.fetcher.latched_map_addr = self.fetcher_map_addr();
                     }
                     FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
-                        // SameBoy re-latches TILE_SEL at every data fetch T1
-                        // (GET_TILE_DATA_LOWER_T1 / GET_TILE_DATA_HIGH_T1)
+                        // Re-latch TILE_SEL at every data fetch T1.
                         // During tile_sel_glitch, preserve the old latched_tile_sel
-                        // (SameBoy's data_for_tile_sel_glitch uses `last_tileset`
-                        // which was set at the *previous* T1, not the current one)
+                        // (the glitch uses last_tileset from the *previous* T1)
                         if self.tile_sel_glitch {
                             self.tile_sel_glitch_latched = true;
                         } else if !self.tile_sel_glitch_latched {
@@ -1524,8 +1595,8 @@ impl Ppu {
     }
 
     /// CGB tile_sel_glitch: when LCDC bit 4 transitions 1→0 during Mode 3,
-    /// SameBoy's `data_for_tile_sel_glitch()` replaces tile data with the
-    /// tile INDEX itself for tiles 0-127 (non-CGB_D models).
+    /// tile data is replaced with the tile INDEX itself for tiles 0-127
+    /// (non-CGB_D models).
     fn tile_sel_glitch_data(&self) -> u8 {
         if self.fetcher.latched_tile_sel {
             // last_tileset was true (TILE_SEL=1 at the preceding T1)
@@ -1542,7 +1613,7 @@ impl Ppu {
                 }
             }
         } else {
-            // last_tileset was false: SameBoy uses a cached `data_for_sel_glitch` value.
+            // last_tileset was false: uses a cached `data_for_sel_glitch` value.
             // For now, use normal VRAM data (this path is less common).
             let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
             if self.fetcher.state == FetcherState::ReadTileDataLow {
@@ -1953,8 +2024,8 @@ impl Ppu {
                     ((self.mode == 0 || self.mode == 1) && self.dot >= 452)
                 ) {
                     // During line_153_phase (before dot 8) or near line end:
-                    // apply value but suppress STAT IRQ (matches SameBoy's
-                    // display_state 15/16 skip behavior).
+                    // apply value but suppress STAT IRQ (display_state 15/16
+                    // skip behavior).
                     // Silently update stat_irq_line to prevent false rising
                     // edge at the next real update_stat_irq() call.
                     self.lyc = val;

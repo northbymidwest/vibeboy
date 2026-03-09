@@ -128,7 +128,7 @@ pub struct Bus {
     ppu_tick_debt: u32,
 }
 
-/// Simple LCG PRNG for RAM initialization (matches SameBoy approach).
+/// Simple LCG PRNG for RAM initialization.
 fn ram_random(state: &mut u64) -> u8 {
     *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (*state >> 56) as u8
@@ -386,38 +386,67 @@ impl Bus {
             if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
                 return self.oam_dma_conflict_byte();
             }
-        } else if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
-            // DMG: OAM reads return 0xFF during DMA
-            return 0xFF;
+        } else {
+            // DMG: OAM reads return 0xFF during active DMA
+            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+                return 0xFF;
+            }
+            // DMG: during active DMA transfer (after warm-up), reads from the same bus
+            // as the DMA source return the previous byte transferred.
+            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+                && self.oam_dma_same_bus(addr)
+            {
+                return self.oam_dma_conflict_byte();
+            }
         }
         self.read_byte_raw(addr)
     }
 
-    /// Check if addr is on the same bus as the OAM DMA source (CGB).
+    /// Check if addr is on the same bus as the OAM DMA source.
+    /// Addresses >= 0xFE00 (internal bus) are never in conflict.
     fn oam_dma_same_bus(&self, addr: u16) -> bool {
+        if addr >= 0xFE00 {
+            return false;
+        }
         let src = self.oam_dma.source;
-        match src {
-            // Cart bus: ROM + SRAM
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF),
-            // VRAM bus
-            0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
-            // WRAM bus (includes echo RAM)
-            0xC000..=0xFDFF => matches!(addr, 0xC000..=0xFDFF),
-            _ => false,
+        if self.model.is_cgb() {
+            // CGB: Cart bus, VRAM bus, and WRAM bus are separate
+            match src {
+                0x0000..=0x7FFF | 0xA000..=0xBFFF => matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF),
+                0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
+                0xC000..=0xFDFF => matches!(addr, 0xC000..=0xFDFF),
+                _ => false,
+            }
+        } else {
+            // DMG: only VRAM is a separate bus; everything else is one shared bus
+            match src {
+                0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
+                _ => !matches!(addr, 0x8000..=0x9FFF),
+            }
         }
     }
 
-    /// Returns the byte currently being transferred by OAM DMA (bus conflict).
-    /// During delay period, progress=0 so this returns byte 0 of the DMA source.
+    /// Returns the bus conflict byte during OAM DMA.
+    /// - CGB: returns the byte at the current DMA source address.
+    /// - DMG: returns the *previous* byte transferred (source + progress - 1),
+    ///   i.e. reading from (dma_source + progress - 1).
     fn oam_dma_conflict_byte(&self) -> u8 {
         if !self.oam_dma.active {
             return 0xFF;
         }
-        let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
-        if !self.model.is_cgb() && src >= 0xFE00 {
-            src -= 0x2000;
+        if self.model.is_cgb() {
+            let src = self.oam_dma.source + self.oam_dma.progress as u16;
+            self.read_byte_raw(src)
+        } else {
+            if self.oam_dma.progress == 0 {
+                return 0xFF;
+            }
+            let mut src = self.oam_dma.source + self.oam_dma.progress as u16 - 1;
+            if src >= 0xFE00 {
+                src -= 0x2000;
+            }
+            self.read_byte_raw(src)
         }
-        self.read_byte_raw(src)
     }
 
     /// Raw read bypassing DMA bus-conflict logic (for DMA/HDMA controllers).
@@ -448,15 +477,7 @@ impl Bus {
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize], // echo
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize], // echo
             0xFE00..=0xFE9F => {
-                let v = if !self.ppu.oam_accessible { 0xFF } else { self.ppu.read_oam(addr) };
-                // Debug: log reads in corrupted region when LCD is off (cp_oam context)
-                if addr >= 0xFE18 && addr <= 0xFE1F && self.ppu.lcdc & 0x80 == 0 {
-                    let idx = (addr - 0xFE00) as usize;
-                    let expected = 0x0Cu8.wrapping_add(idx as u8);
-                    log::warn!("OAM READ ${:04X}: got={:02X} expected={:02X} match={} oam_accessible={} pc={:04X}",
-                        addr, v, expected, v == expected, self.ppu.oam_accessible, self.debug_oam_pc);
-                }
-                v
+                if !self.ppu.oam_accessible { 0xFF } else { self.ppu.read_oam(addr) }
             }
             0xFEA0..=0xFEFF => {
                 // DMG/MGB/SGB: reads return 0x00
@@ -488,8 +509,17 @@ impl Bus {
             if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
                 return;
             }
-        } else if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
-            return;
+        } else {
+            // DMG: OAM writes blocked during DMA
+            if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFE9F) {
+                return;
+            }
+            // DMG: writes to the same bus as DMA source are dropped
+            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+                && self.oam_dma_same_bus(addr)
+            {
+                return;
+            }
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
         if !self.ppu.oam_accessible && addr >= 0xFE00 && addr < 0xFF00 {
