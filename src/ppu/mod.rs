@@ -754,13 +754,16 @@ impl Ppu {
                 } else {
                     456
                 };
-                // CGB STAT Mode 2 quirk at line 144: fires 2T before the line
-                // wrap. This ensures it falls in a different HALT half-cycle than
-                // VBlank IF (which fires at dot 2 of line 144), giving the 4T
-                // separation measured by vblank_stat_intr-C.
+                // CGB mode 2 STAT quirk at VBlank entry: inject STAT IF 2T
+                // before the line wrap so it falls in a different HALT half-cycle
+                // than VBlank IF (which fires at dot 2 of line 144). This 4T
+                // separation is required by vblank_stat_intr-C. We also set
+                // stat_irq_line so the wrap-point update_stat_irq doesn't
+                // double-fire.
                 if self.cgb_mode && self.ly == 143 && self.dot == line_end - 2 {
                     if !self.stat_irq_line && self.stat & 0x20 != 0 {
                         self.if_flags |= 0x02;
+                        self.stat_irq_line = true;
                     }
                 }
                 if self.dot >= line_end {
@@ -773,6 +776,18 @@ impl Ppu {
                         // CGB: all changes (LY, coincidence, mode) are deferred
                         // to the line-start handler. ly_for_comparison and coincidence
                         // update happen at dot 3-4, not at the wrap.
+                        //
+                        // Mode 2 STAT source fires briefly at VBlank line wraps
+                        // (lines 144-152). Firing here (at the wrap, during the last
+                        // tick of the M-cycle) ensures it's invisible to IF reads
+                        // in the same M-cycle but visible to HALT's 2T-split check,
+                        // and fires BEFORE VBlank IF (which comes at dot 2).
+                        if self.ly >= 144 && self.ly <= 152 {
+                            self.mode_for_interrupt = 2;
+                            self.update_stat_irq();
+                            self.mode_for_interrupt = -1;
+                            self.update_stat_irq();
+                        }
                         self.line_start_pending = true;
                         self.line_start_is_vblank = self.ly >= 144;
                     } else {
@@ -844,7 +859,14 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            // CGB: all changes deferred to line-start handler
+                            // CGB: mode 2 STAT source fires at VBlank line wraps
+                            // (lines 145-152). Same timing rationale as line 144.
+                            if self.ly >= 145 && self.ly <= 152 {
+                                self.mode_for_interrupt = 2;
+                                self.update_stat_irq();
+                                self.mode_for_interrupt = -1;
+                                self.update_stat_irq();
+                            }
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
                         } else {
