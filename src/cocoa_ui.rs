@@ -453,10 +453,50 @@ impl Drop for CameraCapture {
 
 // ── Metal renderer ───────────────────────────────────────────────────────────
 
+const METAL_SHADERS: &str = "
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexOut {
+    float4 position [[position]];
+    float2 texcoord;
+};
+
+vertex VertexOut vertex_main(uint vid [[vertex_id]],
+                             constant float4 *viewport [[buffer(0)]]) {
+    // viewport.x = x_offset (NDC), viewport.y = y_offset (NDC)
+    // viewport.z = width (NDC), viewport.w = height (NDC)
+    float4 vp = viewport[0];
+    float2 positions[4] = {
+        float2(vp.x,        vp.y),
+        float2(vp.x + vp.z, vp.y),
+        float2(vp.x,        vp.y + vp.w),
+        float2(vp.x + vp.z, vp.y + vp.w),
+    };
+    float2 texcoords[4] = {
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(1.0, 1.0),
+    };
+    VertexOut out;
+    out.position = float4(positions[vid], 0.0, 1.0);
+    out.texcoord = texcoords[vid];
+    return out;
+}
+
+fragment float4 fragment_main(VertexOut in [[stage_in]],
+                              texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(mag_filter::nearest, min_filter::nearest);
+    return tex.sample(s, in.texcoord);
+}
+";
+
 struct MetalRenderer {
     device: Device,
     layer: MetalLayer,
     command_queue: CommandQueue,
+    pipeline_state: RenderPipelineState,
     texture: Texture,
     tex_w: u32,
     tex_h: u32,
@@ -469,14 +509,30 @@ impl MetalRenderer {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
-        unsafe {
-            let layer_id: id = std::mem::transmute_copy(&layer);
-            let _: () = msg_send![layer_id, setMagnificationFilter:
-                NSString::alloc(nil).init_str("nearest")];
-        }
 
         let command_queue = device.new_command_queue();
 
+        // Compile shaders
+        let library = device
+            .new_library_with_source(METAL_SHADERS, &CompileOptions::new())
+            .expect("Failed to compile Metal shaders");
+        let vert_fn = library.get_function("vertex_main", None).unwrap();
+        let frag_fn = library.get_function("fragment_main", None).unwrap();
+
+        let pipeline_desc = RenderPipelineDescriptor::new();
+        pipeline_desc.set_vertex_function(Some(&vert_fn));
+        pipeline_desc.set_fragment_function(Some(&frag_fn));
+        pipeline_desc
+            .color_attachments()
+            .object_at(0)
+            .unwrap()
+            .set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+
+        let pipeline_state = device
+            .new_render_pipeline_state(&pipeline_desc)
+            .expect("Failed to create render pipeline state");
+
+        // Create framebuffer texture
         let tex_desc = TextureDescriptor::new();
         tex_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         tex_desc.set_width(tex_w as u64);
@@ -489,6 +545,7 @@ impl MetalRenderer {
             device,
             layer,
             command_queue,
+            pipeline_state,
             texture,
             tex_w,
             tex_h,
@@ -512,43 +569,44 @@ impl MetalRenderer {
                 None => return,
             };
 
-            let cmd_buf = self.command_queue.new_command_buffer();
-
-            // Blit our texture to the drawable's texture
-            let blit = cmd_buf.new_blit_command_encoder();
-
-            let src_size = MTLSize::new(self.tex_w as u64, self.tex_h as u64, 1);
-            let src_origin = MTLOrigin { x: 0, y: 0, z: 0 };
-
             let dst_tex = drawable.texture();
-            let dst_w = dst_tex.width();
-            let dst_h = dst_tex.height();
+            let dst_w = dst_tex.width() as f32;
+            let dst_h = dst_tex.height() as f32;
 
-            // Aspect-ratio-correct scaling: compute destination origin
-            let scale_x = dst_w as f64 / self.tex_w as f64;
-            let scale_y = dst_h as f64 / self.tex_h as f64;
-            let scale = scale_x.min(scale_y);
-            let out_w = (self.tex_w as f64 * scale) as u64;
-            let out_h = (self.tex_h as f64 * scale) as u64;
-            let off_x = (dst_w - out_w) / 2;
-            let off_y = (dst_h - out_h) / 2;
+            // Compute aspect-ratio-correct viewport in NDC (-1..1)
+            let tex_aspect = self.tex_w as f32 / self.tex_h as f32;
+            let dst_aspect = dst_w / dst_h;
+            let (ndc_w, ndc_h) = if dst_aspect > tex_aspect {
+                // Window wider than texture: pillarbox
+                (2.0 * tex_aspect / dst_aspect, 2.0)
+            } else {
+                // Window taller than texture: letterbox
+                (2.0, 2.0 * dst_aspect / tex_aspect)
+            };
+            let ndc_x = -ndc_w / 2.0;
+            let ndc_y = -ndc_h / 2.0;
+            let viewport: [f32; 4] = [ndc_x, ndc_y, ndc_w, ndc_h];
 
-            // Blit doesn't scale — if sizes differ we need a render pass.
-            // For now, just copy to center (works when layer drawable size = tex_w * SCALE
-            // and layer contentsScale handles pixel doubling)
-            blit.copy_from_texture(
-                &self.texture,
+            let rpd = RenderPassDescriptor::new();
+            let ca = rpd.color_attachments().object_at(0).unwrap();
+            ca.set_texture(Some(dst_tex));
+            ca.set_load_action(MTLLoadAction::Clear);
+            ca.set_store_action(MTLStoreAction::Store);
+            ca.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+
+            let cmd_buf = self.command_queue.new_command_buffer();
+            let encoder = cmd_buf.new_render_command_encoder(rpd);
+
+            encoder.set_render_pipeline_state(&self.pipeline_state);
+            encoder.set_vertex_bytes(
                 0,
-                0,
-                src_origin,
-                src_size,
-                &dst_tex,
-                0,
-                0,
-                MTLOrigin { x: off_x, y: off_y, z: 0 },
+                std::mem::size_of::<[f32; 4]>() as u64,
+                viewport.as_ptr() as *const _,
             );
+            encoder.set_fragment_texture(0, Some(&self.texture));
+            encoder.draw_primitives(MTLPrimitiveType::TriangleStrip, 0, 4);
+            encoder.end_encoding();
 
-            blit.end_encoding();
             cmd_buf.present_drawable(&drawable);
             cmd_buf.commit();
         });
@@ -848,6 +906,16 @@ fn main() {
                 if let Ok(mut ring) = audio_ring.lock() {
                     ring.write(to_write);
                 }
+            }
+
+            // ── Update drawable size on resize ─────────────────────────────
+            {
+                let bounds: NSRect = msg_send![content_view, bounds];
+                let backing: NSSize = msg_send![content_view,
+                    convertSizeToBacking: bounds.size];
+                renderer.layer.set_drawable_size(CGSize::new(
+                    backing.width, backing.height,
+                ));
             }
 
             // ── Render ───────────────────────────────────────────────────────
