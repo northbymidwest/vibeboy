@@ -6,7 +6,7 @@ TAG="v7.0"
 ASSET="game-boy-test-roms-${TAG}.zip"
 DEST_DIR="game-boy-test-roms"
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ -d "$DEST_DIR" ]; then
     echo "Directory '$DEST_DIR' already exists. Remove it first to re-download."
