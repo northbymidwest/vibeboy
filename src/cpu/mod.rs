@@ -9,6 +9,10 @@ pub struct Cpu {
     pub ime_pending: bool,
     pub halted: bool,
     pub halt_bug: bool,
+    /// Remaining M-cycles to idle during a CGB speed switch.
+    pub speed_switch_remaining: u32,
+    /// M-cycle count at which to toggle the speed (counted down from initial).
+    pub speed_switch_toggle_at: u32,
 }
 
 impl Cpu {
@@ -19,6 +23,8 @@ impl Cpu {
             ime_pending: false,
             halted: false,
             halt_bug: false,
+            speed_switch_remaining: 0,
+            speed_switch_toggle_at: 0,
         }
     }
 
@@ -27,6 +33,20 @@ impl Cpu {
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Handle speed switch idle state (HALT-like during CGB speed switch).
+        if self.speed_switch_remaining > 0 {
+            self.speed_switch_remaining -= 1;
+            if self.speed_switch_remaining == self.speed_switch_toggle_at {
+                bus.do_speed_toggle();
+            }
+            bus.tick_mcycle();
+            bus.step_oam_dma();
+            if self.speed_switch_remaining == 0 {
+                self.halted = false;
+            }
+            return 4;
+        }
+
         // Save pending_ime state before anything else (EI delay)
         let pending_ime = self.ime_pending;
 
@@ -559,7 +579,20 @@ impl Cpu {
             0x10 => {
                 // STOP: consume 0x00 argument, then perform speed switch if KEY1 bit0 set
                 let _next = self.fetch_byte(bus);
-                bus.do_speed_switch();
+                if bus.speed_switch_armed() {
+                    bus.do_speed_switch_prepare();
+                    let total_mcycles = 32768u32;
+                    let toggle_at = if bus.is_double_speed() {
+                        // Double→normal: toggle near start
+                        total_mcycles - 1
+                    } else {
+                        // Normal→double: toggle after 3 M-cycles
+                        total_mcycles - 3
+                    };
+                    self.speed_switch_remaining = total_mcycles;
+                    self.speed_switch_toggle_at = toggle_at;
+                    self.halted = true;
+                }
                 4
             }
             0x11 => {

@@ -177,6 +177,14 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, bo
                 if verbose {
                     eprintln!("  regs: B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X}",
                         regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
+                    if stem.contains("channel_") || stem.contains("div_") {
+                        eprint!("  actual   @C000:");
+                        for i in 0..128u16 {
+                            if i % 16 == 0 && i > 0 { eprint!("\n                "); }
+                            eprint!(" {:02X}", emu.bus.read_byte(0xC000 + i));
+                        }
+                        eprintln!();
+                    }
                     if stem.contains("boot_hwio") {
                         // CGB expected values from boot_hwio-C.s
                         let expected: &[(u16, u8)] = &[
@@ -352,9 +360,10 @@ fn cmd_calibrate(cli: &Cli) {
             let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
             for _ in 0..100_000_000u64 {
                 if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
+                    let div_val = emu.bus.read_byte(0xFF04);
                     eprintln!("{:?}: LY={} dot={} mode={} total_ticks={} DIV={:02X} timer_counter={:#06X} regs=A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X}",
                         model, emu.bus.ppu.ly, emu.bus.ppu.dot, emu.bus.ppu.stat & 0x03,
-                        emu.bus.ppu.total_ticks, emu.bus.read_byte(0xFF04), emu.bus.timer.counter(),
+                        emu.bus.ppu.total_ticks, div_val, emu.bus.timer.counter(),
                         emu.cpu.regs.a, emu.cpu.regs.f, emu.cpu.regs.b, emu.cpu.regs.c,
                         emu.cpu.regs.d, emu.cpu.regs.e, emu.cpu.regs.h, emu.cpu.regs.l);
                     break;

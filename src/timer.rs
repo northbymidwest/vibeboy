@@ -126,7 +126,7 @@ impl Timer {
     /// applies the full M-cycle tick before the write, and the 4-cycle overflow
     /// delay would start counting from the next tick_mcycle (too late), we fire
     /// the interrupt immediately for write-triggered overflows.
-    fn increment_tima_glitch(&mut self) {
+    pub fn increment_tima_glitch(&mut self) {
         self.tima = self.tima.wrapping_add(1);
         if self.tima == 0 {
             self.tima = self.tma;
@@ -147,7 +147,7 @@ impl Timer {
 
     /// The "mux output": 1 when the timer is enabled and the selected counter bit is high.
     /// TIMA increments on a falling edge of this signal.
-    fn mux_output(&self) -> bool {
+    pub fn mux_output(&self) -> bool {
         self.tac & 0x04 != 0 && (self.counter >> self.timer_bit()) & 1 == 1
     }
 
@@ -211,6 +211,11 @@ impl Timer {
     /// Expose the internal 16-bit DIV counter for serial clock edge detection.
     pub fn counter(&self) -> u16 {
         self.counter
+    }
+
+    /// Set the internal counter directly (used by speed switch DIV reset).
+    pub fn set_counter(&mut self, val: u16) {
+        self.counter = val;
     }
 }
 

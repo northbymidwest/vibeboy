@@ -516,18 +516,26 @@ impl Bus {
         if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
             return;
         }
-        if self.model.is_cgb() {
-            // CGB: same-bus conflict after warm-up
-            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
-                && self.oam_dma_same_bus(addr)
-            {
+        // Write during active DMA bus conflict: redirect to dma_current_src - 1
+        if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+            && self.oam_dma_same_bus(addr)
+        {
+            let redirect_addr = self.oam_dma.source.wrapping_add(self.oam_dma.progress as u16).wrapping_sub(1);
+            if self.model.is_cgb() {
+                // CGB-D: zero the OAM byte at progress-1 when redirect is to non-SRAM
+                if redirect_addr < 0xA000 {
+                    let oam_idx = (self.oam_dma.progress - 1) as usize;
+                    if oam_idx < 160 {
+                        self.ppu.oam[oam_idx] = 0;
+                    }
+                }
                 return;
-            }
-        } else {
-            // DMG: writes to the same bus as DMA source are dropped
-            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
-                && self.oam_dma_same_bus(addr)
-            {
+            } else {
+                // DMG: redirect addr >= 0xA000 → drop; otherwise write to redirect addr
+                if redirect_addr >= 0xA000 {
+                    return;
+                }
+                self.write_byte_raw(redirect_addr, val);
                 return;
             }
         }
@@ -1048,16 +1056,41 @@ impl Bus {
 
     // ── Speed switch (called by CPU on STOP) ──────────────────────────────────
 
-    pub fn do_speed_switch(&mut self) {
-        if self.key1 & 0x01 != 0 {
-            self.double_speed = !self.double_speed;
-            self.ppu.double_speed = self.double_speed;
-            if self.double_speed {
-                self.key1 = 0x80; // bit7=1: double speed active, bit0=0: no pending switch
-            } else {
-                self.key1 = 0x00;
-            }
+    /// Check if a speed switch is armed (KEY1 bit 0 set).
+    pub fn speed_switch_armed(&self) -> bool {
+        self.model.is_cgb() && (self.key1 & 0x01 != 0)
+    }
+
+    /// Prepare for speed switch: reset DIV counter with falling edge detection.
+    /// Called at the start of the STOP instruction before entering idle state.
+    pub fn do_speed_switch_prepare(&mut self) {
+        // Reset DIV counter (triggers falling-edge effects on timer/APU)
+        let old_counter = self.timer.counter();
+        if self.timer.mux_output() {
+            self.timer.increment_tima_glitch();
         }
+        self.timer.set_counter(0);
+        // Detect DIV-driven APU falling edge from the reset
+        let apu_bit: u16 = if self.double_speed { 0x2000 } else { 0x1000 };
+        if old_counter & apu_bit != 0 {
+            self.apu.div_event();
+        }
+        self.apu.set_div_counter(0);
+    }
+
+    /// Toggle the actual speed (called partway through speed switch idle).
+    pub fn do_speed_toggle(&mut self) {
+        self.double_speed = !self.double_speed;
+        self.ppu.double_speed = self.double_speed;
+        if self.double_speed {
+            self.key1 = 0x80;
+        } else {
+            self.key1 = 0x00;
+        }
+    }
+
+    pub fn is_double_speed(&self) -> bool {
+        self.double_speed
     }
 
     // ── Tick: advance all components by T-cycles ──────────────────────────────
@@ -1174,6 +1207,14 @@ impl Bus {
     /// Call after PPU renders a complete frame.
     pub fn apply_sgb_palettes(&mut self) {
         if let Some(ref sgb) = self.sgb {
+            if sgb.boot_pending {
+                // Hide uninitialized game output until first SGB command arrives
+                // (real hardware shows the SNES boot animation during this period)
+                for p in self.ppu.frame_buffer.iter_mut() {
+                    *p = 0x00000000;
+                }
+                return;
+            }
             match sgb.mask_mode {
                 0 => {
                     // Normal: remap using shade buffer
@@ -1251,7 +1292,8 @@ impl Bus {
     pub fn capture_sgb_freeze(&mut self) {
         if let Some(ref mut sgb) = self.sgb {
             if sgb.mask_mode == 1 {
-                sgb.frozen_buffer.copy_from_slice(&self.ppu.frame_buffer);
+                let buf = sgb.frozen_buffer.get_or_insert_with(|| vec![0u32; 160 * 144]);
+                buf.copy_from_slice(&self.ppu.frame_buffer);
             }
         }
     }

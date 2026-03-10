@@ -4,8 +4,9 @@
 /// bit-bang protocol: RESET(0x00) → 128 data bits → STOP(0x30), repeated for
 /// multi-packet commands.
 
-/// Default DMG grayscale palette (RGB555).
-const DEFAULT_PALETTE: [u16; 4] = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+/// Default SGB palette (RGB555) — matches the first built-in palette used by
+/// the SGB BIOS after the boot animation completes.
+const DEFAULT_PALETTE: [u16; 4] = [0x67BF, 0x265B, 0x10B5, 0x2866];
 
 #[derive(Clone, Copy, PartialEq)]
 enum PacketState {
@@ -50,17 +51,17 @@ pub struct Sgb {
 
     // ── System palettes (from PAL_TRN) ──
     /// 512 system palettes × 4 colors each
-    sys_palettes: Vec<u16>,
+    sys_palettes: Box<[u16; 512 * 4]>,
 
     // ── Attribute files (from ATTR_TRN) ──
     /// Up to 45 attribute files, each 90 bytes (20×18 / 4, packed 2 bits)
-    attr_files: Vec<[u8; 90]>,
+    attr_files: Box<[[u8; 90]; 45]>,
 
     // ── Border ──
     /// Border tile data: 256 tiles × 32 bytes (SNES 4bpp planar)
-    pub border_tiles: Vec<u8>,
+    pub border_tiles: Box<[u8; 256 * 32]>,
     /// Border tilemap: 32×28 = 896 entries (u16 each)
-    pub border_map: Vec<u16>,
+    pub border_map: Box<[u16; 32 * 28]>,
     /// Border palettes: 4 palettes × 16 colors (RGB555)
     pub border_palettes: [[u16; 16]; 4],
     /// True when border data changed and needs re-render
@@ -69,10 +70,20 @@ pub struct Sgb {
     // ── Screen masking ──
     /// 0=off, 1=freeze, 2=black, 3=color0
     pub mask_mode: u8,
-    /// Frozen frame buffer (captured when MASK_EN(1) is sent)
-    pub frozen_buffer: Vec<u32>,
+    /// Frozen frame buffer (captured when MASK_EN(1) is sent).
+    /// Only allocated when mask_mode==1.
+    pub frozen_buffer: Option<Vec<u32>>,
 
     // ── Multiplayer ──
+    /// True until the screen should be unmasked after SGB boot.
+    /// Cleared by MASK_EN(0) or after a timeout (~3 seconds).
+    /// Real hardware shows the SNES boot animation during this period.
+    pub boot_pending: bool,
+    /// Frame counter for boot timeout (incremented each frame while boot_pending).
+    boot_frames: u16,
+    /// True once any SGB command has been received (used for boot timeout logic).
+    got_first_command: bool,
+
     /// Number of active players (1, 2, or 4)
     pub player_count: u8,
     /// Current player index (0-3), cycles on P1 reads
@@ -105,16 +116,19 @@ impl Sgb {
 
             attr_map: [[0u8; 20]; 18],
 
-            sys_palettes: vec![0u16; 512 * 4],
-            attr_files: vec![[0u8; 90]; 45],
+            sys_palettes: Box::new([0u16; 512 * 4]),
+            attr_files: Box::new([[0u8; 90]; 45]),
 
-            border_tiles: vec![0u8; 256 * 32],
-            border_map: vec![0u16; 32 * 28],
+            border_tiles: Box::new([0u8; 256 * 32]),
+            border_map: Box::new([0u16; 32 * 28]),
             border_palettes: [[0u16; 16]; 4],
             border_dirty: false,
 
+            boot_pending: true,
+            boot_frames: 0,
+            got_first_command: false,
             mask_mode: 0,
-            frozen_buffer: vec![0u32; 160 * 144],
+            frozen_buffer: None,
 
             player_count: 1,
             current_player: 0,
@@ -267,6 +281,9 @@ impl Sgb {
             // Invalid command — likely false positive from joypad polling
             return;
         }
+
+        // Track that we've received a valid command (for boot timeout logic).
+        self.got_first_command = true;
 
         match cmd {
             0x00 => self.cmd_pal01(),
@@ -539,6 +556,7 @@ impl Sgb {
         }
         if attr_byte & 0x40 != 0 {
             self.mask_mode = 0;
+            self.boot_pending = false;
         }
         // Ensure color 0 shared
         let c0 = self.palettes[0][0];
@@ -590,6 +608,7 @@ impl Sgb {
         self.apply_attr_file(file_idx);
         if cancel_mask {
             self.mask_mode = 0;
+            self.boot_pending = false;
         }
     }
 
@@ -613,6 +632,10 @@ impl Sgb {
     fn cmd_mask_en(&mut self) {
         self.mask_mode = self.packet_buf[1] & 0x03;
         log::debug!("SGB MASK_EN: mode {}", self.mask_mode);
+        // MASK_EN(0) unmasks the screen — clear boot_pending so the game is visible
+        if self.mask_mode == 0 {
+            self.boot_pending = false;
+        }
     }
 
     // ── Attribute file helpers ──
@@ -707,10 +730,22 @@ impl Sgb {
         self.pending_transfer.is_some() && self.transfer_countdown == 0
     }
 
-    /// Tick the transfer countdown (call once per frame).
+    /// Tick the transfer countdown and boot timeout (call once per frame).
     pub fn tick_transfer(&mut self) {
         if self.transfer_countdown > 0 {
             self.transfer_countdown -= 1;
+        }
+        // Boot timeout: if we've received at least one SGB command but never got
+        // MASK_EN(0), clear boot_pending after ~3 seconds (180 frames at 60fps).
+        // Also clear if no commands received after ~5 seconds (300 frames) —
+        // some games may not use SGB commands at all on SGB hardware.
+        if self.boot_pending {
+            self.boot_frames = self.boot_frames.saturating_add(1);
+            if self.got_first_command && self.boot_frames >= 180 {
+                self.boot_pending = false;
+            } else if self.boot_frames >= 300 {
+                self.boot_pending = false;
+            }
         }
     }
 
@@ -731,19 +766,26 @@ impl Sgb {
     /// `shade_buf`: 160×144 array of 2-bit shade indices.
     /// `frame_out`: 160×144 output in 0x00RRGGBB format.
     pub fn apply_palettes(&self, shade_buf: &[u8], frame_out: &mut [u32]) {
+        // Pre-convert all palette colors to RGB32 for fast lookup
+        let mut lut = [[0u32; 4]; 4];
+        for pal in 0..4 {
+            for shade in 0..4 {
+                lut[pal][shade] = Self::rgb555_to_rgb32(self.palettes[pal][shade]);
+            }
+        }
+
         for ty in 0..18usize {
             for tx in 0..20usize {
-                let pal_idx = self.attr_map[ty][tx] as usize;
-                let pal = &self.palettes[pal_idx.min(3)];
-                for py in 0..8usize {
-                    let y = ty * 8 + py;
-                    if y >= 144 { break; }
-                    for px in 0..8usize {
-                        let x = tx * 8 + px;
-                        if x >= 160 { break; }
-                        let idx = y * 160 + x;
-                        let shade = shade_buf[idx] as usize;
-                        frame_out[idx] = Self::rgb555_to_rgb32(pal[shade & 3]);
+                let pal = &lut[self.attr_map[ty][tx] as usize & 3];
+                let y_base = ty * 8;
+                let x_base = tx * 8;
+                let y_end = (y_base + 8).min(144);
+                let x_end = (x_base + 8).min(160);
+                for y in y_base..y_end {
+                    let row = y * 160;
+                    for x in x_base..x_end {
+                        let idx = row + x;
+                        frame_out[idx] = pal[shade_buf[idx] as usize & 3];
                     }
                 }
             }
@@ -804,13 +846,10 @@ impl Sgb {
     /// Composite game frame into the 256×224 border buffer at offset (48, 40).
     pub fn composite_frame(border_buf: &mut [u32], game_buf: &[u32]) {
         for y in 0..144usize {
-            for x in 0..160usize {
-                let bx = x + 48;
-                let by = y + 40;
-                if bx < 256 && by < 224 {
-                    border_buf[by * 256 + bx] = game_buf[y * 160 + x];
-                }
-            }
+            let src_start = y * 160;
+            let dst_start = (y + 40) * 256 + 48;
+            border_buf[dst_start..dst_start + 160]
+                .copy_from_slice(&game_buf[src_start..src_start + 160]);
         }
     }
 }

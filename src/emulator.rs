@@ -20,9 +20,8 @@ pub struct Emulator {
     pub cpu: Cpu,
     pub bus: Bus,
     model: GbModel,
-    /// Cached border buffer (256×224) for SGB
-    border_buffer: Vec<u32>,
-    /// Composited output buffer (256×224) for SGB
+    /// Composited SGB output buffer (256×224): border + game area.
+    /// Border pixels persist across frames; only the game area is updated each frame.
     sgb_output: Vec<u32>,
     /// SNES subsystem for SGB LLE (None = HLE fallback)
     snes: Option<SnesSys>,
@@ -96,7 +95,6 @@ impl Emulator {
             cpu,
             bus,
             model,
-            border_buffer: vec![0u32; 256 * 224],
             sgb_output: vec![0u32; 256 * 224],
             snes,
             snes_packet_queue: Vec::new(),
@@ -335,7 +333,9 @@ impl Emulator {
         // For SGB with freeze mask, return frozen buffer
         if let Some(ref sgb) = self.bus.sgb {
             if sgb.mask_mode == 1 {
-                return &sgb.frozen_buffer;
+                if let Some(ref frozen) = sgb.frozen_buffer {
+                    return frozen;
+                }
             }
         }
         self.bus.ppu.frame_buffer()
@@ -347,30 +347,43 @@ impl Emulator {
 
     /// Get the composited 256×224 SGB frame (border + game).
     pub fn sgb_composited_frame(&mut self) -> &[u32] {
+        // Re-render border directly into sgb_output only when dirty.
+        // The border pixels persist across frames, avoiding a 230KB memcpy.
         if let Some(ref sgb) = self.bus.sgb {
             if sgb.border_dirty {
-                sgb.render_border(&mut self.border_buffer);
-                // border_dirty will be cleared below
+                sgb.render_border(&mut self.sgb_output);
             }
         }
         if let Some(ref mut sgb) = self.bus.sgb {
             sgb.border_dirty = false;
         }
 
-        // Copy border into output
-        self.sgb_output.copy_from_slice(&self.border_buffer);
-
-        // Composite game frame
-        let game_buf = if let Some(ref sgb) = self.bus.sgb {
-            if sgb.mask_mode == 1 {
-                &sgb.frozen_buffer
+        // Composite game frame into the game area (48,40)-(208,184)
+        let boot_pending = self.bus.sgb.as_ref().map_or(false, |s| s.boot_pending);
+        if !boot_pending {
+            let game_buf = if let Some(ref sgb) = self.bus.sgb {
+                if sgb.mask_mode == 1 {
+                    if let Some(ref frozen) = sgb.frozen_buffer {
+                        frozen.as_slice()
+                    } else {
+                        self.bus.ppu.frame_buffer()
+                    }
+                } else {
+                    self.bus.ppu.frame_buffer()
+                }
             } else {
                 self.bus.ppu.frame_buffer()
-            }
+            };
+            Sgb::composite_frame(&mut self.sgb_output, game_buf);
         } else {
-            self.bus.ppu.frame_buffer()
-        };
-        Sgb::composite_frame(&mut self.sgb_output, game_buf);
+            // Black out the game area during boot
+            for y in 0..144usize {
+                let row_start = (y + 40) * 256 + 48;
+                for x in 0..160usize {
+                    self.sgb_output[row_start + x] = 0;
+                }
+            }
+        }
 
         &self.sgb_output
     }

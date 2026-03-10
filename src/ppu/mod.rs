@@ -289,8 +289,19 @@ pub struct Ppu {
     sprites_fetched: u16,
     /// Window became active this scanline
     window_active: bool,
+    /// Deferred window activation: set when WX matches on the last tick of
+    /// a step(). Activation happens on the first tick of the next step().
+    /// This allows LCDC writes between steps to cancel window activation.
+    window_trigger_pending: bool,
+    window_trigger_from_wx_write: bool,
+    /// True when processing the last tick of a step() call.
+    last_tick_of_step: bool,
+    /// True when processing the first tick of a step() call.
+    first_tick_of_step: bool,
     /// Startup delay at beginning of Mode 3 (pipeline priming)
     pub(crate) mode3_start_delay: u8,
+    /// Debug: dot when mode 3 started
+    mode3_dot: u32,
     /// Last sprite tile slot for same-slot grouping (or -1 if none)
     last_sprite_slot: i16,
 
@@ -411,7 +422,12 @@ impl Ppu {
             sprite_tile_data_high: 0,
             sprites_fetched: 0,
             window_active: false,
+            window_trigger_pending: false,
+            window_trigger_from_wx_write: false,
+            last_tick_of_step: false,
+            first_tick_of_step: false,
             mode3_start_delay: 0,
+            mode3_dot: 0,
             last_sprite_slot: -1,
             visible_ly: 0,
             ly_for_comparison: 0,
@@ -613,7 +629,35 @@ impl Ppu {
             return 0;
         }
 
-        for _i in 0..cycles {
+        // Deferred window activation: process at the M-cycle boundary (start of
+        // step) so the check sees CPU writes that happened between steps. This is
+        // the closest approximation to per-T-cycle CPU-PPU interleaving in our
+        // batched model: both the CPU write and the deferred check happen at the
+        // same M-cycle boundary.
+        if self.window_trigger_pending && self.mode == 3 {
+            self.window_trigger_pending = false;
+            if self.window_trigger_from_wx_write {
+                // Pending from WX write handler: skip pixel_x re-check since
+                // we already validated it at write time (off-by-1 tolerance)
+                self.window_trigger_from_wx_write = false;
+                if !self.window_active && self.lcdc & 0x20 != 0 && self.wy_triggered {
+                    self.bg_fifo.clear();
+                    self.fetcher.reset(true);
+                    self.window_active = true;
+                }
+            } else {
+                // Pending from tick_mode3: re-check all conditions including WX
+                if self.check_window_trigger() {
+                    self.bg_fifo.clear();
+                    self.fetcher.reset(true);
+                    self.window_active = true;
+                }
+            }
+        }
+
+        for i in 0..cycles {
+            self.first_tick_of_step = i == 0;
+            self.last_tick_of_step = i == cycles - 1;
             self.tick();
         }
 
@@ -680,6 +724,7 @@ impl Ppu {
                 let mode2_end = 84;
                 if self.dot >= mode2_end {
                     self.accessed_oam_row = 0xFF;
+                    self.mode3_dot = self.dot;
                     self.mode = 3;
                     self.mode_for_interrupt = 3;
                     self.oam_accessible = false;
@@ -709,6 +754,11 @@ impl Ppu {
                 self.tick_mode3();
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
+                    // Debug
+                    if self.scx > 0 {
+                        let dur = self.dot - self.mode3_dot;
+                        eprintln!("MODE3 end: ly={} dot={} scx={} m3_dot={} dur={}", self.ly, self.dot, self.scx, self.mode3_dot, dur);
+                    }
                     if self.cgb_mode {
                         // Palette unblock is deferred 3T after mode 3 ends
                         self.cgb_palette_unblock_dot = self.dot + 3;
@@ -1091,18 +1141,8 @@ impl Ppu {
                     // Line 144 gets its mode 2 from the quirk at line 143 dot line_end-2.
                     // Lines 152-153 do not fire mode 2.
                     if self.ly >= 145 && self.ly <= 151 {
-                        let old_irq = self.stat_irq_line;
-                        let old_stat = self.stat;
                         self.mode_for_interrupt = 2;
                         self.update_stat_irq();
-                        if self.ly == 145 && self.if_flags & 0x02 != 0 {
-                            eprintln!("[DBG] VBlank M2 fired at ly={} dot={} stat={:02X} old_irq={} stat_irq={}",
-                                self.ly, self.dot, old_stat, old_irq, self.stat_irq_line);
-                        }
-                        if self.ly == 145 && self.if_flags & 0x02 == 0 {
-                            eprintln!("[DBG] VBlank M2 NOT fired at ly={} dot={} stat={:02X} old_irq={} stat_irq={}",
-                                self.ly, self.dot, old_stat, old_irq, self.stat_irq_line);
-                        }
                         self.mode_for_interrupt = 1;
                     }
                     self.update_stat_irq();
@@ -1217,6 +1257,7 @@ impl Ppu {
     }
 
     fn transition_to_mode3(&mut self) {
+        self.mode3_dot = self.dot;
         self.mode = 3;
         self.mode_for_interrupt = 3;
         self.stat = (self.stat & !0x03) | 0x03;
@@ -1259,6 +1300,8 @@ impl Ppu {
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
+        self.window_trigger_pending = false;
+        self.window_trigger_from_wx_write = false;
         self.last_sprite_slot = -1;
         self.scx_discard = self.scx & 7;
         // Hardware pipeline priming delay before fetcher starts.
@@ -1306,12 +1349,19 @@ impl Ppu {
 
         // Pop pixel from FIFO and output
         if self.bg_fifo.len() > 0 {
-            // Check window trigger BEFORE popping, so pixels aren't lost
+            // Check window trigger BEFORE popping, so pixels aren't lost.
+            // On the first tick of a step, the CPU write for this M-cycle has
+            // already been applied (write-before-tick model), so activate
+            // immediately. On later ticks, a CPU write might arrive at the next
+            // M-cycle boundary, so defer activation to the next step() call.
             if self.scx_discard == 0 && self.check_window_trigger() {
-                self.bg_fifo.clear();
-                // OAM FIFO is NOT cleared — sprite pixels survive window transition
-                self.fetcher.reset(true);
-                self.window_active = true;
+                if self.first_tick_of_step {
+                    self.bg_fifo.clear();
+                    self.fetcher.reset(true);
+                    self.window_active = true;
+                    return;
+                }
+                self.window_trigger_pending = true;
                 return;
             }
 
@@ -2038,19 +2088,37 @@ impl Ppu {
 
                 // Window enable toggled off during mode 3: deactivate window
                 // immediately so the PPU switches back to BG tiles.
+                // Clear deferred window trigger if window was just disabled
+                if win_was_on && !win_now_on {
+                    self.window_trigger_pending = false;
+                    self.window_trigger_from_wx_write = false;
+                }
                 if win_was_on && !win_now_on && self.window_active && self.mode == 3 {
                     self.window_active = false;
                     self.fetcher.reset(false);
                     self.bg_fifo.clear();
                 }
 
+                // Window re-enabled during mode 3 after being recently deactivated:
+                // defer reactivation to the next step boundary
+                // Window re-enabled during mode 3: check if trigger point
+                // was just passed (off-by-1 from mid-M-cycle write timing)
+                if !win_was_on && win_now_on && self.mode == 3
+                    && !self.window_active && !self.window_trigger_pending
+                    && self.wy_triggered && self.scx_discard == 0
+                {
+                    let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
+                    let tolerance = if self.double_speed { 0 } else { 1 };
+                    if self.pixel_x >= wx_screen && self.pixel_x <= wx_screen + tolerance {
+                        self.window_trigger_pending = true;
+                        self.window_trigger_from_wx_write = true;
+                    }
+                }
+
 
                 if lcd_was_on && !lcd_now_on {
                     // LCD off: reset LY, dot, mode; preserve coincidence bit
                     // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
-                    log::warn!("LCD OFF: oam[24..31]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}  oam[56..63]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-                        self.oam[24], self.oam[25], self.oam[26], self.oam[27], self.oam[28], self.oam[29], self.oam[30], self.oam[31],
-                        self.oam[56], self.oam[57], self.oam[58], self.oam[59], self.oam[60], self.oam[61], self.oam[62], self.oam[63]);
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
@@ -2121,7 +2189,12 @@ impl Ppu {
                 }
             }
             0xFF42 => self.scy = val,
-            0xFF43 => self.scx = val,
+            0xFF43 => {
+                if val != self.scx {
+                    eprintln!("SCX write: {} -> {} ly={} dot={} mode={} ticks={}", self.scx, val, self.ly, self.dot, self.mode, self.total_ticks);
+                }
+                self.scx = val;
+            }
             0xFF44 => {} // LY is read-only
             0xFF45 => {
                 if self.cgb_mode && self.line_start_pending {
@@ -2178,7 +2251,21 @@ impl Ppu {
                     self.wy_triggered = true;
                 }
             }
-            0xFF4B => self.wx = val,
+            0xFF4B => {
+                self.wx = val;
+                if self.mode == 3 && !self.window_active && !self.window_trigger_pending
+                    && self.lcdc & 0x20 != 0 && self.wy_triggered && self.scx_discard == 0
+                {
+                    let wx_screen = if val >= 7 { val - 7 } else { 0 };
+                    // Allow trigger if pixel_x just passed the WX point (off-by-1
+                    // from mid-M-cycle write timing in normal speed)
+                    let tolerance = if self.double_speed { 0 } else { 1 };
+                    if self.pixel_x >= wx_screen && self.pixel_x <= wx_screen + tolerance {
+                        self.window_trigger_pending = true;
+                        self.window_trigger_from_wx_write = true;
+                    }
+                }
+            }
             0xFF4F => self.vram_bank = (val & 0x01) as usize,
             0xFF68 => self.bcps = val & 0xBF,
             0xFF69 => {

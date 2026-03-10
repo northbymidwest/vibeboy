@@ -1827,6 +1827,7 @@ fn main() {
         let mut fps_timer = Instant::now();
         let mut fps_count = 0u32;
         let mut fps_emu_total = Duration::ZERO;
+        let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
 
         'running: loop {
             let _pool = NSAutoreleasePool::new(nil);
@@ -2067,12 +2068,12 @@ fn main() {
 
                 // Convert 0x00RRGGBB → BGRA8Unorm (just set alpha to 0xFF)
                 // BGRA8 on LE: u32 = A<<24 | R<<16 | G<<8 | B = 0xFF000000 | src
-                let mut bgra = vec![0u32; w * h];
+                bgra_buf.resize(w * h, 0u32);
                 for i in 0..(w * h) {
-                    bgra[i] = 0xFF00_0000 | src[i];
+                    bgra_buf[i] = 0xFF00_0000 | src[i];
                 }
 
-                renderer.update_texture(&bgra);
+                renderer.update_texture(&bgra_buf);
                 renderer.render();
             }
 

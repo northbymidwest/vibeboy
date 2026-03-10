@@ -17,7 +17,7 @@ use std::sync::Arc;
 const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
     [1, 0, 0, 0, 0, 0, 0, 1], // 25%
-    [1, 0, 0, 0, 1, 1, 1, 1], // 50%
+    [1, 0, 0, 0, 0, 1, 1, 1], // 50%
     [0, 1, 1, 1, 1, 1, 1, 0], // 75%
 ];
 
@@ -386,6 +386,7 @@ impl WaveCh {
         }
     }
 
+
     fn clock_length(&mut self) {
         if self.len_enable && self.length_counter > 0 {
             self.length_counter -= 1;
@@ -485,6 +486,7 @@ impl NoiseCh {
         // Output is high when LFSR bit0 is 0
         if self.lfsr & 1 == 0 { self.volume } else { 0 }
     }
+
 
     fn clock_length(&mut self) {
         if self.len_enable && self.length_counter > 0 {
@@ -692,6 +694,15 @@ impl Apu {
         if self.double_speed { 0x2000 } else { 0x1000 }
     }
 
+    /// Get effective lf_div value for write-time calculations (trigger delays).
+    /// Since lf_div now toggles during power-off M-cycles (matching hardware),
+    /// the phase relationship between our write-then-tick model and the
+    /// advance-then-write reference model is maintained: at write time, both
+    /// models see the same lf_div value after power on initialization.
+    fn write_lf(&self) -> u32 {
+        if self.lf_div { 1 } else { 0 }
+    }
+
     // ── Register read ──────────────────────────────────────────────────────
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -769,7 +780,9 @@ impl Apu {
             if was_on && !self.power {
                 self.power_off();
             } else if !was_on && self.power {
-                // Power on: check if DIV APU bit is high → skip first div event
+                // Power on: reset lf_div to 1 (hardware re-initializes on enable)
+                self.lf_div = true;
+                // Check if DIV APU bit is high → skip first div event
                 let apu_bit = self.apu_bit();
                 if self.div_counter & apu_bit != 0 {
                     self.skip_div_event = 1;
@@ -833,20 +846,20 @@ impl Apu {
             }
             0xFF14 => {
                 let old_freq = self.ch1.freq;
-                self.ch1.freq = (self.ch1.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
-                if self.ch1.just_reloaded {
-                    self.ch1.freq_timer = self.ch1.reload_period();
-                }
-                // did_tick frequency change edge case
+                // did_tick frequency change edge case (must check BEFORE freq update)
                 if val & 0x80 == 0 && self.ch1.enabled {
                     let old_hi = (old_freq >> 8) & 7;
-                    let new_hi = (self.ch1.freq >> 8) & 7;
+                    let new_hi = ((val & 0x07) as u16) as u32;
                     if old_hi == 7 && new_hi != 7 && self.ch1.did_tick {
-                        if (self.ch1.freq_timer.wrapping_sub(2)) / 4 == (self.ch1.freq ^ 0x7FF) as u32 {
+                        if (self.ch1.freq_timer.wrapping_sub(2)) / 4 == (old_freq ^ 0x7FF) as u32 {
                             self.ch1.duty_pos = self.ch1.duty_pos.wrapping_sub(1) & 7;
                             self.ch1.sample_suppressed = false;
                         }
                     }
+                }
+                self.ch1.freq = (self.ch1.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                if self.ch1.just_reloaded {
+                    self.ch1.freq_timer = self.ch1.reload_period();
                 }
                 let was_enabled = self.ch1.len_enable;
                 self.ch1.len_enable = val & 0x40 != 0;
@@ -885,20 +898,20 @@ impl Apu {
             }
             0xFF19 => {
                 let old_freq = self.ch2.freq;
-                self.ch2.freq = (self.ch2.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
-                if self.ch2.just_reloaded {
-                    self.ch2.freq_timer = self.ch2.reload_period();
-                }
-                // did_tick frequency change edge case
+                // did_tick frequency change edge case (must check BEFORE freq update)
                 if val & 0x80 == 0 && self.ch2.enabled {
                     let old_hi = (old_freq >> 8) & 7;
-                    let new_hi = (self.ch2.freq >> 8) & 7;
+                    let new_hi = ((val & 0x07) as u16) as u32;
                     if old_hi == 7 && new_hi != 7 && self.ch2.did_tick {
-                        if (self.ch2.freq_timer.wrapping_sub(2)) / 4 == (self.ch2.freq ^ 0x7FF) as u32 {
+                        if (self.ch2.freq_timer.wrapping_sub(2)) / 4 == (old_freq ^ 0x7FF) as u32 {
                             self.ch2.duty_pos = self.ch2.duty_pos.wrapping_sub(1) & 7;
                             self.ch2.sample_suppressed = false;
                         }
                     }
+                }
+                self.ch2.freq = (self.ch2.freq & 0x0FF) | (((val & 0x07) as u16) << 8);
+                if self.ch2.just_reloaded {
+                    self.ch2.freq_timer = self.ch2.reload_period();
                 }
                 let was_enabled = self.ch2.len_enable;
                 self.ch2.len_enable = val & 0x40 != 0;
@@ -991,10 +1004,9 @@ impl Apu {
         self.ch1.envelope_clock.clock = false;
         // Note: should_lock is NOT reset on trigger (hardware behavior)
 
-        let lf = if self.lf_div { 1u32 } else { 0 };
+        let lf = self.write_lf();
         let base = (self.ch1.freq ^ 0x7FF) as u32 * 4;
         let mut force_unsuppressed = false;
-
         if !was_active {
             // Retrigger duty advance (not active → active)
             if val & 4 == 0
@@ -1054,10 +1066,9 @@ impl Apu {
         self.ch2.envelope_clock.locked = false;
         self.ch2.envelope_clock.clock = false;
 
-        let lf = if self.lf_div { 1u32 } else { 0 };
+        let lf = self.write_lf();
         let base = (self.ch2.freq ^ 0x7FF) as u32 * 4;
         let mut force_unsuppressed = false;
-
         if !was_active {
             // Retrigger duty advance (not active → active)
             if val & 4 == 0
@@ -1189,7 +1200,7 @@ impl Apu {
         self.nr51 = 0;
         self.div_divider = 0;
         self.skip_div_event = 0;
-        self.lf_div = true; // re-init to 1 on power on
+        self.lf_div = false; // zeroed on power off (re-initialized to 1 on power on)
     }
 
     // ── DIV-coupled frame sequencer ─────────────────────────────────────────
@@ -1355,6 +1366,15 @@ impl Apu {
         let tick = self.sample_accum_tick;
         let thresh = self.sample_accum_thresh;
 
+        // Toggle lf_div (sub-2MHz phase) even when APU is off — hardware
+        // continues toggling this counter regardless of NR52 power state.
+        // Flips when APU cycles (cycles/2) is odd.
+        // Normal speed: bus_cycles=4, apu_cycles=2 (even) → no toggle.
+        // Double speed: bus_cycles=2, apu_cycles=1 (odd) → toggles every M-cycle.
+        if (cycles >> 1) & 1 != 0 {
+            self.lf_div = !self.lf_div;
+        }
+
         if !self.power {
             // Still need to emit silence at the correct rate
             self.sample_accum += cycles as u64 * tick;
@@ -1363,11 +1383,6 @@ impl Apu {
                 self.emit_sample();
             }
             return;
-        }
-
-        // Toggle lf_div (sub-2MHz phase) — flips when cycles is odd
-        if cycles & 1 != 0 {
-            self.lf_div = !self.lf_div;
         }
 
         // Advance all frequency timers
