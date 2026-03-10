@@ -221,6 +221,9 @@ pub struct Ppu {
     lcd_first_line: bool,
     /// True during Mode 0 of the first line after LCD enable (shortens line by 7T).
     lcd_first_line_short: bool,
+    /// True for the entire first frame after LCD enable (pixels render as white).
+    /// On real DMG hardware the LCD panel doesn't display the first frame.
+    lcd_first_frame: bool,
 
     /// CGB: dot at which Mode 0 becomes visible in STAT (0 = not pending).
     mode0_stat_dot: u32,
@@ -392,6 +395,7 @@ impl Ppu {
             hblank_entered: false,
             lcd_first_line: false,
             lcd_first_line_short: false,
+            lcd_first_frame: false,
             mode0_stat_dot: 0,
             mode3_stat_dot: 0,
             cgb_palettes_blocked: false,
@@ -472,6 +476,7 @@ impl Ppu {
         self.hblank_entered = false;
         self.lcd_first_line = false;
         self.lcd_first_line_short = false;
+        self.lcd_first_frame = false;
         self.mode0_stat_dot = 0;
         self.mode3_stat_dot = 0;
         self.cgb_palettes_blocked = false;
@@ -1037,6 +1042,7 @@ impl Ppu {
                             self.oam_write_accessible = true;
                             self.vram_accessible = true;
                             self.vram_write_accessible = true;
+                            self.lcd_first_frame = false;
                             self.update_stat_irq();
                         }
                     }
@@ -1125,6 +1131,7 @@ impl Ppu {
                         self.oam_write_accessible = true;
                         self.vram_accessible = true;
                         self.vram_write_accessible = true;
+                        self.lcd_first_frame = false;
                         self.update_stat_irq();
                     }
                 }
@@ -1846,7 +1853,13 @@ impl Ppu {
             self.shade_buffer[fb_idx] = shade;
         }
 
-        self.frame_buffer[fb_idx] = color32;
+        // On real DMG, the LCD doesn't display the first frame after LCD enable.
+        // Suppress pixel output (render white) for that frame.
+        if self.lcd_first_frame {
+            self.frame_buffer[fb_idx] = 0x00FFFFFF;
+        } else {
+            self.frame_buffer[fb_idx] = color32;
+        }
         self.pixel_x += 1;
     }
 
@@ -2153,6 +2166,7 @@ impl Ppu {
                     self.vram_write_accessible = true;
                     self.lcd_first_line = true;
                     self.lcd_first_line_short = false;
+                    self.lcd_first_frame = true;
                     self.total_ticks = 0;
                     self.window_line_counter = 0;
                     // Check WY trigger for first line (LY=0)

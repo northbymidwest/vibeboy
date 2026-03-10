@@ -123,8 +123,15 @@ impl Emulator {
 
         self.bus.clear_frame_ready();
         self.frame_count += 1;
+        let mut cycles = 0u32;
         while !self.bus.frame_ready() {
             self.step();
+            cycles += 4;
+            // Safety valve: if the ROM toggles LCD off before line 153,
+            // frame_ready never fires. Break after 2 frames' worth of cycles.
+            if cycles >= CYCLES_PER_FRAME * 2 {
+                break;
+            }
         }
 
         // SGB post-processing
