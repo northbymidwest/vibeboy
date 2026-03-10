@@ -342,9 +342,9 @@ pub struct Ppu {
     // transition T-cycle (T3), the PPU reads (old_value | new_value) — a bus
     // conflict glitch. At T4, the real new value is used.
     // We track separate "rendering" palette values that implement this timing.
-    bgp_rendering: u8,
-    obp0_rendering: u8,
-    obp1_rendering: u8,
+    pub(crate) bgp_rendering: u8,
+    pub(crate) obp0_rendering: u8,
+    pub(crate) obp1_rendering: u8,
     /// Ring buffer of last 2 pixel metadata for retroactive correction.
     /// Each entry: (fb_idx, pal_type: 0=BGP/1=OBP0/2=OBP1, color_index, bg_color_index, is_sprite).
     pixel_history: [(usize, u8, u8, u8, bool); 2],
@@ -769,19 +769,27 @@ impl Ppu {
             }
         }
 
+        self.step_inner(cycles, true)
+    }
+
+    /// Step the PPU for deferred ticks (from previous M-cycle's lazy flush).
+    /// Unlike step(), this does NOT mark the first tick as a CPU write boundary
+    /// and does NOT capture oam_bug_row. Returns accumulated IF flags.
+    pub fn step_deferred(&mut self, cycles: u32) -> u8 {
+        self.step_inner(cycles, false)
+    }
+
+    fn step_inner(&mut self, cycles: u32, is_cpu_boundary: bool) -> u8 {
         for i in 0..cycles {
-            self.first_tick_of_step = i == 0;
+            self.first_tick_of_step = is_cpu_boundary && i == 0;
             self.last_tick_of_step = i == cycles - 1;
             self.tick();
         }
 
-        // Deferred LYC writes are applied inline:
-        // - lsp-deferred: applied in handle_cgb_line_start() when line_start_pending clears
-        // - l153-deferred: applied in tick_line_153() when line_153_phase clears
-
-        // Capture accessed_oam_row after full step — CPU reads this BEFORE
-        // the next tick_mcycle, matching hardware's M-cycle boundary check.
-        self.oam_bug_row = self.accessed_oam_row;
+        // Only capture oam_bug_row at CPU-boundary steps (not deferred flushes)
+        if is_cpu_boundary {
+            self.oam_bug_row = self.accessed_oam_row;
+        }
 
         let flags = self.if_flags;
         self.if_flags = 0;
@@ -2365,19 +2373,16 @@ impl Ppu {
             }
             0xFF46 => self.dma = val,
             0xFF47 => {
-                self.retroactive_palette_fix(0, self.bgp_rendering, val);
                 self.bgp = val;
                 self.bgp_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, false, 0); }
             }
             0xFF48 => {
-                self.retroactive_palette_fix(1, self.obp0_rendering, val);
                 self.obp0 = val;
                 self.obp0_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 0); }
             }
             0xFF49 => {
-                self.retroactive_palette_fix(2, self.obp1_rendering, val);
                 self.obp1 = val;
                 self.obp1_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 1); }

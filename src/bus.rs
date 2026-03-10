@@ -129,6 +129,12 @@ pub struct Bus {
     /// Next tick_mcycle advances PPU by (4 - debt) T-cycles instead of 4.
     ppu_tick_debt: u32,
 
+    /// Deferred PPU T-cycles from the lazy tick model.
+    /// Each M-cycle ticks PPU immediately for the first half, deferring the
+    /// second half. Deferred ticks are flushed before any PPU-state-sensitive
+    /// read or write, or at the start of the next tick_mcycle.
+    ppu_deferred: u32,
+
     /// Extra T-cycles consumed by GDMA/HDMA that the CPU must account for.
     /// Set during DMA transfers, read and cleared by CPU after each instruction.
     pub(crate) dma_halt_cycles: u32,
@@ -293,6 +299,7 @@ impl Bus {
             ff75: 0,
             dmg_compat: model.is_cgb() && is_dmg_game && !boot_rom_active,
             ppu_tick_debt: 0,
+            ppu_deferred: 0,
             dma_halt_cycles: 0,
         }
     }
@@ -376,7 +383,10 @@ impl Bus {
     // ── Public accessors for Cpu ───────────────────────────────────────────────
 
     pub fn ie(&self) -> u8 { self.ie }
-    pub fn if_reg(&self) -> u8 { self.if_ }
+    pub fn if_reg(&mut self) -> u8 {
+        self.flush_ppu_deferred();
+        self.if_
+    }
     pub fn if_mut(&mut self) -> &mut u8 { &mut self.if_ }
     // ── Memory read ───────────────────────────────────────────────────────────
 
@@ -384,7 +394,10 @@ impl Bus {
     /// - DMG: OAM reads return 0xFF during active DMA transfer.
     /// - CGB: DMA blocks reads from the same bus as the source (including during delay).
     ///   Cart bus (ROM + SRAM) and WRAM bus are separate.
-    pub fn read_byte(&self, addr: u16) -> u8 {
+    pub fn read_byte(&mut self, addr: u16) -> u8 {
+        // Flush all deferred PPU ticks so CPU sees correct PPU state
+        // (mode bits, LY, VRAM/OAM accessibility, IF flags).
+        self.flush_ppu_deferred();
         // OAM bus reads return 0xFF during active DMA (both DMG and CGB)
         // The entire $FE00-$FEFF range is on the OAM bus
         if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
@@ -499,7 +512,7 @@ impl Bus {
         }
     }
 
-    pub fn read_word(&self, addr: u16) -> u16 {
+    pub fn read_word(&mut self, addr: u16) -> u16 {
         let lo = self.read_byte(addr) as u16;
         let hi = self.read_byte(addr.wrapping_add(1)) as u16;
         (hi << 8) | lo
@@ -511,6 +524,12 @@ impl Bus {
     /// - DMG: OAM writes blocked during DMA; external bus writes are ignored.
     /// - CGB: writes to the same bus as DMA source are blocked + OAM.
     pub fn write_byte(&mut self, addr: u16, val: u8) {
+        // Flush deferred PPU ticks so the write sees correct PPU state
+        // (mode, accessibility). PPU register writes (0xFF40-0xFF6B) handle
+        // flushing in write_byte_raw with conflict-specific timing.
+        if !matches!(addr, 0xFF40..=0xFF6B) {
+            self.flush_ppu_deferred();
+        }
         // OAM bus writes blocked during active DMA (both DMG and CGB)
         // The entire $FE00-$FEFF range is on the OAM bus
         if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
@@ -699,6 +718,7 @@ impl Bus {
             0xFF4F | 0xFF68 | 0xFF6A if !self.model.is_cgb() => {}
             // CGB LCDC write: handle tile_sel_glitch when TILE_SEL transitions 1→0
             0xFF40 if self.model.is_cgb() && !self.double_speed => {
+                self.flush_ppu_deferred();
                 let old_lcdc = self.ppu.lcdc;
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
@@ -717,10 +737,71 @@ impl Bus {
                     }
                 }
             }
-            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
+            // DMG palette writes: -2T conflict with bus glitch (old|new at T3)
+            // Hardware timing: 2T old → 1T (old|new) glitch → remaining T with new
+            0xFF47..=0xFF49 if !self.model.is_cgb() => {
+                if self.ppu_deferred >= 4 {
+                    // Flush 2T with old palette value
+                    let flags = self.ppu.step(2);
+                    self.if_ |= flags;
+                    self.ppu_deferred -= 2;
+                    // Set glitch palette (old | new) and tick 1T
+                    let old_val = match addr {
+                        0xFF47 => self.ppu.bgp_rendering,
+                        0xFF48 => self.ppu.obp0_rendering,
+                        _ => self.ppu.obp1_rendering,
+                    };
+                    let glitch = old_val | val;
+                    match addr {
+                        0xFF47 => self.ppu.bgp_rendering = glitch,
+                        0xFF48 => self.ppu.obp0_rendering = glitch,
+                        _ => self.ppu.obp1_rendering = glitch,
+                    }
+                    let flags = self.ppu.step(1);
+                    self.if_ |= flags;
+                    self.ppu_deferred -= 1;
+                } else {
+                    // Not enough deferred ticks for full conflict; flush all
+                    self.flush_ppu_deferred();
+                }
+                // Write real value (remaining deferred tick uses it)
                 self.ppu.write(addr, val);
-                // Immediately transfer any interrupt flags from register writes
-                // (e.g., LCD enable triggering STAT, LYC write causing coincidence)
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
+            // DMG SCX: -2T conflict (write takes effect 2T early)
+            // Hardware: advance(pending-2), write, pending=6
+            0xFF43 if !self.model.is_cgb() => {
+                // Don't flush deferred — write takes effect 2T early so
+                // all deferred ticks should use the new SCX value.
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
+            // DMG SCY: -1T conflict (write takes effect 1T early)
+            // Hardware: advance(pending-1), write, pending=5
+            0xFF42 if !self.model.is_cgb() => {
+                if self.ppu_deferred >= 4 {
+                    // Flush 3T with old SCY value
+                    let flags = self.ppu.step(3);
+                    self.if_ |= flags;
+                    self.ppu_deferred -= 3;
+                }
+                // Write new SCY — remaining 1T deferred uses new value
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
+            // Default PPU registers: READ_OLD (flush all deferred, then write)
+            0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
+                self.flush_ppu_deferred();
+                self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
                     self.ppu.if_flags = 0;
@@ -908,16 +989,20 @@ impl Bus {
     /// Trigger OAM write corruption bug when a 16-bit register pointing to 0xFE00–0xFEFF
     /// is incremented/decremented during PPU Mode 2 (OAM scan). DMG only.
     pub fn trigger_oam_bug(&mut self, addr: u16) {
+        if self.model.is_cgb() { return; }
+        if addr < 0xFE00 || addr > 0xFEFF { return; }
+        self.flush_ppu_deferred();
         self.trigger_oam_bug_inner(addr, "INSTR");
     }
 
     pub fn trigger_oam_bug_from_write(&mut self, addr: u16) {
+        if self.model.is_cgb() { return; }
+        if addr < 0xFE00 || addr > 0xFEFF { return; }
+        self.flush_ppu_deferred();
         self.trigger_oam_bug_inner(addr, "WRITE");
     }
 
     fn trigger_oam_bug_inner(&mut self, addr: u16, source: &str) {
-        if self.model.is_cgb() { return; }
-        if addr < 0xFE00 || addr > 0xFEFF { return; }
         let row = self.ppu.oam_bug_row;
 
         // Row must be valid (not 0xFF) and >= 8 for corruption to occur.
@@ -952,6 +1037,7 @@ impl Bus {
     pub fn trigger_oam_bug_read(&mut self, addr: u16) {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
+        self.flush_ppu_deferred();
         let row = self.ppu.oam_bug_row;
         // Row must be valid (not 0xFF) and >= 8 for corruption to occur.
         // No upper bound check — hardware allows corruption even at accessed_oam_row >= 160.
@@ -1101,17 +1187,58 @@ impl Bus {
         // Capture blocking state BEFORE advancing DMA so CPU accesses in this M-cycle
         // see the correct blocking state (e.g. last DMA copy still blocks OAM).
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
+
         // Timer is clocked by the CPU, so always 4 T-cycles per M-cycle.
         // PPU/APU run at fixed 4MHz, so 2 T-cycles per M-cycle in double-speed.
-        let mut bus_cycles = if self.double_speed { 2 } else { 4 };
+        let bus_cycles = if self.double_speed { 2u32 } else { 4 };
+
         // Apply any PPU tick debt from mid-M-cycle glitch handling
-        if self.ppu_tick_debt > 0 {
-            let debt = self.ppu_tick_debt;
-            self.ppu_tick_debt = 0;
-            bus_cycles -= debt;
-        }
-        self.tick(4, bus_cycles);
+        let debt = self.ppu_tick_debt;
+        self.ppu_tick_debt = 0;
+        let ppu_cycles = bus_cycles.saturating_sub(debt);
+
+        // Accumulate PPU cycles for lazy flushing. PPU ticks are deferred
+        // until the next read_byte/if_reg/write_byte, allowing register writes
+        // to take effect at the correct mid-M-cycle point.
+        self.ppu_deferred += ppu_cycles;
+
+        // Tick everything except PPU
+        self.tick_split(4, bus_cycles, 0);
+
         self.step_oam_dma();
+    }
+
+    /// Flush deferred PPU ticks from the lazy tick model.
+    fn flush_ppu_deferred(&mut self) {
+        if self.ppu_deferred > 0 {
+            let d = self.ppu_deferred;
+            self.ppu_deferred = 0;
+            let flags = self.ppu.step(d);
+            self.if_ |= flags;
+
+            // Check H-Blank HDMA after PPU flush (normally done in tick_split)
+            if self.ppu.hblank_entered && !self.hdma.in_transfer {
+                self.ppu.hblank_entered = false;
+                if self.hdma.active && self.hdma.mode == 1 {
+                    let ds = self.double_speed;
+                    self.hdma.in_transfer = true;
+                    if ds {
+                        self.tick(8, 4);
+                    } else {
+                        self.tick(4, 4);
+                        self.tick(4, 4);
+                    }
+                    self.do_hdma_block_ticked();
+                    self.hdma.in_transfer = false;
+                    let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
+                    self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
+                    self.hdma.blocks -= 1;
+                    if self.hdma.blocks == 0 {
+                        self.hdma.active = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Tick the bus by half an M-cycle (2 T-cycles normal speed, 1 in double-speed).
@@ -1119,13 +1246,21 @@ impl Bus {
     pub fn tick_half_mcycle(&mut self) {
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let bus_cycles = if self.double_speed { 1 } else { 2 };
-        self.tick(2, bus_cycles);
+        // Accumulate PPU cycles lazily (flushed at if_reg check between halves)
+        self.ppu_deferred += bus_cycles;
+        self.tick_split(2, bus_cycles, 0);
         // OAM DMA step deferred to the next half or full M-cycle
     }
 
     /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
     /// `bus_cycles` is 4MHz-rate T-cycles (4 normal, 2 double-speed).
     pub fn tick(&mut self, timer_cycles: u32, bus_cycles: u32) {
+        self.tick_split(timer_cycles, bus_cycles, bus_cycles);
+    }
+
+    /// Like tick() but with a separate PPU cycle count. Used by the lazy PPU
+    /// tick model where PPU gets fewer immediate ticks than other components.
+    fn tick_split(&mut self, timer_cycles: u32, bus_cycles: u32, ppu_cycles: u32) {
         // Capture DIV counter before and after timer step for serial/APU edge detection
         let old_div = self.timer.counter();
         self.timer.step(timer_cycles);
@@ -1156,8 +1291,10 @@ impl Bus {
         self.apu.set_div_counter(new_div);
         self.apu.set_double_speed(self.double_speed);
 
-        let ppu_flags = self.ppu.step(bus_cycles);
-        self.if_ |= ppu_flags;
+        if ppu_cycles > 0 {
+            let ppu_flags = self.ppu.step(ppu_cycles);
+            self.if_ |= ppu_flags;
+        }
 
         self.apu.step(bus_cycles);
 
