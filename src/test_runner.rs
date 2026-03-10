@@ -47,6 +47,8 @@ enum Command {
     Blargg,
     /// Run in Gambatte test mode (hex output comparison after 15 frames)
     Gambatte,
+    /// Run in GBMicrotest mode (HRAM result check after 2 frames)
+    Gbmicrotest,
     /// Take a screenshot after N frames
     Screenshot {
         /// Number of frames to run before capturing
@@ -217,6 +219,37 @@ fn run_test_mooneye(path: &Path, verbose: bool, force_model: Option<GbModel>, bo
             }
         }
         None => "TIMEOUT",
+    }
+}
+
+fn run_test_gbmicrotest(path: &Path, verbose: bool, force_model: Option<GbModel>) -> &'static str {
+    let rom = match fs::read(path) {
+        Ok(r) => r,
+        Err(_) => return "ERR",
+    };
+    let model = force_model.unwrap_or(GbModel::Dmg);
+    let mut emu = Emulator::new(rom, None, None, model, None);
+    // Run for 2 frames (sufficient per gbmicrotest docs)
+    for _ in 0..2 {
+        emu.step_frame();
+    }
+
+    // Check HRAM result at 0xFF82
+    let result = emu.bus.read_byte(0xFF82);
+    let actual = emu.bus.read_byte(0xFF80);
+    let expected = emu.bus.read_byte(0xFF81);
+    if result == 0x01 {
+        "PASS"
+    } else if result == 0xFF {
+        if verbose {
+            eprintln!("  actual=0x{:02X} expected=0x{:02X}", actual, expected);
+        }
+        "FAIL"
+    } else {
+        if verbose {
+            eprintln!("  FF82=0x{:02X} (not 0x01 or 0xFF)", result);
+        }
+        "TIMEOUT"
     }
 }
 
@@ -524,6 +557,7 @@ fn run_test_gambatte(path: &Path, verbose: bool, force_model: Option<GbModel>) -
 fn run_tests(cli: &Cli) {
     let blargg_mode = matches!(cli.command, Some(Command::Blargg));
     let gambatte_mode = matches!(cli.command, Some(Command::Gambatte));
+    let gbmicrotest_mode = matches!(cli.command, Some(Command::Gbmicrotest));
     let mut roms: Vec<PathBuf> = Vec::new();
     collect_roms(&cli.path, &mut roms);
     roms.sort();
@@ -532,6 +566,8 @@ fn run_tests(cli: &Cli) {
         eprintln!("Blargg mode (serial output detection)");
     } else if gambatte_mode {
         eprintln!("Gambatte mode (hex output comparison, 15 frames)");
+    } else if gbmicrotest_mode {
+        eprintln!("GBMicrotest mode (HRAM result check, 2 frames)");
     }
 
     let mut passed = 0usize;
@@ -545,6 +581,8 @@ fn run_tests(cli: &Cli) {
         } else if gambatte_mode {
             let (r, _) = run_test_gambatte(rom, true, cli.model);
             r
+        } else if gbmicrotest_mode {
+            run_test_gbmicrotest(rom, true, cli.model)
         } else {
             let model = cli.model.unwrap_or_else(|| detect_model_with_rom(rom, None));
             let br = if cli.boot || cli.bootrom.is_some() {
@@ -588,7 +626,7 @@ fn main() {
         Some(Command::Analyze { frames }) => cmd_analyze(&cli, *frames),
         Some(Command::TraceTimer) => cmd_trace_timer(&cli),
         Some(Command::Calibrate) => cmd_calibrate(&cli),
-        Some(Command::Blargg) | Some(Command::Gambatte) | None => run_tests(&cli),
+        Some(Command::Blargg) | Some(Command::Gambatte) | Some(Command::Gbmicrotest) | None => run_tests(&cli),
     }
 }
 

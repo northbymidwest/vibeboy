@@ -754,11 +754,6 @@ impl Ppu {
                 self.tick_mode3();
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
-                    // Debug
-                    if self.scx > 0 {
-                        let dur = self.dot - self.mode3_dot;
-                        eprintln!("MODE3 end: ly={} dot={} scx={} m3_dot={} dur={}", self.ly, self.dot, self.scx, self.mode3_dot, dur);
-                    }
                     if self.cgb_mode {
                         // Palette unblock is deferred 3T after mode 3 ends
                         self.cgb_palette_unblock_dot = self.dot + 3;
@@ -2189,12 +2184,7 @@ impl Ppu {
                 }
             }
             0xFF42 => self.scy = val,
-            0xFF43 => {
-                if val != self.scx {
-                    eprintln!("SCX write: {} -> {} ly={} dot={} mode={} ticks={}", self.scx, val, self.ly, self.dot, self.mode, self.total_ticks);
-                }
-                self.scx = val;
-            }
+            0xFF43 => self.scx = val,
             0xFF44 => {} // LY is read-only
             0xFF45 => {
                 if self.cgb_mode && self.line_start_pending {
