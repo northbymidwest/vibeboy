@@ -345,13 +345,13 @@ pub struct Ppu {
     bgp_rendering: u8,
     obp0_rendering: u8,
     obp1_rendering: u8,
-    /// Ring buffer of last 2 pixel metadata for retroactive palette correction.
-    /// Each entry: (fb_idx, pal_type: 0=BGP/1=OBP0/2=OBP1, color_index).
-    palette_pixel_history: [(usize, u8, u8); 2],
-    /// Number of valid entries in palette_pixel_history (0, 1, or 2).
-    palette_pixel_count: u8,
-    /// Next write position in palette_pixel_history (0 or 1).
-    palette_pixel_next: usize,
+    /// Ring buffer of last 2 pixel metadata for retroactive correction.
+    /// Each entry: (fb_idx, pal_type: 0=BGP/1=OBP0/2=OBP1, color_index, bg_color_index, is_sprite).
+    pixel_history: [(usize, u8, u8, u8, bool); 2],
+    /// Number of valid entries in pixel_history (0, 1, or 2).
+    pixel_history_count: u8,
+    /// Next write position in pixel_history (0 or 1).
+    pixel_history_next: usize,
 }
 
 impl Ppu {
@@ -462,9 +462,9 @@ impl Ppu {
             bgp_rendering: 0xFC,
             obp0_rendering: 0xFF,
             obp1_rendering: 0xFF,
-            palette_pixel_history: [(0, 0, 0); 2],
-            palette_pixel_count: 0,
-            palette_pixel_next: 0,
+            pixel_history: [(0, 0, 0, 0, false); 2],
+            pixel_history_count: 0,
+            pixel_history_next: 0,
         }
     }
 
@@ -527,9 +527,9 @@ impl Ppu {
         self.bgp_rendering = 0;
         self.obp0_rendering = 0xFF;
         self.obp1_rendering = 0xFF;
-        self.palette_pixel_history = [(0, 0, 0); 2];
-        self.palette_pixel_count = 0;
-        self.palette_pixel_next = 0;
+        self.pixel_history = [(0, 0, 0, 0, false); 2];
+        self.pixel_history_count = 0;
+        self.pixel_history_next = 0;
     }
 
     /// Retroactively correct the last 2 rendered pixels when a DMG palette
@@ -538,17 +538,17 @@ impl Ppu {
     /// rendered those T-cycles with the old palette. Fix pixel[-2] with the
     /// bus conflict glitch (old | new) and pixel[-1] with the real new value.
     fn retroactive_palette_fix(&mut self, pal_type: u8, old_val: u8, new_val: u8) {
-        if self.mode != 3 || self.cgb_mode || self.palette_pixel_count == 0 {
+        if self.mode != 3 || self.cgb_mode || self.pixel_history_count == 0 {
             return;
         }
         let glitch_val = old_val | new_val;
 
         // pixel_history_next points to the next write slot, so:
         // most recent pixel = (next + 1) % 2, older pixel = next % 2
-        if self.palette_pixel_count >= 2 {
+        if self.pixel_history_count >= 2 {
             // Older pixel (T3 of the M-cycle): glitch value
-            let idx = self.palette_pixel_next;
-            let (fb_idx, pt, cidx) = self.palette_pixel_history[idx];
+            let idx = self.pixel_history_next;
+            let (fb_idx, pt, cidx, _, _) = self.pixel_history[idx];
             if pt == pal_type && !self.lcd_first_frame {
                 self.frame_buffer[fb_idx] = Self::dmg_color(glitch_val, cidx);
                 if self.sgb_mode {
@@ -556,14 +556,58 @@ impl Ppu {
                 }
             }
         }
-        if self.palette_pixel_count >= 1 {
+        if self.pixel_history_count >= 1 {
             // Most recent pixel (T4 of the M-cycle): real new value
-            let idx = (self.palette_pixel_next + 1) % 2;
-            let (fb_idx, pt, cidx) = self.palette_pixel_history[idx];
+            let idx = (self.pixel_history_next + 1) % 2;
+            let (fb_idx, pt, cidx, _, _) = self.pixel_history[idx];
             if pt == pal_type && !self.lcd_first_frame {
                 self.frame_buffer[fb_idx] = Self::dmg_color(new_val, cidx);
                 if self.sgb_mode {
                     self.shade_buffer[fb_idx] = (new_val >> (cidx * 2)) & 0x03;
+                }
+            }
+        }
+    }
+
+    /// Retroactively correct the last 2 pixels for LCDC writes during mode 3.
+    /// On DMG, the LCDC write has a -2T conflict similar to palette writes.
+    /// The glitch cycle (T3) has BG_EN = old_BG_EN | new_BG_EN (only bit 0 is OR'd).
+    /// T4 uses the real new LCDC value.
+    fn retroactive_lcdc_fix(&mut self, old_lcdc: u8, new_lcdc: u8) {
+        if self.mode != 3 || self.cgb_mode || self.pixel_history_count == 0 {
+            return;
+        }
+        let old_bg_en = old_lcdc & 0x01 != 0;
+        let new_bg_en = new_lcdc & 0x01 != 0;
+        if old_bg_en == new_bg_en {
+            return; // BG_EN didn't change, no pixel correction needed
+        }
+
+        // Glitch LCDC: only BG_EN bit is OR'd (old | new), other bits keep old value
+        let glitch_bg_en = old_bg_en || new_bg_en; // always true (one of them changed)
+
+        // Re-render affected pixels
+        for i in 0..2u8 {
+            let count_needed = if i == 0 { 2 } else { 1 };
+            if self.pixel_history_count < count_needed {
+                continue;
+            }
+            let idx = if i == 0 {
+                self.pixel_history_next // older pixel (T3: glitch)
+            } else {
+                (self.pixel_history_next + 1) % 2 // newer pixel (T4: real)
+            };
+            let (fb_idx, pt, cidx, bg_cidx, is_sprite) = self.pixel_history[idx];
+            if self.lcd_first_frame || is_sprite {
+                continue; // sprite pixels not affected by BG_EN
+            }
+            let effective_bg_en = if i == 0 { glitch_bg_en } else { new_bg_en };
+            let render_cidx = if effective_bg_en { bg_cidx } else { 0 };
+            if pt == 0 {
+                // BG pixel using BGP
+                self.frame_buffer[fb_idx] = Self::dmg_color(self.bgp_rendering, render_cidx);
+                if self.sgb_mode {
+                    self.shade_buffer[fb_idx] = (self.bgp_rendering >> (render_cidx * 2)) & 0x03;
                 }
             }
         }
@@ -1332,8 +1376,8 @@ impl Ppu {
         self.oam_write_accessible = false;
         self.vram_accessible = false;
         self.vram_write_accessible = false;
-        self.palette_pixel_count = 0;
-        self.palette_pixel_next = 0;
+        self.pixel_history_count = 0;
+        self.pixel_history_next = 0;
         self.init_fifo();
         self.update_stat_irq();
     }
@@ -1923,7 +1967,7 @@ impl Ppu {
             self.shade_buffer[fb_idx] = shade;
         }
 
-        // Record pixel metadata for retroactive palette correction (DMG only).
+        // Record pixel metadata for retroactive correction (DMG only).
         if !self.cgb_mode {
             let (pal_type, cidx) = if draw_sprite {
                 let oam_px = oam.unwrap();
@@ -1933,10 +1977,10 @@ impl Ppu {
             } else {
                 (0u8, bg.color_index)
             };
-            self.palette_pixel_history[self.palette_pixel_next] = (fb_idx, pal_type, cidx);
-            self.palette_pixel_next = 1 - self.palette_pixel_next;
-            if self.palette_pixel_count < 2 {
-                self.palette_pixel_count += 1;
+            self.pixel_history[self.pixel_history_next] = (fb_idx, pal_type, cidx, bg.color_index, draw_sprite);
+            self.pixel_history_next = 1 - self.pixel_history_next;
+            if self.pixel_history_count < 2 {
+                self.pixel_history_count += 1;
             }
         }
 
@@ -2170,6 +2214,7 @@ impl Ppu {
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
             0xFF40 => {
+                self.retroactive_lcdc_fix(self.lcdc, val);
                 let lcd_was_on = self.lcdc & 0x80 != 0;
                 let win_was_on = self.lcdc & 0x20 != 0;
                 self.lcdc = val;
