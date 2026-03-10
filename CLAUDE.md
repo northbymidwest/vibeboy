@@ -75,6 +75,94 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - `snes/`: Optional LLE mode with full 65C816 CPU, SNES memory map, DMA, ICD2 bridge
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
 
+## Tools & Scripts
+
+### Disassemblers (`tools/`)
+
+#### `tools/dis_sm83.py` — SM83 (Game Boy CPU) Disassembler
+
+Disassembles Game Boy ROM files. Supports all SM83 opcodes including CB-prefixed bit operations. Can disassemble at arbitrary ROM offsets or GB addresses, search for byte patterns, hex dump, and display cartridge header info.
+
+```bash
+# Show cartridge header + entry point (default with no flags)
+python3 tools/dis_sm83.py path/to/rom.gb
+
+# Disassemble 50 instructions starting at GB address $0150
+python3 tools/dis_sm83.py path/to/rom.gb --pc 0150 -n 50
+
+# Disassemble from a raw ROM file offset
+python3 tools/dis_sm83.py path/to/rom.gb --offset 4037 -n 20
+
+# Hex dump 512 bytes at address $C000
+python3 tools/dis_sm83.py path/to/rom.gb --pc C000 --hex --hex-len 512
+
+# Search for a byte pattern (e.g. CP $0C instruction = FE 0C)
+python3 tools/dis_sm83.py path/to/rom.gb --search FE0C --context 8
+
+# Show cartridge header info
+python3 tools/dis_sm83.py path/to/rom.gb --header
+```
+
+#### `tools/dis65816.py` — WDC 65C816 (SNES CPU) Disassembler
+
+Disassembles SNES ROM files, primarily for SGB BIOS analysis. Automatically tracks M/X processor flag state through REP/SEP instructions to correctly decode 8-bit vs 16-bit immediate operands. Uses LoROM address mapping.
+
+```bash
+# Show interrupt vectors + reset handler (default with no flags)
+python3 tools/dis65816.py sgb1.program.rom
+
+# Disassemble 60 instructions starting at PC address $BF4A
+python3 tools/dis65816.py sgb1.program.rom --pc BF4A -n 60
+
+# Start in 16-bit accumulator/index mode
+python3 tools/dis65816.py sgb1.program.rom --pc 8000 --m16 --x16
+
+# Show interrupt vectors
+python3 tools/dis65816.py sgb1.program.rom --vectors
+
+# Search for a byte pattern
+python3 tools/dis65816.py sgb1.program.rom --search 8D0042 --context 5
+```
+
+### Scripts (`scripts/`)
+
+#### `scripts/fetch-test-roms.sh` — Download Test ROM Suite
+
+Downloads the c-sp/game-boy-test-roms v7.0 release from GitHub and unpacks it into the `game-boy-test-roms/` directory. Will not overwrite an existing directory.
+
+```bash
+./scripts/fetch-test-roms.sh
+```
+
+#### `scripts/bundle_app.sh` — Build macOS Application Bundle
+
+Builds the `vibeboy_cocoa` binary in release mode and packages it into a `VibeBoy.app` macOS application bundle under `target/VibeBoy.app`. Copies the binary, `Info.plist`, and app icon (`resources/AppIcon.icns`) into the bundle structure.
+
+```bash
+./scripts/bundle_app.sh
+
+# Then run or install:
+open target/VibeBoy.app
+cp -r target/VibeBoy.app /Applications/
+```
+
+#### `scripts/generate_icon.py` — Generate App Icon
+
+Generates the VibeBoy macOS app icon (a stylized Game Boy Color) at all required sizes (16x16 through 1024x1024), saves them as an `.iconset`, and converts to `.icns` using `iconutil`. Requires the Python `Pillow` library. Output goes to `resources/AppIcon.icns`.
+
+```bash
+pip install Pillow  # if not already installed
+python3 scripts/generate_icon.py
+```
+
+### Binaries
+
+The project produces three binaries (defined in `Cargo.toml`):
+
+- **`vibeboy`** (`src/main.rs`) — Main emulator with SDL3 window, audio, and input handling
+- **`vibeboy_cocoa`** (`src/cocoa_ui.rs`) — Native macOS Cocoa/Metal UI frontend (used by `bundle_app.sh`)
+- **`test_runner`** (`src/test_runner.rs`) — Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, screenshot). See the [Testing](#testing) section for usage
+
 ## Conventions
 
 - Models are `GbModel` enum in `model.rs`. Use `model.is_cgb()` to check CGB/AGB, `model.is_sgb()` for SGB/SGB2
