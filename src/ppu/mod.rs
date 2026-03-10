@@ -280,7 +280,7 @@ pub struct Ppu {
     /// SCX/8 tile column offset latched at Mode 3 start
     scx_tile_offset: u8,
     /// Sprite fetch in progress
-    sprite_fetch_active: bool,
+    pub(crate) sprite_fetch_active: bool,
     sprite_fetch_step: u8,   // 0=tile_id, 1=data_lo, 2=data_hi
     sprite_fetch_tick: u8,   // 0-1 within each step (2T per step)
     /// Alignment delay before sprite fetch begins (BG fetcher keeps running)
@@ -352,6 +352,8 @@ pub struct Ppu {
     pixel_history_count: u8,
     /// Next write position in pixel_history (0 or 1).
     pixel_history_next: usize,
+    /// WX write conflict: suppresses WX+6 window trigger for 1T after WX write
+    pub(crate) wx_just_changed: bool,
 }
 
 impl Ppu {
@@ -465,6 +467,7 @@ impl Ppu {
             pixel_history: [(0, 0, 0, 0, false); 2],
             pixel_history_count: 0,
             pixel_history_next: 0,
+            wx_just_changed: false,
         }
     }
 
@@ -530,6 +533,7 @@ impl Ppu {
         self.pixel_history = [(0, 0, 0, 0, false); 2];
         self.pixel_history_count = 0;
         self.pixel_history_next = 0;
+        self.wx_just_changed = false;
     }
 
     /// Retroactively correct the last 2 rendered pixels when a DMG palette
@@ -1507,6 +1511,9 @@ impl Ppu {
     fn check_window_trigger(&self) -> bool {
         if self.window_active {
             return false; // already active
+        }
+        if self.wx_just_changed {
+            return false; // suppressed for 1T after WX write
         }
         if self.lcdc & 0x20 == 0 {
             return false; // window disabled

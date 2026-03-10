@@ -798,6 +798,59 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
+            // DMG LCDC: -2T conflict with glitch (old | (new & BG_EN)) for 1T
+            // Only apply glitch during mode 3 — LCD enable/disable uses READ_OLD
+            0xFF40 if !self.model.is_cgb() => {
+                let in_mode3 = self.ppu.mode == 3;
+                if in_mode3 && self.ppu_deferred >= 4 {
+                    // Flush 2T with old LCDC
+                    let flags = self.ppu.step(2);
+                    self.if_ |= flags;
+                    self.ppu_deferred -= 2;
+
+                    // OBJ_EN suppression: if disabling OBJ_EN at pixel_x==0 or
+                    // during sprite fetch, clear it from old value too
+                    let mut old_lcdc = self.ppu.lcdc;
+                    if (val & 0x02) == 0 {
+                        if self.ppu.pixel_x == 0 || self.ppu.sprite_fetch_active {
+                            old_lcdc &= !0x02;
+                        }
+                    }
+
+                    // Glitch LCDC: old | (new & BG_EN bit)
+                    let glitch = old_lcdc | (val & 0x01);
+                    let saved_lcdc = self.ppu.lcdc;
+                    self.ppu.lcdc = glitch;
+                    // Tick 1T with glitch LCDC
+                    let flags = self.ppu.step(1);
+                    self.if_ |= flags;
+                    self.ppu_deferred -= 1;
+                    // Restore before full write
+                    self.ppu.lcdc = saved_lcdc;
+                } else {
+                    self.flush_ppu_deferred();
+                }
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
+            // DMG WX: READ_OLD + wx_just_changed flag for 1T after write
+            0xFF4B if !self.model.is_cgb() => {
+                self.flush_ppu_deferred();
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+                // Tick 1T with wx_just_changed to suppress window trigger
+                self.ppu.wx_just_changed = true;
+                let flags = self.ppu.step(1);
+                self.if_ |= flags;
+                self.ppu.wx_just_changed = false;
+                self.ppu_tick_debt += 1;
+            }
             // Default PPU registers: READ_OLD (flush all deferred, then write)
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
                 self.flush_ppu_deferred();
