@@ -16,7 +16,7 @@ struct FifoPixel {
     is_sprite: bool,
     bg_priority: bool,      // CGB BG attr bit 7
     sprite_bg_over: bool,   // sprite OAM attr bit 7
-    sprite_dmg_palette: u8, // DMG: captured obp0/obp1 value
+    sprite_dmg_palette: u8, // DMG: 0=OBP0, 1=OBP1 (palette selected at output time)
     sprite_oam_index: u8,   // OAM entry index (0-39) for CGB priority
     bg_color_index: u8,     // original BG color underneath sprite
     bg_palette: u8,         // original BG palette underneath sprite
@@ -336,6 +336,22 @@ pub struct Ppu {
     /// The CPU checks this value BEFORE the next tick_mcycle(), so it
     /// reflects the PPU state after the previous M-cycle's advancement.
     pub oam_bug_row: i16,
+
+    // ---- DMG palette write timing ----
+    // On hardware, CPU writes take effect at T3 of the M-cycle. During the
+    // transition T-cycle (T3), the PPU reads (old_value | new_value) — a bus
+    // conflict glitch. At T4, the real new value is used.
+    // We track separate "rendering" palette values that implement this timing.
+    bgp_rendering: u8,
+    obp0_rendering: u8,
+    obp1_rendering: u8,
+    /// Ring buffer of last 2 pixel metadata for retroactive palette correction.
+    /// Each entry: (fb_idx, pal_type: 0=BGP/1=OBP0/2=OBP1, color_index).
+    palette_pixel_history: [(usize, u8, u8); 2],
+    /// Number of valid entries in palette_pixel_history (0, 1, or 2).
+    palette_pixel_count: u8,
+    /// Next write position in palette_pixel_history (0 or 1).
+    palette_pixel_next: usize,
 }
 
 impl Ppu {
@@ -443,6 +459,12 @@ impl Ppu {
             accessed_oam_row: 0xFF,
             oam_bug_row: 0xFF,
             pending_lyc: None,
+            bgp_rendering: 0xFC,
+            obp0_rendering: 0xFF,
+            obp1_rendering: 0xFF,
+            palette_pixel_history: [(0, 0, 0); 2],
+            palette_pixel_count: 0,
+            palette_pixel_next: 0,
         }
     }
 
@@ -502,6 +524,49 @@ impl Ppu {
         self.accessed_oam_row = 0xFF;
         self.oam_bug_row = 0xFF;
         self.pending_lyc = None;
+        self.bgp_rendering = 0;
+        self.obp0_rendering = 0xFF;
+        self.obp1_rendering = 0xFF;
+        self.palette_pixel_history = [(0, 0, 0); 2];
+        self.palette_pixel_count = 0;
+        self.palette_pixel_next = 0;
+    }
+
+    /// Retroactively correct the last 2 rendered pixels when a DMG palette
+    /// register is written during mode 3. On hardware, the CPU write takes
+    /// effect at T3 of the M-cycle, but our eager PPU model has already
+    /// rendered those T-cycles with the old palette. Fix pixel[-2] with the
+    /// bus conflict glitch (old | new) and pixel[-1] with the real new value.
+    fn retroactive_palette_fix(&mut self, pal_type: u8, old_val: u8, new_val: u8) {
+        if self.mode != 3 || self.cgb_mode || self.palette_pixel_count == 0 {
+            return;
+        }
+        let glitch_val = old_val | new_val;
+
+        // pixel_history_next points to the next write slot, so:
+        // most recent pixel = (next + 1) % 2, older pixel = next % 2
+        if self.palette_pixel_count >= 2 {
+            // Older pixel (T3 of the M-cycle): glitch value
+            let idx = self.palette_pixel_next;
+            let (fb_idx, pt, cidx) = self.palette_pixel_history[idx];
+            if pt == pal_type && !self.lcd_first_frame {
+                self.frame_buffer[fb_idx] = Self::dmg_color(glitch_val, cidx);
+                if self.sgb_mode {
+                    self.shade_buffer[fb_idx] = (glitch_val >> (cidx * 2)) & 0x03;
+                }
+            }
+        }
+        if self.palette_pixel_count >= 1 {
+            // Most recent pixel (T4 of the M-cycle): real new value
+            let idx = (self.palette_pixel_next + 1) % 2;
+            let (fb_idx, pt, cidx) = self.palette_pixel_history[idx];
+            if pt == pal_type && !self.lcd_first_frame {
+                self.frame_buffer[fb_idx] = Self::dmg_color(new_val, cidx);
+                if self.sgb_mode {
+                    self.shade_buffer[fb_idx] = (new_val >> (cidx * 2)) & 0x03;
+                }
+            }
+        }
     }
 
     /// Set post-boot PPU state for the given model (used when no boot ROM is loaded).
@@ -1267,6 +1332,8 @@ impl Ppu {
         self.oam_write_accessible = false;
         self.vram_accessible = false;
         self.vram_write_accessible = false;
+        self.palette_pixel_count = 0;
+        self.palette_pixel_next = 0;
         self.init_fifo();
         self.update_stat_irq();
     }
@@ -1515,7 +1582,7 @@ impl Ppu {
         } else {
             0
         };
-        let dmg_pal = if attrs & 0x10 != 0 { self.obp1 } else { self.obp0 };
+        let dmg_pal = if attrs & 0x10 != 0 { 1u8 } else { 0u8 };
 
         let lo = self.sprite_tile_data_low;
         let hi = self.sprite_tile_data_high;
@@ -1825,7 +1892,9 @@ impl Ppu {
             if self.cgb_mode {
                 self.gbc_obj_color(oam_px.palette as usize, oam_px.color_index as usize)
             } else {
-                Self::dmg_color(oam_px.sprite_dmg_palette, oam_px.color_index)
+                // Use rendering palette (respects T3 write timing)
+                let pal = if oam_px.sprite_dmg_palette == 1 { self.obp1_rendering } else { self.obp0_rendering };
+                Self::dmg_color(pal, oam_px.color_index)
             }
         } else {
             // BG/window pixel
@@ -1833,9 +1902,9 @@ impl Ppu {
                 self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
             } else if self.lcdc & 0x01 == 0 {
                 // DMG: LCDC bit 0 off → BG/window draws as color 0
-                Self::dmg_color(self.bgp, 0)
+                Self::dmg_color(self.bgp_rendering, 0)
             } else {
-                Self::dmg_color(self.bgp, bg.color_index)
+                Self::dmg_color(self.bgp_rendering, bg.color_index)
             }
         };
 
@@ -1845,12 +1914,30 @@ impl Ppu {
         if self.sgb_mode {
             let (pal_reg, cidx) = if draw_sprite {
                 let oam_px = oam.unwrap();
-                (oam_px.sprite_dmg_palette, oam_px.color_index)
+                let pal = if oam_px.sprite_dmg_palette == 1 { self.obp1_rendering } else { self.obp0_rendering };
+                (pal, oam_px.color_index)
             } else {
-                (self.bgp, bg.color_index)
+                (self.bgp_rendering, bg.color_index)
             };
             let shade = (pal_reg >> (cidx * 2)) & 0x03;
             self.shade_buffer[fb_idx] = shade;
+        }
+
+        // Record pixel metadata for retroactive palette correction (DMG only).
+        if !self.cgb_mode {
+            let (pal_type, cidx) = if draw_sprite {
+                let oam_px = oam.unwrap();
+                (if oam_px.sprite_dmg_palette == 1 { 2u8 } else { 1u8 }, oam_px.color_index)
+            } else if self.lcdc & 0x01 == 0 {
+                (0u8, 0u8) // BG disabled → color 0 through BGP
+            } else {
+                (0u8, bg.color_index)
+            };
+            self.palette_pixel_history[self.palette_pixel_next] = (fb_idx, pal_type, cidx);
+            self.palette_pixel_next = 1 - self.palette_pixel_next;
+            if self.palette_pixel_count < 2 {
+                self.palette_pixel_count += 1;
+            }
         }
 
         // On real DMG, the LCD doesn't display the first frame after LCD enable.
@@ -2233,15 +2320,21 @@ impl Ppu {
             }
             0xFF46 => self.dma = val,
             0xFF47 => {
+                self.retroactive_palette_fix(0, self.bgp_rendering, val);
                 self.bgp = val;
+                self.bgp_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, false, 0); }
             }
             0xFF48 => {
+                self.retroactive_palette_fix(1, self.obp0_rendering, val);
                 self.obp0 = val;
+                self.obp0_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 0); }
             }
             0xFF49 => {
+                self.retroactive_palette_fix(2, self.obp1_rendering, val);
                 self.obp1 = val;
+                self.obp1_rendering = val;
                 if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 1); }
             }
             0xFF4A => {
