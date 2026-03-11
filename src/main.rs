@@ -286,6 +286,7 @@ fn main() {
         .unwrap();
 
     let mut canvas = window.into_canvas();
+
     let texture_creator = canvas.texture_creator();
 
     let mut texture = texture_creator

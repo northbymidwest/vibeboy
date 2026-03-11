@@ -309,7 +309,6 @@ impl Sweep {
                 match self.calc() {
                     None => ch.enabled = false,
                     Some(f) => {
-                        // Only write back frequency if shift != 0
                         if self.shift != 0 {
                             self.shadow = f;
                             ch.freq = f;
@@ -1313,8 +1312,7 @@ impl Apu {
 
         // Sweep: when div_divider & 3 == 3 (every 4th event)
         if self.div_divider & 3 == 3 {
-            let ch1 = &mut self.ch1;
-            self.sweep.clock(ch1);
+            self.sweep.clock(&mut self.ch1);
         }
 
         // Envelope volume_countdown: only on envelope steps (div_divider & 7 == 7)
