@@ -364,6 +364,12 @@ pub struct Ppu {
     pub(crate) wx_just_changed: bool,
     /// Skip retroactive LCDC fix: set when bus handler already applied glitch timing
     pub(crate) skip_retroactive_lcdc_fix: bool,
+    /// Junk zone: set when position_in_line is in [-16, -9] and SCX alignment
+    /// hasn't matched yet. Used by hardware for mid-scanline SCX glitches.
+    line_has_fractional_scrolling: bool,
+    /// True while the fetcher is actively fetching window tiles (set when window
+    /// activates, cleared by render_pixel_if_possible after first pixel pop).
+    window_is_being_fetched: bool,
 }
 
 impl Ppu {
@@ -478,6 +484,8 @@ impl Ppu {
             pixel_history_next: 0,
             wx_just_changed: false,
             skip_retroactive_lcdc_fix: false,
+            line_has_fractional_scrolling: false,
+            window_is_being_fetched: false,
         }
     }
 
@@ -1434,19 +1442,17 @@ impl Ppu {
         self.bg_fifo.clear();
         self.oam_fifo.clear();
         self.fetcher.reset(false);
-        // Pre-fill the FIFO with 8 junk pixels. The fetcher's Push state
-        // stalls while the FIFO is non-empty, so these junk pixels control
-        // the timing: they get consumed by pixel output in parallel with
-        // the fetcher's first tile read (6T), then the remaining junk
-        // pixels stall the Push until the FIFO drains.
-        // Position starts at -(8 + scx_frac) so that after consuming all
-        // junk (8 pops) and SCX discard pixels (scx_frac pops), position
-        // reaches 0 for the first visible pixel.
+        // Pre-fill the FIFO with 8 junk pixels. These get consumed during
+        // the junk zone (positions -16 to -9) in parallel with the fetcher's
+        // first tile read. The alignment check (pos & 7) == (SCX & 7) jumps
+        // position to -8, entering the SCX discard zone (-8 to -1). This
+        // naturally handles fractional scroll pixel discarding.
         for _ in 0..8 {
             self.bg_fifo.push_back(FifoPixel::default());
         }
-        let scx_frac = (self.scx & 7) as i16;
-        self.position_in_line = -(8 + scx_frac);
+        self.position_in_line = -16;
+        self.line_has_fractional_scrolling = false;
+        self.window_is_being_fetched = false;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -1455,9 +1461,8 @@ impl Ppu {
         self.disable_window_pixel_insertion_glitch = false;
         self.last_sprite_slot = -1;
         // Hardware pipeline priming delay before the rendering loop starts.
-        // In the pop-before-fetch model, the first pixel output happens 1T
-        // after the Push succeeds, offsetting by 1T vs fetch-before-render.
-        // DMG hardware: 5T priming → 4T here. CGB hardware: 4T → 3T here.
+        // Hardware uses 5T (3T + 2T) but the junk zone alignment jump adds
+        // 1T of implicit delay, so we compensate: DMG=4, CGB=3.
         self.mode3_start_delay = if self.cgb_mode { 3 } else { 4 };
     }
 
@@ -1527,8 +1532,35 @@ impl Ppu {
             None
         };
 
+        // Junk zone: positions -16 to -9. The pre-filled junk pixels drain
+        // here while the fetcher reads the first tile. The alignment check
+        // (pos & 7) == (SCX & 7) jumps position to -8, transitioning to the
+        // SCX discard zone. This models the hardware's tile-boundary alignment.
+        if self.position_in_line >= -16 && self.position_in_line <= -9 {
+            if (self.position_in_line & 7) == (self.scx as i16 & 7) {
+                // Tile boundary alignment: skip remaining junk
+                self.position_in_line = -8;
+            } else if self.window_is_being_fetched
+                && (self.position_in_line & 7) == 6
+                && (self.scx & 7) == 7
+            {
+                // Window fetch edge case: early alignment when SCX low bits = 7
+                self.position_in_line = -8;
+            } else if self.position_in_line == -9 {
+                // Alignment never matched (safety net), wrap back
+                self.position_in_line = -16;
+                return;
+            } else {
+                self.line_has_fractional_scrolling = true;
+            }
+            // Fall through to the < 0 discard check below
+        }
+
+        self.window_is_being_fetched = false;
+
         if self.position_in_line < 0 {
-            // SCX discard zone (-8..-1): pixels popped but not rendered.
+            // Discard zone (includes -8..-1 from SCX alignment and
+            // post-alignment junk zone pixels): pop but don't render.
             self.position_in_line += 1;
             return;
         }
@@ -1574,6 +1606,7 @@ impl Ppu {
         self.bg_fifo.clear();
         self.fetcher.reset(true);
         self.window_active = true;
+        self.window_is_being_fetched = true;
     }
 
     /// Find a sprite that triggers at the current position_in_line
