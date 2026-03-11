@@ -162,6 +162,7 @@ struct SquareCh {
     volume: u8,
     env_timer: u8,
     volume_countdown: u8, // separate from env_timer, decremented when envelope_clock is not set
+    current_sample: u8,      // cached output sample, updated on duty advance/envelope/trigger
     sample_suppressed: bool, // first sample after trigger is suppressed (outputs 0)
     just_reloaded: bool,     // true when last tick consumed all cycles exactly
     did_tick: bool,          // true when duty_pos advanced, cleared on trigger
@@ -191,6 +192,7 @@ impl SquareCh {
             volume: 0,
             env_timer: 0,
             volume_countdown: 0,
+            current_sample: 0,
             sample_suppressed: false,
             just_reloaded: false,
             did_tick: false,
@@ -216,6 +218,7 @@ impl SquareCh {
             self.duty_pos = (self.duty_pos + 1) & 7;
             self.did_tick = true;
             self.sample_suppressed = false;
+            self.update_sample();
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
                 self.freq_timer = 1;
@@ -227,11 +230,16 @@ impl SquareCh {
         }
     }
 
-    fn output(&self) -> u8 {
+    fn update_sample(&mut self) {
         if !self.enabled || !self.dac_on || self.sample_suppressed {
-            return 0;
+            self.current_sample = 0;
+        } else {
+            self.current_sample = DUTY_TABLE[self.duty as usize][self.duty_pos as usize] * self.volume;
         }
-        DUTY_TABLE[self.duty as usize][self.duty_pos as usize] * self.volume
+    }
+
+    fn output(&self) -> u8 {
+        self.current_sample
     }
 
     fn clock_length(&mut self) {
@@ -257,6 +265,7 @@ impl SquareCh {
         } else {
             self.volume = self.volume.wrapping_sub(1) & 0xF;
         }
+        self.update_sample();
     }
 }
 
@@ -868,6 +877,7 @@ impl Apu {
                     self.ch1.enabled = false;
                 } else if self.ch1.enabled {
                     nrx2_glitch(&mut self.ch1.volume, val, old_value, &mut self.ch1.volume_countdown, &mut self.ch1.envelope_clock);
+                    self.ch1.update_sample();
                     // PCM mask: CH1 is low nibble of pcm_mask[0]
                     self.pcm_mask[0] &= self.ch1.volume | 0xF0;
                 }
@@ -920,6 +930,7 @@ impl Apu {
                     self.ch2.enabled = false;
                 } else if self.ch2.enabled {
                     nrx2_glitch(&mut self.ch2.volume, val, old_value, &mut self.ch2.volume_countdown, &mut self.ch2.envelope_clock);
+                    self.ch2.update_sample();
                     // PCM mask: CH2 is high nibble of pcm_mask[0]
                     self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
                 }
@@ -1090,6 +1101,7 @@ impl Apu {
         if !self.ch1.dac_on {
             self.ch1.enabled = false;
         }
+        self.ch1.update_sample();
     }
 
     fn trigger_ch2(&mut self, val: u8) {
@@ -1143,6 +1155,7 @@ impl Apu {
         if !self.ch2.dac_on {
             self.ch2.enabled = false;
         }
+        self.ch2.update_sample();
     }
 
     fn trigger_ch3(&mut self) {

@@ -577,10 +577,11 @@ impl Cpu {
 
             // ---- 0x10-0x1F ----
             0x10 => {
-                // STOP: consume 0x00 argument, then perform speed switch if KEY1 bit0 set
+                // STOP: consume 0x00 argument, reset DIV, optionally speed switch
                 let _next = self.fetch_byte(bus);
+                // STOP always resets DIV (triggers falling-edge effects on timer/APU)
+                bus.do_speed_switch_prepare();
                 if bus.speed_switch_armed() {
-                    bus.do_speed_switch_prepare();
                     let total_mcycles = 32768u32;
                     let toggle_at = if bus.is_double_speed() {
                         // Double→normal: toggle near start
