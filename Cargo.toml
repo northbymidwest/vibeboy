@@ -14,18 +14,24 @@ path = "src/main.rs"
 name = "test_runner"
 path = "src/test_runner.rs"
 
-[[bin]]
-name = "vibeboy_cocoa"
-path = "src/cocoa_ui.rs"
-
 [dependencies]
 sdl3 = { version = "0.17", features = ["hidapi"] }
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
 metal = "0.29"
 core-graphics-types = "0.1.3"
 block2 = "0.6"
+
+[[bin]]
+name = "vibeboy_cocoa"
+path = "src/cocoa_ui.rs"
+required-features = ["macos-ui"]
+
+[features]
+macos-ui = []
