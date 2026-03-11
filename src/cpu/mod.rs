@@ -952,6 +952,12 @@ impl Cpu {
 
             0x76 => {
                 // HALT
+                // EI→HALT: the EI delay completes during HALT, so IME becomes
+                // true before HALT checks for pending interrupts.
+                if self.ime_pending {
+                    self.ime = true;
+                    self.ime_pending = false;
+                }
                 if !self.ime {
                     let pending = bus.ie() & bus.if_reg() & 0x1F;
                     if pending != 0 {
