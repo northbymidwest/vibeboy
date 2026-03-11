@@ -5,6 +5,8 @@
 //! anti-aliased output while preserving pixel-art detail.
 
 use super::get;
+use super::color_dist;
+use super::blend_argb as blend;
 
 /// xBR scaling factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,45 +24,6 @@ impl XbrScale {
             XbrScale::Xbr4x => 4,
         }
     }
-}
-
-// ── Color distance (YCbCr-weighted) ────────────────────────────────────────
-
-/// Weighted color distance in YCbCr-like space.
-#[inline(always)]
-fn color_dist(a: u32, b: u32) -> f32 {
-    if a == b {
-        return 0.0;
-    }
-    let ar = ((a >> 16) & 0xFF) as f32;
-    let ag = ((a >> 8) & 0xFF) as f32;
-    let ab = (a & 0xFF) as f32;
-    let br = ((b >> 16) & 0xFF) as f32;
-    let bg = ((b >> 8) & 0xFF) as f32;
-    let bb = (b & 0xFF) as f32;
-
-    let dr = ar - br;
-    let dg = ag - bg;
-    let db = ab - bb;
-
-    // Approximate YCbCr weighting
-    let dy = 0.299 * dr + 0.587 * dg + 0.114 * db;
-    let dcb = -0.169 * dr - 0.331 * dg + 0.500 * db;
-    let dcr = 0.500 * dr - 0.419 * dg - 0.081 * db;
-
-    48.0 * dy * dy + 7.0 * dcb * dcb + 6.0 * dcr * dcr
-}
-
-/// Blend two ARGB colors with weight alpha (0.0 = all a, 1.0 = all b).
-#[inline(always)]
-fn blend(a: u32, b: u32, alpha: f32) -> u32 {
-    if alpha <= 0.0 { return a; }
-    if alpha >= 1.0 { return b; }
-    let inv = 1.0 - alpha;
-    let r = (((a >> 16) & 0xFF) as f32 * inv + ((b >> 16) & 0xFF) as f32 * alpha).round() as u32;
-    let g = (((a >> 8) & 0xFF) as f32 * inv + ((b >> 8) & 0xFF) as f32 * alpha).round() as u32;
-    let bl = ((a & 0xFF) as f32 * inv + (b & 0xFF) as f32 * alpha).round() as u32;
-    0xFF000000 | (r.min(255) << 16) | (g.min(255) << 8) | bl.min(255)
 }
 
 /// Check if two colors are equal (exact match).

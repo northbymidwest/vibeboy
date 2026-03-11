@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest (default), bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x, xbr3x, xbr4x
+    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -247,8 +247,15 @@ fn main() {
         "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
         "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
         "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
+        "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz2x),
+        "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz3x),
+        "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
+        "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
+        "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
+        "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
+        "super-xbr" => scaling::ScaleFilter::SuperXbr,
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x, xbr3x, xbr4x", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr", other);
             std::process::exit(1);
         }
     };
@@ -518,6 +525,18 @@ fn main() {
                 }
                 scaling::ScaleFilter::Xbr(mode) => {
                     scaled = scaling::xbr::scale(raw_src, sw, sh, mode);
+                    &scaled
+                }
+                scaling::ScaleFilter::Xbrz(mode) => {
+                    scaled = scaling::xbrz::scale(raw_src, sw, sh, mode);
+                    &scaled
+                }
+                scaling::ScaleFilter::XbrHybrid => {
+                    scaled = scaling::xbr_hybrid::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::SuperXbr => {
+                    scaled = scaling::super_xbr::scale(raw_src, sw, sh);
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,
