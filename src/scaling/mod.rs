@@ -1,9 +1,12 @@
 //! Pixel-art scaling algorithms.
 
+pub mod bicubic;
+pub mod bilinear;
 pub mod eagle;
 pub mod epx;
 pub mod hqx;
 pub mod scale3x;
+pub mod xbr;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]
@@ -31,24 +34,31 @@ impl HqxScale {
     }
 }
 
+pub use xbr::XbrScale;
+
 /// Scaling filter for the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaleFilter {
     Nearest,
+    Bilinear,
+    Bicubic,
     Hqx(HqxScale),
     Epx,
     Scale2x,
     Scale3x,
     Eagle,
+    Xbr(XbrScale),
 }
 
 impl ScaleFilter {
     pub fn factor(self) -> u32 {
         match self {
             ScaleFilter::Nearest => 1,
+            ScaleFilter::Bilinear | ScaleFilter::Bicubic => 2,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
             ScaleFilter::Scale3x => 3,
+            ScaleFilter::Xbr(x) => x.factor(),
         }
     }
 }

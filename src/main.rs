@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest (default), epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x
+    /// Scaling filter: nearest (default), bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x, xbr3x, xbr4x
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -235,6 +235,8 @@ fn main() {
     // Parse scaling filter
     let scale_filter: scaling::ScaleFilter = match cli.filter.to_lowercase().as_str() {
         "nearest" | "none" => scaling::ScaleFilter::Nearest,
+        "bilinear" => scaling::ScaleFilter::Bilinear,
+        "bicubic" => scaling::ScaleFilter::Bicubic,
         "epx" => scaling::ScaleFilter::Epx,
         "scale2x" => scaling::ScaleFilter::Scale2x,
         "scale3x" => scaling::ScaleFilter::Scale3x,
@@ -242,8 +244,11 @@ fn main() {
         "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
         "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
         "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
+        "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
+        "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
+        "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x, xbr3x, xbr4x", other);
             std::process::exit(1);
         }
     };
@@ -501,6 +506,18 @@ fn main() {
                 }
                 scaling::ScaleFilter::Eagle => {
                     scaled = scaling::eagle::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Bilinear => {
+                    scaled = scaling::bilinear::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Bicubic => {
+                    scaled = scaling::bicubic::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Xbr(mode) => {
+                    scaled = scaling::xbr::scale(raw_src, sw, sh, mode);
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,
