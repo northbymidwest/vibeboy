@@ -192,6 +192,10 @@ impl HqxScale {
 pub enum ScaleFilter {
     Nearest,
     Hqx(HqxScale),
+    Epx,
+    Scale2x,
+    Scale3x,
+    Eagle,
 }
 
 impl ScaleFilter {
@@ -199,6 +203,8 @@ impl ScaleFilter {
         match self {
             ScaleFilter::Nearest => 1,
             ScaleFilter::Hqx(h) => h.factor(),
+            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
+            ScaleFilter::Scale3x => 3,
         }
     }
 }

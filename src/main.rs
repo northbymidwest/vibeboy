@@ -5,6 +5,7 @@ mod cpu;
 mod emulator;
 mod hqx;
 mod joypad;
+mod scaling;
 mod model;
 mod ppu;
 mod printer;
@@ -88,7 +89,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest (default), hq2x, hq3x, hq4x
+    /// Scaling filter: nearest (default), epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -235,11 +236,15 @@ fn main() {
     // Parse scaling filter
     let scale_filter: hqx::ScaleFilter = match cli.filter.to_lowercase().as_str() {
         "nearest" | "none" => hqx::ScaleFilter::Nearest,
+        "epx" => hqx::ScaleFilter::Epx,
+        "scale2x" => hqx::ScaleFilter::Scale2x,
+        "scale3x" => hqx::ScaleFilter::Scale3x,
+        "eagle" => hqx::ScaleFilter::Eagle,
         "hq2x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq2x),
         "hq3x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq3x),
         "hq4x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq4x),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, hq2x, hq3x, hq4x", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x", other);
             std::process::exit(1);
         }
     };
@@ -485,6 +490,18 @@ fn main() {
             let final_src: &[u32] = match scale_filter {
                 hqx::ScaleFilter::Hqx(mode) => {
                     scaled = hqx::scale(raw_src, sw, sh, mode);
+                    &scaled
+                }
+                hqx::ScaleFilter::Epx | hqx::ScaleFilter::Scale2x => {
+                    scaled = scaling::epx::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                hqx::ScaleFilter::Scale3x => {
+                    scaled = scaling::scale3x::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                hqx::ScaleFilter::Eagle => {
+                    scaled = scaling::eagle::scale(raw_src, sw, sh);
                     &scaled
                 }
                 hqx::ScaleFilter::Nearest => raw_src,
