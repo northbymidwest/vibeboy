@@ -356,6 +356,8 @@ pub struct Ppu {
     pixel_history_next: usize,
     /// WX write conflict: suppresses WX+6 window trigger for 1T after WX write
     pub(crate) wx_just_changed: bool,
+    /// Skip retroactive LCDC fix: set when bus handler already applied glitch timing
+    pub(crate) skip_retroactive_lcdc_fix: bool,
 }
 
 impl Ppu {
@@ -470,6 +472,7 @@ impl Ppu {
             pixel_history_count: 0,
             pixel_history_next: 0,
             wx_just_changed: false,
+            skip_retroactive_lcdc_fix: false,
         }
     }
 
@@ -580,6 +583,12 @@ impl Ppu {
     /// T4 uses the real new LCDC value.
     fn retroactive_lcdc_fix(&mut self, old_lcdc: u8, new_lcdc: u8) {
         if self.mode != 3 || self.cgb_mode || self.pixel_history_count == 0 {
+            return;
+        }
+        // When the bus handler already applied the glitch timing (2T old + 1T glitch),
+        // skip the retroactive fix to avoid double-correcting pixels.
+        if self.skip_retroactive_lcdc_fix {
+            self.skip_retroactive_lcdc_fix = false;
             return;
         }
         let old_bg_en = old_lcdc & 0x01 != 0;
@@ -1695,13 +1704,13 @@ impl Ppu {
     }
 
     /// Advance the BG/window tile fetcher by one T-cycle.
-    /// T1/T2 model: T1 computes & latches addresses, T2 reads VRAM.
+    /// T1/T2 model: T1 latches register values, T2 reads VRAM.
+    /// CGB latches all registers at T1 (cached on CGB-D+).
+    /// DMG computes addresses at T2 with live register reads (SCX/SCY/LCDC).
     fn tick_bg_fetcher(&mut self) {
         self.fetcher.tick += 1;
         if self.fetcher.tick < 2 {
-            // T1: latch state on CGB (≥CGB-D). On DMG, we defer address
-            // computation to T2 because our fetch-before-pop ordering means
-            // our T2 aligns with hardware's T1 in absolute time.
+            // T1: latch state on CGB (≥CGB-D).
             if self.cgb_mode {
                 match self.fetcher.state {
                     FetcherState::ReadTileId => {
@@ -1734,9 +1743,7 @@ impl Ppu {
 
         match self.fetcher.state {
             FetcherState::ReadTileId => {
-                // CGB: use latched address from T1. DMG: compute fresh at T2
-                // (our T2 aligns with hardware's register read point due to
-                // fetch-before-pop ordering).
+                // CGB: use latched address from T1. DMG: compute fresh at T2.
                 let map_addr = if self.cgb_mode {
                     self.fetcher.latched_map_addr
                 } else {

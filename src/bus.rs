@@ -740,6 +740,13 @@ impl Bus {
             // DMG palette writes: -2T conflict with bus glitch (old|new at T3)
             // Hardware timing: 2T old → 1T (old|new) glitch → remaining T with new
             0xFF47..=0xFF49 if !self.model.is_cgb() => {
+                // Flush all deferred ticks except the current M-cycle's 4T
+                if self.ppu_deferred > 4 {
+                    let catchup = self.ppu_deferred - 4;
+                    let flags = self.ppu.step(catchup);
+                    self.if_ |= flags;
+                    self.ppu_deferred = 4;
+                }
                 if self.ppu_deferred >= 4 {
                     // Flush 2T with old palette value
                     let flags = self.ppu.step(2);
@@ -772,9 +779,9 @@ impl Bus {
                 }
             }
             // DMG SCX: -2T conflict (write takes effect 2T early)
-            // Hardware: advance(pending-2), write, pending=6
-            // The fetcher reads SCX live, so the new value affects the next
-            // tile fetch. Don't flush deferred — the write is 2T early.
+            // Hardware: advance(pending-2), write, pending=6.
+            // No flush — live SCX read in fetcher at T2 naturally aligns for
+            // scx_low_3_bits. The high-5-bits test requires further work.
             0xFF43 if !self.model.is_cgb() => {
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
@@ -784,8 +791,7 @@ impl Bus {
             }
             // DMG SCY: READ_NEW (-1T conflict, write takes effect 1T early)
             // Hardware: advance(pending-1), write, pending=5.
-            // Since our fetcher reads at T2 (1T after hardware's T1, compensating
-            // for fetch-before-pop ordering), no flush gives correct alignment.
+            // No flush — our T2 fetcher read compensates for the timing.
             0xFF42 if !self.model.is_cgb() => {
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
@@ -794,34 +800,37 @@ impl Bus {
                 }
             }
             // DMG LCDC: -2T conflict with glitch (old | (new & BG_EN)) for 1T
-            // Only apply glitch during mode 3 — LCD enable/disable uses READ_OLD
             0xFF40 if !self.model.is_cgb() => {
+                // Flush all deferred ticks except the current M-cycle's 4T,
+                // so we check mode with up-to-date PPU state.
+                if self.ppu_deferred > 4 {
+                    let catchup = self.ppu_deferred - 4;
+                    let flags = self.ppu.step(catchup);
+                    self.if_ |= flags;
+                    self.ppu_deferred = 4;
+                }
                 let in_mode3 = self.ppu.mode == 3;
                 if in_mode3 && self.ppu_deferred >= 4 {
-                    // Flush 2T with old LCDC
+                    // 2T old + 1T glitch (old | new & BG_EN) + write real
                     let flags = self.ppu.step(2);
                     self.if_ |= flags;
                     self.ppu_deferred -= 2;
-
-                    // OBJ_EN suppression: if disabling OBJ_EN at pixel_x==0 or
-                    // during sprite fetch, clear it from old value too
+                    // OBJ_EN suppression
                     let mut old_lcdc = self.ppu.lcdc;
                     if (val & 0x02) == 0 {
                         if self.ppu.pixel_x == 0 || self.ppu.sprite_fetch_active {
                             old_lcdc &= !0x02;
                         }
                     }
-
                     // Glitch LCDC: old | (new & BG_EN bit)
                     let glitch = old_lcdc | (val & 0x01);
                     let saved_lcdc = self.ppu.lcdc;
                     self.ppu.lcdc = glitch;
-                    // Tick 1T with glitch LCDC
                     let flags = self.ppu.step(1);
                     self.if_ |= flags;
                     self.ppu_deferred -= 1;
-                    // Restore before full write
                     self.ppu.lcdc = saved_lcdc;
+                    self.ppu.skip_retroactive_lcdc_fix = true;
                 } else {
                     self.flush_ppu_deferred();
                 }
