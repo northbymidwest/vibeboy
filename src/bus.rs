@@ -789,10 +789,24 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG SCY: READ_NEW (-1T conflict, write takes effect 1T early)
-            // Hardware: advance(pending-1), write, pending=5.
-            // No flush — our T2 fetcher read compensates for the timing.
+            // DMG SCY: READ_NEW conflict (hardware: pending-1, write, pending=5)
+            // Our deferred model: write immediately (SCY read live by fetcher at T2)
             0xFF42 if !self.model.is_cgb() => {
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
+            // DMG/CGB-double SCX: write takes effect 2T early (SCX_DMG conflict)
+            0xFF43 if !self.model.is_cgb() || self.double_speed => {
+                // Flush all but 2T with old SCX value
+                if self.ppu_deferred > 2 {
+                    let flush = self.ppu_deferred - 2;
+                    let flags = self.ppu.step(flush);
+                    self.if_ |= flags;
+                    self.ppu_deferred = 2;
+                }
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
