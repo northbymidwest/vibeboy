@@ -888,8 +888,11 @@ impl Ppu {
                 // Check if scanline is complete
                 if self.pixel_x >= 160 {
                     if self.cgb_mode {
-                        // Palette unblock is deferred 3T after mode 3 ends
-                        self.cgb_palette_unblock_dot = self.dot + 3;
+                        // Palette stays blocked into mode 0:
+                        // Single-speed: 5T after mode 3 ends
+                        // Double-speed: 3T after mode 3 ends
+                        let delay = if self.double_speed { 3 } else { 5 };
+                        self.cgb_palette_unblock_dot = self.dot + delay;
                     } else {
                         self.cgb_palettes_blocked = false;
                     }
