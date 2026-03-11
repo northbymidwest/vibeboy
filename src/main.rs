@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr
+    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x]
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -254,8 +254,18 @@ fn main() {
         "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
         "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
         "super-xbr" => scaling::ScaleFilter::SuperXbr,
+        "omniscale" | "omniscale2x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X2),
+        "omniscale3x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X3),
+        "omniscale4x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X4),
+        "omniscale5x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X5),
+        "omniscale6x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X6),
+        "omniscale-legacy" | "omniscale-legacy2x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X2),
+        "omniscale-legacy3x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X3),
+        "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
+        "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
+        "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x]", other);
             std::process::exit(1);
         }
     };
@@ -537,6 +547,14 @@ fn main() {
                 }
                 scaling::ScaleFilter::SuperXbr => {
                     scaled = scaling::super_xbr::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::OmniScale(f) => {
+                    scaled = scaling::omniscale::scale(raw_src, sw, sh, f.factor());
+                    &scaled
+                }
+                scaling::ScaleFilter::OmniScaleLegacy(f) => {
+                    scaled = scaling::omniscale_legacy::scale(raw_src, sw, sh, f.factor());
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,

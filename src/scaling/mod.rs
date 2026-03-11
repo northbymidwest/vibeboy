@@ -5,6 +5,8 @@ pub mod bilinear;
 pub mod eagle;
 pub mod epx;
 pub mod hqx;
+pub mod omniscale;
+pub mod omniscale_legacy;
 pub mod scale3x;
 pub mod super_xbr;
 pub mod xbr;
@@ -77,6 +79,28 @@ impl HqxScale {
 pub use xbr::XbrScale;
 pub use xbrz::XbrzScale;
 
+/// OmniScale factor (works at any integer scale).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OmniScaleFactor {
+    X2,
+    X3,
+    X4,
+    X5,
+    X6,
+}
+
+impl OmniScaleFactor {
+    pub fn factor(self) -> u32 {
+        match self {
+            OmniScaleFactor::X2 => 2,
+            OmniScaleFactor::X3 => 3,
+            OmniScaleFactor::X4 => 4,
+            OmniScaleFactor::X5 => 5,
+            OmniScaleFactor::X6 => 6,
+        }
+    }
+}
+
 /// Scaling filter for the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaleFilter {
@@ -92,6 +116,8 @@ pub enum ScaleFilter {
     Xbrz(XbrzScale),
     XbrHybrid,
     SuperXbr,
+    OmniScale(OmniScaleFactor),
+    OmniScaleLegacy(OmniScaleFactor),
 }
 
 impl ScaleFilter {
@@ -105,6 +131,7 @@ impl ScaleFilter {
             ScaleFilter::Xbr(x) => x.factor(),
             ScaleFilter::Xbrz(x) => x.factor(),
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr => 2,
+            ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f) => f.factor(),
         }
     }
 }
