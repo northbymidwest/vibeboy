@@ -1458,7 +1458,7 @@ impl Ppu {
         // In the pop-before-fetch model, the first pixel output happens 1T
         // after the Push succeeds, offsetting by 1T vs fetch-before-render.
         // DMG hardware: 5T priming → 4T here. CGB hardware: 4T → 3T here.
-        self.mode3_start_delay = 4;
+        self.mode3_start_delay = if self.cgb_mode { 3 } else { 4 };
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
@@ -2459,11 +2459,10 @@ impl Ppu {
             }
             0xFF4A => {
                 self.wy = val;
-                // WY comparison runs continuously until the BG FIFO has
-                // started outputting pixels. In mode 3, this means the
-                // fetcher must have completed its first tile push.
-                let can_trigger = self.mode != 3
-                    || (self.bg_fifo.len() == 0 && self.position_in_line <= 0);
+                // WY comparison runs continuously until the PPU has started
+                // outputting visible pixels (position_in_line > 0 means at
+                // least one visible pixel has been output).
+                let can_trigger = self.mode != 3 || self.position_in_line <= 0;
                 if self.lcdc & 0x20 != 0 && self.ly == val && can_trigger {
                     self.wy_triggered = true;
                 }
