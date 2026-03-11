@@ -278,7 +278,6 @@ pub struct Ppu {
     /// SCX%8 pixels to discard from first BG tile
     scx_discard: u8,
     /// SCX/8 tile column offset latched at Mode 3 start
-    scx_tile_offset: u8,
     /// Sprite fetch in progress
     pub(crate) sprite_fetch_active: bool,
     sprite_fetch_step: u8,   // 0=tile_id, 1=data_lo, 2=data_hi
@@ -297,6 +296,9 @@ pub struct Ppu {
     /// This allows LCDC writes between steps to cancel window activation.
     window_trigger_pending: bool,
     window_trigger_from_wx_write: bool,
+    /// DMG glitch: when WIN_EN is disabled while window is being fetched,
+    /// suppress the phantom window pixel insertion at the fetcher push state.
+    disable_window_pixel_insertion_glitch: bool,
     /// True when processing the last tick of a step() call.
     last_tick_of_step: bool,
     /// True when processing the first tick of a step() call.
@@ -434,7 +436,6 @@ impl Ppu {
             fetcher: Fetcher::new(),
             pixel_x: 0,
             scx_discard: 0,
-            scx_tile_offset: 0,
             sprite_fetch_active: false,
             sprite_fetch_step: 0,
             sprite_fetch_tick: 0,
@@ -446,6 +447,7 @@ impl Ppu {
             window_active: false,
             window_trigger_pending: false,
             window_trigger_from_wx_write: false,
+            disable_window_pixel_insertion_glitch: false,
             last_tick_of_step: false,
             first_tick_of_step: false,
             mode3_start_delay: 0,
@@ -512,7 +514,6 @@ impl Ppu {
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.scx_discard = 0;
-        self.scx_tile_offset = 0;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -1421,12 +1422,12 @@ impl Ppu {
         self.oam_fifo.clear();
         self.fetcher.reset(false);
         self.pixel_x = 0;
-        self.scx_tile_offset = self.scx / 8;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
         self.window_trigger_pending = false;
         self.window_trigger_from_wx_write = false;
+        self.disable_window_pixel_insertion_glitch = false;
         self.last_sprite_slot = -1;
         self.scx_discard = self.scx & 7;
         // Hardware pipeline priming delay before fetcher starts.
@@ -1698,36 +1699,45 @@ impl Ppu {
     fn tick_bg_fetcher(&mut self) {
         self.fetcher.tick += 1;
         if self.fetcher.tick < 2 {
-            // T1: latch state on CGB (≥CGB-D)
-            if self.cgb_mode {
-                match self.fetcher.state {
-                    FetcherState::ReadTileId => {
-                        // Latch fetcher_y, TILE_SEL, and map address
+            // T1: latch addresses from live register values.
+            // Hardware reads SCY/SCX/LCDC at T1 and uses the latched addresses at T2.
+            // Both CGB and DMG latch here; the key difference is CGB-D+ also caches
+            // fetcher_y across data fetch steps, while DMG/CGB-C re-reads each time.
+            match self.fetcher.state {
+                FetcherState::ReadTileId => {
+                    // Latch fetcher_y, TILE_SEL, and map address
+                    self.fetcher.fetcher_y = if self.fetcher.fetching_window {
+                        self.window_line_counter as u8
+                    } else {
+                        self.scy.wrapping_add(self.ly)
+                    };
+                    self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                    self.fetcher.latched_map_addr = self.fetcher_map_addr();
+                }
+                FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
+                    if self.cgb_mode {
+                        // CGB: re-latch TILE_SEL at every data fetch T1.
+                        // During tile_sel_glitch, preserve the old latched_tile_sel
+                        if self.tile_sel_glitch {
+                            self.tile_sel_glitch_latched = true;
+                        } else if !self.tile_sel_glitch_latched {
+                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                        }
+                    } else {
+                        // DMG: re-read fetcher_y fresh (SCY may have changed)
                         self.fetcher.fetcher_y = if self.fetcher.fetching_window {
                             self.window_line_counter as u8
                         } else {
                             self.scy.wrapping_add(self.ly)
                         };
                         self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                        self.fetcher.latched_map_addr = self.fetcher_map_addr();
                     }
-                    FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
-                        // Re-latch TILE_SEL at every data fetch T1.
-                        // During tile_sel_glitch, preserve the old latched_tile_sel
-                        // (the glitch uses last_tileset from the *previous* T1)
-                        if self.tile_sel_glitch {
-                            self.tile_sel_glitch_latched = true;
-                        } else if !self.tile_sel_glitch_latched {
-                            // Don't re-latch if glitch is pending consumption
-                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                        }
-                        // Compute and cache tile data address
-                        let (addr, bank) = self.fetcher_tile_data_addr();
-                        self.fetcher.latched_addr = addr;
-                        self.fetcher.latched_bank = bank;
-                    }
-                    _ => {}
+                    // Compute and cache tile data address
+                    let (addr, bank) = self.fetcher_tile_data_addr();
+                    self.fetcher.latched_addr = addr;
+                    self.fetcher.latched_bank = bank;
                 }
+                _ => {}
             }
             return; // each step takes 2T
         }
@@ -1735,13 +1745,8 @@ impl Ppu {
 
         match self.fetcher.state {
             FetcherState::ReadTileId => {
-                // CGB: use the map address latched at T1 (critical for mid-scanline
-                // LCDC changes that alter BG_MAP between T1 and T2)
-                let map_addr = if self.cgb_mode {
-                    self.fetcher.latched_map_addr
-                } else {
-                    self.fetcher_map_addr()
-                };
+                // Use the map address latched at T1
+                let map_addr = self.fetcher.latched_map_addr;
                 self.fetcher.tile_id = self.vram[0][map_addr];
                 self.fetcher.tile_attrs = if self.cgb_mode {
                     self.vram[1][map_addr]
@@ -1751,17 +1756,10 @@ impl Ppu {
                 self.fetcher.state = FetcherState::ReadTileDataLow;
             }
             FetcherState::ReadTileDataLow => {
-                // CGB: use address cached at T1; DMG: compute fresh
-                let (addr, bank) = if self.cgb_mode {
-                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
-                } else {
-                    self.fetcher_tile_data_addr()
-                };
+                // Use address cached at T1
+                let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
                 // CGB tile_sel_glitch: when TILE_SEL transitions 1→0, the PPU
                 // reads glitched data instead of normal VRAM for 1T.
-                // Check both immediate (T2 hit) and latched (T1 hit, consumed at T2).
-                // tile_sel_glitch only affects HIGH byte (not low), so
-                // don't consume tile_sel_glitch_latched here — carry to HIGH T2.
                 if self.tile_sel_glitch && self.cgb_mode {
                     self.fetcher.tile_data_low =
                         self.tile_sel_glitch_data();
@@ -1771,12 +1769,8 @@ impl Ppu {
                 self.fetcher.state = FetcherState::ReadTileDataHigh;
             }
             FetcherState::ReadTileDataHigh => {
-                // CGB: use address cached at T1; DMG: compute fresh
-                let (addr, bank) = if self.cgb_mode {
-                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
-                } else {
-                    self.fetcher_tile_data_addr()
-                };
+                // Use address cached at T1
+                let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
                 // CGB tile_sel_glitch: same as ReadTileDataLow
                 if (self.tile_sel_glitch || self.tile_sel_glitch_latched) && self.cgb_mode {
                     self.tile_sel_glitch_latched = false;
@@ -1810,7 +1804,8 @@ impl Ppu {
         } else {
             let bg_map_base: u16 = if self.lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
             let scroll_y = self.scy.wrapping_add(self.ly);
-            let tile_x = (self.scx_tile_offset.wrapping_add(self.fetcher.tile_x)) & 0x1F;
+            // Read SCX live (not cached) — hardware reads the register each tile fetch
+            let tile_x = ((self.scx / 8).wrapping_add(self.fetcher.tile_x)) & 0x1F;
             let tile_y = (scroll_y as u16) / 8;
             (bg_map_base + tile_y * 32 + tile_x as u16) as usize
         }
@@ -1823,11 +1818,8 @@ impl Ppu {
         let tile_id = self.fetcher.tile_id;
         let attrs = self.fetcher.tile_attrs;
         // CGB: use latched TILE_SEL from ReadTileId T1; DMG: read LCDC live
-        let tile_data_signed = if self.cgb_mode {
-            !self.fetcher.latched_tile_sel
-        } else {
-            self.lcdc & 0x10 == 0
-        };
+        // Use TILE_SEL latched at T1 (both CGB and DMG latch at T1 now)
+        let tile_data_signed = !self.fetcher.latched_tile_sel;
 
         let tile_addr: u16 = if !tile_data_signed {
             tile_id as u16 * 16
@@ -1838,14 +1830,8 @@ impl Ppu {
         let y_flip = self.cgb_mode && attrs & 0x40 != 0;
         let bank = if self.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
 
-        let pixel_y = if self.cgb_mode {
-            // CGB (≥CGB-D): use latched fetcher_y
-            self.fetcher.fetcher_y & 7
-        } else if self.fetcher.fetching_window {
-            (self.window_line_counter & 7) as u8
-        } else {
-            self.scy.wrapping_add(self.ly) & 7
-        };
+        // Use fetcher_y latched at T1 (both CGB and DMG latch at T1 now)
+        let pixel_y = self.fetcher.fetcher_y & 7;
 
         let row = if y_flip { 7 - pixel_y } else { pixel_y };
         let addr = (tile_addr + row as u16 * 2) as usize;
@@ -2249,6 +2235,11 @@ impl Ppu {
                     self.window_trigger_from_wx_write = false;
                 }
                 if win_was_on && !win_now_on && self.window_active && self.mode == 3 {
+                    // DMG glitch: disabling window while fetcher is in window mode
+                    // suppresses phantom window pixel insertion
+                    if !self.cgb_mode && self.fetcher.fetching_window {
+                        self.disable_window_pixel_insertion_glitch = true;
+                    }
                     self.window_active = false;
                     self.fetcher.reset(false);
                     self.bg_fifo.clear();

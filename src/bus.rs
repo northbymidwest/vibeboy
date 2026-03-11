@@ -773,25 +773,25 @@ impl Bus {
             }
             // DMG SCX: -2T conflict (write takes effect 2T early)
             // Hardware: advance(pending-2), write, pending=6
+            // The fetcher reads SCX live, so the new value affects the next
+            // tile fetch. Don't flush deferred — the write is 2T early.
             0xFF43 if !self.model.is_cgb() => {
-                // Don't flush deferred — write takes effect 2T early so
-                // all deferred ticks should use the new SCX value.
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG SCY: -1T conflict (write takes effect 1T early)
+            // DMG SCY: READ_NEW (-1T conflict, write takes effect 1T early)
             // Hardware: advance(pending-1), write, pending=5
             0xFF42 if !self.model.is_cgb() => {
                 if self.ppu_deferred >= 4 {
-                    // Flush 3T with old SCY value
                     let flags = self.ppu.step(3);
                     self.if_ |= flags;
                     self.ppu_deferred -= 3;
+                } else {
+                    self.flush_ppu_deferred();
                 }
-                // Write new SCY — remaining 1T deferred uses new value
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
