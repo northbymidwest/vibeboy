@@ -633,9 +633,9 @@ impl Ppu {
     /// For SGB/SGB2, PPU timing depends on ROM header data (same mechanism as timer).
     pub fn set_post_boot(&mut self, model: crate::model::GbModel, is_cgb_game: bool, rom: &[u8]) {
         let (ly, dot, ticks) = match model {
-            crate::model::GbModel::Dmg0 => (145u8, 95u32, 24_574_384u64),
+            crate::model::GbModel::Dmg0 => (145u8, 99u32, 24_574_388u64),
             crate::model::GbModel::Dmg |
-            crate::model::GbModel::Mgb  => (0, 399, 23_173_856u64),
+            crate::model::GbModel::Mgb  => (0, 403, 23_173_860u64),
             crate::model::GbModel::Sgb |
             crate::model::GbModel::Sgb2 => {
                 // SGB boot ROM timing depends on ROM header data popcount.
@@ -663,6 +663,7 @@ impl Ppu {
         self.stat = (self.stat & 0xF8) | 1;  // Mode 1
         self.visible_ly = ly;
         self.ly_for_comparison = ly as i16;
+        self.update_coincidence();
         // Set LCDC so that the subsequent write of 0x91 in emulator.rs doesn't
         // trigger a fresh LCD enable (which would reset the PPU state we just set).
         self.lcdc = 0x91;
@@ -1941,13 +1942,9 @@ impl Ppu {
                 // DMG: LCDC bit 1 off disables sprites entirely
                 false
             } else if self.lcdc & 0x01 == 0 {
-                if self.cgb_mode {
-                    // CGB: LCDC bit 0 off disables BG priority, sprite always wins
-                    true
-                } else {
-                    // DMG: LCDC bit 0 off disables BG, sprite always shows
-                    true
-                }
+                // Both DMG and CGB: LCDC bit 0 off → sprite always wins
+                // (DMG: BG disabled; CGB: BG priority disabled)
+                true
             } else if oam_px.sprite_bg_over && bg.color_index != 0 {
                 false // OAM attr bit 7: sprite behind non-zero BG
             } else if bg.bg_priority && bg.color_index != 0 {
@@ -1970,8 +1967,16 @@ impl Ppu {
             }
         } else {
             // BG/window pixel
-            if self.cgb_mode {
+            if self.cgb_mode && !self.dmg_compat {
+                // Native CGB: LCDC bit 0 doesn't disable BG display
                 self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
+            } else if self.cgb_mode && self.dmg_compat {
+                // CGB DMG-compat: LCDC bit 0 disables BG display (DMG behavior)
+                if self.lcdc & 0x01 == 0 {
+                    self.gbc_bg_color(bg.palette as usize, 0)
+                } else {
+                    self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
+                }
             } else if self.lcdc & 0x01 == 0 {
                 // DMG: LCDC bit 0 off → BG/window draws as color 0
                 Self::dmg_color(self.bgp_rendering, 0)
