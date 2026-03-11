@@ -7,6 +7,8 @@
 //! Each function takes a source buffer of u32 ARGB pixels and produces a
 //! scaled output buffer.
 
+use super::HqxScale;
+
 // ── YUV color distance ──────────────────────────────────────────────────────
 
 /// Default color-distance threshold (tuned to match the original hqx C code).
@@ -64,42 +66,6 @@ fn interp_3(a: u32, b: u32) -> u32 {
 #[inline(always)]
 fn interp_4(a: u32, b: u32, c: u32) -> u32 {
     blend3(a, b, c, 2, 1, 1)
-}
-
-/// Weighted interpolation: (a + b) / 2  (same as interp_2)
-#[inline(always)]
-fn interp_5(a: u32, b: u32) -> u32 {
-    interp_2(a, b)
-}
-
-/// Weighted: (5a + 2b + c) / 8
-#[inline(always)]
-fn interp_6(a: u32, b: u32, c: u32) -> u32 {
-    blend3(a, b, c, 5, 2, 1)
-}
-
-/// Weighted: (6a + b + c) / 8
-#[inline(always)]
-fn interp_7(a: u32, b: u32, c: u32) -> u32 {
-    blend3(a, b, c, 6, 1, 1)
-}
-
-/// Weighted: (5a + 3b) / 8
-#[inline(always)]
-fn interp_8(a: u32, b: u32) -> u32 {
-    blend(a, b, 5, 3)
-}
-
-/// Weighted: (2a + 3b + 3c) / 8
-#[inline(always)]
-fn interp_9(a: u32, b: u32, c: u32) -> u32 {
-    blend3(a, b, c, 2, 3, 3)
-}
-
-/// Weighted: (14a + b + c) / 16
-#[inline(always)]
-fn interp_10(a: u32, b: u32, c: u32) -> u32 {
-    blend3(a, b, c, 14, 1, 1)
 }
 
 /// Two-component blend: (wa*a + wb*b) / (wa+wb)
@@ -164,48 +130,6 @@ impl Neighbors {
         }
 
         Neighbors { w, pattern }
-    }
-}
-
-// ── Scaling mode enum ───────────────────────────────────────────────────────
-
-/// HQx scaling factor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HqxScale {
-    Hq2x,
-    Hq3x,
-    Hq4x,
-}
-
-impl HqxScale {
-    pub fn factor(self) -> u32 {
-        match self {
-            HqxScale::Hq2x => 2,
-            HqxScale::Hq3x => 3,
-            HqxScale::Hq4x => 4,
-        }
-    }
-}
-
-/// Scaling mode for the renderer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScaleFilter {
-    Nearest,
-    Hqx(HqxScale),
-    Epx,
-    Scale2x,
-    Scale3x,
-    Eagle,
-}
-
-impl ScaleFilter {
-    pub fn factor(self) -> u32 {
-        match self {
-            ScaleFilter::Nearest => 1,
-            ScaleFilter::Hqx(h) => h.factor(),
-            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
-            ScaleFilter::Scale3x => 3,
-        }
     }
 }
 

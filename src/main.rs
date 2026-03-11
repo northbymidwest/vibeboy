@@ -3,7 +3,6 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod emulator;
-mod hqx;
 mod joypad;
 mod scaling;
 mod model;
@@ -234,15 +233,15 @@ fn main() {
     }
 
     // Parse scaling filter
-    let scale_filter: hqx::ScaleFilter = match cli.filter.to_lowercase().as_str() {
-        "nearest" | "none" => hqx::ScaleFilter::Nearest,
-        "epx" => hqx::ScaleFilter::Epx,
-        "scale2x" => hqx::ScaleFilter::Scale2x,
-        "scale3x" => hqx::ScaleFilter::Scale3x,
-        "eagle" => hqx::ScaleFilter::Eagle,
-        "hq2x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq2x),
-        "hq3x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq3x),
-        "hq4x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq4x),
+    let scale_filter: scaling::ScaleFilter = match cli.filter.to_lowercase().as_str() {
+        "nearest" | "none" => scaling::ScaleFilter::Nearest,
+        "epx" => scaling::ScaleFilter::Epx,
+        "scale2x" => scaling::ScaleFilter::Scale2x,
+        "scale3x" => scaling::ScaleFilter::Scale3x,
+        "eagle" => scaling::ScaleFilter::Eagle,
+        "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
+        "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
+        "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
         other => {
             eprintln!("Unknown filter '{}'. Options: nearest, epx, scale2x, scale3x, eagle, hq2x, hq3x, hq4x", other);
             std::process::exit(1);
@@ -259,8 +258,8 @@ fn main() {
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  1-9         — Select state slot");
     eprintln!("  Escape      — Quit");
-    if let hqx::ScaleFilter::Hqx(mode) = scale_filter {
-        eprintln!("  Filter: hq{}x", mode.factor());
+    if scale_filter != scaling::ScaleFilter::Nearest {
+        eprintln!("  Filter: {:?}", scale_filter);
     }
     eprintln!();
 
@@ -488,23 +487,23 @@ fn main() {
 
             let scaled;
             let final_src: &[u32] = match scale_filter {
-                hqx::ScaleFilter::Hqx(mode) => {
-                    scaled = hqx::scale(raw_src, sw, sh, mode);
+                scaling::ScaleFilter::Hqx(mode) => {
+                    scaled = scaling::hqx::scale(raw_src, sw, sh, mode);
                     &scaled
                 }
-                hqx::ScaleFilter::Epx | hqx::ScaleFilter::Scale2x => {
+                scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x => {
                     scaled = scaling::epx::scale(raw_src, sw, sh);
                     &scaled
                 }
-                hqx::ScaleFilter::Scale3x => {
+                scaling::ScaleFilter::Scale3x => {
                     scaled = scaling::scale3x::scale(raw_src, sw, sh);
                     &scaled
                 }
-                hqx::ScaleFilter::Eagle => {
+                scaling::ScaleFilter::Eagle => {
                     scaled = scaling::eagle::scale(raw_src, sw, sh);
                     &scaled
                 }
-                hqx::ScaleFilter::Nearest => raw_src,
+                scaling::ScaleFilter::Nearest => raw_src,
             };
             let fw = tex_w as usize;
             let fh = tex_h as usize;
