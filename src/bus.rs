@@ -1276,7 +1276,36 @@ impl Bus {
         // Tick everything except PPU
         self.tick_split(4, bus_cycles, 0);
 
+        self.check_hdma_hblank();
         self.step_oam_dma();
+    }
+
+    /// Check if a prior PPU flush detected mode 0 entry and trigger
+    /// HDMA mode 1 transfer. Called from tick_mcycle (after CPU read)
+    /// so transfer data isn't visible until the next read.
+    pub fn check_hdma_hblank(&mut self) {
+        if self.ppu.hblank_entered && !self.hdma.in_transfer {
+            self.ppu.hblank_entered = false;
+            if self.hdma.active && self.hdma.mode == 1 {
+                let ds = self.double_speed;
+                self.hdma.in_transfer = true;
+                // Setup: 2 bus M-cycles (normal) or 1 (DS)
+                if ds {
+                    self.tick(8, 4);
+                } else {
+                    self.tick(4, 4);
+                    self.tick(4, 4);
+                }
+                self.do_hdma_block_ticked();
+                self.hdma.in_transfer = false;
+                let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
+                self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
+                self.hdma.blocks -= 1;
+                if self.hdma.blocks == 0 {
+                    self.hdma.active = false;
+                }
+            }
+        }
     }
 
     /// Flush deferred PPU ticks from the lazy tick model.
@@ -1287,28 +1316,10 @@ impl Bus {
             let flags = self.ppu.step(d);
             self.if_ |= flags;
 
-            // Check H-Blank HDMA after PPU flush (normally done in tick_split)
-            if self.ppu.hblank_entered && !self.hdma.in_transfer {
-                self.ppu.hblank_entered = false;
-                if self.hdma.active && self.hdma.mode == 1 {
-                    let ds = self.double_speed;
-                    self.hdma.in_transfer = true;
-                    if ds {
-                        self.tick(8, 4);
-                    } else {
-                        self.tick(4, 4);
-                        self.tick(4, 4);
-                    }
-                    self.do_hdma_block_ticked();
-                    self.hdma.in_transfer = false;
-                    let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
-                    self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
-                    self.hdma.blocks -= 1;
-                    if self.hdma.blocks == 0 {
-                        self.hdma.active = false;
-                    }
-                }
-            }
+            // Don't trigger HDMA during flush — defer to tick_mcycle.
+            // Hardware detects mode 0 during tick (after CPU read), pauses
+            // the CPU, and transfers during the pause. Data only becomes
+            // visible at the next CPU read after the pause completes.
         }
     }
 

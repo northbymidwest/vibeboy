@@ -59,6 +59,7 @@ impl Cpu {
             bus.tick_half_mcycle(); // first 2T of HALT NOP
             let pending = bus.ie() & bus.if_reg() & 0x1F;
             bus.tick_half_mcycle(); // second 2T of HALT NOP
+            bus.check_hdma_hblank(); // HDMA during HALT NOP cycles
             bus.step_oam_dma();
             if pending != 0 {
                 self.halted = false;
