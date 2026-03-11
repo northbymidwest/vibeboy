@@ -769,16 +769,12 @@ impl Ppu {
                 // we already validated it at write time (off-by-1 tolerance)
                 self.window_trigger_from_wx_write = false;
                 if !self.window_active && self.lcdc & 0x20 != 0 && self.wy_triggered {
-                    self.bg_fifo.clear();
-                    self.fetcher.reset(true);
-                    self.window_active = true;
+                    self.activate_window();
                 }
             } else {
                 // Pending from tick_mode3: re-check all conditions including WX
                 if self.check_window_trigger() {
-                    self.bg_fifo.clear();
-                    self.fetcher.reset(true);
-                    self.window_active = true;
+                    self.activate_window();
                 }
             }
         }
@@ -978,7 +974,6 @@ impl Ppu {
                 if self.dot >= line_end {
                     self.lcd_first_line_short = false;
                     self.dot = 0;
-                    let old_ly = self.ly;
                     self.ly = self.ly.wrapping_add(1);
 
                     if self.cgb_mode {
@@ -986,16 +981,15 @@ impl Ppu {
                         // to the line-start handler. ly_for_comparison and coincidence
                         // update happen at dot 3-4, not at the wrap.
                         //
-                        // Mode 2 STAT source fires briefly at VBlank line wraps
-                        // (lines 144-152). Firing here (at the wrap, during the last
-                        // tick of the M-cycle) ensures it's invisible to IF reads
-                        // in the same M-cycle but visible to HALT's 2T-split check,
-                        // and fires BEFORE VBlank IF (which comes at dot 2).
+                        // CGB VBlank line wraps (144-152): use direct IF injection
+                        // for Mode 2 STAT source instead of mode_for_interrupt pulse.
+                        // Pulsing mode_for_interrupt through 2→-1 would disturb
+                        // stat_irq_line, creating spurious rising edges when the
+                        // line-start handler restores mode_for_interrupt to 1.
                         if self.ly >= 144 && self.ly <= 152 {
-                            self.mode_for_interrupt = 2;
-                            self.update_stat_irq();
-                            self.mode_for_interrupt = -1;
-                            self.update_stat_irq();
+                            if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                                self.if_flags |= 0x02;
+                            }
                         }
                         self.line_start_pending = true;
                         self.line_start_is_vblank = self.ly >= 144;
@@ -1068,13 +1062,12 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            // CGB: mode 2 STAT source fires at VBlank line wraps
-                            // (lines 145-152). Same timing rationale as line 144.
+                            // CGB VBlank line wraps (145-152): direct IF injection
+                            // for Mode 2 source. Same rationale as line 144 wrap.
                             if self.ly >= 145 && self.ly <= 152 {
-                                self.mode_for_interrupt = 2;
-                                self.update_stat_irq();
-                                self.mode_for_interrupt = -1;
-                                self.update_stat_irq();
+                                if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                                    self.if_flags |= 0x02;
+                                }
                             }
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
@@ -1270,13 +1263,16 @@ impl Ppu {
                     // Clear ly_for_comparison briefly (creates coincidence gap)
                     self.ly_for_comparison = -1;
                     self.update_coincidence();
-                    // Mode 2 STAT source fires briefly at start of VBlank lines 145-151.
-                    // Line 144 gets its mode 2 from the quirk at line 143 dot line_end-2.
-                    // Lines 152-153 do not fire mode 2.
+                    // Mode 2 STAT source: direct IF injection for VBlank lines
+                    // 145-151. Line 144's mode 2 comes from the early injection
+                    // at line 143 dot line_end-2. Lines 152-153 do not fire mode 2.
+                    // Uses direct injection instead of mode_for_interrupt pulse
+                    // to avoid disturbing stat_irq_line (which would create
+                    // spurious rising edges).
                     if self.ly >= 145 && self.ly <= 151 {
-                        self.mode_for_interrupt = 2;
-                        self.update_stat_irq();
-                        self.mode_for_interrupt = 1;
+                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                            self.if_flags |= 0x02;
+                        }
                     }
                     self.update_stat_irq();
                 }
@@ -1491,9 +1487,7 @@ impl Ppu {
             // M-cycle boundary, so defer activation to the next step() call.
             if self.scx_discard == 0 && self.check_window_trigger() {
                 if self.first_tick_of_step {
-                    self.bg_fifo.clear();
-                    self.fetcher.reset(true);
-                    self.window_active = true;
+                    self.activate_window();
                     return;
                 }
                 self.window_trigger_pending = true;
@@ -1543,6 +1537,13 @@ impl Ppu {
             }
         }
         false
+    }
+
+    /// Activate window: clear BG FIFO, restart fetcher for window tiles.
+    fn activate_window(&mut self) {
+        self.bg_fifo.clear();
+        self.fetcher.reset(true);
+        self.window_active = true;
     }
 
     /// Find a sprite that triggers at the current pixel_x
