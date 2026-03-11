@@ -1522,9 +1522,6 @@ impl Ppu {
         if self.window_active {
             return false; // already active
         }
-        if self.wx_just_changed {
-            return false; // suppressed for 1T after WX write
-        }
         if self.lcdc & 0x20 == 0 {
             return false; // window disabled
         }
@@ -1535,7 +1532,17 @@ impl Ppu {
         // Window triggers when pixel_x == WX-7 (for WX >= 7)
         // For WX < 7, window triggers at pixel_x == 0
         let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
-        self.pixel_x == wx_screen
+        if self.pixel_x == wx_screen {
+            return true;
+        }
+        // DMG LCD-PPU horizontal desync: window also triggers 1 pixel late
+        // (WX == position + 6), unless WX was just written this T-cycle.
+        if !self.cgb_mode && !self.wx_just_changed && self.wx >= 7 {
+            if self.pixel_x == self.wx.wrapping_sub(6) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Find a sprite that triggers at the current pixel_x
