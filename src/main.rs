@@ -3,6 +3,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod emulator;
+mod hqx;
 mod joypad;
 mod model;
 mod ppu;
@@ -86,6 +87,10 @@ struct Cli {
     /// Connect a Game Boy Printer (saves PNGs to prints/ directory)
     #[arg(long)]
     printer: bool,
+
+    /// Scaling filter: nearest (default), hq2x, hq3x, hq4x
+    #[arg(long, default_value = "nearest")]
+    filter: String,
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -223,6 +228,18 @@ fn main() {
         eprintln!("SNES program ROM loaded — SGB LLE mode active.");
     }
 
+    // Parse scaling filter
+    let scale_filter: hqx::ScaleFilter = match cli.filter.to_lowercase().as_str() {
+        "nearest" | "none" => hqx::ScaleFilter::Nearest,
+        "hq2x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq2x),
+        "hq3x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq3x),
+        "hq4x" => hqx::ScaleFilter::Hqx(hqx::HqxScale::Hq4x),
+        other => {
+            eprintln!("Unknown filter '{}'. Options: nearest, hq2x, hq3x, hq4x", other);
+            std::process::exit(1);
+        }
+    };
+
     eprintln!("\nControls:");
     eprintln!("  Arrow keys  — D-pad");
     eprintln!("  Z / X       — A / B");
@@ -233,6 +250,9 @@ fn main() {
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  1-9         — Select state slot");
     eprintln!("  Escape      — Quit");
+    if let hqx::ScaleFilter::Hqx(mode) = scale_filter {
+        eprintln!("  Filter: hq{}x", mode.factor());
+    }
     eprintln!();
 
     let mut emu = Emulator::new(rom, boot_rom, Some(rom_path.as_path()), model, snes_rom);
@@ -244,9 +264,14 @@ fn main() {
     }
 
     let is_sgb = emu.is_sgb();
-    let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
-    let win_w = tex_w * SCALE;
-    let win_h = tex_h * SCALE;
+    let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
+    let filter_factor = scale_filter.factor();
+    let tex_w = src_w * filter_factor;
+    let tex_h = src_h * filter_factor;
+    let win_scale = if filter_factor > 1 { SCALE / filter_factor.max(1) } else { SCALE };
+    let win_scale = win_scale.max(1);
+    let win_w = tex_w * win_scale;
+    let win_h = tex_h * win_scale;
 
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();
@@ -428,39 +453,39 @@ fn main() {
         let occluded = canvas.window().window_flags()
             & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
         if !occluded {
-            if is_sgb {
-                let src = emu.sgb_composited_frame();
-                texture
-                    .with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                        for y in 0..224usize {
-                            for x in 0..256usize {
-                                let argb = src[y * 256 + x];
-                                let off = y * pitch + x * 4;
-                                pixels[off]     =  argb        as u8; // B
-                                pixels[off + 1] = (argb >>  8) as u8; // G
-                                pixels[off + 2] = (argb >> 16) as u8; // R
-                                pixels[off + 3] = 0xFF;                // A
-                            }
-                        }
-                    })
-                    .unwrap();
+            let raw_src: &[u32] = if is_sgb {
+                emu.sgb_composited_frame()
             } else {
-                let src = emu.frame_buffer();
-                texture
-                    .with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                        for y in 0..144usize {
-                            for x in 0..160usize {
-                                let argb = src[y * 160 + x];
-                                let off = y * pitch + x * 4;
-                                pixels[off]     =  argb        as u8; // B
-                                pixels[off + 1] = (argb >>  8) as u8; // G
-                                pixels[off + 2] = (argb >> 16) as u8; // R
-                                pixels[off + 3] = 0xFF;                // A
-                            }
+                emu.frame_buffer()
+            };
+            let sw = src_w as usize;
+            let sh = src_h as usize;
+
+            let scaled;
+            let final_src: &[u32] = match scale_filter {
+                hqx::ScaleFilter::Hqx(mode) => {
+                    scaled = hqx::scale(raw_src, sw, sh, mode);
+                    &scaled
+                }
+                hqx::ScaleFilter::Nearest => raw_src,
+            };
+            let fw = tex_w as usize;
+            let fh = tex_h as usize;
+
+            texture
+                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                    for y in 0..fh {
+                        for x in 0..fw {
+                            let argb = final_src[y * fw + x];
+                            let off = y * pitch + x * 4;
+                            pixels[off]     =  argb        as u8; // B
+                            pixels[off + 1] = (argb >>  8) as u8; // G
+                            pixels[off + 2] = (argb >> 16) as u8; // R
+                            pixels[off + 3] = 0xFF;                // A
                         }
-                    })
-                    .unwrap();
-            }
+                    }
+                })
+                .unwrap();
 
             canvas.clear();
             canvas.copy(&texture, None, None).unwrap();
