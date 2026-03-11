@@ -1699,45 +1699,34 @@ impl Ppu {
     fn tick_bg_fetcher(&mut self) {
         self.fetcher.tick += 1;
         if self.fetcher.tick < 2 {
-            // T1: latch addresses from live register values.
-            // Hardware reads SCY/SCX/LCDC at T1 and uses the latched addresses at T2.
-            // Both CGB and DMG latch here; the key difference is CGB-D+ also caches
-            // fetcher_y across data fetch steps, while DMG/CGB-C re-reads each time.
-            match self.fetcher.state {
-                FetcherState::ReadTileId => {
-                    // Latch fetcher_y, TILE_SEL, and map address
-                    self.fetcher.fetcher_y = if self.fetcher.fetching_window {
-                        self.window_line_counter as u8
-                    } else {
-                        self.scy.wrapping_add(self.ly)
-                    };
-                    self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                    self.fetcher.latched_map_addr = self.fetcher_map_addr();
-                }
-                FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
-                    if self.cgb_mode {
-                        // CGB: re-latch TILE_SEL at every data fetch T1.
-                        // During tile_sel_glitch, preserve the old latched_tile_sel
-                        if self.tile_sel_glitch {
-                            self.tile_sel_glitch_latched = true;
-                        } else if !self.tile_sel_glitch_latched {
-                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                        }
-                    } else {
-                        // DMG: re-read fetcher_y fresh (SCY may have changed)
+            // T1: latch state on CGB (≥CGB-D). On DMG, we defer address
+            // computation to T2 because our fetch-before-pop ordering means
+            // our T2 aligns with hardware's T1 in absolute time.
+            if self.cgb_mode {
+                match self.fetcher.state {
+                    FetcherState::ReadTileId => {
                         self.fetcher.fetcher_y = if self.fetcher.fetching_window {
                             self.window_line_counter as u8
                         } else {
                             self.scy.wrapping_add(self.ly)
                         };
                         self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                        self.fetcher.latched_map_addr = self.fetcher_map_addr();
                     }
-                    // Compute and cache tile data address
-                    let (addr, bank) = self.fetcher_tile_data_addr();
-                    self.fetcher.latched_addr = addr;
-                    self.fetcher.latched_bank = bank;
+                    FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
+                        // Re-latch TILE_SEL at every data fetch T1.
+                        // During tile_sel_glitch, preserve the old latched_tile_sel
+                        if self.tile_sel_glitch {
+                            self.tile_sel_glitch_latched = true;
+                        } else if !self.tile_sel_glitch_latched {
+                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                        }
+                        let (addr, bank) = self.fetcher_tile_data_addr();
+                        self.fetcher.latched_addr = addr;
+                        self.fetcher.latched_bank = bank;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
             return; // each step takes 2T
         }
@@ -1745,8 +1734,14 @@ impl Ppu {
 
         match self.fetcher.state {
             FetcherState::ReadTileId => {
-                // Use the map address latched at T1
-                let map_addr = self.fetcher.latched_map_addr;
+                // CGB: use latched address from T1. DMG: compute fresh at T2
+                // (our T2 aligns with hardware's register read point due to
+                // fetch-before-pop ordering).
+                let map_addr = if self.cgb_mode {
+                    self.fetcher.latched_map_addr
+                } else {
+                    self.fetcher_map_addr()
+                };
                 self.fetcher.tile_id = self.vram[0][map_addr];
                 self.fetcher.tile_attrs = if self.cgb_mode {
                     self.vram[1][map_addr]
@@ -1756,8 +1751,12 @@ impl Ppu {
                 self.fetcher.state = FetcherState::ReadTileDataLow;
             }
             FetcherState::ReadTileDataLow => {
-                // Use address cached at T1
-                let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
+                // CGB: use address cached at T1. DMG: compute fresh at T2.
+                let (addr, bank) = if self.cgb_mode {
+                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
+                } else {
+                    self.fetcher_tile_data_addr()
+                };
                 // CGB tile_sel_glitch: when TILE_SEL transitions 1→0, the PPU
                 // reads glitched data instead of normal VRAM for 1T.
                 if self.tile_sel_glitch && self.cgb_mode {
@@ -1769,8 +1768,12 @@ impl Ppu {
                 self.fetcher.state = FetcherState::ReadTileDataHigh;
             }
             FetcherState::ReadTileDataHigh => {
-                // Use address cached at T1
-                let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
+                // CGB: use address cached at T1. DMG: compute fresh at T2.
+                let (addr, bank) = if self.cgb_mode {
+                    (self.fetcher.latched_addr, self.fetcher.latched_bank)
+                } else {
+                    self.fetcher_tile_data_addr()
+                };
                 // CGB tile_sel_glitch: same as ReadTileDataLow
                 if (self.tile_sel_glitch || self.tile_sel_glitch_latched) && self.cgb_mode {
                     self.tile_sel_glitch_latched = false;
@@ -1813,13 +1816,16 @@ impl Ppu {
 
     /// Compute VRAM address and bank for tile data.
     /// On CGB, uses latched fetcher_y and TILE_SEL (cached at ReadTileId T1).
-    /// On DMG, computes fetcher_y fresh from current SCY+LY.
+    /// On DMG, computes fresh from current SCY+LY and LCDC.
     fn fetcher_tile_data_addr(&self) -> (usize, usize) {
         let tile_id = self.fetcher.tile_id;
         let attrs = self.fetcher.tile_attrs;
-        // CGB: use latched TILE_SEL from ReadTileId T1; DMG: read LCDC live
-        // Use TILE_SEL latched at T1 (both CGB and DMG latch at T1 now)
-        let tile_data_signed = !self.fetcher.latched_tile_sel;
+        // CGB: use latched TILE_SEL from T1; DMG: read LCDC live at T2
+        let tile_data_signed = if self.cgb_mode {
+            !self.fetcher.latched_tile_sel
+        } else {
+            self.lcdc & 0x10 == 0
+        };
 
         let tile_addr: u16 = if !tile_data_signed {
             tile_id as u16 * 16
@@ -1830,8 +1836,14 @@ impl Ppu {
         let y_flip = self.cgb_mode && attrs & 0x40 != 0;
         let bank = if self.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
 
-        // Use fetcher_y latched at T1 (both CGB and DMG latch at T1 now)
-        let pixel_y = self.fetcher.fetcher_y & 7;
+        // CGB: use latched fetcher_y from T1; DMG: read SCY+LY fresh at T2
+        let pixel_y = if self.cgb_mode {
+            self.fetcher.fetcher_y & 7
+        } else if self.fetcher.fetching_window {
+            (self.window_line_counter & 7) as u8
+        } else {
+            self.scy.wrapping_add(self.ly) & 7
+        };
 
         let row = if y_flip { 7 - pixel_y } else { pixel_y };
         let addr = (tile_addr + row as u16 * 2) as usize;

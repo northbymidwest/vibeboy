@@ -783,15 +783,10 @@ impl Bus {
                 }
             }
             // DMG SCY: READ_NEW (-1T conflict, write takes effect 1T early)
-            // Hardware: advance(pending-1), write, pending=5
+            // Hardware: advance(pending-1), write, pending=5.
+            // Since our fetcher reads at T2 (1T after hardware's T1, compensating
+            // for fetch-before-pop ordering), no flush gives correct alignment.
             0xFF42 if !self.model.is_cgb() => {
-                if self.ppu_deferred >= 4 {
-                    let flags = self.ppu.step(3);
-                    self.if_ |= flags;
-                    self.ppu_deferred -= 3;
-                } else {
-                    self.flush_ppu_deferred();
-                }
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
