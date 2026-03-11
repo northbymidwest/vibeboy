@@ -69,18 +69,23 @@ impl PixelFifo {
     }
 }
 
+/// BG/Window tile fetcher states. Each state takes exactly 1 T-cycle.
+/// States come in pairs: T1 (latch/address) and T2 (VRAM read/execute).
+/// Push stalls (repeats) if the BG FIFO is not yet empty.
 #[derive(Clone, Copy, PartialEq)]
 enum FetcherState {
-    ReadTileId,
-    ReadTileDataLow,
-    ReadTileDataHigh,
+    GetTileT1,
+    GetTileT2,
+    GetTileDataLowT1,
+    GetTileDataLowT2,
+    GetTileDataHighT1,
+    GetTileDataHighT2,
     Push,
 }
 
 #[derive(Clone)]
 struct Fetcher {
     state: FetcherState,
-    tick: u8,               // counts 0-1 within each state (2T per step)
     fetching_window: bool,
     tile_x: u8,             // tiles fetched so far
     tile_id: u8,
@@ -90,11 +95,11 @@ struct Fetcher {
     /// Latched tile data address (computed at T1 of data fetch, used at T2)
     latched_addr: usize,
     latched_bank: usize,
-    /// CGB: fetcher_y latched at ReadTileId T1 (CGB-D+ caches this)
+    /// CGB: fetcher_y latched at GetTileT1 (CGB-D+ caches this)
     fetcher_y: u8,
-    /// CGB: LCDC TILE_SEL (bit 4) latched at ReadTileId T1
+    /// CGB: LCDC TILE_SEL (bit 4) latched at GetTileT1
     latched_tile_sel: bool,
-    /// CGB: BG map address latched at ReadTileId T1
+    /// CGB: BG map address latched at GetTileT1
     /// (cached at GET_TILE T1, used at T2 for VRAM read)
     latched_map_addr: usize,
 }
@@ -102,8 +107,7 @@ struct Fetcher {
 impl Fetcher {
     fn new() -> Self {
         Self {
-            state: FetcherState::ReadTileId,
-            tick: 0,
+            state: FetcherState::GetTileT1,
             fetching_window: false,
             tile_x: 0,
             tile_id: 0,
@@ -119,8 +123,7 @@ impl Fetcher {
     }
 
     fn reset(&mut self, for_window: bool) {
-        self.state = FetcherState::ReadTileId;
-        self.tick = 0;
+        self.state = FetcherState::GetTileT1;
         self.fetching_window = for_window;
         self.tile_x = 0;
         self.tile_id = 0;
@@ -273,11 +276,14 @@ pub struct Ppu {
     /// so priority is resolved correctly at output time.
     oam_fifo: PixelFifo,
     fetcher: Fetcher,
-    /// Pixels pushed to framebuffer this scanline (0-160)
-    pub(crate) pixel_x: u8,
-    /// SCX%8 pixels to discard from first BG tile
-    scx_discard: u8,
-    /// SCX/8 tile column offset latched at Mode 3 start
+    /// Pixel position in current scanline. Tracks progress through the
+    /// rendering pipeline using signed coordinates:
+    ///   -16..-9 : junk pixel zone (pre-filled FIFO garbage being consumed)
+    ///   -8..-1  : SCX fractional scroll discard zone
+    ///   0..159  : visible screen pixels (maps to framebuffer X)
+    ///   160     : scanline complete, triggers mode 0
+    /// Replaces separate pixel_x + scx_discard counters with a unified model.
+    pub(crate) position_in_line: i16,
     /// Sprite fetch in progress
     pub(crate) sprite_fetch_active: bool,
     sprite_fetch_step: u8,   // 0=tile_id, 1=data_lo, 2=data_hi
@@ -436,8 +442,7 @@ impl Ppu {
             bg_fifo: PixelFifo::new(),
             oam_fifo: PixelFifo::new(),
             fetcher: Fetcher::new(),
-            pixel_x: 0,
-            scx_discard: 0,
+            position_in_line: 0,
             sprite_fetch_active: false,
             sprite_fetch_step: 0,
             sprite_fetch_tick: 0,
@@ -515,8 +520,7 @@ impl Ppu {
         self.wy_triggered = false;
         self.bg_fifo.clear();
         self.fetcher.reset(false);
-        self.pixel_x = 0;
-        self.scx_discard = 0;
+        self.position_in_line = 0;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -766,7 +770,7 @@ impl Ppu {
         if self.window_trigger_pending && self.mode == 3 {
             self.window_trigger_pending = false;
             if self.window_trigger_from_wx_write {
-                // Pending from WX write handler: skip pixel_x re-check since
+                // Pending from WX write handler: skip position re-check since
                 // we already validated it at write time (off-by-1 tolerance)
                 self.window_trigger_from_wx_write = false;
                 if !self.window_active && self.lcdc & 0x20 != 0 && self.wy_triggered {
@@ -886,7 +890,7 @@ impl Ppu {
                 // Run per-pixel FIFO logic
                 self.tick_mode3();
                 // Check if scanline is complete
-                if self.pixel_x >= 160 {
+                if self.position_in_line >= 160 {
                     if self.cgb_mode {
                         // Palette stays blocked into mode 0:
                         // Single-speed: 5T after mode 3 ends
@@ -1430,7 +1434,19 @@ impl Ppu {
         self.bg_fifo.clear();
         self.oam_fifo.clear();
         self.fetcher.reset(false);
-        self.pixel_x = 0;
+        // Pre-fill the FIFO with 8 junk pixels. The fetcher's Push state
+        // stalls while the FIFO is non-empty, so these junk pixels control
+        // the timing: they get consumed by pixel output in parallel with
+        // the fetcher's first tile read (6T), then the remaining junk
+        // pixels stall the Push until the FIFO drains.
+        // Position starts at -(8 + scx_frac) so that after consuming all
+        // junk (8 pops) and SCX discard pixels (scx_frac pops), position
+        // reaches 0 for the first visible pixel.
+        for _ in 0..8 {
+            self.bg_fifo.push_back(FifoPixel::default());
+        }
+        let scx_frac = (self.scx & 7) as i16;
+        self.position_in_line = -(8 + scx_frac);
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
         self.window_active = false;
@@ -1438,10 +1454,11 @@ impl Ppu {
         self.window_trigger_from_wx_write = false;
         self.disable_window_pixel_insertion_glitch = false;
         self.last_sprite_slot = -1;
-        self.scx_discard = self.scx & 7;
-        // Hardware pipeline priming delay before fetcher starts.
-        // DMG: 5T; CGB: 4T
-        self.mode3_start_delay = if self.cgb_mode { 4 } else { 5 };
+        // Hardware pipeline priming delay before the rendering loop starts.
+        // In the pop-before-fetch model, the first pixel output happens 1T
+        // after the Push succeeds, offsetting by 1T vs fetch-before-render.
+        // DMG hardware: 5T priming → 4T here. CGB hardware: 4T → 3T here.
+        self.mode3_start_delay = 4;
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
@@ -1463,16 +1480,27 @@ impl Ppu {
             return;
         }
 
-        // Advance BG fetcher
-        self.tick_bg_fetcher();
+        // Pixel output runs BEFORE the fetcher advance each T-cycle,
+        // matching hardware pipeline ordering where the FIFO is drained
+        // before the fetcher state machine advances.
+        self.render_pixel_if_possible();
 
-        // Check sprite trigger (only after SCX discard is complete, so sprite
-        // pixels aren't consumed by background scrolling — sprites have absolute
-        // screen positions unaffected by SCX)
-        if self.lcdc & 0x02 != 0 && self.bg_fifo.len() > 0 && self.scx_discard == 0 {
+        // Advance BG fetcher (runs every T-cycle regardless of pixel output)
+        self.tick_bg_fetcher();
+    }
+
+    /// Try to pop a pixel from the BG FIFO and either discard it (junk/SCX
+    /// zone) or render it. Also handles sprite and window trigger detection.
+    fn render_pixel_if_possible(&mut self) {
+        if self.bg_fifo.len() == 0 {
+            return;
+        }
+
+        // Check sprite trigger (only in visible pixel zone, after SCX
+        // discard is complete — sprites use absolute screen positions)
+        if self.lcdc & 0x02 != 0 && self.position_in_line >= 0 {
             if let Some(sprite_idx) = self.find_sprite_at_pixel_x() {
                 self.start_sprite_fetch(sprite_idx);
-                // Process first cycle immediately to avoid off-by-one penalty
                 if self.sprite_alignment_delay > 0 {
                     self.sprite_alignment_delay -= 1;
                 } else {
@@ -1482,40 +1510,34 @@ impl Ppu {
             }
         }
 
-        // Pop pixel from FIFO and output
-        if self.bg_fifo.len() > 0 {
-            // Check window trigger BEFORE popping, so pixels aren't lost.
-            // On the first tick of a step, the CPU write for this M-cycle has
-            // already been applied (write-before-tick model), so activate
-            // immediately. On later ticks, a CPU write might arrive at the next
-            // M-cycle boundary, so defer activation to the next step() call.
-            if self.scx_discard == 0 && self.check_window_trigger() {
-                if self.first_tick_of_step {
-                    self.activate_window();
-                    return;
-                }
-                self.window_trigger_pending = true;
+        // Window trigger check (only in visible pixel zone)
+        if self.position_in_line >= 0 && self.check_window_trigger() {
+            if self.first_tick_of_step {
+                self.activate_window();
                 return;
             }
-
-            let bg_pixel = self.bg_fifo.pop_front();
-            // Pop OAM FIFO in lockstep (may be empty if no sprites)
-            let oam_pixel = if self.oam_fifo.len() > 0 {
-                Some(self.oam_fifo.pop_front())
-            } else {
-                None
-            };
-
-            if self.scx_discard > 0 {
-                self.scx_discard -= 1;
-                return;
-            }
-
-            self.output_pixel_dual(bg_pixel, oam_pixel);
+            self.window_trigger_pending = true;
+            return;
         }
+
+        let bg_pixel = self.bg_fifo.pop_front();
+        let oam_pixel = if self.oam_fifo.len() > 0 {
+            Some(self.oam_fifo.pop_front())
+        } else {
+            None
+        };
+
+        if self.position_in_line < 0 {
+            // SCX discard zone (-8..-1): pixels popped but not rendered.
+            self.position_in_line += 1;
+            return;
+        }
+
+        // Visible pixel zone (0..159): render to framebuffer
+        self.output_pixel(bg_pixel, oam_pixel);
     }
 
-    /// Check if window should activate at current pixel_x
+    /// Check if window should activate at current position_in_line
     fn check_window_trigger(&self) -> bool {
         if self.window_active {
             return false; // already active
@@ -1526,17 +1548,21 @@ impl Ppu {
         if !self.wy_triggered {
             return false; // WY condition not met
         }
+        if self.position_in_line < 0 {
+            return false; // still in junk/discard zone
+        }
+        let px = self.position_in_line as u8;
         // WX=0..166 maps to screen pixel (WX-7)..
-        // Window triggers when pixel_x == WX-7 (for WX >= 7)
-        // For WX < 7, window triggers at pixel_x == 0
+        // Window triggers when position == WX-7 (for WX >= 7)
+        // For WX < 7, window triggers at position == 0
         let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
-        if self.pixel_x == wx_screen {
+        if px == wx_screen {
             return true;
         }
         // DMG LCD-PPU horizontal desync: window also triggers 1 pixel late
         // (WX == position + 6), unless WX was just written this T-cycle.
         if !self.cgb_mode && !self.wx_just_changed && self.wx >= 7 {
-            if self.pixel_x == self.wx.wrapping_sub(6) {
+            if px == self.wx.wrapping_sub(6) {
                 return true;
             }
         }
@@ -1550,16 +1576,20 @@ impl Ppu {
         self.window_active = true;
     }
 
-    /// Find a sprite that triggers at the current pixel_x
+    /// Find a sprite that triggers at the current position_in_line
     fn find_sprite_at_pixel_x(&self) -> Option<usize> {
+        if self.position_in_line < 0 {
+            return None;
+        }
+        let px = self.position_in_line as u8;
         for (i, &(_y, x, _tile, _attrs, _oam_idx)) in self.scanline_sprites.iter().enumerate() {
             if self.sprites_fetched & (1 << i) != 0 {
                 continue; // already fetched
             }
-            // Sprite triggers when pixel_x reaches sprite_x - 8
-            // For sprites with X < 8, they trigger at pixel_x == 0
+            // Sprite triggers when position reaches sprite_x - 8
+            // For sprites with X < 8, they trigger at position == 0
             let trigger_x = if x >= 8 { x - 8 } else { 0 };
-            if self.pixel_x == trigger_x {
+            if px == trigger_x {
                 return Some(i);
             }
         }
@@ -1716,46 +1746,31 @@ impl Ppu {
     }
 
     /// Advance the BG/window tile fetcher by one T-cycle.
-    /// T1/T2 model: T1 latches register values, T2 reads VRAM.
-    /// CGB latches all registers at T1 (cached on CGB-D+).
-    /// DMG computes addresses at T2 with live register reads (SCX/SCY/LCDC).
+    /// 7-state pipeline: each state is exactly 1T.
+    ///   GetTileT1: CGB latches fetcher_y, TILE_SEL, map address
+    ///   GetTileT2: reads tile ID (and CGB attributes) from VRAM
+    ///   GetTileDataLowT1: CGB latches TILE_SEL, tile data address
+    ///   GetTileDataLowT2: reads low byte of tile data from VRAM
+    ///   GetTileDataHighT1: CGB latches TILE_SEL, tile data address
+    ///   GetTileDataHighT2: reads high byte of tile data from VRAM
+    ///   Push: pushes 8 pixels to BG FIFO (stalls if FIFO not empty)
     fn tick_bg_fetcher(&mut self) {
-        self.fetcher.tick += 1;
-        if self.fetcher.tick < 2 {
-            // T1: latch state on CGB (≥CGB-D).
-            if self.cgb_mode {
-                match self.fetcher.state {
-                    FetcherState::ReadTileId => {
-                        self.fetcher.fetcher_y = if self.fetcher.fetching_window {
-                            self.window_line_counter as u8
-                        } else {
-                            self.scy.wrapping_add(self.ly)
-                        };
-                        self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                        self.fetcher.latched_map_addr = self.fetcher_map_addr();
-                    }
-                    FetcherState::ReadTileDataLow | FetcherState::ReadTileDataHigh => {
-                        // Re-latch TILE_SEL at every data fetch T1.
-                        // During tile_sel_glitch, preserve the old latched_tile_sel
-                        if self.tile_sel_glitch {
-                            self.tile_sel_glitch_latched = true;
-                        } else if !self.tile_sel_glitch_latched {
-                            self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
-                        }
-                        let (addr, bank) = self.fetcher_tile_data_addr();
-                        self.fetcher.latched_addr = addr;
-                        self.fetcher.latched_bank = bank;
-                    }
-                    _ => {}
-                }
-            }
-            return; // each step takes 2T
-        }
-        self.fetcher.tick = 0;
-
         match self.fetcher.state {
-            FetcherState::ReadTileId => {
-                // CGB: use latched address from T1. DMG: compute fresh at T2.
+            FetcherState::GetTileT1 => {
+                // CGB (≥CGB-D): latch registers at T1
+                if self.cgb_mode {
+                    self.fetcher.fetcher_y = if self.fetcher.fetching_window {
+                        self.window_line_counter as u8
+                    } else {
+                        self.scy.wrapping_add(self.ly)
+                    };
+                    self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                    self.fetcher.latched_map_addr = self.fetcher_map_addr();
+                }
+                self.fetcher.state = FetcherState::GetTileT2;
+            }
+            FetcherState::GetTileT2 => {
+                // CGB: use latched address. DMG: compute fresh.
                 let map_addr = if self.cgb_mode {
                     self.fetcher.latched_map_addr
                 } else {
@@ -1767,51 +1782,72 @@ impl Ppu {
                 } else {
                     0
                 };
-                self.fetcher.state = FetcherState::ReadTileDataLow;
+                self.fetcher.state = FetcherState::GetTileDataLowT1;
             }
-            FetcherState::ReadTileDataLow => {
-                // CGB: use address cached at T1. DMG: compute fresh at T2.
+            FetcherState::GetTileDataLowT1 => {
+                // CGB: latch TILE_SEL and tile data address
+                if self.cgb_mode {
+                    if self.tile_sel_glitch {
+                        self.tile_sel_glitch_latched = true;
+                    } else if !self.tile_sel_glitch_latched {
+                        self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                    }
+                    let (addr, bank) = self.fetcher_tile_data_addr();
+                    self.fetcher.latched_addr = addr;
+                    self.fetcher.latched_bank = bank;
+                }
+                self.fetcher.state = FetcherState::GetTileDataLowT2;
+            }
+            FetcherState::GetTileDataLowT2 => {
+                // CGB: use cached address. DMG: compute fresh.
                 let (addr, bank) = if self.cgb_mode {
                     (self.fetcher.latched_addr, self.fetcher.latched_bank)
                 } else {
                     self.fetcher_tile_data_addr()
                 };
-                // CGB tile_sel_glitch: when TILE_SEL transitions 1→0, the PPU
-                // reads glitched data instead of normal VRAM for 1T.
                 if self.tile_sel_glitch && self.cgb_mode {
-                    self.fetcher.tile_data_low =
-                        self.tile_sel_glitch_data();
+                    self.fetcher.tile_data_low = self.tile_sel_glitch_data();
                 } else {
                     self.fetcher.tile_data_low = self.vram[bank][addr];
                 }
-                self.fetcher.state = FetcherState::ReadTileDataHigh;
+                self.fetcher.state = FetcherState::GetTileDataHighT1;
             }
-            FetcherState::ReadTileDataHigh => {
-                // CGB: use address cached at T1. DMG: compute fresh at T2.
+            FetcherState::GetTileDataHighT1 => {
+                // CGB: latch TILE_SEL and tile data address
+                if self.cgb_mode {
+                    if self.tile_sel_glitch {
+                        self.tile_sel_glitch_latched = true;
+                    } else if !self.tile_sel_glitch_latched {
+                        self.fetcher.latched_tile_sel = self.lcdc & 0x10 != 0;
+                    }
+                    let (addr, bank) = self.fetcher_tile_data_addr();
+                    self.fetcher.latched_addr = addr;
+                    self.fetcher.latched_bank = bank;
+                }
+                self.fetcher.state = FetcherState::GetTileDataHighT2;
+            }
+            FetcherState::GetTileDataHighT2 => {
+                // CGB: use cached address. DMG: compute fresh.
                 let (addr, bank) = if self.cgb_mode {
                     (self.fetcher.latched_addr, self.fetcher.latched_bank)
                 } else {
                     self.fetcher_tile_data_addr()
                 };
-                // CGB tile_sel_glitch: same as ReadTileDataLow
                 if (self.tile_sel_glitch || self.tile_sel_glitch_latched) && self.cgb_mode {
                     self.tile_sel_glitch_latched = false;
-                    self.fetcher.tile_data_high =
-                        self.tile_sel_glitch_data();
+                    self.fetcher.tile_data_high = self.tile_sel_glitch_data();
                 } else {
                     self.fetcher.tile_data_high = self.vram[bank][addr + 1];
                 }
                 self.fetcher.state = FetcherState::Push;
             }
             FetcherState::Push => {
-                if self.bg_fifo.len() <= 8 {
+                if self.bg_fifo.len() == 0 {
                     self.push_bg_pixels();
                     self.fetcher.tile_x += 1;
-                    self.fetcher.state = FetcherState::ReadTileId;
-                } else {
-                    // FIFO full, stall — re-tick this state next cycle
-                    self.fetcher.tick = 1; // will trigger again next T-cycle
+                    self.fetcher.state = FetcherState::GetTileT1;
                 }
+                // If FIFO not empty, stall — stay in Push state.
             }
         }
     }
@@ -1834,7 +1870,7 @@ impl Ppu {
     }
 
     /// Compute VRAM address and bank for tile data.
-    /// On CGB, uses latched fetcher_y and TILE_SEL (cached at ReadTileId T1).
+    /// On CGB, uses latched fetcher_y and TILE_SEL (cached at GetTileT1).
     /// On DMG, computes fresh from current SCY+LY and LCDC.
     fn fetcher_tile_data_addr(&self) -> (usize, usize) {
         let tile_id = self.fetcher.tile_id;
@@ -1881,7 +1917,7 @@ impl Ppu {
             } else {
                 // tile >= 128: no glitch, use normal VRAM data
                 let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
-                if self.fetcher.state == FetcherState::ReadTileDataLow {
+                if self.fetcher.state == FetcherState::GetTileDataLowT2 {
                     self.vram[bank][addr]
                 } else {
                     self.vram[bank][addr + 1]
@@ -1891,7 +1927,7 @@ impl Ppu {
             // last_tileset was false: uses a cached `data_for_sel_glitch` value.
             // For now, use normal VRAM data (this path is less common).
             let (addr, bank) = (self.fetcher.latched_addr, self.fetcher.latched_bank);
-            if self.fetcher.state == FetcherState::ReadTileDataLow {
+            if self.fetcher.state == FetcherState::GetTileDataLowT2 {
                 self.vram[bank][addr]
             } else {
                 self.vram[bank][addr + 1]
@@ -1928,8 +1964,8 @@ impl Ppu {
     }
 
     /// Output one pixel to the framebuffer, resolving BG/OAM priority.
-    fn output_pixel_dual(&mut self, bg: FifoPixel, oam: Option<FifoPixel>) {
-        if self.pixel_x >= 160 {
+    fn output_pixel(&mut self, bg: FifoPixel, oam: Option<FifoPixel>) {
+        if self.position_in_line < 0 || self.position_in_line >= 160 {
             return;
         }
         let ly = self.ly as usize;
@@ -1988,7 +2024,7 @@ impl Ppu {
             }
         };
 
-        let fb_idx = ly * 160 + self.pixel_x as usize;
+        let fb_idx = ly * 160 + self.position_in_line as usize;
 
         // SGB: capture 2-bit shade index for palette remapping
         if self.sgb_mode {
@@ -2027,7 +2063,7 @@ impl Ppu {
         } else {
             self.frame_buffer[fb_idx] = color32;
         }
-        self.pixel_x += 1;
+        self.position_in_line += 1;
     }
 
     // ---- Edge-triggered STAT interrupt ----
@@ -2286,11 +2322,12 @@ impl Ppu {
                 // was just passed (off-by-1 from mid-M-cycle write timing)
                 if !win_was_on && win_now_on && self.mode == 3
                     && !self.window_active && !self.window_trigger_pending
-                    && self.wy_triggered && self.scx_discard == 0
+                    && self.wy_triggered && self.position_in_line >= 0
                 {
                     let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
                     let tolerance = if self.double_speed { 0 } else { 1 };
-                    if self.pixel_x >= wx_screen && self.pixel_x <= wx_screen + tolerance {
+                    let px = self.position_in_line as u8;
+                    if px >= wx_screen && px <= wx_screen + tolerance {
                         self.window_trigger_pending = true;
                         self.window_trigger_from_wx_write = true;
                     }
@@ -2426,7 +2463,7 @@ impl Ppu {
                 // started outputting pixels. In mode 3, this means the
                 // fetcher must have completed its first tile push.
                 let can_trigger = self.mode != 3
-                    || (self.bg_fifo.len() == 0 && self.pixel_x == 0);
+                    || (self.bg_fifo.len() == 0 && self.position_in_line <= 0);
                 if self.lcdc & 0x20 != 0 && self.ly == val && can_trigger {
                     self.wy_triggered = true;
                 }
@@ -2434,13 +2471,14 @@ impl Ppu {
             0xFF4B => {
                 self.wx = val;
                 if self.mode == 3 && !self.window_active && !self.window_trigger_pending
-                    && self.lcdc & 0x20 != 0 && self.wy_triggered && self.scx_discard == 0
+                    && self.lcdc & 0x20 != 0 && self.wy_triggered && self.position_in_line >= 0
                 {
                     let wx_screen = if val >= 7 { val - 7 } else { 0 };
-                    // Allow trigger if pixel_x just passed the WX point (off-by-1
+                    // Allow trigger if position just passed the WX point (off-by-1
                     // from mid-M-cycle write timing in normal speed)
                     let tolerance = if self.double_speed { 0 } else { 1 };
-                    if self.pixel_x >= wx_screen && self.pixel_x <= wx_screen + tolerance {
+                    let px = self.position_in_line as u8;
+                    if px >= wx_screen && px <= wx_screen + tolerance {
                         self.window_trigger_pending = true;
                         self.window_trigger_from_wx_write = true;
                     }

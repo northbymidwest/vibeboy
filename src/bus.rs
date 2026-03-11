@@ -832,7 +832,7 @@ impl Bus {
                     // OBJ_EN suppression
                     let mut old_lcdc = self.ppu.lcdc;
                     if (val & 0x02) == 0 {
-                        if self.ppu.pixel_x == 0 || self.ppu.sprite_fetch_active {
+                        if self.ppu.position_in_line <= 0 || self.ppu.sprite_fetch_active {
                             old_lcdc &= !0x02;
                         }
                     }
