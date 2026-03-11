@@ -865,7 +865,7 @@ impl Ppu {
                     }
                 }
 
-                // Mode 2 → Mode 3: internal transition at dot 80
+                // Mode 2 → Mode 3: transition at dot 84
                 let mode2_end = 84;
                 if self.dot >= mode2_end {
                     self.accessed_oam_row = 0xFF;
@@ -883,6 +883,10 @@ impl Ppu {
                         self.stat = (self.stat & !0x03) | 0x03;
                     }
                     self.update_stat_irq();
+                    // Run the first mode 3 tick on the transition dot itself.
+                    // The 5T priming delay includes this dot as tick 1, so
+                    // tick_mode3 must run here to avoid losing 1T at the boundary.
+                    self.tick_mode3();
                 }
             }
             3 => {
@@ -1414,6 +1418,9 @@ impl Ppu {
         self.pixel_history_next = 0;
         self.init_fifo();
         self.update_stat_irq();
+        // Run the first mode 3 tick on the transition dot itself.
+        // The 5T priming includes this dot as tick 1.
+        self.tick_mode3();
     }
 
     fn transition_to_mode1(&mut self) {
@@ -1460,10 +1467,10 @@ impl Ppu {
         self.window_trigger_from_wx_write = false;
         self.disable_window_pixel_insertion_glitch = false;
         self.last_sprite_slot = -1;
-        // Hardware pipeline priming delay before the rendering loop starts.
-        // Hardware uses 5T (3T + 2T) but the junk zone alignment jump adds
-        // 1T of implicit delay, so we compensate: DMG=4, CGB=3.
-        self.mode3_start_delay = if self.cgb_mode { 3 } else { 4 };
+        // Hardware pipeline priming delay. tick_mode3() runs on the
+        // transition dot itself, so the delay counter starts decrementing
+        // immediately. DMG=5T, CGB=4T (CGB begins rendering 1T earlier).
+        self.mode3_start_delay = if self.cgb_mode { 4 } else { 5 };
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
