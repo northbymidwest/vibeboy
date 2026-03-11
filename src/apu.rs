@@ -21,8 +21,12 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 1, 1, 1, 1, 1, 1, 0], // 75%
 ];
 
-// Noise divisor table (for NR43 bits 2-0)
-const NOISE_DIVISORS: [u32; 8] = [8, 16, 32, 48, 64, 80, 96, 112];
+// Noise base divisor in T-cycles for the counter increment rate.
+// Hardware has a 14-bit counter that increments at this rate; the LFSR steps when
+// the bit selected by clock_shift transitions 0→1 in the counter.
+// Values: code*8, with code 0 using 4 (half the normal minimum).
+// SameBoy uses 2MHz units [2,4,8,12,16,20,24,28]; ours are 2× for T-cycles.
+const NOISE_DIVISORS: [u32; 8] = [4, 8, 16, 24, 32, 40, 48, 56];
 
 // ── BLIP buffer (band-limited synthesis) ──────────────────────────────────
 
@@ -411,8 +415,16 @@ struct NoiseCh {
 
     enabled: bool,
     dac_on: bool,
-    freq_timer: u32,
+    // Counter-based frequency model (matching hardware):
+    // A 14-bit counter increments at the base divisor rate.
+    // The LFSR steps when the bit selected by clock_shift transitions 0→1.
+    counter: u16,              // 14-bit counter
+    counter_countdown: u32,    // T-cycles until next counter increment
+    counter_active: bool,      // true when counter should be running
+    countdown_reloaded: bool,  // true if countdown just reloaded (for NR43 write timing)
+    alignment: u32,            // T-cycle phase tracker
     lfsr: u16,
+    lfsr_sample: bool,         // current LFSR output sample state
     length_counter: u16,
     volume: u8,
     env_timer: u8,
@@ -437,8 +449,13 @@ impl NoiseCh {
             len_enable: false,
             enabled: false,
             dac_on: false,
-            freq_timer: 8,
-            lfsr: 0x7FFF,
+            counter: 0,
+            counter_countdown: 0,
+            counter_active: false,
+            countdown_reloaded: false,
+            alignment: 0,
+            lfsr: 0,
+            lfsr_sample: false,
             length_counter: 64,
             volume: 0,
             env_timer: 0,
@@ -448,34 +465,52 @@ impl NoiseCh {
         }
     }
 
-    fn reload_period(&self) -> u32 {
-        let div = NOISE_DIVISORS[self.divisor_code as usize];
-        if self.clock_shift < 14 {
-            div << self.clock_shift
-        } else {
-            div << 13 // cap to avoid overflow
-        }
+    /// Base divisor in T-cycles for counter increment rate.
+    fn base_divisor(&self) -> u32 {
+        NOISE_DIVISORS[self.divisor_code as usize]
     }
 
-    fn tick_freq(&mut self, mut cycles: u32) {
-        if !self.enabled {
+    /// Step the LFSR once. Uses XNOR feedback (hardware-accurate).
+    /// LFSR starts at 0; output is high when bit 0 is 1.
+    fn step_lfsr(&mut self) {
+        let high_bit_mask: u16 = if self.lfsr_narrow { 0x4040 } else { 0x4000 };
+        let new_high = (self.lfsr ^ (self.lfsr >> 1) ^ 1) & 1;
+        self.lfsr >>= 1;
+        if new_high != 0 {
+            self.lfsr |= high_bit_mask;
+        } else {
+            self.lfsr &= !high_bit_mask;
+        }
+        self.lfsr_sample = self.lfsr & 1 != 0;
+    }
+
+    /// Advance the noise counter by `cycles` T-cycles.
+    /// The 14-bit counter increments at the base divisor rate.
+    /// LFSR steps when the bit selected by clock_shift transitions 0→1.
+    fn tick_counter(&mut self, mut cycles: u32) {
+        if !self.counter_active {
             return;
         }
-        loop {
-            if self.freq_timer > cycles {
-                self.freq_timer -= cycles;
-                return;
+        let divisor = self.base_divisor();
+        if self.counter_countdown == 0 {
+            self.counter_countdown = divisor;
+        }
+        while cycles >= self.counter_countdown {
+            cycles -= self.counter_countdown;
+            self.counter_countdown = divisor;
+            let mask: u16 = 1u16 << self.clock_shift;
+            let old_bit = self.counter & mask != 0;
+            self.counter = (self.counter + 1) & 0x3FFF;
+            let new_bit = self.counter & mask != 0;
+            if new_bit && !old_bit && self.enabled {
+                self.step_lfsr();
             }
-            cycles -= self.freq_timer;
-            let xor = (self.lfsr & 1) ^ ((self.lfsr >> 1) & 1);
-            self.lfsr = (self.lfsr >> 1) | (xor << 14);
-            if self.lfsr_narrow {
-                self.lfsr = (self.lfsr & !(1 << 6)) | (xor << 6);
-            }
-            self.freq_timer = self.reload_period();
-            if self.freq_timer == 0 {
-                self.freq_timer = 8;
-            }
+        }
+        if cycles > 0 {
+            self.counter_countdown -= cycles;
+            self.countdown_reloaded = false;
+        } else {
+            self.countdown_reloaded = true;
         }
     }
 
@@ -483,8 +518,7 @@ impl NoiseCh {
         if !self.enabled || !self.dac_on {
             return 0;
         }
-        // Output is high when LFSR bit0 is 0
-        if self.lfsr & 1 == 0 { self.volume } else { 0 }
+        if self.lfsr_sample { self.volume } else { 0 }
     }
 
 
@@ -959,6 +993,13 @@ impl Apu {
                 }
             }
             0xFF22 => {
+                // NR43 write: update frequency parameters.
+                // When counter_countdown just reloaded, recalculate it from the new divisor.
+                if self.ch4.countdown_reloaded {
+                    let new_div_code = val & 0x07;
+                    let new_divisor = NOISE_DIVISORS[new_div_code as usize];
+                    self.ch4.counter_countdown = new_divisor;
+                }
                 self.ch4.clock_shift  = val >> 4;
                 self.ch4.lfsr_narrow  = val & 0x08 != 0;
                 self.ch4.divisor_code = val & 0x07;
@@ -1154,8 +1195,33 @@ impl Apu {
         self.ch4.volume_countdown = self.ch4.env_period;
         self.ch4.envelope_clock.locked = false;
         self.ch4.envelope_clock.clock = false;
-        self.ch4.lfsr      = 0x7FFF;
-        self.ch4.freq_timer = self.ch4.reload_period();
+
+        // Reset LFSR to 0 (hardware starts at all-zeros with XNOR feedback)
+        self.ch4.lfsr = 0;
+        self.ch4.lfsr_sample = false;
+
+        // Set up counter-based frequency timing.
+        // Initial counter_countdown derived from SameBoy's prepare_noise_start:
+        // Base: divisor_code == 0 ? 6 : divisor_code * 4 + 6 (in 2MHz-cycles)
+        // Converted to T-cycles (×2).
+        let raw_div = self.ch4.divisor_code as u32;
+        let was_active = self.ch4.counter_active;
+        let base = if raw_div == 0 { 12 } else { raw_div * 8 + 12 };
+        // Alignment-based adjustment matching SameBoy's prepare_noise_start.
+        // When re-triggering (counter already active), the alignment affects
+        // the initial countdown differently based on divisor and phase.
+        let align = self.ch4.alignment & 7;
+        let adj: i32 = if was_active && raw_div == 0 && (align & 2) == 0 {
+            8
+        } else if !was_active && raw_div > 1 && (align & 6) == 0 {
+            -8
+        } else {
+            0
+        };
+        self.ch4.counter_countdown = ((base as i32) + adj).max(1) as u32;
+        self.ch4.counter = 0;
+        self.ch4.counter_active = true;
+
         if !self.ch4.dac_on {
             self.ch4.enabled = false;
         }
@@ -1389,7 +1455,8 @@ impl Apu {
         if self.ch1.enabled { self.ch1.tick_freq(cycles); }
         if self.ch2.enabled { self.ch2.tick_freq(cycles); }
         self.ch3.tick_freq(cycles);
-        self.ch4.tick_freq(cycles);
+        self.ch4.alignment += cycles;
+        self.ch4.tick_counter(cycles);
 
         // Frame sequencer is now driven by DIV events from Bus, not by counting cycles here.
 
