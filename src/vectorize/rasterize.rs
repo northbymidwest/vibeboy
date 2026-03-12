@@ -1,14 +1,87 @@
 //! Rasterize vector paths (ColorPath) to a pixel buffer using scanline rendering
-//! with 4x4 supersampling for anti-aliased edges.
+//! with 2x2 supersampling for anti-aliased edges.
 
 use super::contour::{ColorPath, PathSegment};
 
-/// A line segment in output pixel space.
+/// A line segment in output pixel space with precomputed fields.
 struct Edge {
     x0: f64,
     y0: f64,
     x1: f64,
-    y1: f64,
+    inv_dy: f64,
+    y_min: f64,
+    y_max: f64,
+    dir: i32,
+}
+
+impl Edge {
+    #[inline(always)]
+    fn new(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+        let dy = y1 - y0;
+        Edge {
+            x0, y0, x1,
+            inv_dy: 1.0 / dy,
+            y_min: y0.min(y1),
+            y_max: y0.max(y1),
+            dir: if dy > 0.0 { 1 } else { -1 },
+        }
+    }
+
+    #[inline(always)]
+    fn intersect_x(&self, sy: f64) -> f64 {
+        let t = (sy - self.y0) * self.inv_dy;
+        self.x0 + t * (self.x1 - self.x0)
+    }
+}
+
+/// Flatten a quadratic Bezier into line edges via recursive subdivision.
+#[inline]
+fn flatten_quad(
+    x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64,
+    tol_sq: f64, edges: &mut Vec<Edge>,
+) {
+    let mx = (x0 + x1) * 0.5;
+    let my = (y0 + y1) * 0.5;
+    let dx = cx - mx;
+    let dy = cy - my;
+    if dx * dx + dy * dy <= tol_sq {
+        if (y0 - y1).abs() > 1e-10 {
+            edges.push(Edge::new(x0, y0, x1, y1));
+        }
+        return;
+    }
+    let mx01 = (x0 + cx) * 0.5;
+    let my01 = (y0 + cy) * 0.5;
+    let mx12 = (cx + x1) * 0.5;
+    let my12 = (cy + y1) * 0.5;
+    let midx = (mx01 + mx12) * 0.5;
+    let midy = (my01 + my12) * 0.5;
+    flatten_quad(x0, y0, mx01, my01, midx, midy, tol_sq, edges);
+    flatten_quad(midx, midy, mx12, my12, x1, y1, tol_sq, edges);
+}
+
+/// Extract edges from a single path, scaled to output space.
+fn extract_edges(path: &ColorPath, scale: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
+    edges.clear();
+    for seg in &path.segments {
+        match seg {
+            PathSegment::Line(a, b) => {
+                let y0 = a.y * scale;
+                let y1 = b.y * scale;
+                if (y0 - y1).abs() > 1e-10 {
+                    edges.push(Edge::new(a.x * scale, y0, b.x * scale, y1));
+                }
+            }
+            PathSegment::QuadBezier(start, ctrl, end) => {
+                flatten_quad(
+                    start.x * scale, start.y * scale,
+                    ctrl.x * scale, ctrl.y * scale,
+                    end.x * scale, end.y * scale,
+                    tol_sq, edges,
+                );
+            }
+        }
+    }
 }
 
 /// Rasterize vector paths to an ARGB pixel buffer.
@@ -24,233 +97,166 @@ pub fn rasterize(
     let out_h = height * scale;
     let mut buffer = vec![bg_color; out_w * out_h];
     let scale_f = scale as f64;
-    let tolerance = 0.25 / scale_f;
+    let tol_sq = 0.25;
+
+    let mut edges = Vec::new();
+    let mut sorted: Vec<usize> = Vec::new();
+    let mut coverage = vec![0u8; out_w];
 
     for path in paths {
         if path.color == bg_color || path.segments.is_empty() {
             continue;
         }
 
-        // Extract and flatten all edges for this path, scaled to output space
-        let edges = extract_edges(path, scale_f, tolerance);
+        extract_edges(path, scale_f, tol_sq, &mut edges);
         if edges.is_empty() {
             continue;
         }
 
-        // Sort edges by y_min for active edge tracking
-        let mut sorted_indices: Vec<usize> = (0..edges.len()).collect();
-        sorted_indices.sort_by(|&a, &b| {
-            let ya = edges[a].y0.min(edges[a].y1);
-            let yb = edges[b].y0.min(edges[b].y1);
-            ya.partial_cmp(&yb).unwrap()
+        sorted.clear();
+        sorted.extend(0..edges.len());
+        sorted.sort_unstable_by(|&a, &b| {
+            edges[a].y_min.partial_cmp(&edges[b].y_min).unwrap()
         });
 
-        // Rasterize with 4x4 supersampling
-        rasterize_path_supersampled(
+        // Clear stale coverage from previous path
+        for c in coverage.iter_mut() { *c = 0; }
+
+        rasterize_path(
             &edges,
-            &sorted_indices,
+            &sorted,
             path.color,
-            bg_color,
             &mut buffer,
             out_w,
             out_h,
+            &mut coverage,
         );
     }
 
     buffer
 }
 
-/// Flatten path segments into line edges in output pixel space.
-fn extract_edges(path: &ColorPath, scale: f64, tolerance: f64) -> Vec<Edge> {
-    let mut edges = Vec::new();
-
-    for seg in &path.segments {
-        match seg {
-            PathSegment::Line(a, b) => {
-                let e = Edge {
-                    x0: a.x * scale,
-                    y0: a.y * scale,
-                    x1: b.x * scale,
-                    y1: b.y * scale,
-                };
-                // Skip degenerate edges
-                if (e.y0 - e.y1).abs() > 1e-10 {
-                    edges.push(e);
-                }
-            }
-            PathSegment::QuadBezier(start, ctrl, end) => {
-                flatten_quad(
-                    start.x * scale,
-                    start.y * scale,
-                    ctrl.x * scale,
-                    ctrl.y * scale,
-                    end.x * scale,
-                    end.y * scale,
-                    tolerance * scale,
-                    &mut edges,
-                );
-            }
-        }
-    }
-
-    edges
-}
-
-/// Recursively flatten a quadratic Bezier curve into line segments via de Casteljau.
-fn flatten_quad(
-    x0: f64, y0: f64,
-    cx: f64, cy: f64,
-    x1: f64, y1: f64,
-    tolerance: f64,
-    edges: &mut Vec<Edge>,
-) {
-    // Check flatness: distance from control point to line (x0,y0)-(x1,y1)
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let len_sq = dx * dx + dy * dy;
-    let flatness = if len_sq < 1e-12 {
-        let dcx = cx - x0;
-        let dcy = cy - y0;
-        (dcx * dcx + dcy * dcy).sqrt()
-    } else {
-        let t = ((cx - x0) * dx + (cy - y0) * dy) / len_sq;
-        let px = x0 + t * dx;
-        let py = y0 + t * dy;
-        let ex = cx - px;
-        let ey = cy - py;
-        (ex * ex + ey * ey).sqrt()
-    };
-
-    if flatness <= tolerance {
-        // Flat enough — emit as a line
-        if (y0 - y1).abs() > 1e-10 {
-            edges.push(Edge { x0, y0, x1, y1 });
-        }
-        return;
-    }
-
-    // Subdivide at t=0.5
-    let mx01 = (x0 + cx) * 0.5;
-    let my01 = (y0 + cy) * 0.5;
-    let mx12 = (cx + x1) * 0.5;
-    let my12 = (cy + y1) * 0.5;
-    let midx = (mx01 + mx12) * 0.5;
-    let midy = (my01 + my12) * 0.5;
-
-    flatten_quad(x0, y0, mx01, my01, midx, midy, tolerance, edges);
-    flatten_quad(midx, midy, mx12, my12, x1, y1, tolerance, edges);
-}
-
-/// Rasterize a single path's edges with 4x4 supersampling.
-fn rasterize_path_supersampled(
+/// Rasterize a single path's edges with 2x2 supersampling.
+fn rasterize_path(
     edges: &[Edge],
-    sorted_indices: &[usize],
+    sorted: &[usize],
     fill_color: u32,
-    _bg_color: u32,
     buffer: &mut [u32],
     out_w: usize,
     out_h: usize,
+    coverage: &mut [u8],
 ) {
-    let sub_offsets: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
+    let mut dirty_min = out_w;
+    let mut dirty_max = 0usize;
 
-    // Coverage buffer for one row of pixels
-    let mut coverage = vec![0u8; out_w];
+    // Y bounding box
+    let mut y_min_f = f64::MAX;
+    let mut y_max_f = f64::MIN;
+    for e in edges {
+        if e.y_min < y_min_f { y_min_f = e.y_min; }
+        if e.y_max > y_max_f { y_max_f = e.y_max; }
+    }
+    let py_start = (y_min_f.floor() as usize).min(out_h);
+    let py_end = (y_max_f.ceil() as usize).min(out_h);
 
-    // Track where sorted_indices scanning starts
+    let mut isects: [Vec<(f64, i32)>; 2] = [Vec::new(), Vec::new()];
     let mut scan_start = 0usize;
 
-    for py in 0..out_h {
+    for py in py_start..py_end {
         let y_top = py as f64;
         let y_bot = y_top + 1.0;
 
-        // Reset coverage
-        for c in coverage.iter_mut() {
-            *c = 0;
+        // Reset dirty coverage
+        if dirty_min <= dirty_max {
+            for c in &mut coverage[dirty_min..=dirty_max.min(out_w - 1)] {
+                *c = 0;
+            }
+            dirty_min = out_w;
+            dirty_max = 0;
         }
 
-        // Advance scan_start past edges entirely above this row
-        while scan_start < sorted_indices.len() {
-            let e = &edges[sorted_indices[scan_start]];
-            if e.y0.max(e.y1) <= y_top {
+        // Advance past edges above this row
+        while scan_start < sorted.len() {
+            if edges[sorted[scan_start]].y_max <= y_top {
                 scan_start += 1;
             } else {
                 break;
             }
         }
 
-        // Process 4 sub-scanlines
-        for &sub_off in &sub_offsets {
-            let sy = y_top + sub_off;
+        // Collect intersections for both sub-scanlines
+        for buf in isects.iter_mut() { buf.clear(); }
 
-            // Collect x-intersections for this sub-scanline
-            let mut intersections: Vec<(f64, i32)> = Vec::new();
+        for i in scan_start..sorted.len() {
+            let e = &edges[sorted[i]];
+            if e.y_min >= y_bot { break; }
 
-            for i in scan_start..sorted_indices.len() {
-                let e = &edges[sorted_indices[i]];
-                let e_ymin = e.y0.min(e.y1);
-                let e_ymax = e.y0.max(e.y1);
-
-                // Early exit: if edge starts below this row, all remaining do too
-                if e_ymin >= y_bot {
-                    break;
-                }
-
-                // Does this edge cross the sub-scanline?
-                if sy < e_ymin || sy >= e_ymax {
-                    continue;
-                }
-
-                // Compute x intersection
-                let t = (sy - e.y0) / (e.y1 - e.y0);
-                let ix = e.x0 + t * (e.x1 - e.x0);
-
-                // Winding direction: +1 if edge goes down, -1 if up
-                let dir = if e.y1 > e.y0 { 1i32 } else { -1i32 };
-                intersections.push((ix, dir));
+            let sy0 = y_top + 0.25;
+            let sy1 = y_top + 0.75;
+            if sy0 >= e.y_min && sy0 < e.y_max {
+                isects[0].push((e.intersect_x(sy0), e.dir));
             }
+            if sy1 >= e.y_min && sy1 < e.y_max {
+                isects[1].push((e.intersect_x(sy1), e.dir));
+            }
+        }
 
-            // Sort intersections by x
-            intersections.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // Process each sub-scanline
+        for si in 0..2 {
+            let isect = &mut isects[si];
+            if isect.is_empty() { continue; }
 
-            // Apply nonzero winding rule
+            isect.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
             let mut winding = 0i32;
             let mut i = 0;
-            while i < intersections.len() {
-                let (x_enter, dir) = intersections[i];
-                winding += dir;
+            while i < isect.len() {
+                winding += isect[i].1;
 
                 if winding != 0 {
-                    // Find where winding returns to zero
+                    let x_enter = isect[i].0;
                     let mut j = i + 1;
-                    while j < intersections.len() {
-                        winding += intersections[j].1;
-                        if winding == 0 {
-                            break;
-                        }
+                    while j < isect.len() {
+                        winding += isect[j].1;
+                        if winding == 0 { break; }
                         j += 1;
                     }
 
-                    let x_exit = if j < intersections.len() {
-                        intersections[j].0
+                    let x_exit = if j < isect.len() {
+                        isect[j].0
                     } else {
-                        // Shouldn't happen with proper closed paths, but be safe
                         break;
                     };
 
-                    // Mark pixels in [x_enter, x_exit] as covered for this sub-scanline
                     let px_start = (x_enter.max(0.0) as usize).min(out_w);
                     let px_end = ((x_exit.ceil() as usize).min(out_w)).max(px_start);
 
-                    for px in px_start..px_end {
-                        // Check sub-pixel coverage within this pixel
-                        let pixel_left = px as f64;
-                        // How many of 4 horizontal sub-pixels are inside?
-                        for &sx_off in &sub_offsets {
-                            let sx = pixel_left + sx_off;
-                            if sx >= x_enter && sx < x_exit {
-                                coverage[px] += 1;
-                            }
+                    if px_start < dirty_min { dirty_min = px_start; }
+                    if px_end > 0 && px_end - 1 > dirty_max { dirty_max = px_end - 1; }
+
+                    // Interior: both sub-x samples covered → +2
+                    let interior_start = ((x_enter - 0.25).ceil() as usize).max(px_start);
+                    let interior_end = ((x_exit - 0.75).floor() as usize + 1).min(px_end);
+
+                    // Partial before
+                    for px in px_start..interior_start.min(px_end) {
+                        let pl = px as f64;
+                        if pl + 0.25 >= x_enter && pl + 0.25 < x_exit { coverage[px] += 1; }
+                        if pl + 0.75 >= x_enter && pl + 0.75 < x_exit { coverage[px] += 1; }
+                    }
+
+                    // Full interior
+                    if interior_start < interior_end {
+                        for px in interior_start..interior_end {
+                            coverage[px] += 2;
                         }
+                    }
+
+                    // Partial after
+                    for px in interior_end.max(interior_start).max(px_start)..px_end {
+                        let pl = px as f64;
+                        if pl + 0.25 >= x_enter && pl + 0.25 < x_exit { coverage[px] += 1; }
+                        if pl + 0.75 >= x_enter && pl + 0.75 < x_exit { coverage[px] += 1; }
                     }
 
                     i = j + 1;
@@ -260,29 +266,28 @@ fn rasterize_path_supersampled(
             }
         }
 
-        // Write pixels from coverage
-        let row_start = py * out_w;
-        for px in 0..out_w {
-            let cov = coverage[px];
-            if cov == 0 {
-                continue;
-            }
-
-            if cov >= 16 {
-                buffer[row_start + px] = fill_color;
-            } else {
-                // Blend fill over existing pixel
-                let existing = buffer[row_start + px];
-                buffer[row_start + px] = blend(existing, fill_color, cov);
+        // Write pixels
+        if dirty_min <= dirty_max {
+            let row_start = py * out_w;
+            let end = dirty_max.min(out_w - 1);
+            for px in dirty_min..=end {
+                let cov = coverage[px];
+                if cov == 0 { continue; }
+                if cov >= 4 {
+                    buffer[row_start + px] = fill_color;
+                } else {
+                    buffer[row_start + px] = blend4(buffer[row_start + px], fill_color, cov);
+                }
             }
         }
     }
 }
 
-/// Blend two ARGB colors with coverage (0..16).
-fn blend(bg: u32, fg: u32, coverage: u8) -> u32 {
+/// Blend two ARGB colors with 2x2 coverage (0..4).
+#[inline(always)]
+fn blend4(bg: u32, fg: u32, coverage: u8) -> u32 {
     let alpha = coverage as u32;
-    let inv = 16 - alpha;
+    let inv = 4 - alpha;
 
     let bg_r = (bg >> 16) & 0xFF;
     let bg_g = (bg >> 8) & 0xFF;
@@ -292,9 +297,9 @@ fn blend(bg: u32, fg: u32, coverage: u8) -> u32 {
     let fg_g = (fg >> 8) & 0xFF;
     let fg_b = fg & 0xFF;
 
-    let r = (bg_r * inv + fg_r * alpha) / 16;
-    let g = (bg_g * inv + fg_g * alpha) / 16;
-    let b = (bg_b * inv + fg_b * alpha) / 16;
+    let r = (bg_r * inv + fg_r * alpha) >> 2;
+    let g = (bg_g * inv + fg_g * alpha) >> 2;
+    let b = (bg_b * inv + fg_b * alpha) >> 2;
 
     0xFF000000 | (r << 16) | (g << 8) | b
 }

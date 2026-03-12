@@ -33,7 +33,9 @@ pub fn vectorize_to_raster(
     let (paths, w, h, bg_color) = vectorize_paths(pixels, width, height);
     let out_w = w * scale;
     let out_h = h * scale;
+    let t = std::time::Instant::now();
     let buf = rasterize::rasterize(&paths, w, h, bg_color, scale);
+    eprintln!("Rasterize: {:.2}ms ({}x{} at {}x)", t.elapsed().as_secs_f64() * 1000.0, w, h, scale);
     (buf, out_w, out_h)
 }
 
@@ -41,28 +43,42 @@ pub fn vectorize_to_raster(
 fn vectorize_paths(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, usize, usize, u32) {
+    use std::time::Instant;
+
     // Step 0: Detect and collapse nearest-neighbor upscaling
+    let t = Instant::now();
     let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
     let (px, w, h) = if !native_pixels.is_empty() {
         (native_pixels.as_slice(), nw, nh)
     } else {
         (pixels, width, height)
     };
+    let t_collapse = t.elapsed();
 
     // Step 1: Build similarity graph with diagonal crossing resolution
+    let t = Instant::now();
     let graph = graph::build(px, w, h);
+    let t_graph = t.elapsed();
 
     // Step 2: Build reshaped cell graph (Voronoi diagram per Section 3.2)
+    let t = Instant::now();
     let paths = contour::extract_cells_smooth(px, &graph);
+    let t_contour = t.elapsed();
 
-    let bg_color = detect_background_color(px, w, h);
+    let (bg_color, _is_strong) = detect_background_color(px, w, h);
+    eprintln!("Pipeline: collapse={:.2}ms graph={:.2}ms contour={:.2}ms total={:.2}ms",
+        t_collapse.as_secs_f64() * 1000.0,
+        t_graph.as_secs_f64() * 1000.0,
+        t_contour.as_secs_f64() * 1000.0,
+        (t_collapse + t_graph + t_contour).as_secs_f64() * 1000.0);
     (paths, w, h, bg_color)
 }
 
-/// Detect background color: most common color along the image edges,
-/// but only if it also covers a significant portion of the total image.
-/// Returns a sentinel (0xFFFFFFFF) if no clear background is found.
-fn detect_background_color(pixels: &[u32], width: usize, height: usize) -> u32 {
+/// Detect background color: most common color along the image edges.
+/// Returns the most common edge color (used for buffer init and optional path skipping).
+/// Also returns whether the color is a strong background (covers ≥20% of pixels),
+/// meaning we can safely skip rendering paths with that color.
+fn detect_background_color(pixels: &[u32], width: usize, height: usize) -> (u32, bool) {
     let mut edge_counts = std::collections::HashMap::new();
     for x in 0..width {
         *edge_counts.entry(pixels[x]).or_insert(0u32) += 1;
@@ -74,16 +90,11 @@ fn detect_background_color(pixels: &[u32], width: usize, height: usize) -> u32 {
     }
     let candidate = edge_counts.into_iter().max_by_key(|&(_, c)| c).map(|(color, _)| color).unwrap_or(0);
 
-    // Verify: the candidate must cover at least 20% of all pixels to be a true background.
-    // This prevents dark outlines or small border elements from being misidentified.
+    // Strong background: covers ≥20% of all pixels — safe to skip rendering
     let total = pixels.len();
     let coverage = pixels.iter().filter(|&&p| p == candidate).count();
-    if coverage * 5 >= total {
-        candidate
-    } else {
-        // No dominant background — use a sentinel that won't match any real color
-        0xFFFFFFFF
-    }
+    let is_strong = coverage * 5 >= total;
+    (candidate, is_strong)
 }
 
 /// Detect nearest-neighbor upscaling and collapse to native pixel resolution.

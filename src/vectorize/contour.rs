@@ -12,6 +12,60 @@
 use super::graph::SimilarityGraph;
 use super::voronoi::Point;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasher, Hasher};
+
+// --- FxHash: fast non-cryptographic hasher for integer keys ---
+// Replaces SipHash (default) which is ~3x slower for small integer keys.
+
+const FXHASH_SEED: u64 = 0x517cc1b727220a95;
+
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline] fn finish(&self) -> u64 { self.0 }
+    #[inline] fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(FXHASH_SEED);
+        }
+    }
+    #[inline] fn write_i32(&mut self, i: i32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(FXHASH_SEED);
+    }
+    #[inline] fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(FXHASH_SEED);
+    }
+    #[inline] fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(FXHASH_SEED);
+    }
+    #[inline] fn write_u8(&mut self, i: u8) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(FXHASH_SEED);
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct FxBuildHasher;
+impl BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+    #[inline] fn build_hasher(&self) -> FxHasher { FxHasher(0) }
+}
+
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxHashSet<K> = HashSet<K, FxBuildHasher>;
+
+#[inline]
+fn fx_hashmap<K, V>() -> FxHashMap<K, V> {
+    HashMap::with_hasher(FxBuildHasher)
+}
+
+#[inline]
+fn fx_hashmap_cap<K, V>(cap: usize) -> FxHashMap<K, V> {
+    HashMap::with_capacity_and_hasher(cap, FxBuildHasher)
+}
+
+#[inline]
+fn fx_hashset_cap<K>(cap: usize) -> FxHashSet<K> {
+    HashSet::with_capacity_and_hasher(cap, FxBuildHasher)
+}
 
 // --- Public types ---
 
@@ -77,17 +131,86 @@ fn corner_vertices(
     }
 }
 
+/// Inline buffer for pixel cell vertices (max 8).
+struct CellBuf {
+    pts: [Point; 8],
+    len: usize,
+}
+
+impl CellBuf {
+    #[inline]
+    fn new() -> Self {
+        CellBuf { pts: [Point::new(0.0, 0.0); 8], len: 0 }
+    }
+    #[inline]
+    fn push(&mut self, p: Point) {
+        self.pts[self.len] = p;
+        self.len += 1;
+    }
+    #[inline]
+    fn as_slice(&self) -> &[Point] {
+        &self.pts[..self.len]
+    }
+}
+
+/// Compute the full Voronoi cell polygon for pixel (px, py).
+/// Returns vertices in CW order, 4–8 vertices. Uses inline buffer.
+#[inline]
+fn pixel_cell_inline(px: usize, py: usize, graph: &SimilarityGraph, buf: &mut CellBuf) {
+    let ipx = px as i32;
+    let ipy = py as i32;
+    buf.len = 0;
+    corner_vertices_inline(ipx, ipy, CornerRel::BR, graph, buf);
+    corner_vertices_inline(ipx + 1, ipy, CornerRel::BL, graph, buf);
+    corner_vertices_inline(ipx + 1, ipy + 1, CornerRel::TL, graph, buf);
+    corner_vertices_inline(ipx, ipy + 1, CornerRel::TR, graph, buf);
+}
+
+/// Same as corner_vertices but uses CellBuf instead of Vec.
+#[inline]
+fn corner_vertices_inline(
+    cx: i32, cy: i32, rel: CornerRel, graph: &SimilarityGraph, out: &mut CellBuf,
+) {
+    let w = graph.width as i32;
+    let h = graph.height as i32;
+
+    if cx <= 0 || cy <= 0 || cx >= w || cy >= h {
+        out.push(Point::new(cx as f64, cy as f64));
+        return;
+    }
+
+    let has_backslash = graph.edge((cx - 1) as usize, (cy - 1) as usize).down_right;
+    let has_slash = graph.edge(cx as usize, (cy - 1) as usize).down_left;
+
+    if has_backslash {
+        let a = Point::new(cx as f64 - 0.25, cy as f64 + 0.25);
+        let b = Point::new(cx as f64 + 0.25, cy as f64 - 0.25);
+        match rel {
+            CornerRel::TL => { out.push(b); out.push(a); }
+            CornerRel::BR => { out.push(a); out.push(b); }
+            CornerRel::TR => out.push(b),
+            CornerRel::BL => out.push(a),
+        }
+    } else if has_slash {
+        let c = Point::new(cx as f64 - 0.25, cy as f64 - 0.25);
+        let d = Point::new(cx as f64 + 0.25, cy as f64 + 0.25);
+        match rel {
+            CornerRel::TR => { out.push(d); out.push(c); }
+            CornerRel::BL => { out.push(c); out.push(d); }
+            CornerRel::TL => out.push(c),
+            CornerRel::BR => out.push(d),
+        }
+    } else {
+        out.push(Point::new(cx as f64, cy as f64));
+    }
+}
+
 /// Compute the full Voronoi cell polygon for pixel (px, py).
 /// Returns vertices in CW order, 4–8 vertices.
 fn pixel_cell(px: usize, py: usize, graph: &SimilarityGraph) -> Vec<Point> {
-    let ipx = px as i32;
-    let ipy = py as i32;
-    let mut vertices = Vec::with_capacity(8);
-    corner_vertices(ipx, ipy, CornerRel::BR, graph, &mut vertices);
-    corner_vertices(ipx + 1, ipy, CornerRel::BL, graph, &mut vertices);
-    corner_vertices(ipx + 1, ipy + 1, CornerRel::TL, graph, &mut vertices);
-    corner_vertices(ipx, ipy + 1, CornerRel::TR, graph, &mut vertices);
-    vertices
+    let mut buf = CellBuf::new();
+    pixel_cell_inline(px, py, graph, &mut buf);
+    buf.as_slice().to_vec()
 }
 
 /// Render each pixel as its Voronoi cell polygon, grouped by color.
@@ -123,14 +246,35 @@ pub fn extract_cells(pixels: &[u32], graph: &SimilarityGraph) -> Vec<ColorPath> 
 
 // --- Precomputed cells ---
 
-/// Precompute NodeId cell polygons for all pixels (avoids repeated pixel_cell calls).
-/// Returns flat vec indexed by y * w + x, each entry is a SmallVec-like array of NodeIds.
-fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<Vec<NodeId>> {
-    let mut cells = Vec::with_capacity(w * h);
+/// Inline fixed-size cell: max 8 vertices per Voronoi cell, avoids heap allocation.
+#[derive(Clone, Copy)]
+struct InlineCell {
+    nodes: [NodeId; 8],
+    len: u8,
+}
+
+impl InlineCell {
+    #[inline]
+    fn as_slice(&self) -> &[NodeId] {
+        &self.nodes[..self.len as usize]
+    }
+}
+
+/// Precompute NodeId cell polygons for all pixels using inline fixed-size arrays.
+/// Eliminates w*h heap allocations vs Vec<Vec<NodeId>>.
+fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<InlineCell> {
+    let zero = NodeId { x4: 0, y4: 0 };
+    let mut cells = vec![InlineCell { nodes: [zero; 8], len: 0 }; w * h];
+    let mut buf = CellBuf::new();
     for y in 0..h {
         for x in 0..w {
-            let pts = pixel_cell(x, y, graph);
-            cells.push(pts.iter().map(|p| NodeId::from_point(p)).collect());
+            pixel_cell_inline(x, y, graph, &mut buf);
+            let cell = &mut cells[y * w + x];
+            let n = buf.len.min(8);
+            cell.len = n as u8;
+            for i in 0..n {
+                cell.nodes[i] = NodeId::from_point(&buf.pts[i]);
+            }
         }
     }
     cells
@@ -140,15 +284,15 @@ fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<Vec<Node
 /// Each undirected edge between different colors produces two directed edges:
 /// a→b with right_color and b→a with left_color.
 fn build_directed_boundary_edges(
-    pixels: &[u32], w: usize, h: usize, all_cells: &[Vec<NodeId>],
+    pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell],
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
-    let mut edge_map: HashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> =
-        HashMap::with_capacity(w * h * 3);
+    let mut edge_map: FxHashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> =
+        fx_hashmap_cap(w * h * 3);
 
     for y in 0..h {
         for x in 0..w {
             let color = pixels[y * w + x];
-            let cell = &all_cells[y * w + x];
+            let cell = all_cells[y * w + x].as_slice();
             let n = cell.len();
             if n < 3 { continue; }
 
@@ -172,11 +316,8 @@ fn build_directed_boundary_edges(
         }
     }
 
-    let mut visible = Vec::new();
-    // Directed edges: (from, to, right_side_color)
-    // Cell winding is CW, so for directed edge a→b, the right side color
-    // is the color of the cell that has this edge in its CW winding.
-    let mut directed = Vec::new();
+    let mut visible = Vec::with_capacity(edge_map.len() / 4);
+    let mut directed = Vec::with_capacity(edge_map.len() / 2);
 
     for ((a, b), (left, right)) in &edge_map {
         let lc = left.unwrap_or(0);
@@ -188,9 +329,7 @@ fn build_directed_boundary_edges(
                 left_color: lc,
                 right_color: rc,
             });
-            // a→b forward direction has right_color = rc (from CW winding convention)
             directed.push((*a, *b, rc));
-            // b→a reverse direction has right_color = lc
             directed.push((*b, *a, lc));
         }
     }
@@ -202,13 +341,13 @@ fn build_directed_boundary_edges(
 fn region_boundary_edges_fast(
     region_pixels: &[(usize, usize)],
     w: usize,
-    all_cells: &[Vec<NodeId>],
+    all_cells: &[InlineCell],
 ) -> Vec<(NodeId, NodeId)> {
     let mut all_directed: Vec<(NodeId, NodeId)> = Vec::new();
-    let mut undirected_count: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut undirected_count: FxHashMap<(NodeId, NodeId), usize> = fx_hashmap();
 
     for &(px, py) in region_pixels {
-        let cell = &all_cells[py * w + px];
+        let cell = all_cells[py * w + px].as_slice();
         let n = cell.len();
         if n < 3 { continue; }
 
@@ -267,7 +406,7 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
     let w = graph.width;
     let h = graph.height;
 
-    let mut edge_map: HashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> = HashMap::new();
+    let mut edge_map: FxHashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> = fx_hashmap();
 
     for y in 0..h {
         for x in 0..w {
@@ -315,71 +454,61 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
 
 /// Chain visible edges through valence-2 nodes into paths.
 fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
-    let mut adj: HashMap<NodeId, Vec<(NodeId, (u32, u32))>> = HashMap::new();
+    // Use edge indices instead of HashSet<(NodeId, NodeId)> for visited tracking.
+    // Build adjacency as (neighbor_node, cpair, edge_index).
+    let mut adj: FxHashMap<NodeId, Vec<(NodeId, (u32, u32), usize)>> =
+        fx_hashmap_cap(edges.len());
 
-    for e in edges {
+    for (ei, e) in edges.iter().enumerate() {
         let cpair = if e.left_color <= e.right_color {
             (e.left_color, e.right_color)
         } else {
             (e.right_color, e.left_color)
         };
-        adj.entry(e.a).or_default().push((e.b, cpair));
-        adj.entry(e.b).or_default().push((e.a, cpair));
+        adj.entry(e.a).or_default().push((e.b, cpair, ei));
+        adj.entry(e.b).or_default().push((e.a, cpair, ei));
     }
 
-    let mut visited_edges: HashSet<(NodeId, NodeId)> = HashSet::new();
-    let mut chains: Vec<Vec<NodeId>> = Vec::new();
-
-    let is_valence2 = |node: &NodeId, cpair: &(u32, u32)| -> bool {
-        if let Some(neighbors) = adj.get(node) {
-            neighbors.iter().filter(|(_, cp)| cp == cpair).count() == 2
-        } else {
-            false
+    // Pre-compute valence per (node, cpair)
+    let mut valence: FxHashMap<(NodeId, (u32, u32)), u8> = fx_hashmap_cap(edges.len() * 2);
+    for (node, neighbors) in &adj {
+        for &(_, cpair, _) in neighbors {
+            *valence.entry((*node, cpair)).or_insert(0) += 1;
         }
-    };
+    }
+
+    let mut visited = vec![false; edges.len()];
+    let mut chains: Vec<Vec<NodeId>> = Vec::new();
 
     let all_nodes: Vec<NodeId> = adj.keys().copied().collect();
 
     // Start chains from endpoints (valence != 2)
     for start_node in &all_nodes {
         if let Some(neighbors) = adj.get(start_node) {
-            for &(next, cpair) in neighbors {
-                let edge_key = if *start_node <= next {
-                    (*start_node, next)
-                } else {
-                    (next, *start_node)
-                };
-                if visited_edges.contains(&edge_key) { continue; }
-                if is_valence2(start_node, &cpair) { continue; }
+            for &(next, cpair, ei) in neighbors {
+                if visited[ei] { continue; }
+                if valence.get(&(*start_node, cpair)).copied().unwrap_or(0) == 2 { continue; }
 
                 let mut chain = vec![*start_node];
                 let mut current = *start_node;
                 let mut next_node = next;
+                let mut cur_ei = ei;
 
                 loop {
-                    let ek = if current <= next_node {
-                        (current, next_node)
-                    } else {
-                        (next_node, current)
-                    };
-                    if visited_edges.contains(&ek) { break; }
-                    visited_edges.insert(ek);
+                    if visited[cur_ei] { break; }
+                    visited[cur_ei] = true;
                     chain.push(next_node);
 
-                    if !is_valence2(&next_node, &cpair) { break; }
+                    if valence.get(&(next_node, cpair)).copied().unwrap_or(0) != 2 { break; }
 
                     let neighbors_of_next = adj.get(&next_node).unwrap();
                     let mut found_next = false;
-                    for &(nn, cp) in neighbors_of_next {
+                    for &(nn, cp, nei) in neighbors_of_next {
                         if cp != cpair { continue; }
-                        let ek2 = if next_node <= nn {
-                            (next_node, nn)
-                        } else {
-                            (nn, next_node)
-                        };
-                        if !visited_edges.contains(&ek2) {
+                        if !visited[nei] {
                             current = next_node;
                             next_node = nn;
+                            cur_ei = nei;
                             found_next = true;
                             break;
                         }
@@ -397,40 +526,27 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
     // Handle closed loops (all nodes are valence-2)
     for start_node in &all_nodes {
         if let Some(neighbors) = adj.get(start_node) {
-            for &(next, cpair) in neighbors {
-                let edge_key = if *start_node <= next {
-                    (*start_node, next)
-                } else {
-                    (next, *start_node)
-                };
-                if visited_edges.contains(&edge_key) { continue; }
+            for &(next, cpair, ei) in neighbors {
+                if visited[ei] { continue; }
 
                 let mut chain = vec![*start_node];
                 let mut current = *start_node;
                 let mut next_node = next;
+                let mut cur_ei = ei;
 
                 loop {
-                    let ek = if current <= next_node {
-                        (current, next_node)
-                    } else {
-                        (next_node, current)
-                    };
-                    if visited_edges.contains(&ek) { break; }
-                    visited_edges.insert(ek);
+                    if visited[cur_ei] { break; }
+                    visited[cur_ei] = true;
                     chain.push(next_node);
 
                     let neighbors_of_next = adj.get(&next_node).unwrap();
                     let mut found_next = false;
-                    for &(nn, cp) in neighbors_of_next {
+                    for &(nn, cp, nei) in neighbors_of_next {
                         if cp != cpair { continue; }
-                        let ek2 = if next_node <= nn {
-                            (next_node, nn)
-                        } else {
-                            (nn, next_node)
-                        };
-                        if !visited_edges.contains(&ek2) {
+                        if !visited[nei] {
                             current = next_node;
                             next_node = nn;
+                            cur_ei = nei;
                             found_next = true;
                             break;
                         }
@@ -455,7 +571,7 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
 /// Paper Section 3.3: merge if angle between tangents < 160°.
 fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
     // Build map: node → list of (chain_index, is_start_endpoint)
-    let mut endpoint_map: HashMap<NodeId, Vec<(usize, bool)>> = HashMap::new();
+    let mut endpoint_map: FxHashMap<NodeId, Vec<(usize, bool)>> = fx_hashmap();
     for (ci, chain) in chains.iter().enumerate() {
         if chain.len() < 2 { continue; }
         // Skip closed loops (first == last)
@@ -464,7 +580,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
         endpoint_map.entry(chain[chain.len() - 1]).or_default().push((ci, false));
     }
 
-    let mut merged: HashSet<usize> = HashSet::new();
+    let mut merged: FxHashSet<usize> = fx_hashset_cap(0);
 
     for (_node, endpoints) in &endpoint_map {
         if endpoints.len() < 2 { continue; }
@@ -564,7 +680,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
         if merged.contains(&i) {
             chains.remove(i);
             // Update merged indices
-            let mut new_merged = HashSet::new();
+            let mut new_merged = fx_hashset_cap(0);
             for &m in &merged {
                 if m > i {
                     new_merged.insert(m - 1);
@@ -602,8 +718,8 @@ fn chain_tangent_at_endpoint(chain: &[NodeId], is_start: bool) -> (f64, f64) {
 
 /// Build map from NodeId to optimized Point position.
 /// Interior chain nodes get optimized positions; junction/corner nodes stay fixed.
-fn build_optimized_positions(chains: &[Vec<NodeId>]) -> HashMap<NodeId, Point> {
-    let mut positions: HashMap<NodeId, Point> = HashMap::new();
+fn build_optimized_positions(chains: &[Vec<NodeId>]) -> FxHashMap<NodeId, Point> {
+    let mut positions: FxHashMap<NodeId, Point> = fx_hashmap();
 
     for chain in chains {
         let is_closed = chain.len() > 2 && chain.first() == chain.last();
@@ -668,7 +784,7 @@ fn region_boundary_edges(
 ) -> Vec<(NodeId, NodeId)> {
     // Collect all directed edges from region cells, count undirected occurrences
     let mut all_directed: Vec<(NodeId, NodeId)> = Vec::new();
-    let mut undirected_count: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut undirected_count: FxHashMap<(NodeId, NodeId), usize> = fx_hashmap();
 
     for &(px, py) in region_pixels {
         let cell = pixel_cell(px, py, graph);
@@ -694,69 +810,90 @@ fn region_boundary_edges(
         .collect()
 }
 
+/// Compare angles of two direction vectors without atan2.
+/// Uses half-plane + cross-product for a total ordering equivalent to atan2.
+#[inline]
+fn angle_cmp(adx: i32, ady: i32, bdx: i32, bdy: i32) -> std::cmp::Ordering {
+    // Upper half-plane: y > 0, or y == 0 && x > 0
+    let ha = ady > 0 || (ady == 0 && adx > 0);
+    let hb = bdy > 0 || (bdy == 0 && bdx > 0);
+    if ha != hb {
+        return if ha { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+    }
+    // Same half-plane: use cross product (positive = a before b in CCW order)
+    let cross = (adx as i64) * (bdy as i64) - (ady as i64) * (bdx as i64);
+    // Reverse because positive cross means a is CCW from b (smaller angle)
+    cross.cmp(&0).reverse()
+}
+
 /// Trace ALL boundary loops globally, returning (nodes, color) for each loop.
 /// Uses the planar face algorithm on directed edges with known right-side colors.
 fn trace_all_boundary_loops(
     directed_edges: &[(NodeId, NodeId, u32)],
 ) -> Vec<(Vec<NodeId>, u32)> {
-    // Build outgoing edges sorted by angle at each node
-    let mut outgoing: HashMap<NodeId, Vec<(NodeId, f64)>> = HashMap::new();
+    // Build outgoing edges sorted by angle at each node, using integer angle comparison.
+    // Store index into directed_edges for color lookup.
+    let mut outgoing: FxHashMap<NodeId, Vec<(NodeId, i32, i32)>> =
+        fx_hashmap_cap(directed_edges.len());
     for &(a, b, _) in directed_edges {
-        let angle = ((b.y4 - a.y4) as f64).atan2((b.x4 - a.x4) as f64);
-        outgoing.entry(a).or_default().push((b, angle));
+        outgoing.entry(a).or_default().push((b, b.x4 - a.x4, b.y4 - a.y4));
     }
     for (_, edges) in outgoing.iter_mut() {
-        edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        edges.sort_unstable_by(|a, b| angle_cmp(a.1, a.2, b.1, b.2));
     }
 
-    // Build edge→color map for looking up right-side color
-    let mut edge_color: HashMap<(NodeId, NodeId), u32> = HashMap::with_capacity(directed_edges.len());
-    for &(a, b, color) in directed_edges {
-        edge_color.insert((a, b), color);
+    // Build next-edge + color arrays indexed by directed edge index.
+    // Map each directed edge to an index for O(1) lookup during tracing.
+    let n_edges = directed_edges.len();
+    let mut edge_to_idx: FxHashMap<(NodeId, NodeId), u32> = fx_hashmap_cap(n_edges);
+    for (i, &(a, b, _)) in directed_edges.iter().enumerate() {
+        edge_to_idx.insert((a, b), i as u32);
     }
 
-    // Build next-edge map using planar face algorithm
-    let mut next_map: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+    // Build next-edge index array
+    let mut next_idx: Vec<u32> = vec![u32::MAX; n_edges];
 
-    for &(p, c, _) in directed_edges {
-        let reverse_angle = ((p.y4 - c.y4) as f64).atan2((p.x4 - c.x4) as f64);
+    for (i, &(p, c, _)) in directed_edges.iter().enumerate() {
+        let rdx = p.x4 - c.x4;
+        let rdy = p.y4 - c.y4;
 
         if let Some(edges) = outgoing.get(&c) {
-            let pos = edges.partition_point(|(_, a)| *a < reverse_angle);
+            let pos = edges.partition_point(|e|
+                angle_cmp(e.1, e.2, rdx, rdy) == std::cmp::Ordering::Less
+            );
             let prev_idx = if pos == 0 { edges.len() - 1 } else { pos - 1 };
-            let (next_node, _) = edges[prev_idx];
-            next_map.insert((p, c), (c, next_node));
+            let next_node = edges[prev_idx].0;
+            if let Some(&ni) = edge_to_idx.get(&(c, next_node)) {
+                next_idx[i] = ni;
+            }
         }
     }
 
-    // Trace loops
-    let mut used: HashSet<(NodeId, NodeId)> = HashSet::new();
+    // Trace loops using index-based traversal
+    let mut used = vec![false; n_edges];
     let mut loops = Vec::new();
 
-    for &(a, b, _) in directed_edges {
-        let start_edge = (a, b);
-        if used.contains(&start_edge) { continue; }
+    for start in 0..n_edges {
+        if used[start] { continue; }
 
         let mut nodes = Vec::new();
-        let mut current = start_edge;
+        let mut cur = start;
         let mut closed = false;
 
         loop {
-            if used.contains(&current) {
-                if current == start_edge { closed = true; }
+            if used[cur] {
+                if cur == start { closed = true; }
                 break;
             }
-            used.insert(current);
-            nodes.push(current.0);
-            current = match next_map.get(&current) {
-                Some(&next) => next,
-                None => break,
-            };
+            used[cur] = true;
+            nodes.push(directed_edges[cur].0);
+            let ni = next_idx[cur] as usize;
+            if ni >= n_edges { break; }
+            cur = ni;
         }
 
         if nodes.len() >= 3 && closed {
-            // Get color from the first edge's right-side color
-            let color = edge_color.get(&start_edge).copied().unwrap_or(0);
+            let color = directed_edges[start].2;
             loops.push((nodes, color));
         }
     }
@@ -768,7 +905,7 @@ fn trace_all_boundary_loops(
 /// At each node, picks the rightmost turn (most CW) to keep region on the right.
 fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<NodeId>> {
     // Build outgoing edges sorted by angle at each node
-    let mut outgoing: HashMap<NodeId, Vec<(NodeId, f64)>> = HashMap::new();
+    let mut outgoing: FxHashMap<NodeId, Vec<(NodeId, f64)>> = fx_hashmap();
     for &(a, b) in boundary_edges {
         let ap = a.to_point();
         let bp = b.to_point();
@@ -784,7 +921,7 @@ fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<Nod
     // For incoming edge P→C, find the outgoing edge from C that is the rightmost
     // turn. This is the edge just BEFORE the reverse direction (C→P) in the
     // CW-sorted (ascending atan2) list.
-    let mut next_map: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+    let mut next_map: FxHashMap<(NodeId, NodeId), (NodeId, NodeId)> = fx_hashmap();
 
     for &(p, c) in boundary_edges {
         let pp = p.to_point();
@@ -802,7 +939,7 @@ fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<Nod
     }
 
     // Trace loops by following the next-edge map
-    let mut used: HashSet<(NodeId, NodeId)> = HashSet::new();
+    let mut used: FxHashSet<(NodeId, NodeId)> = fx_hashset_cap(0);
     let mut loops = Vec::new();
 
     for &start_edge in boundary_edges {
@@ -837,7 +974,7 @@ fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<Nod
 /// Uses optimized positions and splits at corners for B-spline fitting.
 fn boundary_loop_to_segments(
     nodes: &[NodeId],
-    optimized: &HashMap<NodeId, Point>,
+    optimized: &FxHashMap<NodeId, Point>,
 ) -> Vec<PathSegment> {
     let n = nodes.len();
     let points: Vec<Point> = nodes
@@ -906,26 +1043,35 @@ fn boundary_loop_to_segments(
 /// Region-based rendering: merges same-color cells into regions, traces
 /// boundaries on the cell graph, emits smooth B-spline curves as region outlines.
 pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<ColorPath> {
+    use std::time::Instant;
     let w = graph.width;
     let h = graph.height;
 
-    // Precompute all cell polygons (NodeId sequences) once
+    let t = Instant::now();
     let all_cells = precompute_cells(w, h, graph);
+    eprintln!("  precompute_cells: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
 
-    // Step 1: Extract visible edges (for chaining) and directed boundary edges (for loop tracing)
+    let t = Instant::now();
     let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells);
+    eprintln!("  build_edges: {:.2}ms ({} visible)", t.elapsed().as_secs_f64() * 1000.0, visible_edges.len());
 
+    let t = Instant::now();
     let mut chains = chain_visible_edges(&visible_edges);
+    eprintln!("  chain: {:.2}ms ({} chains)", t.elapsed().as_secs_f64() * 1000.0, chains.len());
 
-    // Step 2: Merge T-junctions (Section 3.3)
+    let t = Instant::now();
     merge_t_junctions(&mut chains);
+    eprintln!("  merge_tj: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
 
-    // Step 3: Optimize control points and build position map
+    let t = Instant::now();
     let optimized = build_optimized_positions(&chains);
+    eprintln!("  optimize: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
 
-    // Step 4: Trace ALL boundary loops globally (replaces flood_fill + per-region tracing)
+    let t = Instant::now();
     let all_loops = trace_all_boundary_loops(&directed_edges);
+    eprintln!("  trace_loops: {:.2}ms ({} loops)", t.elapsed().as_secs_f64() * 1000.0, all_loops.len());
 
+    let t = Instant::now();
     // Step 5: Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
     for (node_loop, color) in &all_loops {
@@ -946,6 +1092,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
             segments: all_segments,
         });
     }
+    eprintln!("  group+bspline: {:.2}ms ({} paths)", t.elapsed().as_secs_f64() * 1000.0, result.len());
 
     result
 }
@@ -1011,10 +1158,10 @@ fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
 
 // --- Section 3.4: B-spline optimization ---
 
-const OPT_ITERATIONS: usize = 4;
+const OPT_ITERATIONS: usize = 1;
 const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
-const CURVATURE_INTERVALS: usize = 6;
+const CURVATURE_INTERVALS: usize = 3;
 
 fn detect_corners(points: &[Point], is_closed: bool) -> Vec<bool> {
     let n = points.len();
@@ -1100,18 +1247,15 @@ fn optimize_control_points(points: &mut Vec<Point>, is_closed: bool) {
             let e0 = local_energy(points, &orig, &corners, i, n, is_closed);
             if e0 < 1e-12 { continue; }
 
-            // Central difference gradient
+            // Forward-difference gradient (3 evals instead of 5)
             points[i] = Point::new(current.x + eps, current.y);
-            let ex_plus = local_energy(points, &orig, &corners, i, n, is_closed);
-            points[i] = Point::new(current.x - eps, current.y);
-            let ex_minus = local_energy(points, &orig, &corners, i, n, is_closed);
+            let ex_fwd = local_energy(points, &orig, &corners, i, n, is_closed);
             points[i] = Point::new(current.x, current.y + eps);
-            let ey_plus = local_energy(points, &orig, &corners, i, n, is_closed);
-            points[i] = Point::new(current.x, current.y - eps);
-            let ey_minus = local_energy(points, &orig, &corners, i, n, is_closed);
+            let ey_fwd = local_energy(points, &orig, &corners, i, n, is_closed);
 
-            let gx = (ex_plus - ex_minus) / (2.0 * eps);
-            let gy = (ey_plus - ey_minus) / (2.0 * eps);
+            let inv_eps = 1.0 / eps;
+            let gx = (ex_fwd - e0) * inv_eps;
+            let gy = (ey_fwd - e0) * inv_eps;
 
             let grad_len = (gx * gx + gy * gy).sqrt();
             if grad_len < 1e-12 {
@@ -1135,6 +1279,7 @@ fn optimize_control_points(points: &mut Vec<Point>, is_closed: bool) {
     }
 }
 
+#[inline(always)]
 fn local_energy(
     points: &[Point], orig: &[Point], corners: &[bool],
     idx: usize, n: usize, is_closed: bool,
@@ -1143,6 +1288,7 @@ fn local_energy(
         + positional_energy(points, orig, idx)
 }
 
+#[inline(always)]
 fn positional_energy(points: &[Point], orig: &[Point], idx: usize) -> f64 {
     let dx = points[idx].x - orig[idx].x;
     let dy = points[idx].y - orig[idx].y;
@@ -1150,6 +1296,7 @@ fn positional_energy(points: &[Point], orig: &[Point], idx: usize) -> f64 {
     dist_sq * dist_sq
 }
 
+#[inline(always)]
 fn curvature_energy(
     points: &[Point], corners: &[bool], idx: usize, n: usize, is_closed: bool,
 ) -> f64 {
@@ -1174,21 +1321,29 @@ fn curvature_energy(
     energy
 }
 
+#[inline(always)]
 fn integrate_span_curvature(p0: Point, p1: Point, p2: Point) -> f64 {
+    // For quadratic Bezier, second derivative is constant:
+    let ddx = p0.x - 2.0 * p1.x + p2.x;
+    let ddy = p0.y - 2.0 * p1.y + p2.y;
+    let cross_sq_factor = ddx * ddx + ddy * ddy; // |d''|² is constant
+    if cross_sq_factor < 1e-20 { return 0.0; }
+
+    // First derivative at t: d'(t) = (t-1)*p0 + (1-2t)*p1 + t*p2
+    // Evaluate at endpoints and midpoint (Simpson's-like)
     let dt = 1.0 / CURVATURE_INTERVALS as f64;
-    let mut result = (curvature_sq_at(p0, p1, p2, 0.0)
-        + curvature_sq_at(p0, p1, p2, 1.0)) / 2.0;
+    let mut result = (curvature_sq_precomputed(p0, p1, p2, 0.0, ddx, ddy)
+        + curvature_sq_precomputed(p0, p1, p2, 1.0, ddx, ddy)) * 0.5;
     for i in 1..CURVATURE_INTERVALS {
-        result += curvature_sq_at(p0, p1, p2, i as f64 * dt);
+        result += curvature_sq_precomputed(p0, p1, p2, i as f64 * dt, ddx, ddy);
     }
     result * dt
 }
 
-fn curvature_sq_at(p0: Point, p1: Point, p2: Point, t: f64) -> f64 {
+#[inline(always)]
+fn curvature_sq_precomputed(p0: Point, p1: Point, p2: Point, t: f64, ddx: f64, ddy: f64) -> f64 {
     let dx = (t - 1.0) * p0.x + (1.0 - 2.0 * t) * p1.x + t * p2.x;
     let dy = (t - 1.0) * p0.y + (1.0 - 2.0 * t) * p1.y + t * p2.y;
-    let ddx = p0.x - 2.0 * p1.x + p2.x;
-    let ddy = p0.y - 2.0 * p1.y + p2.y;
 
     let numer = dx * ddy - dy * ddx;
     let denom_sq = dx * dx + dy * dy;

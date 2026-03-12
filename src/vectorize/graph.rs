@@ -33,27 +33,30 @@ impl SimilarityGraph {
 /// Per-channel YUV similarity check matching the reference implementation.
 /// Uses PAL YUV color space with independent per-channel thresholds:
 ///   |ΔY| ≤ 48, |ΔU| ≤ 7, |ΔV| ≤ 6
+/// Computed with fixed-point integer math (×1000) to avoid f64.
 #[inline]
 fn similar(a: u32, b: u32) -> bool {
     if a == b {
         return true;
     }
-    let ar = ((a >> 16) & 0xFF) as f64;
-    let ag = ((a >> 8) & 0xFF) as f64;
-    let ab = (a & 0xFF) as f64;
-    let br = ((b >> 16) & 0xFF) as f64;
-    let bg = ((b >> 8) & 0xFF) as f64;
-    let bb = (b & 0xFF) as f64;
+    let dr = ((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32;
+    let dg = ((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32;
+    let db = (a & 0xFF) as i32 - (b & 0xFF) as i32;
 
-    let dr = ar - br;
-    let dg = ag - bg;
-    let db = ab - bb;
+    // Y = 0.299*R + 0.587*G + 0.114*B → ×1000: 299*R + 587*G + 114*B
+    let dy1000 = 299 * dr + 587 * dg + 114 * db;
+    // |ΔY| ≤ 48 → |ΔY×1000| ≤ 48000
+    if dy1000.abs() > 48000 { return false; }
 
-    let dy = 0.299 * dr + 0.587 * dg + 0.114 * db;
-    let du = 0.492 * (db - dy);
-    let dv = 0.877 * (dr - dy);
+    // U = 0.492*(B - Y) → ×1000: 492*(db*1000 - dy1000)/1000
+    // |ΔU| ≤ 7 → |ΔU×1000| ≤ 7000 → |492*(db*1000 - dy1000)| ≤ 7000000
+    let du_num = 492i64 * (db as i64 * 1000 - dy1000 as i64);
+    if du_num.abs() > 7_000_000 { return false; }
 
-    dy.abs() <= 48.0 && du.abs() <= 7.0 && dv.abs() <= 6.0
+    // V = 0.877*(R - Y) → ×1000: 877*(dr*1000 - dy1000)/1000
+    // |ΔV| ≤ 6 → |877*(dr*1000 - dy1000)| ≤ 6000000
+    let dv_num = 877i64 * (dr as i64 * 1000 - dy1000 as i64);
+    dv_num.abs() <= 6_000_000
 }
 
 #[inline]
