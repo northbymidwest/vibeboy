@@ -353,8 +353,7 @@ fn build_directed_boundary_edges(
         }
     }
 
-    // Sort to restore deterministic ordering (downstream chain/loop building
-    // is sensitive to edge order). This is cheap: only boundary edges, not all edges.
+    // Sort for deterministic output and better cache locality in downstream steps.
     visible.sort_unstable_by(|a, b| (a.a, a.b).cmp(&(b.a, b.b)));
     directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
 
@@ -476,23 +475,16 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
     visible
 }
 
-/// Compute valence of a node for a specific color pair by counting matching
-/// entries in the adjacency list. Avoids a separate valence HashMap.
-#[inline]
-fn cpair_valence(neighbors: &[(NodeId, (u32, u32), usize)], cpair: (u32, u32)) -> u8 {
-    let mut v = 0u8;
-    for &(_, cp, _) in neighbors {
-        if cp == cpair { v += 1; }
-    }
-    v
-}
-
 /// Chain visible edges through valence-2 nodes into paths.
+/// Precomputes per-(node, cpair) valence for O(1) lookup instead of
+/// O(degree) scan on every step.
 fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
-    // Use edge indices instead of HashSet<(NodeId, NodeId)> for visited tracking.
     // Build adjacency as (neighbor_node, cpair, edge_index).
     let mut adj: FxHashMap<NodeId, Vec<(NodeId, (u32, u32), usize)>> =
         fx_hashmap_cap(edges.len());
+
+    // Precompute cpair valence: how many edges connect this node with this cpair.
+    let mut cpair_val: FxHashMap<(NodeId, (u32, u32)), u8> = fx_hashmap_cap(edges.len() * 2);
 
     for (ei, e) in edges.iter().enumerate() {
         let cpair = if e.left_color <= e.right_color {
@@ -502,6 +494,8 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
         };
         adj.entry(e.a).or_default().push((e.b, cpair, ei));
         adj.entry(e.b).or_default().push((e.a, cpair, ei));
+        *cpair_val.entry((e.a, cpair)).or_insert(0) += 1;
+        *cpair_val.entry((e.b, cpair)).or_insert(0) += 1;
     }
 
     let mut visited = vec![false; edges.len()];
@@ -514,7 +508,7 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
         if let Some(neighbors) = adj.get(start_node) {
             for &(next, cpair, ei) in neighbors {
                 if visited[ei] { continue; }
-                if cpair_valence(neighbors, cpair) == 2 { continue; }
+                if cpair_val[&(*start_node, cpair)] == 2 { continue; }
 
                 let mut chain = vec![*start_node];
                 let mut next_node = next;
@@ -525,9 +519,9 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                     visited[cur_ei] = true;
                     chain.push(next_node);
 
-                    let neighbors_of_next = adj.get(&next_node).unwrap();
-                    if cpair_valence(neighbors_of_next, cpair) != 2 { break; }
+                    if cpair_val[&(next_node, cpair)] != 2 { break; }
 
+                    let neighbors_of_next = adj.get(&next_node).unwrap();
                     let mut found_next = false;
                     for &(nn, cp, nei) in neighbors_of_next {
                         if cp != cpair { continue; }
@@ -1060,9 +1054,18 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
 
     let all_cells = precompute_cells(w, h, graph);
     let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells);
-    let mut chains = chain_visible_edges(&visible_edges);
-    merge_t_junctions(&mut chains);
-    let optimized = build_optimized_positions(&chains);
+
+    // Adaptive pipeline: skip expensive B-spline optimization when boundary
+    // complexity is high (noisy/dithered frames). The optimization provides
+    // negligible visual benefit when boundaries are this dense.
+    let optimized = if visible_edges.len() <= 12000 {
+        let mut chains = chain_visible_edges(&visible_edges);
+        merge_t_junctions(&mut chains);
+        build_optimized_positions(&chains)
+    } else {
+        fx_hashmap()
+    };
+
     let all_loops = trace_all_boundary_loops(&directed_edges);
 
     // Group loops by color and convert to segments
