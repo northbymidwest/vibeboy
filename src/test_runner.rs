@@ -12,6 +12,7 @@ mod sgb;
 mod snapshot;
 mod snes;
 mod timer;
+mod vectorize;
 
 use clap::{Parser, Subcommand};
 use emulator::Emulator;
@@ -63,6 +64,9 @@ enum Command {
         /// Output file path
         #[arg(long, default_value = "screenshot.png")]
         out: String,
+        /// Output format: png or svg
+        #[arg(long, default_value = "png")]
+        format: String,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -399,7 +403,7 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     }
 }
 
-fn cmd_screenshot(cli: &Cli, frames: u32, out: &str) {
+fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str) {
     let rom = fs::read(&cli.path).expect("Failed to read ROM");
     let model = cli.model.unwrap_or_else(|| detect_model_with_rom(&cli.path, Some(&rom)));
     let br = resolve_boot_rom(cli, model);
@@ -408,18 +412,25 @@ fn cmd_screenshot(cli: &Cli, frames: u32, out: &str) {
         emu.step_frame();
     }
     let fb = emu.frame_buffer();
-    let mut rgb = Vec::with_capacity(160 * 144 * 3);
-    for y in 0..144 {
-        for x in 0..160 {
-            let pixel = fb[y * 160 + x];
-            rgb.push(((pixel >> 16) & 0xFF) as u8);
-            rgb.push(((pixel >> 8) & 0xFF) as u8);
-            rgb.push((pixel & 0xFF) as u8);
+
+    if format == "svg" || out.ends_with(".svg") {
+        let svg = vectorize::vectorize_to_svg(fb, 160, 144);
+        fs::write(out, &svg).expect("Failed to write SVG");
+        eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
+    } else {
+        let mut rgb = Vec::with_capacity(160 * 144 * 3);
+        for y in 0..144 {
+            for x in 0..160 {
+                let pixel = fb[y * 160 + x];
+                rgb.push(((pixel >> 16) & 0xFF) as u8);
+                rgb.push(((pixel >> 8) & 0xFF) as u8);
+                rgb.push((pixel & 0xFF) as u8);
+            }
         }
+        image::save_buffer(out, &rgb, 160, 144, image::ColorType::Rgb8)
+            .expect("Failed to write PNG");
+        eprintln!("Wrote {} (frame {})", out, frames);
     }
-    image::save_buffer(out, &rgb, 160, 144, image::ColorType::Rgb8)
-        .expect("Failed to write PNG");
-    eprintln!("Wrote {} (frame {})", out, frames);
 }
 
 fn cmd_analyze(cli: &Cli, frames: u32) {
@@ -750,7 +761,7 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Command::Screenshot { frames, out }) => cmd_screenshot(&cli, *frames, out),
+        Some(Command::Screenshot { frames, out, format }) => cmd_screenshot(&cli, *frames, out, format),
         Some(Command::Analyze { frames }) => cmd_analyze(&cli, *frames),
         Some(Command::TraceTimer) => cmd_trace_timer(&cli),
         Some(Command::Calibrate) => cmd_calibrate(&cli),
