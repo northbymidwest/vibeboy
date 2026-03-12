@@ -254,6 +254,9 @@ fn main() {
         "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
         "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
         "super-xbr" => scaling::ScaleFilter::SuperXbr,
+        "nedi" => scaling::ScaleFilter::Nedi,
+        "dcci" => scaling::ScaleFilter::Dcci,
+        "edi" => scaling::ScaleFilter::Edi,
         "omniscale" | "omniscale2x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X2),
         "omniscale3x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X3),
         "omniscale4x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X4),
@@ -265,7 +268,7 @@ fn main() {
         "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
         "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x]", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x]", other);
             std::process::exit(1);
         }
     };
@@ -547,6 +550,18 @@ fn main() {
                 }
                 scaling::ScaleFilter::SuperXbr => {
                     scaled = scaling::super_xbr::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Nedi => {
+                    scaled = scaling::nedi::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Dcci => {
+                    scaled = scaling::dcci::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Edi => {
+                    scaled = scaling::edi::scale(raw_src, sw, sh);
                     &scaled
                 }
                 scaling::ScaleFilter::OmniScale(f) => {

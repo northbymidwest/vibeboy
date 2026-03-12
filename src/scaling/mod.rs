@@ -2,9 +2,12 @@
 
 pub mod bicubic;
 pub mod bilinear;
+pub mod dcci;
 pub mod eagle;
+pub mod edi;
 pub mod epx;
 pub mod hqx;
+pub mod nedi;
 pub mod omniscale;
 pub mod omniscale_legacy;
 pub mod scale3x;
@@ -116,6 +119,9 @@ pub enum ScaleFilter {
     Xbrz(XbrzScale),
     XbrHybrid,
     SuperXbr,
+    Nedi,
+    Dcci,
+    Edi,
     OmniScale(OmniScaleFactor),
     OmniScaleLegacy(OmniScaleFactor),
 }
@@ -130,7 +136,8 @@ impl ScaleFilter {
             ScaleFilter::Scale3x => 3,
             ScaleFilter::Xbr(x) => x.factor(),
             ScaleFilter::Xbrz(x) => x.factor(),
-            ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr => 2,
+            ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
+            | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
             ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f) => f.factor(),
         }
     }
