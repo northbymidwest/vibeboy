@@ -1043,36 +1043,17 @@ fn boundary_loop_to_segments(
 /// Region-based rendering: merges same-color cells into regions, traces
 /// boundaries on the cell graph, emits smooth B-spline curves as region outlines.
 pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<ColorPath> {
-    use std::time::Instant;
     let w = graph.width;
     let h = graph.height;
 
-    let t = Instant::now();
     let all_cells = precompute_cells(w, h, graph);
-    eprintln!("  precompute_cells: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
-
-    let t = Instant::now();
     let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells);
-    eprintln!("  build_edges: {:.2}ms ({} visible)", t.elapsed().as_secs_f64() * 1000.0, visible_edges.len());
-
-    let t = Instant::now();
     let mut chains = chain_visible_edges(&visible_edges);
-    eprintln!("  chain: {:.2}ms ({} chains)", t.elapsed().as_secs_f64() * 1000.0, chains.len());
-
-    let t = Instant::now();
     merge_t_junctions(&mut chains);
-    eprintln!("  merge_tj: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
-
-    let t = Instant::now();
     let optimized = build_optimized_positions(&chains);
-    eprintln!("  optimize: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
-
-    let t = Instant::now();
     let all_loops = trace_all_boundary_loops(&directed_edges);
-    eprintln!("  trace_loops: {:.2}ms ({} loops)", t.elapsed().as_secs_f64() * 1000.0, all_loops.len());
 
-    let t = Instant::now();
-    // Step 5: Group loops by color and convert to segments
+    // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
     for (node_loop, color) in &all_loops {
         let segs = boundary_loop_to_segments(node_loop, &optimized);
@@ -1092,7 +1073,6 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
             segments: all_segments,
         });
     }
-    eprintln!("  group+bspline: {:.2}ms ({} paths)", t.elapsed().as_secs_f64() * 1000.0, result.len());
 
     result
 }

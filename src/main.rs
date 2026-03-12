@@ -13,6 +13,7 @@ mod sgb;
 mod snapshot;
 mod snes;
 mod timer;
+mod vectorize;
 #[cfg(target_os = "macos")]
 mod macos_accel;
 
@@ -88,7 +89,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x]
+    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x], vectorize[2-6x]
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -272,8 +273,13 @@ fn main() {
         "aa-nearest4x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X4),
         "aa-nearest5x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X5),
         "aa-nearest6x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X6),
+        "vectorize" | "vectorize2x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X2),
+        "vectorize3x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X3),
+        "vectorize4x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X4),
+        "vectorize5x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X5),
+        "vectorize6x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X6),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x], aa-nearest[2-6x]", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x], aa-nearest[2-6x], vectorize[2-6x]", other);
             std::process::exit(1);
         }
     };
@@ -579,6 +585,11 @@ fn main() {
                 }
                 scaling::ScaleFilter::AaNearestNeighbor(f) => {
                     scaled = scaling::aa_nearest::scale_integer(raw_src, sw, sh, f.factor() as usize);
+                    &scaled
+                }
+                scaling::ScaleFilter::Vectorize(f) => {
+                    let (buf, _ow, _oh) = crate::vectorize::vectorize_to_raster(raw_src, sw, sh, f.factor() as usize);
+                    scaled = buf;
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,

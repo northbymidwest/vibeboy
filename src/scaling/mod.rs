@@ -126,6 +126,7 @@ pub enum ScaleFilter {
     OmniScale(OmniScaleFactor),
     OmniScaleLegacy(OmniScaleFactor),
     AaNearestNeighbor(OmniScaleFactor),
+    Vectorize(OmniScaleFactor),
 }
 
 impl ScaleFilter {
@@ -141,7 +142,7 @@ impl ScaleFilter {
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
             | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
             ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f)
-            | ScaleFilter::AaNearestNeighbor(f) => f.factor(),
+            | ScaleFilter::AaNearestNeighbor(f) | ScaleFilter::Vectorize(f) => f.factor(),
         }
     }
 }

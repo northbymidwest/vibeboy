@@ -26,51 +26,42 @@ pub fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
 }
 
 /// Vectorize a pixel buffer and rasterize at the given scale.
+/// Output is exactly (width*scale) x (height*scale) — no upscale collapse.
 /// Returns (pixels, output_width, output_height).
 pub fn vectorize_to_raster(
     pixels: &[u32], width: usize, height: usize, scale: usize,
 ) -> (Vec<u32>, usize, usize) {
-    let (paths, w, h, bg_color) = vectorize_paths(pixels, width, height);
-    let out_w = w * scale;
-    let out_h = h * scale;
-    let t = std::time::Instant::now();
-    let buf = rasterize::rasterize(&paths, w, h, bg_color, scale);
-    eprintln!("Rasterize: {:.2}ms ({}x{} at {}x)", t.elapsed().as_secs_f64() * 1000.0, w, h, scale);
+    let (paths, bg_color) = vectorize_core(pixels, width, height);
+    let out_w = width * scale;
+    let out_h = height * scale;
+    let buf = rasterize::rasterize(&paths, width, height, bg_color, scale);
     (buf, out_w, out_h)
 }
 
-/// Shared vectorization pipeline: returns (paths, width, height, bg_color).
+/// Core vectorization: graph → contour → paths. No upscale collapse.
+fn vectorize_core(
+    pixels: &[u32], width: usize, height: usize,
+) -> (Vec<contour::ColorPath>, u32) {
+    let graph = graph::build(pixels, width, height);
+    let paths = contour::extract_cells_smooth(pixels, &graph);
+    let (bg_color, _) = detect_background_color(pixels, width, height);
+    (paths, bg_color)
+}
+
+/// Full vectorization pipeline with upscale collapse detection.
+/// Returns (paths, native_width, native_height, bg_color).
 fn vectorize_paths(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, usize, usize, u32) {
-    use std::time::Instant;
-
     // Step 0: Detect and collapse nearest-neighbor upscaling
-    let t = Instant::now();
     let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
     let (px, w, h) = if !native_pixels.is_empty() {
         (native_pixels.as_slice(), nw, nh)
     } else {
         (pixels, width, height)
     };
-    let t_collapse = t.elapsed();
 
-    // Step 1: Build similarity graph with diagonal crossing resolution
-    let t = Instant::now();
-    let graph = graph::build(px, w, h);
-    let t_graph = t.elapsed();
-
-    // Step 2: Build reshaped cell graph (Voronoi diagram per Section 3.2)
-    let t = Instant::now();
-    let paths = contour::extract_cells_smooth(px, &graph);
-    let t_contour = t.elapsed();
-
-    let (bg_color, _is_strong) = detect_background_color(px, w, h);
-    eprintln!("Pipeline: collapse={:.2}ms graph={:.2}ms contour={:.2}ms total={:.2}ms",
-        t_collapse.as_secs_f64() * 1000.0,
-        t_graph.as_secs_f64() * 1000.0,
-        t_contour.as_secs_f64() * 1000.0,
-        (t_collapse + t_graph + t_contour).as_secs_f64() * 1000.0);
+    let (paths, bg_color) = vectorize_core(px, w, h);
     (paths, w, h, bg_color)
 }
 
