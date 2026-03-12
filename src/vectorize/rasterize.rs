@@ -269,17 +269,24 @@ fn rasterize_path(
             }
         }
 
-        // Write pixels
+        // Write pixels — batch-fill contiguous full-coverage runs
         if dirty_min <= dirty_max {
             let row_start = py * out_w;
             let end = dirty_max.min(out_w - 1);
-            for px in dirty_min..=end {
+            let mut px = dirty_min;
+            while px <= end {
                 let cov = coverage[px];
-                if cov == 0 { continue; }
+                if cov == 0 { px += 1; continue; }
                 if cov >= 4 {
-                    buffer[row_start + px] = fill_color;
+                    // Find contiguous run of full coverage for batch fill
+                    let run_start = px;
+                    while px <= end && coverage[px] >= 4 {
+                        px += 1;
+                    }
+                    buffer[row_start + run_start..row_start + px].fill(fill_color);
                 } else {
                     buffer[row_start + px] = blend4(buffer[row_start + px], fill_color, cov);
+                    px += 1;
                 }
             }
         }

@@ -86,20 +86,24 @@ pub fn vectorize_to_raster_scaled(
     rasterize::rasterize_scaled(&paths, width, height, bg_color, scale)
 }
 
-/// Quantize a single pixel color (round each channel to nearest multiple of 4).
-#[inline(always)]
-fn quantize_color(c: u32) -> u32 {
-    let r = (((c >> 16) & 0xFF) + 2).min(255) & !3;
-    let g = (((c >> 8) & 0xFF) + 2).min(255) & !3;
-    let b = ((c & 0xFF) + 2).min(255) & !3;
-    (r << 16) | (g << 8) | b
-}
-
 /// Quantize colors into a reusable buffer to avoid allocation.
+/// Uses byte-level saturating_add + mask which LLVM auto-vectorizes
+/// to NEON vqadd+vand (aarch64) or SSE paddusb+pand (x86_64).
 fn quantize_pixels_into(pixels: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    out.reserve(pixels.len());
-    out.extend(pixels.iter().map(|&c| quantize_color(c)));
+    out.resize(pixels.len(), 0);
+    // Safety: reinterpret &[u32] as &[u8] and &mut [u32] as &mut [u8]
+    // for byte-level auto-vectorizable processing.
+    let src_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+    };
+    let dst_bytes: &mut [u8] = unsafe {
+        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4)
+    };
+    // saturating_add(2) clamps at 255, then & 0xFC rounds down to multiple of 4.
+    // Alpha byte (0x00) → 0+2=2, 2&0xFC=0 — correctly stays zero.
+    for i in 0..dst_bytes.len() {
+        dst_bytes[i] = src_bytes[i].saturating_add(2) & 0xFC;
+    }
 }
 
 /// Core vectorization: graph → contour → paths. No upscale collapse.

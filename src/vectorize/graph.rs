@@ -57,23 +57,30 @@ fn px(pixels: &[u32], w: usize, x: usize, y: usize) -> u32 {
 }
 
 /// Build the initial similarity graph with all similar edges.
+/// Uses direct row-pointer indexing to avoid repeated multiply in px() lookups.
 pub fn build(pixels: &[u32], width: usize, height: usize) -> SimilarityGraph {
     let mut edges = vec![PixelEdges::default(); width * height];
 
     for y in 0..height {
+        let row = y * width;
+        let next_row = row + width; // only valid when y + 1 < height
+        let has_next_row = y + 1 < height;
+
         for x in 0..width {
-            let c = px(pixels, width, x, y);
+            let c = pixels[row + x];
+            let idx = row + x;
+
             if x + 1 < width {
-                edges[y * width + x].right = similar(c, px(pixels, width, x + 1, y));
+                edges[idx].right = similar(c, pixels[row + x + 1]);
             }
-            if y + 1 < height {
-                edges[y * width + x].down = similar(c, px(pixels, width, x, y + 1));
-            }
-            if x + 1 < width && y + 1 < height {
-                edges[y * width + x].down_right = similar(c, px(pixels, width, x + 1, y + 1));
-            }
-            if x > 0 && y + 1 < height {
-                edges[y * width + x].down_left = similar(c, px(pixels, width, x - 1, y + 1));
+            if has_next_row {
+                edges[idx].down = similar(c, pixels[next_row + x]);
+                if x + 1 < width {
+                    edges[idx].down_right = similar(c, pixels[next_row + x + 1]);
+                }
+                if x > 0 {
+                    edges[idx].down_left = similar(c, pixels[next_row + x - 1]);
+                }
             }
         }
     }
