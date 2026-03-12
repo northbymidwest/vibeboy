@@ -34,7 +34,8 @@ impl SimilarityGraph {
 /// Uses PAL YUV color space with independent per-channel thresholds:
 ///   |ΔY| ≤ 48, |ΔU| ≤ 7, |ΔV| ≤ 6
 /// Computed with fixed-point integer math (×1000) to avoid f64.
-#[inline]
+/// Branchless: combines all conditions to avoid branch misprediction.
+#[inline(always)]
 fn similar(a: u32, b: u32) -> bool {
     if a == b {
         return true;
@@ -43,20 +44,11 @@ fn similar(a: u32, b: u32) -> bool {
     let dg = ((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32;
     let db = (a & 0xFF) as i32 - (b & 0xFF) as i32;
 
-    // Y = 0.299*R + 0.587*G + 0.114*B → ×1000: 299*R + 587*G + 114*B
     let dy1000 = 299 * dr + 587 * dg + 114 * db;
-    // |ΔY| ≤ 48 → |ΔY×1000| ≤ 48000
-    if dy1000.abs() > 48000 { return false; }
-
-    // U = 0.492*(B - Y) → ×1000: 492*(db*1000 - dy1000)/1000
-    // |ΔU| ≤ 7 → |ΔU×1000| ≤ 7000 → |492*(db*1000 - dy1000)| ≤ 7000000
     let du_num = 492i64 * (db as i64 * 1000 - dy1000 as i64);
-    if du_num.abs() > 7_000_000 { return false; }
-
-    // V = 0.877*(R - Y) → ×1000: 877*(dr*1000 - dy1000)/1000
-    // |ΔV| ≤ 6 → |877*(dr*1000 - dy1000)| ≤ 6000000
     let dv_num = 877i64 * (dr as i64 * 1000 - dy1000 as i64);
-    dv_num.abs() <= 6_000_000
+
+    (dy1000.abs() <= 48000) & (du_num.abs() <= 7_000_000) & (dv_num.abs() <= 6_000_000)
 }
 
 #[inline]
@@ -208,12 +200,13 @@ fn curve_length(
     let mut stack = vec![(x0, y0), (x1, y1)];
 
     while let Some(node) = stack.pop() {
-        let neighbors = pixel_neighbors(edges, w, h, node.0, node.1);
-        if neighbors.len() != 2 {
+        let (nbuf, ncount) = pixel_neighbors(edges, w, h, node.0, node.1);
+        if ncount != 2 {
             continue;
         }
 
-        for &(nx, ny) in &neighbors {
+        for i in 0..ncount {
+            let (nx, ny) = nbuf[i];
             let key = sorted_edge(node, (nx, ny));
             if !seen_edges.contains(&key) {
                 seen_edges.insert(key);
@@ -238,6 +231,7 @@ fn sorted_edge(
 
 /// Sparse heuristic: BFS from both endpoints within an 8×8 window.
 /// Returns connected component size (smaller = sparser = should be kept).
+/// Uses a u64 bitmask (8×8 grid) instead of HashSet for zero-allocation visited tracking.
 fn component_size(
     edges: &[PixelEdges],
     w: usize,
@@ -247,30 +241,59 @@ fn component_size(
     x1: usize,
     y1: usize,
 ) -> i32 {
-    let min_x = x0.min(x1) as i32;
-    let min_y = y0.min(y1) as i32;
+    let origin_x = x0.min(x1) as i32 - 3;
+    let origin_y = y0.min(y1) as i32 - 3;
 
-    let mut visited = HashSet::new();
-    visited.insert((x0, y0));
-    visited.insert((x1, y1));
-    let mut stack = vec![(x0, y0), (x1, y1)];
-
-    while let Some((cx, cy)) = stack.pop() {
-        for &(nx, ny) in &pixel_neighbors(edges, w, h, cx, cy) {
-            if visited.contains(&(nx, ny)) {
-                continue;
-            }
-            let dx = nx as i32 - min_x;
-            let dy = ny as i32 - min_y;
-            if dx < -3 || dx > 4 || dy < -3 || dy > 4 {
-                continue;
-            }
-            visited.insert((nx, ny));
-            stack.push((nx, ny));
+    #[inline(always)]
+    fn bit_idx(x: i32, y: i32, ox: i32, oy: i32) -> Option<u32> {
+        let lx = x - ox;
+        let ly = y - oy;
+        if lx >= 0 && lx < 8 && ly >= 0 && ly < 8 {
+            Some((ly * 8 + lx) as u32)
+        } else {
+            None
         }
     }
 
-    visited.len() as i32
+    let mut visited: u64 = 0;
+    let mut stack = [(0u8, 0u8); 64];
+    let mut sp = 0;
+    let mut count = 0i32;
+
+    // Seed both endpoints
+    for &(sx, sy) in &[(x0, y0), (x1, y1)] {
+        if let Some(bit) = bit_idx(sx as i32, sy as i32, origin_x, origin_y) {
+            let mask = 1u64 << bit;
+            if visited & mask == 0 {
+                visited |= mask;
+                count += 1;
+                stack[sp] = (sx as u8, sy as u8);
+                sp += 1;
+            }
+        }
+    }
+
+    while sp > 0 {
+        sp -= 1;
+        let (cx, cy) = (stack[sp].0 as usize, stack[sp].1 as usize);
+        let (nbuf, ncount) = pixel_neighbors(edges, w, h, cx, cy);
+        for i in 0..ncount {
+            let (nx, ny) = nbuf[i];
+            if let Some(bit) = bit_idx(nx as i32, ny as i32, origin_x, origin_y) {
+                let mask = 1u64 << bit;
+                if visited & mask == 0 {
+                    visited |= mask;
+                    count += 1;
+                    if sp < 64 {
+                        stack[sp] = (nx as u8, ny as u8);
+                        sp += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    count
 }
 
 /// Island heuristic: true if either endpoint has valence 1
@@ -288,40 +311,43 @@ fn has_valence1_endpoint(
 }
 
 /// Get all connected neighbor pixels of (x, y).
+/// Returns (array, count) to avoid heap allocation in hot loops.
+#[inline]
 fn pixel_neighbors(
     edges: &[PixelEdges],
     w: usize,
     h: usize,
     x: usize,
     y: usize,
-) -> Vec<(usize, usize)> {
-    let mut neighbors = Vec::with_capacity(8);
+) -> ([(usize, usize); 8], usize) {
+    let mut buf = [(0usize, 0usize); 8];
+    let mut n = 0;
     let e = edges[y * w + x];
     if e.right && x + 1 < w {
-        neighbors.push((x + 1, y));
+        buf[n] = (x + 1, y); n += 1;
     }
     if e.down && y + 1 < h {
-        neighbors.push((x, y + 1));
+        buf[n] = (x, y + 1); n += 1;
     }
     if e.down_right && x + 1 < w && y + 1 < h {
-        neighbors.push((x + 1, y + 1));
+        buf[n] = (x + 1, y + 1); n += 1;
     }
     if e.down_left && x > 0 && y + 1 < h {
-        neighbors.push((x - 1, y + 1));
+        buf[n] = (x - 1, y + 1); n += 1;
     }
     if x > 0 && edges[y * w + (x - 1)].right {
-        neighbors.push((x - 1, y));
+        buf[n] = (x - 1, y); n += 1;
     }
     if y > 0 && edges[(y - 1) * w + x].down {
-        neighbors.push((x, y - 1));
+        buf[n] = (x, y - 1); n += 1;
     }
     if x > 0 && y > 0 && edges[(y - 1) * w + (x - 1)].down_right {
-        neighbors.push((x - 1, y - 1));
+        buf[n] = (x - 1, y - 1); n += 1;
     }
     if x + 1 < w && y > 0 && edges[(y - 1) * w + (x + 1)].down_left {
-        neighbors.push((x + 1, y - 1));
+        buf[n] = (x + 1, y - 1); n += 1;
     }
-    neighbors
+    (buf, n)
 }
 
 /// Count all edges connecting to pixel (x, y).

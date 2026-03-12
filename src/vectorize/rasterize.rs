@@ -35,7 +35,7 @@ impl Edge {
 }
 
 /// Flatten a quadratic Bezier into line edges via recursive subdivision.
-#[inline]
+#[inline(always)]
 fn flatten_quad(
     x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64,
     tol_sq: f64, edges: &mut Vec<Edge>,
@@ -250,29 +250,17 @@ fn rasterize_path(
                     if px_start < dirty_min { dirty_min = px_start; }
                     if px_end > 0 && px_end - 1 > dirty_max { dirty_max = px_end - 1; }
 
-                    // Interior: both sub-x samples covered → +2
-                    let interior_start = ((x_enter - 0.25).ceil() as usize).max(px_start);
-                    let interior_end = ((x_exit - 0.75).floor() as usize + 1).min(px_end);
+                    // Fixed-point coverage: multiply x coords by 256 for integer math.
+                    // Sample points at px+0.25 and px+0.75 become 256*px+64 and 256*px+192.
+                    let enter_fp = (x_enter * 256.0).round() as i64;
+                    let exit_fp = (x_exit * 256.0).round() as i64;
 
-                    // Partial before
-                    for px in px_start..interior_start.min(px_end) {
-                        let pl = px as f64;
-                        if pl + 0.25 >= x_enter && pl + 0.25 < x_exit { coverage[px] += 1; }
-                        if pl + 0.75 >= x_enter && pl + 0.75 < x_exit { coverage[px] += 1; }
-                    }
-
-                    // Full interior
-                    if interior_start < interior_end {
-                        for px in interior_start..interior_end {
-                            coverage[px] += 2;
-                        }
-                    }
-
-                    // Partial after
-                    for px in interior_end.max(interior_start).max(px_start)..px_end {
-                        let pl = px as f64;
-                        if pl + 0.25 >= x_enter && pl + 0.25 < x_exit { coverage[px] += 1; }
-                        if pl + 0.75 >= x_enter && pl + 0.75 < x_exit { coverage[px] += 1; }
+                    for px in px_start..px_end {
+                        let base = (px as i64) * 256;
+                        // Sample at px + 0.25 (base + 64)
+                        if base + 64 >= enter_fp && base + 64 < exit_fp { coverage[px] += 1; }
+                        // Sample at px + 0.75 (base + 192)
+                        if base + 192 >= enter_fp && base + 192 < exit_fp { coverage[px] += 1; }
                     }
 
                     i = j + 1;
