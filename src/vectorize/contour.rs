@@ -121,6 +121,115 @@ pub fn extract_cells(pixels: &[u32], graph: &SimilarityGraph) -> Vec<ColorPath> 
         .collect()
 }
 
+// --- Precomputed cells ---
+
+/// Precompute NodeId cell polygons for all pixels (avoids repeated pixel_cell calls).
+/// Returns flat vec indexed by y * w + x, each entry is a SmallVec-like array of NodeIds.
+fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<Vec<NodeId>> {
+    let mut cells = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let pts = pixel_cell(x, y, graph);
+            cells.push(pts.iter().map(|p| NodeId::from_point(p)).collect());
+        }
+    }
+    cells
+}
+
+/// Build directed boundary edges with right-side color from precomputed cells.
+/// Each undirected edge between different colors produces two directed edges:
+/// a→b with right_color and b→a with left_color.
+fn build_directed_boundary_edges(
+    pixels: &[u32], w: usize, h: usize, all_cells: &[Vec<NodeId>],
+) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
+    let mut edge_map: HashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> =
+        HashMap::with_capacity(w * h * 3);
+
+    for y in 0..h {
+        for x in 0..w {
+            let color = pixels[y * w + x];
+            let cell = &all_cells[y * w + x];
+            let n = cell.len();
+            if n < 3 { continue; }
+
+            for i in 0..n {
+                let pa = cell[i];
+                let pb = cell[(i + 1) % n];
+
+                let (key, is_forward) = if pa <= pb {
+                    ((pa, pb), true)
+                } else {
+                    ((pb, pa), false)
+                };
+
+                let entry = edge_map.entry(key).or_insert((None, None));
+                if is_forward {
+                    entry.1 = Some(color);
+                } else {
+                    entry.0 = Some(color);
+                }
+            }
+        }
+    }
+
+    let mut visible = Vec::new();
+    // Directed edges: (from, to, right_side_color)
+    // Cell winding is CW, so for directed edge a→b, the right side color
+    // is the color of the cell that has this edge in its CW winding.
+    let mut directed = Vec::new();
+
+    for ((a, b), (left, right)) in &edge_map {
+        let lc = left.unwrap_or(0);
+        let rc = right.unwrap_or(0);
+        if lc != rc {
+            visible.push(CellEdge {
+                a: *a,
+                b: *b,
+                left_color: lc,
+                right_color: rc,
+            });
+            // a→b forward direction has right_color = rc (from CW winding convention)
+            directed.push((*a, *b, rc));
+            // b→a reverse direction has right_color = lc
+            directed.push((*b, *a, lc));
+        }
+    }
+
+    (visible, directed)
+}
+
+/// Find boundary edges for a region using precomputed cells.
+fn region_boundary_edges_fast(
+    region_pixels: &[(usize, usize)],
+    w: usize,
+    all_cells: &[Vec<NodeId>],
+) -> Vec<(NodeId, NodeId)> {
+    let mut all_directed: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut undirected_count: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+
+    for &(px, py) in region_pixels {
+        let cell = &all_cells[py * w + px];
+        let n = cell.len();
+        if n < 3 { continue; }
+
+        for i in 0..n {
+            let pa = cell[i];
+            let pb = cell[(i + 1) % n];
+            all_directed.push((pa, pb));
+            let key = if pa <= pb { (pa, pb) } else { (pb, pa) };
+            *undirected_count.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    all_directed
+        .into_iter()
+        .filter(|&(pa, pb)| {
+            let key = if pa <= pb { (pa, pb) } else { (pb, pa) };
+            undirected_count[&key] == 1
+        })
+        .collect()
+}
+
 // --- Section 3.3: Visible edge extraction and B-spline fitting ---
 
 /// A node in the reshaped cell graph, identified by quantized coordinates.
@@ -585,6 +694,76 @@ fn region_boundary_edges(
         .collect()
 }
 
+/// Trace ALL boundary loops globally, returning (nodes, color) for each loop.
+/// Uses the planar face algorithm on directed edges with known right-side colors.
+fn trace_all_boundary_loops(
+    directed_edges: &[(NodeId, NodeId, u32)],
+) -> Vec<(Vec<NodeId>, u32)> {
+    // Build outgoing edges sorted by angle at each node
+    let mut outgoing: HashMap<NodeId, Vec<(NodeId, f64)>> = HashMap::new();
+    for &(a, b, _) in directed_edges {
+        let angle = ((b.y4 - a.y4) as f64).atan2((b.x4 - a.x4) as f64);
+        outgoing.entry(a).or_default().push((b, angle));
+    }
+    for (_, edges) in outgoing.iter_mut() {
+        edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    // Build edge→color map for looking up right-side color
+    let mut edge_color: HashMap<(NodeId, NodeId), u32> = HashMap::with_capacity(directed_edges.len());
+    for &(a, b, color) in directed_edges {
+        edge_color.insert((a, b), color);
+    }
+
+    // Build next-edge map using planar face algorithm
+    let mut next_map: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+
+    for &(p, c, _) in directed_edges {
+        let reverse_angle = ((p.y4 - c.y4) as f64).atan2((p.x4 - c.x4) as f64);
+
+        if let Some(edges) = outgoing.get(&c) {
+            let pos = edges.partition_point(|(_, a)| *a < reverse_angle);
+            let prev_idx = if pos == 0 { edges.len() - 1 } else { pos - 1 };
+            let (next_node, _) = edges[prev_idx];
+            next_map.insert((p, c), (c, next_node));
+        }
+    }
+
+    // Trace loops
+    let mut used: HashSet<(NodeId, NodeId)> = HashSet::new();
+    let mut loops = Vec::new();
+
+    for &(a, b, _) in directed_edges {
+        let start_edge = (a, b);
+        if used.contains(&start_edge) { continue; }
+
+        let mut nodes = Vec::new();
+        let mut current = start_edge;
+        let mut closed = false;
+
+        loop {
+            if used.contains(&current) {
+                if current == start_edge { closed = true; }
+                break;
+            }
+            used.insert(current);
+            nodes.push(current.0);
+            current = match next_map.get(&current) {
+                Some(&next) => next,
+                None => break,
+            };
+        }
+
+        if nodes.len() >= 3 && closed {
+            // Get color from the first edge's right-side color
+            let color = edge_color.get(&start_edge).copied().unwrap_or(0);
+            loops.push((nodes, color));
+        }
+    }
+
+    loops
+}
+
 /// Trace boundary edges into closed node loops using the planar face algorithm.
 /// At each node, picks the rightmost turn (most CW) to keep region on the right.
 fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<NodeId>> {
@@ -730,8 +909,12 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
     let w = graph.width;
     let h = graph.height;
 
-    // Step 1: Extract visible edges and chain them
-    let visible_edges = extract_cell_edges(pixels, graph);
+    // Precompute all cell polygons (NodeId sequences) once
+    let all_cells = precompute_cells(w, h, graph);
+
+    // Step 1: Extract visible edges (for chaining) and directed boundary edges (for loop tracing)
+    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells);
+
     let mut chains = chain_visible_edges(&visible_edges);
 
     // Step 2: Merge T-junctions (Section 3.3)
@@ -740,30 +923,28 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
     // Step 3: Optimize control points and build position map
     let optimized = build_optimized_positions(&chains);
 
-    // Step 4: Flood-fill regions
-    let regions = flood_fill_regions(pixels, w, h);
+    // Step 4: Trace ALL boundary loops globally (replaces flood_fill + per-region tracing)
+    let all_loops = trace_all_boundary_loops(&directed_edges);
 
-    // Step 5: For each region, trace boundary and emit smooth paths
+    // Step 5: Group loops by color and convert to segments
+    let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
+    for (node_loop, color) in &all_loops {
+        let segs = boundary_loop_to_segments(node_loop, &optimized);
+        if !segs.is_empty() {
+            color_loops.entry(*color).or_default().push(segs);
+        }
+    }
+
     let mut result: Vec<ColorPath> = Vec::new();
-
-    for (color, region_pixels) in &regions {
-        let boundary_edges = region_boundary_edges(region_pixels, graph);
-        if boundary_edges.is_empty() { continue; }
-
-        let loops = trace_boundary_node_loops(&boundary_edges);
-        if loops.is_empty() { continue; }
-
+    for (color, loop_segments) in color_loops {
         let mut all_segments = Vec::new();
-        for node_loop in &loops {
-            all_segments.extend(boundary_loop_to_segments(node_loop, &optimized));
+        for segs in loop_segments {
+            all_segments.extend(segs);
         }
-
-        if !all_segments.is_empty() {
-            result.push(ColorPath {
-                color: *color,
-                segments: all_segments,
-            });
-        }
+        result.push(ColorPath {
+            color,
+            segments: all_segments,
+        });
     }
 
     result
@@ -830,22 +1011,10 @@ fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
 
 // --- Section 3.4: B-spline optimization ---
 
-const OPT_ITERATIONS: usize = 50;
-const POINT_GUESSES: usize = 40;
-const GUESS_RADIUS: f64 = 0.25;
-const CURVATURE_INTERVALS: usize = 20;
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self { Self(seed.max(1)) }
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 & 0x000F_FFFF_FFFF_FFFF) as f64 / (0x0010_0000_0000_0000u64 as f64)
-    }
-}
+const OPT_ITERATIONS: usize = 4;
+const GRADIENT_STEP: f64 = 0.01;
+const MAX_MOVE: f64 = 0.25;
+const CURVATURE_INTERVALS: usize = 6;
 
 fn detect_corners(points: &[Point], is_closed: bool) -> Vec<bool> {
     let n = points.len();
@@ -898,32 +1067,70 @@ fn optimize_control_points(points: &mut Vec<Point>, is_closed: bool) {
 
     let orig: Vec<Point> = points.clone();
     let corners = detect_corners(&orig, is_closed);
-    let mut rng = Rng::new(0xDEAD_BEEF_CAFE_1234);
+
+    // Check if chain is nearly straight — skip optimization if so
+    let mut max_deviation = 0.0f64;
+    if !is_closed && n >= 2 {
+        let (ax, ay) = (points[0].x, points[0].y);
+        let (bx, by) = (points[n - 1].x, points[n - 1].y);
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len_sq = dx * dx + dy * dy;
+        if len_sq > 1e-12 {
+            for p in points.iter() {
+                let t = ((p.x - ax) * dx + (p.y - ay) * dy) / len_sq;
+                let proj_x = ax + t * dx;
+                let proj_y = ay + t * dy;
+                let ex = p.x - proj_x;
+                let ey = p.y - proj_y;
+                max_deviation = max_deviation.max(ex * ex + ey * ey);
+            }
+        }
+    }
+    // Skip nearly-straight chains (deviation < 0.1 pixel)
+    if !is_closed && max_deviation < 0.01 { return; }
+
+    let eps = GRADIENT_STEP;
 
     for _iter in 0..OPT_ITERATIONS {
         for i in 0..n {
             if corners[i] { continue; }
 
             let current = points[i];
-            let mut best_energy = local_energy(points, &orig, &corners, i, n, is_closed);
-            let mut best_point = current;
+            let e0 = local_energy(points, &orig, &corners, i, n, is_closed);
+            if e0 < 1e-12 { continue; }
 
-            for _ in 0..POINT_GUESSES {
-                let r = rng.next_f64() * GUESS_RADIUS;
-                let theta = rng.next_f64() * std::f64::consts::TAU;
-                let candidate = Point::new(
-                    current.x + r * theta.cos(),
-                    current.y + r * theta.sin(),
-                );
-                points[i] = candidate;
-                let energy = local_energy(points, &orig, &corners, i, n, is_closed);
-                if energy < best_energy {
-                    best_energy = energy;
-                    best_point = candidate;
-                }
+            // Central difference gradient
+            points[i] = Point::new(current.x + eps, current.y);
+            let ex_plus = local_energy(points, &orig, &corners, i, n, is_closed);
+            points[i] = Point::new(current.x - eps, current.y);
+            let ex_minus = local_energy(points, &orig, &corners, i, n, is_closed);
+            points[i] = Point::new(current.x, current.y + eps);
+            let ey_plus = local_energy(points, &orig, &corners, i, n, is_closed);
+            points[i] = Point::new(current.x, current.y - eps);
+            let ey_minus = local_energy(points, &orig, &corners, i, n, is_closed);
+
+            let gx = (ex_plus - ex_minus) / (2.0 * eps);
+            let gy = (ey_plus - ey_minus) / (2.0 * eps);
+
+            let grad_len = (gx * gx + gy * gy).sqrt();
+            if grad_len < 1e-12 {
+                points[i] = current;
+                continue;
             }
 
-            points[i] = best_point;
+            // Normalized gradient step, clamped to MAX_MOVE
+            let step = (e0 / grad_len).min(MAX_MOVE);
+            let nx = current.x - step * gx / grad_len;
+            let ny = current.y - step * gy / grad_len;
+
+            // Accept if it improves energy
+            let candidate = Point::new(nx, ny);
+            points[i] = candidate;
+            let e_new = local_energy(points, &orig, &corners, i, n, is_closed);
+            if e_new >= e0 {
+                points[i] = current; // revert
+            }
         }
     }
 }
