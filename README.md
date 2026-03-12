@@ -43,6 +43,18 @@ cargo run --release -- path/to/rom.gb --boot-rom bootroms/dmg_boot.bin
 | 1-9 | Select save slot |
 | Escape | Quit |
 
+### Scaling Filters
+
+```bash
+# Run with a scaling filter (nearest, bilinear, epx, hq2x-4x, xbrz2x-6x, omniscale2x-6x, ...)
+cargo run --release -- path/to/rom.gb --filter hq4x
+
+# Kopf-Lischinski pixel-art vectorization (2x-6x)
+cargo run --release -- path/to/rom.gb --filter vectorize4x
+```
+
+The vectorize filter converts each frame to smooth vector paths using the Kopf-Lischinski algorithm, then rasterizes at the target scale with anti-aliased edges. Runs in real-time (~10ms/frame).
+
 ## Features
 
 - **CPU**: Full SM83 instruction set with accurate M-cycle timing
@@ -54,6 +66,7 @@ cargo run --release -- path/to/rom.gb --boot-rom bootroms/dmg_boot.bin
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
 - **Save states**: 9 slots with rewind support (~10 seconds buffer)
 - **Camera**: Game Boy Camera support via webcam (macOS)
+- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with real-time rasterization
 
 ## Test Status
 
@@ -101,6 +114,8 @@ src/
 ├── joypad.rs        Input handling
 ├── snapshot.rs      Rewind ring buffer + save states
 ├── model.rs         GbModel enum and per-model configuration
+├── scaling/         Pixel scaling filters (EPX, HQx, xBRZ, OmniScale, ...)
+├── vectorize/       Kopf-Lischinski pixel-art vectorizer + rasterizer
 └── test_runner.rs   Automated test ROM runner
 ```
 

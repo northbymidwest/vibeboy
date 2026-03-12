@@ -14,6 +14,9 @@ cargo run --release -- path/to/rom.gbc
 
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.bin
+
+# With vectorized scaling filter (2x-6x)
+cargo run --release -- path/to/rom.gbc --filter vectorize4x
 ```
 
 ## Testing
@@ -39,6 +42,12 @@ cargo run --release --bin test_runner -- game-boy-test-roms/blargg/cpu_instrs/in
 # Screenshot a ROM after N frames
 cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png
 
+# Vectorize a frame to SVG
+cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.svg
+
+# Vectorize and rasterize at 4x scale
+cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png --format raster --scale 4
+
 # Force a specific model
 cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
 
@@ -48,7 +57,7 @@ cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/a
 
 Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag. Gambatte tests encode expected hex output in filenames after `_out` (e.g. `_out3` expects "3"). DMG tests have `dmg08` in the name, CGB tests have `cgb04c`.
 
-**Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 33/70 SameSuite APU.
+**Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 55/70 SameSuite APU.
 
 ## Architecture
 
@@ -74,6 +83,18 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - `sgb.rs`: HLE command processing (palettes, attributes, borders, masking)
 - `snes/`: Optional LLE mode with full 65C816 CPU, SNES memory map, DMA, ICD2 bridge
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
+
+### Vectorization subsystem (`src/vectorize/`)
+Kopf-Lischinski pixel-art vectorization pipeline. Converts frame buffers into smooth vector paths, then rasterizes at any scale with anti-aliased edges.
+
+Pipeline: `pixels → quantize → graph::build → contour::extract_cells_smooth → rasterize`
+
+- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), color quantization (±2/channel), upscale detection/collapse, background color detection
+- `graph.rs`: Similarity graph — connects adjacent pixels with similar colors, resolves diagonal crossings with Kopf-Lischinski heuristics (curves, islands, sparse)
+- `voronoi.rs`: Voronoi cell computation — deforms grid nodes at diagonal crossings, collapses valence-2 nodes for smoother boundaries
+- `contour.rs`: Extracts boundary contours between different-color Voronoi cells, fits quadratic B-splines. Uses VOID_COLOR sentinel (0xFFFFFFFF) for image border edges. Outputs `Vec<ColorPath>` (each path = all boundary loops of one color region)
+- `svg.rs`: Serializes paths to SVG document string
+- `rasterize.rs`: Scanline rasterizer with 2x2 supersampling, nonzero winding rule. Skips background-colored paths (buffer pre-filled with bg_color). ~10ms/frame for complex scenes
 
 ## Tools & Scripts
 
