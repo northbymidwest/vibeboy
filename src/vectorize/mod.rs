@@ -24,6 +24,7 @@ pub struct VectorizeCache {
     prev_pixels: Vec<u32>,
     cached_paths: Vec<contour::ColorPath>,
     cached_bg_color: u32,
+    qbuf: Vec<u32>,
 }
 
 impl VectorizeCache {
@@ -32,6 +33,7 @@ impl VectorizeCache {
             prev_pixels: Vec::new(),
             cached_paths: Vec::new(),
             cached_bg_color: 0,
+            qbuf: Vec::new(),
         }
     }
 
@@ -43,7 +45,7 @@ impl VectorizeCache {
         if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
             return (&self.cached_paths, self.cached_bg_color);
         }
-        let (paths, bg_color) = vectorize_core(pixels, width, height);
+        let (paths, bg_color) = vectorize_core_with_buf(pixels, width, height, &mut self.qbuf);
         self.prev_pixels.clear();
         self.prev_pixels.extend_from_slice(pixels);
         self.cached_paths = paths;
@@ -84,29 +86,39 @@ pub fn vectorize_to_raster_scaled(
     rasterize::rasterize_scaled(&paths, width, height, bg_color, scale)
 }
 
-/// Quantize colors to merge near-identical shades (e.g. #555555 vs #565656).
-/// PPU output can have ±1-2 per channel jitter; without quantization the
-/// vectorizer creates separate cells for each unique value, producing
-/// hundreds of spurious boundaries that show as white outlines.
-fn quantize_pixels(pixels: &[u32]) -> Vec<u32> {
-    pixels.iter().map(|&c| {
-        // Round each channel to nearest multiple of 4.
-        // Max shift ±2 per channel — imperceptible, but merges jitter variants.
-        let r = (((c >> 16) & 0xFF) + 2).min(255) & !3;
-        let g = (((c >> 8) & 0xFF) + 2).min(255) & !3;
-        let b = ((c & 0xFF) + 2).min(255) & !3;
-        (r << 16) | (g << 8) | b
-    }).collect()
+/// Quantize a single pixel color (round each channel to nearest multiple of 4).
+#[inline(always)]
+fn quantize_color(c: u32) -> u32 {
+    let r = (((c >> 16) & 0xFF) + 2).min(255) & !3;
+    let g = (((c >> 8) & 0xFF) + 2).min(255) & !3;
+    let b = ((c & 0xFF) + 2).min(255) & !3;
+    (r << 16) | (g << 8) | b
+}
+
+/// Quantize colors into a reusable buffer to avoid allocation.
+fn quantize_pixels_into(pixels: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve(pixels.len());
+    out.extend(pixels.iter().map(|&c| quantize_color(c)));
 }
 
 /// Core vectorization: graph → contour → paths. No upscale collapse.
+/// Uses a reusable quantization buffer to avoid per-frame allocation.
 pub fn vectorize_core(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, u32) {
-    let qpixels = quantize_pixels(pixels);
-    let graph = graph::build(&qpixels, width, height);
-    let paths = contour::extract_cells_smooth(&qpixels, &graph);
-    let (bg_color, _) = detect_background_color(&qpixels, width, height);
+    let mut qbuf = Vec::new();
+    vectorize_core_with_buf(pixels, width, height, &mut qbuf)
+}
+
+/// Core vectorization with a caller-provided quantization buffer.
+fn vectorize_core_with_buf(
+    pixels: &[u32], width: usize, height: usize, qbuf: &mut Vec<u32>,
+) -> (Vec<contour::ColorPath>, u32) {
+    quantize_pixels_into(pixels, qbuf);
+    let graph = graph::build(qbuf, width, height);
+    let paths = contour::extract_cells_smooth(qbuf, &graph);
+    let (bg_color, _) = detect_background_color(qbuf, width, height);
     (paths, bg_color)
 }
 

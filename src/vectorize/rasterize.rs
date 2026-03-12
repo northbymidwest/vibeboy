@@ -133,10 +133,10 @@ pub fn rasterize_scaled(
         sorted.clear();
         sorted.extend(0..edges.len());
         sorted.sort_unstable_by(|&a, &b| {
-            edges[a].y_min.partial_cmp(&edges[b].y_min).unwrap()
+            edges[a].y_min.total_cmp(&edges[b].y_min)
         });
 
-        for c in coverage.iter_mut() { *c = 0; }
+        coverage[..out_w].fill(0);
 
         rasterize_path(
             &edges,
@@ -222,7 +222,7 @@ fn rasterize_path(
             let isect = &mut isects[si];
             if isect.is_empty() { continue; }
 
-            isect.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            isect.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
             let mut winding = 0i32;
             let mut i = 0;
