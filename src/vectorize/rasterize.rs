@@ -60,10 +60,10 @@ fn flatten_quad(
     flatten_quad(midx, midy, mx12, my12, x1, y1, tol_sq, edges);
 }
 
-/// Extract edges from a single path, scaled to output space.
-fn extract_edges(path: &ColorPath, scale: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
+/// Extract edges from path segments, scaled to output space.
+fn extract_edges(segments: &[PathSegment], scale: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
     edges.clear();
-    for seg in &path.segments {
+    for seg in segments {
         match seg {
             PathSegment::Line(a, b) => {
                 let y0 = a.y * scale;
@@ -104,11 +104,14 @@ pub fn rasterize(
     let mut coverage = vec![0u8; out_w];
 
     for path in paths {
-        if path.color == bg_color || path.segments.is_empty() {
+        if path.segments.is_empty() {
+            continue;
+        }
+        if path.color == bg_color {
             continue;
         }
 
-        extract_edges(path, scale_f, tol_sq, &mut edges);
+        extract_edges(&path.segments, scale_f, tol_sq, &mut edges);
         if edges.is_empty() {
             continue;
         }
@@ -119,7 +122,6 @@ pub fn rasterize(
             edges[a].y_min.partial_cmp(&edges[b].y_min).unwrap()
         });
 
-        // Clear stale coverage from previous path
         for c in coverage.iter_mut() { *c = 0; }
 
         rasterize_path(
@@ -136,7 +138,7 @@ pub fn rasterize(
     buffer
 }
 
-/// Rasterize a single path's edges with 2x2 supersampling.
+/// Rasterize a single path's edges with 2x2 supersampling and nonzero winding.
 fn rasterize_path(
     edges: &[Edge],
     sorted: &[usize],
@@ -201,7 +203,7 @@ fn rasterize_path(
             }
         }
 
-        // Process each sub-scanline
+        // Process each sub-scanline with nonzero winding rule
         for si in 0..2 {
             let isect = &mut isects[si];
             if isect.is_empty() { continue; }

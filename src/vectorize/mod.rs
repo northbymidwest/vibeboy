@@ -38,13 +38,29 @@ pub fn vectorize_to_raster(
     (buf, out_w, out_h)
 }
 
+/// Quantize colors to merge near-identical shades (e.g. #555555 vs #565656).
+/// PPU output can have ±1-2 per channel jitter; without quantization the
+/// vectorizer creates separate cells for each unique value, producing
+/// hundreds of spurious boundaries that show as white outlines.
+fn quantize_pixels(pixels: &[u32]) -> Vec<u32> {
+    pixels.iter().map(|&c| {
+        // Round each channel to nearest multiple of 4.
+        // Max shift ±2 per channel — imperceptible, but merges jitter variants.
+        let r = (((c >> 16) & 0xFF) + 2).min(255) & !3;
+        let g = (((c >> 8) & 0xFF) + 2).min(255) & !3;
+        let b = ((c & 0xFF) + 2).min(255) & !3;
+        (r << 16) | (g << 8) | b
+    }).collect()
+}
+
 /// Core vectorization: graph → contour → paths. No upscale collapse.
 fn vectorize_core(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, u32) {
-    let graph = graph::build(pixels, width, height);
-    let paths = contour::extract_cells_smooth(pixels, &graph);
-    let (bg_color, _) = detect_background_color(pixels, width, height);
+    let qpixels = quantize_pixels(pixels);
+    let graph = graph::build(&qpixels, width, height);
+    let paths = contour::extract_cells_smooth(&qpixels, &graph);
+    let (bg_color, _) = detect_background_color(&qpixels, width, height);
     (paths, bg_color)
 }
 

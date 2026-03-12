@@ -14,6 +14,11 @@ use super::voronoi::Point;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 
+/// Sentinel color for the void outside the image. No real pixel has this value
+/// (PPU format is 0x00RRGGBB). Border edges use this instead of collapsing,
+/// so contours close properly while the void path gets filtered from output.
+const VOID_COLOR: u32 = 0xFFFFFFFF;
+
 // --- FxHash: fast non-cryptographic hasher for integer keys ---
 // Replaces SipHash (default) which is ~3x slower for small integer keys.
 
@@ -320,8 +325,11 @@ fn build_directed_boundary_edges(
     let mut directed = Vec::with_capacity(edge_map.len() / 2);
 
     for ((a, b), (left, right)) in &edge_map {
-        let lc = left.unwrap_or(0);
-        let rc = right.unwrap_or(0);
+        // Border edges have None on the outside (void). Use a sentinel color
+        // so border pixel contours still close properly, but the image-perimeter
+        // loop goes to an unused "void" path that gets filtered out later.
+        let lc = left.unwrap_or(VOID_COLOR);
+        let rc = right.unwrap_or(VOID_COLOR);
         if lc != rc {
             visible.push(CellEdge {
                 a: *a,
@@ -437,8 +445,8 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
 
     let mut visible = Vec::new();
     for ((a, b), (left, right)) in &edge_map {
-        let lc = left.unwrap_or(0);
-        let rc = right.unwrap_or(0);
+        let lc = left.unwrap_or(VOID_COLOR);
+        let rc = right.unwrap_or(VOID_COLOR);
         if lc != rc {
             visible.push(CellEdge {
                 a: *a,
@@ -1064,6 +1072,8 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
 
     let mut result: Vec<ColorPath> = Vec::new();
     for (color, loop_segments) in color_loops {
+        // Skip the void sentinel path (image perimeter loop)
+        if color == VOID_COLOR { continue; }
         let mut all_segments = Vec::new();
         for segs in loop_segments {
             all_segments.extend(segs);

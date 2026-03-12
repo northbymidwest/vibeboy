@@ -70,6 +70,9 @@ enum Command {
         /// Scale factor for raster format (default 4)
         #[arg(long, default_value = "4")]
         scale: usize,
+        /// Button presses: "frame:button,frame:button" e.g. "100:a,200:start"
+        #[arg(long, default_value = "")]
+        keys: String,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -412,12 +415,45 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     }
 }
 
-fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str, scale: usize) {
+fn parse_keys(keys: &str) -> Vec<(u32, u8, bool)> {
+    // Parse "frame:button,frame:button" into (frame, button_mask, press)
+    // A button press at frame N presses at frame N and releases at frame N+4
+    let mut events = Vec::new();
+    if keys.is_empty() { return events; }
+    for part in keys.split(',') {
+        let parts: Vec<&str> = part.trim().split(':').collect();
+        if parts.len() != 2 { continue; }
+        let frame: u32 = parts[0].parse().unwrap_or(0);
+        let btn = match parts[1].to_lowercase().as_str() {
+            "a" => joypad::BTN_A,
+            "b" => joypad::BTN_B,
+            "start" => joypad::BTN_START,
+            "select" => joypad::BTN_SELECT,
+            "up" => joypad::BTN_UP,
+            "down" => joypad::BTN_DOWN,
+            "left" => joypad::BTN_LEFT,
+            "right" => joypad::BTN_RIGHT,
+            _ => continue,
+        };
+        events.push((frame, btn, true));
+        events.push((frame + 4, btn, false));
+    }
+    events.sort_by_key(|e| e.0);
+    events
+}
+
+fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str, scale: usize, keys: &str) {
     let rom = fs::read(&cli.path).expect("Failed to read ROM");
     let model = cli.model.unwrap_or_else(|| detect_model_with_rom(&cli.path, Some(&rom)));
     let br = resolve_boot_rom(cli, model);
     let mut emu = make_emu(rom, br, model, parse_renderer(&cli.renderer));
-    for _ in 0..frames {
+    let key_events = parse_keys(keys);
+    let mut key_idx = 0;
+    for f in 0..frames {
+        while key_idx < key_events.len() && key_events[key_idx].0 == f {
+            emu.set_button(key_events[key_idx].1, key_events[key_idx].2);
+            key_idx += 1;
+        }
         emu.step_frame();
     }
     let fb = emu.frame_buffer();
@@ -807,7 +843,7 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Command::Screenshot { frames, out, format, scale }) => cmd_screenshot(&cli, *frames, out, format, *scale),
+        Some(Command::Screenshot { frames, out, format, scale, keys }) => cmd_screenshot(&cli, *frames, out, format, *scale, keys),
         Some(Command::Vectorize { out }) => cmd_vectorize(&cli.path, out),
         Some(Command::Analyze { frames }) => cmd_analyze(&cli, *frames),
         Some(Command::TraceTimer) => cmd_trace_timer(&cli),
