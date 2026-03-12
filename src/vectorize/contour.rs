@@ -66,13 +66,6 @@ fn fx_hashmap_cap<K, V>(cap: usize) -> FxHashMap<K, V> {
     HashMap::with_capacity_and_hasher(cap, FxBuildHasher)
 }
 
-type FxHashSet<K> = HashSet<K, FxBuildHasher>;
-
-#[inline]
-fn fx_hashset_cap<K>(cap: usize) -> FxHashSet<K> {
-    HashSet::with_capacity_and_hasher(cap, FxBuildHasher)
-}
-
 // --- Public types ---
 
 /// A path segment for SVG output.
@@ -289,11 +282,16 @@ fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<InlineCe
 /// Build directed boundary edges with right-side color from precomputed cells.
 /// Each undirected edge between different colors produces two directed edges:
 /// a→b with right_color and b→a with left_color.
+///
+/// Uses sort-merge instead of HashMap: collect all cell edges into a flat Vec,
+/// sort by canonical edge, then merge consecutive entries. Cache-friendly and
+/// avoids hashing overhead for the pipeline's largest data structure.
 fn build_directed_boundary_edges(
     pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell],
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
-    let mut edge_map: FxHashMap<(NodeId, NodeId), (Option<u32>, Option<u32>)> =
-        fx_hashmap_cap(w * h * 3);
+    // Pack each cell edge as (canonical_a, canonical_b, is_forward, color).
+    // Average ~5 edges per pixel.
+    let mut entries: Vec<(NodeId, NodeId, bool, u32)> = Vec::with_capacity(w * h * 5);
 
     for y in 0..h {
         for x in 0..w {
@@ -306,40 +304,48 @@ fn build_directed_boundary_edges(
                 let pa = cell[i];
                 let pb = cell[(i + 1) % n];
 
-                let (key, is_forward) = if pa <= pb {
-                    ((pa, pb), true)
+                let (key_a, key_b, is_forward) = if pa <= pb {
+                    (pa, pb, true)
                 } else {
-                    ((pb, pa), false)
+                    (pb, pa, false)
                 };
-
-                let entry = edge_map.entry(key).or_insert((None, None));
-                if is_forward {
-                    entry.1 = Some(color);
-                } else {
-                    entry.0 = Some(color);
-                }
+                entries.push((key_a, key_b, is_forward, color));
             }
         }
     }
 
-    let mut visible = Vec::with_capacity(edge_map.len() / 4);
-    let mut directed = Vec::with_capacity(edge_map.len() / 2);
+    // Sort by canonical edge (NodeId is Ord: x4 then y4, lexicographic)
+    entries.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
 
-    for ((a, b), (left, right)) in &edge_map {
-        // Border edges have None on the outside (void). Use a sentinel color
-        // so border pixel contours still close properly, but the image-perimeter
-        // loop goes to an unused "void" path that gets filtered out later.
-        let lc = left.unwrap_or(VOID_COLOR);
-        let rc = right.unwrap_or(VOID_COLOR);
-        if lc != rc {
+    // Merge consecutive entries with the same canonical edge
+    let mut visible = Vec::new();
+    let mut directed = Vec::new();
+
+    let mut i = 0;
+    while i < entries.len() {
+        let key_a = entries[i].0;
+        let key_b = entries[i].1;
+        let mut left: u32 = VOID_COLOR;
+        let mut right: u32 = VOID_COLOR;
+
+        while i < entries.len() && entries[i].0 == key_a && entries[i].1 == key_b {
+            if entries[i].2 {
+                right = entries[i].3;
+            } else {
+                left = entries[i].3;
+            }
+            i += 1;
+        }
+
+        if left != right {
             visible.push(CellEdge {
-                a: *a,
-                b: *b,
-                left_color: lc,
-                right_color: rc,
+                a: key_a,
+                b: key_b,
+                left_color: left,
+                right_color: right,
             });
-            directed.push((*a, *b, rc));
-            directed.push((*b, *a, lc));
+            directed.push((key_a, key_b, right));
+            directed.push((key_b, key_a, left));
         }
     }
 
@@ -461,6 +467,17 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
     visible
 }
 
+/// Compute valence of a node for a specific color pair by counting matching
+/// entries in the adjacency list. Avoids a separate valence HashMap.
+#[inline]
+fn cpair_valence(neighbors: &[(NodeId, (u32, u32), usize)], cpair: (u32, u32)) -> u8 {
+    let mut v = 0u8;
+    for &(_, cp, _) in neighbors {
+        if cp == cpair { v += 1; }
+    }
+    v
+}
+
 /// Chain visible edges through valence-2 nodes into paths.
 fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
     // Use edge indices instead of HashSet<(NodeId, NodeId)> for visited tracking.
@@ -478,14 +495,6 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
         adj.entry(e.b).or_default().push((e.a, cpair, ei));
     }
 
-    // Pre-compute valence per (node, cpair)
-    let mut valence: FxHashMap<(NodeId, (u32, u32)), u8> = fx_hashmap_cap(edges.len() * 2);
-    for (node, neighbors) in &adj {
-        for &(_, cpair, _) in neighbors {
-            *valence.entry((*node, cpair)).or_insert(0) += 1;
-        }
-    }
-
     let mut visited = vec![false; edges.len()];
     let mut chains: Vec<Vec<NodeId>> = Vec::new();
 
@@ -496,10 +505,9 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
         if let Some(neighbors) = adj.get(start_node) {
             for &(next, cpair, ei) in neighbors {
                 if visited[ei] { continue; }
-                if valence.get(&(*start_node, cpair)).copied().unwrap_or(0) == 2 { continue; }
+                if cpair_valence(neighbors, cpair) == 2 { continue; }
 
                 let mut chain = vec![*start_node];
-                let mut current = *start_node;
                 let mut next_node = next;
                 let mut cur_ei = ei;
 
@@ -508,14 +516,13 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                     visited[cur_ei] = true;
                     chain.push(next_node);
 
-                    if valence.get(&(next_node, cpair)).copied().unwrap_or(0) != 2 { break; }
-
                     let neighbors_of_next = adj.get(&next_node).unwrap();
+                    if cpair_valence(neighbors_of_next, cpair) != 2 { break; }
+
                     let mut found_next = false;
                     for &(nn, cp, nei) in neighbors_of_next {
                         if cp != cpair { continue; }
                         if !visited[nei] {
-                            current = next_node;
                             next_node = nn;
                             cur_ei = nei;
                             found_next = true;
@@ -539,7 +546,6 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                 if visited[ei] { continue; }
 
                 let mut chain = vec![*start_node];
-                let mut current = *start_node;
                 let mut next_node = next;
                 let mut cur_ei = ei;
 
@@ -553,7 +559,6 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                     for &(nn, cp, nei) in neighbors_of_next {
                         if cp != cpair { continue; }
                         if !visited[nei] {
-                            current = next_node;
                             next_node = nn;
                             cur_ei = nei;
                             found_next = true;
@@ -589,7 +594,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
         endpoint_map.entry(chain[chain.len() - 1]).or_default().push((ci, false));
     }
 
-    let mut merged: FxHashSet<usize> = fx_hashset_cap(0);
+    let mut merged = vec![false; chains.len()];
 
     for (_node, endpoints) in &endpoint_map {
         if endpoints.len() < 2 { continue; }
@@ -597,7 +602,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
         // Collect valid (not yet merged) endpoints at this junction
         let mut active: Vec<(usize, bool)> = endpoints
             .iter()
-            .filter(|(ci, _)| !merged.contains(ci))
+            .filter(|(ci, _)| !merged[*ci])
             .copied()
             .collect();
 
@@ -671,7 +676,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
 
             // Replace chain_a with merged, mark chain_b as merged
             chains[ci_a] = new_chain;
-            merged.insert(ci_b);
+            merged[ci_b] = true;
 
             // Update active list: remove both, add new endpoint of merged chain
             let new_is_start_a = false; // junction was placed at end for chain_a part
@@ -683,25 +688,14 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
         }
     }
 
-    // Remove merged chains
-    let mut i = 0;
-    while i < chains.len() {
-        if merged.contains(&i) {
-            chains.remove(i);
-            // Update merged indices
-            let mut new_merged = fx_hashset_cap(0);
-            for &m in &merged {
-                if m > i {
-                    new_merged.insert(m - 1);
-                } else if m < i {
-                    new_merged.insert(m);
-                }
-            }
-            merged = new_merged;
-        } else {
-            i += 1;
+    // Remove merged chains in O(n) by filtering
+    let mut kept = Vec::with_capacity(chains.len());
+    for (i, chain) in chains.drain(..).enumerate() {
+        if !merged[i] {
+            kept.push(chain);
         }
     }
+    *chains = kept;
 }
 
 /// Get tangent vector at a chain endpoint, pointing AWAY from the endpoint.
@@ -948,7 +942,7 @@ fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<Nod
     }
 
     // Trace loops by following the next-edge map
-    let mut used: FxHashSet<(NodeId, NodeId)> = fx_hashset_cap(0);
+    let mut used: HashSet<(NodeId, NodeId)> = HashSet::new();
     let mut loops = Vec::new();
 
     for &start_edge in boundary_edges {
