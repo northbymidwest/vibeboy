@@ -1,8 +1,13 @@
-//! Voronoi reshaping for cell-corner positions.
+//! Voronoi corner reshaping for the Kopf-Lischinski algorithm (Section 3.2).
 //!
-//! At each grid intersection where 4 pixels meet, diagonal edges in the
-//! similarity graph shift the corner position to create non-square cell
-//! boundaries that follow the pixel-art features.
+//! At each interior grid corner where 4 pixel cells meet, a diagonal connection
+//! in the resolved similarity graph shifts the corner by ±¼ pixel, forming the
+//! generalized Voronoi diagram. This ensures diagonally-connected pixels share
+//! an edge in the reshaped cell graph.
+//!
+//! The paper: "The reshaped cell graph can be computed as a generalized Voronoi
+//! diagram, where each Voronoi cell contains the points that are closest to the
+//! union of a node and its half-edges."
 
 use super::graph::SimilarityGraph;
 
@@ -19,91 +24,50 @@ impl Point {
     }
 }
 
-/// Precomputed corner positions for the reshaped Voronoi grid.
-/// Grid has (width+1) x (height+1) corners.
-pub struct CornersGrid {
-    pub cw: usize, // width+1
-    pub _ch: usize, // height+1
-    /// For each corner, store the base position and diagonal type.
-    /// Diagonal type: 0 = no diagonal, 1 = main (\), 2 = anti (/)
-    pub corners: Vec<(Point, u8)>,
-}
+/// Get the reshaped corner position at grid corner (cx, cy) for a directed
+/// boundary edge traveling in the given direction.
+///
+/// At each interior grid corner, at most one diagonal can exist (after crossing
+/// resolution). The diagonal shifts the corner into two nodes offset by ¼ pixel,
+/// and the correct node depends on the travel direction of the contour edge.
+///
+/// Convention: the traced region is to the LEFT of the travel direction.
+///
+/// For \ diagonal (TL-BR connected) at corner (cx, cy):
+///   Nodes A=(cx-¼, cy+¼) and B=(cx+¼, cy-¼)
+///   Going right or up → B; going down or left → A
+///
+/// For / diagonal (TR-BL connected) at corner (cx, cy):
+///   Nodes C=(cx-¼, cy-¼) and D=(cx+¼, cy+¼)
+///   Going left or up → C; going right or down → D
+///
+/// dir: 0=right, 1=down, 2=left, 3=up
+pub fn reshaped_corner(cx: i32, cy: i32, dir: u8, graph: &SimilarityGraph) -> Point {
+    let w = graph.width as i32;
+    let h = graph.height as i32;
 
-impl CornersGrid {
-    /// Get the reshaped corner position for a specific pixel at a specific corner.
-    /// `px, py` is the pixel; `corner` is which corner (0=TL, 1=TR, 2=BR, 3=BL).
-    pub fn corner_for_pixel(&self, px: usize, py: usize, corner: u8) -> Point {
-        let (cx, cy) = match corner {
-            0 => (px, py),       // TL
-            1 => (px + 1, py),   // TR
-            2 => (px + 1, py + 1), // BR
-            3 => (px, py + 1),   // BL
-            _ => unreachable!(),
-        };
-
-        let (base, diag) = self.corners[cy * self.cw + cx];
-
-        if diag == 0 {
-            return base;
-        }
-
-        let shift = 0.25;
-
-        if diag == 1 {
-            // Main diagonal (\): TL and BR pixels are connected
-            match corner {
-                0 => Point::new(base.x + shift, base.y + shift), // TL pixel: shift toward BR
-                1 => Point::new(base.x + shift, base.y - shift), // TR pixel: shift away
-                2 => Point::new(base.x - shift, base.y - shift), // BR pixel: shift toward TL
-                3 => Point::new(base.x - shift, base.y + shift), // BL pixel: shift away
-                _ => base,
-            }
-        } else {
-            // Anti diagonal (/): TR and BL pixels are connected
-            match corner {
-                0 => Point::new(base.x - shift, base.y + shift), // TL pixel: shift away
-                1 => Point::new(base.x - shift, base.y - shift), // TR pixel: shift toward BL
-                2 => Point::new(base.x + shift, base.y - shift), // BR pixel: shift away
-                3 => Point::new(base.x + shift, base.y + shift), // BL pixel: shift toward TR
-                _ => base,
-            }
-        }
-    }
-}
-
-/// Build the corner grid from the similarity graph.
-pub fn build_corners(graph: &SimilarityGraph) -> CornersGrid {
-    let w = graph.width;
-    let h = graph.height;
-    let cw = w + 1;
-    let ch = h + 1;
-    let mut corners = vec![(Point::new(0.0, 0.0), 0u8); cw * ch];
-
-    for cy in 0..ch {
-        for cx in 0..cw {
-            let base = Point::new(cx as f64, cy as f64);
-
-            // Interior corners only
-            let diag = if cx > 0 && cy > 0 && cx < w && cy < h {
-                let bx = cx - 1; // top-left pixel of the 2x2 block
-                let by = cy - 1;
-                let has_main = graph.edge(bx, by).down_right;
-                let has_anti = graph.edge(bx + 1, by).down_left;
-
-                if has_main && !has_anti {
-                    1 // main diagonal
-                } else if has_anti && !has_main {
-                    2 // anti diagonal
-                } else {
-                    0 // no diagonal or both (resolved to none)
-                }
-            } else {
-                0
-            };
-
-            corners[cy * cw + cx] = (base, diag);
-        }
+    // Only interior corners (not on the image boundary) can be reshaped
+    if cx <= 0 || cy <= 0 || cx >= w || cy >= h {
+        return Point::new(cx as f64, cy as f64);
     }
 
-    CornersGrid { cw, _ch: ch, corners }
+    // \ diagonal: pixel (cx-1, cy-1) connected to (cx, cy)
+    let has_backslash = graph.edge((cx - 1) as usize, (cy - 1) as usize).down_right;
+
+    // / diagonal: pixel (cx, cy-1) connected to (cx-1, cy)
+    let has_slash = graph.edge(cx as usize, (cy - 1) as usize).down_left;
+
+    if has_backslash {
+        match dir {
+            0 | 3 => Point::new(cx as f64 + 0.25, cy as f64 - 0.25),
+            _ => Point::new(cx as f64 - 0.25, cy as f64 + 0.25),
+        }
+    } else if has_slash {
+        match dir {
+            2 | 3 => Point::new(cx as f64 - 0.25, cy as f64 - 0.25),
+            _ => Point::new(cx as f64 + 0.25, cy as f64 + 0.25),
+        }
+    } else {
+        Point::new(cx as f64, cy as f64)
+    }
 }

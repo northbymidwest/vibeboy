@@ -64,9 +64,12 @@ enum Command {
         /// Output file path
         #[arg(long, default_value = "screenshot.png")]
         out: String,
-        /// Output format: png or svg
+        /// Output format: png, svg, or raster (vectorized then rasterized)
         #[arg(long, default_value = "png")]
         format: String,
+        /// Scale factor for raster format (default 4)
+        #[arg(long, default_value = "4")]
+        scale: usize,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -78,6 +81,12 @@ enum Command {
     TraceTimer,
     /// Dump PPU/timer state at PC=$0100 for all models with boot ROMs
     Calibrate,
+    /// Vectorize an input PNG image to SVG using Kopf-Lischinski
+    Vectorize {
+        /// Output SVG file path
+        #[arg(long, default_value = "output.svg")]
+        out: String,
+    },
 }
 
 fn parse_model(s: &str) -> Result<GbModel, String> {
@@ -403,7 +412,7 @@ fn run_test_blargg(path: &Path, verbose: bool) -> &'static str {
     }
 }
 
-fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str) {
+fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str, scale: usize) {
     let rom = fs::read(&cli.path).expect("Failed to read ROM");
     let model = cli.model.unwrap_or_else(|| detect_model_with_rom(&cli.path, Some(&rom)));
     let br = resolve_boot_rom(cli, model);
@@ -413,10 +422,21 @@ fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str) {
     }
     let fb = emu.frame_buffer();
 
-    if format == "svg" || out.ends_with(".svg") {
+    if format == "svg" || (format == "png" && out.ends_with(".svg")) {
         let svg = vectorize::vectorize_to_svg(fb, 160, 144);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
+    } else if format == "raster" {
+        let (pixels, out_w, out_h) = vectorize::vectorize_to_raster(fb, 160, 144, scale);
+        let mut rgb = Vec::with_capacity(out_w * out_h * 3);
+        for pixel in &pixels {
+            rgb.push(((pixel >> 16) & 0xFF) as u8);
+            rgb.push(((pixel >> 8) & 0xFF) as u8);
+            rgb.push((pixel & 0xFF) as u8);
+        }
+        image::save_buffer(out, &rgb, out_w as u32, out_h as u32, image::ColorType::Rgb8)
+            .expect("Failed to write PNG");
+        eprintln!("Wrote {} (frame {}, {}x{} at {}x scale, vectorized+rasterized)", out, frames, out_w, out_h, scale);
     } else {
         let mut rgb = Vec::with_capacity(160 * 144 * 3);
         for y in 0..144 {
@@ -431,6 +451,32 @@ fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str) {
             .expect("Failed to write PNG");
         eprintln!("Wrote {} (frame {})", out, frames);
     }
+}
+
+fn cmd_vectorize(input: &Path, out: &str) {
+    let img = image::open(input).unwrap_or_else(|e| {
+        eprintln!("Failed to open image '{}': {}", input.display(), e);
+        std::process::exit(1);
+    });
+    let rgba = img.to_rgba8();
+    let width = rgba.width() as usize;
+    let height = rgba.height() as usize;
+
+    // Convert RGBA to ARGB u32
+    let pixels: Vec<u32> = rgba
+        .pixels()
+        .map(|p| {
+            let [r, g, b, _a] = p.0;
+            0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        })
+        .collect();
+
+    let svg = vectorize::vectorize_to_svg(&pixels, width, height);
+    fs::write(out, &svg).expect("Failed to write SVG");
+    eprintln!(
+        "Vectorized {}x{} image → {} ({} bytes)",
+        width, height, out, svg.len()
+    );
 }
 
 fn cmd_analyze(cli: &Cli, frames: u32) {
@@ -761,7 +807,8 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Command::Screenshot { frames, out, format }) => cmd_screenshot(&cli, *frames, out, format),
+        Some(Command::Screenshot { frames, out, format, scale }) => cmd_screenshot(&cli, *frames, out, format, *scale),
+        Some(Command::Vectorize { out }) => cmd_vectorize(&cli.path, out),
         Some(Command::Analyze { frames }) => cmd_analyze(&cli, *frames),
         Some(Command::TraceTimer) => cmd_trace_timer(&cli),
         Some(Command::Calibrate) => cmd_calibrate(&cli),

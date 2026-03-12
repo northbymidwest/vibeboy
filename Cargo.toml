@@ -20,6 +20,7 @@ log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
+svg = "0.18.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

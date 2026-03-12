@@ -11,4 +11,5 @@ profile.json.gz
 .DS_Store
 *.log
 *.png
+*.svg
 .claude/worktrees/

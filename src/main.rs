@@ -267,8 +267,13 @@ fn main() {
         "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
         "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
         "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
+        "aa-nearest" | "aa-nearest2x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X2),
+        "aa-nearest3x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X3),
+        "aa-nearest4x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X4),
+        "aa-nearest5x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X5),
+        "aa-nearest6x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X6),
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x]", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x], aa-nearest[2-6x]", other);
             std::process::exit(1);
         }
     };
@@ -570,6 +575,10 @@ fn main() {
                 }
                 scaling::ScaleFilter::OmniScaleLegacy(f) => {
                     scaled = scaling::omniscale_legacy::scale(raw_src, sw, sh, f.factor());
+                    &scaled
+                }
+                scaling::ScaleFilter::AaNearestNeighbor(f) => {
+                    scaled = scaling::aa_nearest::scale_integer(raw_src, sw, sh, f.factor() as usize);
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,

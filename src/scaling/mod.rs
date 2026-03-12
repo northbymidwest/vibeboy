@@ -1,5 +1,6 @@
 //! Pixel-art scaling algorithms.
 
+pub mod aa_nearest;
 pub mod bicubic;
 pub mod bilinear;
 pub mod dcci;
@@ -124,6 +125,7 @@ pub enum ScaleFilter {
     Edi,
     OmniScale(OmniScaleFactor),
     OmniScaleLegacy(OmniScaleFactor),
+    AaNearestNeighbor(OmniScaleFactor),
 }
 
 impl ScaleFilter {
@@ -138,7 +140,8 @@ impl ScaleFilter {
             ScaleFilter::Xbrz(x) => x.factor(),
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
             | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
-            ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f) => f.factor(),
+            ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f)
+            | ScaleFilter::AaNearestNeighbor(f) => f.factor(),
         }
     }
 }
