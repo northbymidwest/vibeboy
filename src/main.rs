@@ -324,6 +324,10 @@ fn main() {
 
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
+    let is_resizable = matches!(scale_filter,
+        scaling::ScaleFilter::Bilinear | scaling::ScaleFilter::Bicubic
+        | scaling::ScaleFilter::OmniScale(_) | scaling::ScaleFilter::AaNearestNeighbor(_)
+        | scaling::ScaleFilter::Vectorize(_));
     let filter_factor = scale_filter.factor();
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
@@ -338,18 +342,21 @@ fn main() {
     let audio = sdl.audio().unwrap();
 
     // ── Video ─────────────────────────────────────────────────────────────────
-    let window = video
-        .window("GBC Emulator", win_w, win_h)
-        .position_centered()
-        .build()
-        .unwrap();
+    let mut window_builder = video.window("GBC Emulator", win_w, win_h);
+    window_builder.position_centered();
+    if is_resizable {
+        window_builder.resizable();
+    }
+    let window = window_builder.build().unwrap();
 
     let mut canvas = window.into_canvas();
 
     let texture_creator = canvas.texture_creator();
 
+    let mut tex_cur_w = tex_w;
+    let mut tex_cur_h = tex_h;
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormat::ARGB8888, tex_w, tex_h)
+        .create_texture_streaming(PixelFormat::ARGB8888, tex_cur_w, tex_cur_h)
         .unwrap();
     texture.set_scale_mode(ScaleMode::Nearest);
 
@@ -521,7 +528,22 @@ fn main() {
             let sw = src_w as usize;
             let sh = src_h as usize;
 
+            // For resizable filters, compute aspect-correct display area
+            let (disp_w, disp_h) = if is_resizable {
+                let (ww, wh) = canvas.window().size();
+                let src_aspect = src_w as f64 / src_h as f64;
+                let win_aspect = ww as f64 / wh as f64;
+                if win_aspect > src_aspect {
+                    ((wh as f64 * src_aspect) as usize, wh as usize)
+                } else {
+                    (ww as usize, (ww as f64 / src_aspect) as usize)
+                }
+            } else {
+                (0, 0)
+            };
+
             let scaled;
+            let mut vec_out: (usize, usize) = (0, 0);
             let final_src: &[u32] = match scale_filter {
                 scaling::ScaleFilter::Hqx(mode) => {
                     scaled = scaling::hqx::scale(raw_src, sw, sh, mode);
@@ -540,11 +562,11 @@ fn main() {
                     &scaled
                 }
                 scaling::ScaleFilter::Bilinear => {
-                    scaled = scaling::bilinear::scale(raw_src, sw, sh);
+                    scaled = scaling::bilinear::scale_to(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
                 scaling::ScaleFilter::Bicubic => {
-                    scaled = scaling::bicubic::scale(raw_src, sw, sh);
+                    scaled = scaling::bicubic::scale_to(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
                 scaling::ScaleFilter::Xbr(mode) => {
@@ -575,27 +597,69 @@ fn main() {
                     scaled = scaling::edi::scale(raw_src, sw, sh);
                     &scaled
                 }
-                scaling::ScaleFilter::OmniScale(f) => {
-                    scaled = scaling::omniscale::scale(raw_src, sw, sh, f.factor());
+                scaling::ScaleFilter::OmniScale(_) => {
+                    // OmniScale at ceiling integer factor, then AA downscale to exact display size
+                    let ceil_factor = ((disp_w as f64 / sw as f64).ceil() as u32).max(2);
+                    let os = scaling::omniscale::scale(raw_src, sw, sh, ceil_factor);
+                    let os_w = sw * ceil_factor as usize;
+                    let os_h = sh * ceil_factor as usize;
+                    if os_w == disp_w && os_h == disp_h {
+                        scaled = os;
+                    } else {
+                        scaled = scaling::aa_nearest::scale(&os, os_w, os_h, disp_w, disp_h);
+                    }
                     &scaled
                 }
                 scaling::ScaleFilter::OmniScaleLegacy(f) => {
                     scaled = scaling::omniscale_legacy::scale(raw_src, sw, sh, f.factor());
                     &scaled
                 }
-                scaling::ScaleFilter::AaNearestNeighbor(f) => {
-                    scaled = scaling::aa_nearest::scale_integer(raw_src, sw, sh, f.factor() as usize);
+                scaling::ScaleFilter::AaNearestNeighbor(_) => {
+                    scaled = scaling::aa_nearest::scale(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
-                scaling::ScaleFilter::Vectorize(f) => {
-                    let (buf, _ow, _oh) = crate::vectorize::vectorize_to_raster(raw_src, sw, sh, f.factor() as usize);
+                scaling::ScaleFilter::Vectorize(_) => {
+                    // Rasterize vector paths at uniform scale that fits the display area
+                    let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                    let (buf, w, h) = crate::vectorize::vectorize_to_raster_scaled(raw_src, sw, sh, scale);
+                    vec_out = (w, h);
                     scaled = buf;
                     &scaled
                 }
                 scaling::ScaleFilter::Nearest => raw_src,
             };
-            let fw = tex_w as usize;
-            let fh = tex_h as usize;
+
+            // Output frame dimensions and display rect
+            let is_vec = matches!(scale_filter, scaling::ScaleFilter::Vectorize(_));
+            let (fw, fh) = if is_vec {
+                vec_out
+            } else if is_resizable {
+                (disp_w, disp_h)
+            } else {
+                (tex_w as usize, tex_h as usize)
+            };
+
+            // Aspect-correct destination rect (letterbox/pillarbox)
+            let dst_rect: Option<sdl3::render::FRect> = if is_resizable {
+                let (ww, wh) = canvas.window().size();
+                // For vectorize, center the actual rasterized output
+                let (dw, dh) = if is_vec { vec_out } else { (disp_w, disp_h) };
+                let dx = (ww as usize).saturating_sub(dw) / 2;
+                let dy = (wh as usize).saturating_sub(dh) / 2;
+                Some(sdl3::render::FRect::new(dx as f32, dy as f32, dw as f32, dh as f32))
+            } else {
+                None
+            };
+
+            // Recreate texture if dimensions changed (vectorize resize)
+            if fw as u32 != tex_cur_w || fh as u32 != tex_cur_h {
+                tex_cur_w = fw as u32;
+                tex_cur_h = fh as u32;
+                texture = texture_creator
+                    .create_texture_streaming(PixelFormat::ARGB8888, tex_cur_w, tex_cur_h)
+                    .unwrap();
+                texture.set_scale_mode(ScaleMode::Nearest);
+            }
 
             texture
                 .with_lock(None, |pixels: &mut [u8], pitch: usize| {
@@ -613,7 +677,7 @@ fn main() {
                 .unwrap();
 
             canvas.clear();
-            canvas.copy(&texture, None, None).unwrap();
+            canvas.copy(&texture, None, dst_rect).unwrap();
             canvas.present();
         }
 

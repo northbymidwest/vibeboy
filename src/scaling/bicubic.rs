@@ -54,6 +54,29 @@ fn bicubic_sample(src: &[u32], w: usize, h: usize, ix: isize, iy: isize, fx: f32
     0xFF000000 | (rc << 16) | (gc << 8) | bc
 }
 
+/// Scale to arbitrary output dimensions using bicubic (Catmull-Rom) interpolation.
+pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u32> {
+    let mut dst = vec![0u32; dst_w * dst_h];
+    let sx = src_w as f64 / dst_w as f64;
+    let sy = src_h as f64 / dst_h as f64;
+
+    for oy in 0..dst_h {
+        let src_y = oy as f64 * sy;
+        let iy = src_y as isize;
+        let fy = (src_y - iy as f64) as f32;
+
+        for ox in 0..dst_w {
+            let src_x = ox as f64 * sx;
+            let ix = src_x as isize;
+            let fx = (src_x - ix as f64) as f32;
+
+            dst[oy * dst_w + ox] = bicubic_sample(src, src_w, src_h, ix, iy, fx, fy);
+        }
+    }
+    dst
+}
+
+/// Fixed 2x bicubic scale (fast path).
 pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     let dst_w = src_w * 2;
     let dst_h = src_h * 2;

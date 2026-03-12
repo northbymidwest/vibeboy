@@ -61,22 +61,22 @@ fn flatten_quad(
 }
 
 /// Extract edges from path segments, scaled to output space.
-fn extract_edges(segments: &[PathSegment], scale: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
+fn extract_edges(segments: &[PathSegment], sx: f64, sy: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
     edges.clear();
     for seg in segments {
         match seg {
             PathSegment::Line(a, b) => {
-                let y0 = a.y * scale;
-                let y1 = b.y * scale;
+                let y0 = a.y * sy;
+                let y1 = b.y * sy;
                 if (y0 - y1).abs() > 1e-10 {
-                    edges.push(Edge::new(a.x * scale, y0, b.x * scale, y1));
+                    edges.push(Edge::new(a.x * sx, y0, b.x * sx, y1));
                 }
             }
             PathSegment::QuadBezier(start, ctrl, end) => {
                 flatten_quad(
-                    start.x * scale, start.y * scale,
-                    ctrl.x * scale, ctrl.y * scale,
-                    end.x * scale, end.y * scale,
+                    start.x * sx, start.y * sy,
+                    ctrl.x * sx, ctrl.y * sy,
+                    end.x * sx, end.y * sy,
                     tol_sq, edges,
                 );
             }
@@ -93,10 +93,24 @@ pub fn rasterize(
     bg_color: u32,
     scale: usize,
 ) -> Vec<u32> {
-    let out_w = width * scale;
-    let out_h = height * scale;
+    let (buf, _, _) = rasterize_scaled(paths, width, height, bg_color, scale as f64);
+    buf
+}
+
+/// Rasterize vector paths at a floating-point scale factor.
+/// Output dimensions are `(width * scale).round()` x `(height * scale).round()`.
+pub fn rasterize_scaled(
+    paths: &[ColorPath],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+    scale: f64,
+) -> (Vec<u32>, usize, usize) {
+    let out_w = (width as f64 * scale).round() as usize;
+    let out_h = (height as f64 * scale).round() as usize;
     let mut buffer = vec![bg_color; out_w * out_h];
-    let scale_f = scale as f64;
+    let sx = scale;
+    let sy = scale;
     let tol_sq = 0.25;
 
     let mut edges = Vec::new();
@@ -111,7 +125,7 @@ pub fn rasterize(
             continue;
         }
 
-        extract_edges(&path.segments, scale_f, tol_sq, &mut edges);
+        extract_edges(&path.segments, sx, sy, tol_sq, &mut edges);
         if edges.is_empty() {
             continue;
         }
@@ -135,7 +149,7 @@ pub fn rasterize(
         );
     }
 
-    buffer
+    (buffer, out_w, out_h)
 }
 
 /// Rasterize a single path's edges with 2x2 supersampling and nonzero winding.

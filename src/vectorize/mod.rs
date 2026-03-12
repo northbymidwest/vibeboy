@@ -25,8 +25,8 @@ pub fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
     svg::render_svg(&paths, w, h, bg_color)
 }
 
-/// Vectorize a pixel buffer and rasterize at the given scale.
-/// Output is exactly (width*scale) x (height*scale) — no upscale collapse.
+/// Vectorize a pixel buffer and rasterize at the given integer scale.
+/// Output is exactly (width*scale) x (height*scale).
 /// Returns (pixels, output_width, output_height).
 pub fn vectorize_to_raster(
     pixels: &[u32], width: usize, height: usize, scale: usize,
@@ -36,6 +36,16 @@ pub fn vectorize_to_raster(
     let out_h = height * scale;
     let buf = rasterize::rasterize(&paths, width, height, bg_color, scale);
     (buf, out_w, out_h)
+}
+
+/// Vectorize a pixel buffer and rasterize at a floating-point scale factor.
+/// Uses a single uniform scale so the aspect ratio is always preserved.
+/// Returns (pixels, output_width, output_height).
+pub fn vectorize_to_raster_scaled(
+    pixels: &[u32], width: usize, height: usize, scale: f64,
+) -> (Vec<u32>, usize, usize) {
+    let (paths, bg_color) = vectorize_core(pixels, width, height);
+    rasterize::rasterize_scaled(&paths, width, height, bg_color, scale)
 }
 
 /// Quantize colors to merge near-identical shades (e.g. #555555 vs #565656).
