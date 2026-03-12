@@ -328,6 +328,14 @@ fn main() {
         scaling::ScaleFilter::Bilinear | scaling::ScaleFilter::Bicubic
         | scaling::ScaleFilter::OmniScale(_) | scaling::ScaleFilter::AaNearestNeighbor(_)
         | scaling::ScaleFilter::Vectorize(_));
+    let is_vectorize = matches!(scale_filter, scaling::ScaleFilter::Vectorize(_));
+    let mut vec_cache = if is_vectorize {
+        Some(crate::vectorize::VectorizeCache::new())
+    } else { None };
+    #[cfg(feature = "gpu")]
+    let gpu_rasterizer = if is_vectorize {
+        crate::vectorize::gpu_rasterize::GpuRasterizer::new()
+    } else { None };
     let filter_factor = scale_filter.factor();
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
@@ -619,9 +627,17 @@ fn main() {
                     &scaled
                 }
                 scaling::ScaleFilter::Vectorize(_) => {
-                    // Rasterize vector paths at uniform scale that fits the display area
                     let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                    let (buf, w, h) = crate::vectorize::vectorize_to_raster_scaled(raw_src, sw, sh, scale);
+                    let cache = vec_cache.as_mut().unwrap();
+                    let (paths, bg_color) = cache.get_paths(raw_src, sw, sh);
+                    #[cfg(feature = "gpu")]
+                    let (buf, w, h) = if let Some(ref gpu) = gpu_rasterizer {
+                        gpu.rasterize(paths, sw, sh, bg_color, scale)
+                    } else {
+                        crate::vectorize::rasterize::rasterize_scaled(paths, sw, sh, bg_color, scale)
+                    };
+                    #[cfg(not(feature = "gpu"))]
+                    let (buf, w, h) = crate::vectorize::rasterize::rasterize_scaled(paths, sw, sh, bg_color, scale);
                     vec_out = (w, h);
                     scaled = buf;
                     &scaled

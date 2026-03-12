@@ -12,9 +12,45 @@
 
 pub mod contour;
 pub mod graph;
+#[cfg(feature = "gpu")]
+pub mod gpu_rasterize;
 pub mod rasterize;
 pub mod svg;
 pub mod voronoi;
+
+/// Caches vectorized paths between frames to skip re-vectorization when
+/// the source pixel buffer hasn't changed.
+pub struct VectorizeCache {
+    prev_pixels: Vec<u32>,
+    cached_paths: Vec<contour::ColorPath>,
+    cached_bg_color: u32,
+}
+
+impl VectorizeCache {
+    pub fn new() -> Self {
+        Self {
+            prev_pixels: Vec::new(),
+            cached_paths: Vec::new(),
+            cached_bg_color: 0,
+        }
+    }
+
+    /// Returns cached (paths, bg_color) if pixels unchanged, otherwise
+    /// runs vectorization, updates cache, and returns new results.
+    pub fn get_paths(&mut self, pixels: &[u32], width: usize, height: usize)
+        -> (&[contour::ColorPath], u32)
+    {
+        if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
+            return (&self.cached_paths, self.cached_bg_color);
+        }
+        let (paths, bg_color) = vectorize_core(pixels, width, height);
+        self.prev_pixels.clear();
+        self.prev_pixels.extend_from_slice(pixels);
+        self.cached_paths = paths;
+        self.cached_bg_color = bg_color;
+        (&self.cached_paths, self.cached_bg_color)
+    }
+}
 
 /// Vectorize a pixel buffer to an SVG string.
 ///
@@ -64,7 +100,7 @@ fn quantize_pixels(pixels: &[u32]) -> Vec<u32> {
 }
 
 /// Core vectorization: graph → contour → paths. No upscale collapse.
-fn vectorize_core(
+pub fn vectorize_core(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, u32) {
     let qpixels = quantize_pixels(pixels);

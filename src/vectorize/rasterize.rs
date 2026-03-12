@@ -299,6 +299,76 @@ fn rasterize_path(
     }
 }
 
+/// GPU-ready edge data for compute shader upload.
+#[cfg(feature = "gpu")]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct GpuEdge {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub inv_dy: f32,
+    pub y_min: f32,
+    pub y_max: f32,
+    pub dir: i32,
+    pub _pad: u32,
+}
+
+/// Per-path metadata for GPU compute shader.
+#[cfg(feature = "gpu")]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct GpuPathMeta {
+    pub color: u32,
+    pub edge_start: u32,
+    pub edge_count: u32,
+    pub _pad: u32,
+}
+
+/// Flatten all paths into GPU-ready edge and path metadata arrays.
+/// Skips background-colored paths. Returns (edges, path_metas).
+#[cfg(feature = "gpu")]
+pub fn prepare_gpu_edges(
+    paths: &[ColorPath], bg_color: u32, scale: f64,
+) -> (Vec<GpuEdge>, Vec<GpuPathMeta>) {
+    let sx = scale;
+    let sy = scale;
+    let tol_sq = 0.25;
+    let mut cpu_edges = Vec::new();
+    let mut gpu_edges = Vec::new();
+    let mut metas = Vec::new();
+
+    for path in paths {
+        if path.segments.is_empty() || path.color == bg_color {
+            continue;
+        }
+        extract_edges(&path.segments, sx, sy, tol_sq, &mut cpu_edges);
+        if cpu_edges.is_empty() {
+            continue;
+        }
+        let start = gpu_edges.len() as u32;
+        for e in &cpu_edges {
+            gpu_edges.push(GpuEdge {
+                x0: e.x0 as f32,
+                y0: e.y0 as f32,
+                x1: e.x1 as f32,
+                inv_dy: e.inv_dy as f32,
+                y_min: e.y_min as f32,
+                y_max: e.y_max as f32,
+                dir: e.dir,
+                _pad: 0,
+            });
+        }
+        metas.push(GpuPathMeta {
+            color: path.color,
+            edge_start: start,
+            edge_count: gpu_edges.len() as u32 - start,
+            _pad: 0,
+        });
+    }
+    (gpu_edges, metas)
+}
+
 /// Blend two ARGB colors with 2x2 coverage (0..4).
 #[inline(always)]
 fn blend4(bg: u32, fg: u32, coverage: u8) -> u32 {
