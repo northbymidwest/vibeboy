@@ -283,15 +283,27 @@ fn precompute_cells(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<InlineCe
 /// Each undirected edge between different colors produces two directed edges:
 /// a→b with right_color and b→a with left_color.
 ///
-/// Uses sort-merge instead of HashMap: collect all cell edges into a flat Vec,
-/// sort by canonical edge, then merge consecutive entries. Cache-friendly and
-/// avoids hashing overhead for the pipeline's largest data structure.
+/// Pack a NodeId into a u32 for fast hashing. Coordinates are offset by +2
+/// so negative border values (-1) become non-negative.
+#[inline(always)]
+fn pack_node(n: NodeId, stride: u32) -> u32 {
+    (n.y4 + 2) as u32 * stride + (n.x4 + 2) as u32
+}
+
+/// Pack a canonical edge (a ≤ b) into a u64 key.
+#[inline(always)]
+fn pack_edge(a: u32, b: u32) -> u64 {
+    (a as u64) << 32 | b as u64
+}
+
 fn build_directed_boundary_edges(
     pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell],
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
-    // Pack each cell edge as (canonical_a, canonical_b, is_forward, color).
-    // Average ~5 edges per pixel.
-    let mut entries: Vec<(NodeId, NodeId, bool, u32)> = Vec::with_capacity(w * h * 5);
+    // Hash-based deduplication: O(n) instead of O(n log n) sort-merge.
+    // Each edge maps to (left_color, right_color).
+    let stride = (4 * w + 4) as u32;
+    let mut edge_map: FxHashMap<u64, (u32, u32, NodeId, NodeId)> =
+        fx_hashmap_cap(w * h * 2);
 
     for y in 0..h {
         for x in 0..w {
@@ -304,50 +316,47 @@ fn build_directed_boundary_edges(
                 let pa = cell[i];
                 let pb = cell[(i + 1) % n];
 
-                let (key_a, key_b, is_forward) = if pa <= pb {
-                    (pa, pb, true)
+                let (key, is_forward, node_a, node_b) = if pa <= pb {
+                    let ka = pack_node(pa, stride);
+                    let kb = pack_node(pb, stride);
+                    (pack_edge(ka, kb), true, pa, pb)
                 } else {
-                    (pb, pa, false)
+                    let ka = pack_node(pb, stride);
+                    let kb = pack_node(pa, stride);
+                    (pack_edge(ka, kb), false, pb, pa)
                 };
-                entries.push((key_a, key_b, is_forward, color));
+
+                let entry = edge_map.entry(key)
+                    .or_insert((VOID_COLOR, VOID_COLOR, node_a, node_b));
+                if is_forward {
+                    entry.1 = color; // right
+                } else {
+                    entry.0 = color; // left
+                }
             }
         }
     }
 
-    // Sort by canonical edge (NodeId is Ord: x4 then y4, lexicographic)
-    entries.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-
-    // Merge consecutive entries with the same canonical edge
     let mut visible = Vec::new();
     let mut directed = Vec::new();
 
-    let mut i = 0;
-    while i < entries.len() {
-        let key_a = entries[i].0;
-        let key_b = entries[i].1;
-        let mut left: u32 = VOID_COLOR;
-        let mut right: u32 = VOID_COLOR;
-
-        while i < entries.len() && entries[i].0 == key_a && entries[i].1 == key_b {
-            if entries[i].2 {
-                right = entries[i].3;
-            } else {
-                left = entries[i].3;
-            }
-            i += 1;
-        }
-
+    for (_, (left, right, key_a, key_b)) in &edge_map {
         if left != right {
             visible.push(CellEdge {
-                a: key_a,
-                b: key_b,
-                left_color: left,
-                right_color: right,
+                a: *key_a,
+                b: *key_b,
+                left_color: *left,
+                right_color: *right,
             });
-            directed.push((key_a, key_b, right));
-            directed.push((key_b, key_a, left));
+            directed.push((*key_a, *key_b, *right));
+            directed.push((*key_b, *key_a, *left));
         }
     }
+
+    // Sort to restore deterministic ordering (downstream chain/loop building
+    // is sensitive to edge order). This is cheap: only boundary edges, not all edges.
+    visible.sort_unstable_by(|a, b| (a.a, a.b).cmp(&(b.a, b.b)));
+    directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
 
     (visible, directed)
 }
