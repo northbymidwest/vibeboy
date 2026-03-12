@@ -59,18 +59,31 @@ fn vectorize_paths(
     (paths, w, h, bg_color)
 }
 
-/// Detect background color: most common color along the image edges.
+/// Detect background color: most common color along the image edges,
+/// but only if it also covers a significant portion of the total image.
+/// Returns a sentinel (0xFFFFFFFF) if no clear background is found.
 fn detect_background_color(pixels: &[u32], width: usize, height: usize) -> u32 {
-    let mut counts = std::collections::HashMap::new();
+    let mut edge_counts = std::collections::HashMap::new();
     for x in 0..width {
-        *counts.entry(pixels[x]).or_insert(0u32) += 1;
-        *counts.entry(pixels[(height - 1) * width + x]).or_insert(0u32) += 1;
+        *edge_counts.entry(pixels[x]).or_insert(0u32) += 1;
+        *edge_counts.entry(pixels[(height - 1) * width + x]).or_insert(0u32) += 1;
     }
     for y in 1..height - 1 {
-        *counts.entry(pixels[y * width]).or_insert(0u32) += 1;
-        *counts.entry(pixels[y * width + width - 1]).or_insert(0u32) += 1;
+        *edge_counts.entry(pixels[y * width]).or_insert(0u32) += 1;
+        *edge_counts.entry(pixels[y * width + width - 1]).or_insert(0u32) += 1;
     }
-    counts.into_iter().max_by_key(|&(_, c)| c).map(|(color, _)| color).unwrap_or(0)
+    let candidate = edge_counts.into_iter().max_by_key(|&(_, c)| c).map(|(color, _)| color).unwrap_or(0);
+
+    // Verify: the candidate must cover at least 20% of all pixels to be a true background.
+    // This prevents dark outlines or small border elements from being misidentified.
+    let total = pixels.len();
+    let coverage = pixels.iter().filter(|&&p| p == candidate).count();
+    if coverage * 5 >= total {
+        candidate
+    } else {
+        // No dominant background — use a sentinel that won't match any real color
+        0xFFFFFFFF
+    }
 }
 
 /// Detect nearest-neighbor upscaling and collapse to native pixel resolution.

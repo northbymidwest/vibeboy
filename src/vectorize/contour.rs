@@ -682,6 +682,16 @@ fn boundary_loop_to_segments(
         return bspline_closed(&points);
     }
 
+    if corner_indices.len() == 1 {
+        // Single corner: open B-spline from corner around the full loop back to corner
+        let c = corner_indices[0];
+        let mut span_points = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            span_points.push(points[(c + i) % n]);
+        }
+        return bspline_open(&span_points);
+    }
+
     // Split loop into spans between consecutive corners
     let mut segments = Vec::new();
     let num_corners = corner_indices.len();
@@ -741,6 +751,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
         if boundary_edges.is_empty() { continue; }
 
         let loops = trace_boundary_node_loops(&boundary_edges);
+        if loops.is_empty() { continue; }
 
         let mut all_segments = Vec::new();
         for node_loop in &loops {
