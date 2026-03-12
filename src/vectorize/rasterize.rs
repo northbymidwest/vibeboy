@@ -7,8 +7,7 @@ use super::contour::{ColorPath, PathSegment};
 struct Edge {
     x0: f64,
     y0: f64,
-    x1: f64,
-    inv_dy: f64,
+    dx_per_dy: f64,
     y_min: f64,
     y_max: f64,
     dir: i32,
@@ -19,18 +18,18 @@ impl Edge {
     fn new(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
         let dy = y1 - y0;
         Edge {
-            x0, y0, x1,
-            inv_dy: 1.0 / dy,
+            x0, y0,
+            dx_per_dy: (x1 - x0) / dy,
             y_min: y0.min(y1),
             y_max: y0.max(y1),
             dir: if dy > 0.0 { 1 } else { -1 },
         }
     }
 
+    /// X intersection at scanline y. Precomputed dx/dy reduces to 1 sub + 1 fma.
     #[inline(always)]
     fn intersect_x(&self, sy: f64) -> f64 {
-        let t = (sy - self.y0) * self.inv_dy;
-        self.x0 + t * (self.x1 - self.x0)
+        self.x0 + (sy - self.y0) * self.dx_per_dy
     }
 }
 
@@ -294,12 +293,12 @@ fn rasterize_path(
 pub struct GpuEdge {
     pub x0: f32,
     pub y0: f32,
-    pub x1: f32,
-    pub inv_dy: f32,
+    pub dx_per_dy: f32,
     pub y_min: f32,
     pub y_max: f32,
     pub dir: i32,
-    pub _pad: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 /// Per-path metadata for GPU compute shader.
@@ -339,12 +338,12 @@ pub fn prepare_gpu_edges(
             gpu_edges.push(GpuEdge {
                 x0: e.x0 as f32,
                 y0: e.y0 as f32,
-                x1: e.x1 as f32,
-                inv_dy: e.inv_dy as f32,
+                dx_per_dy: e.dx_per_dy as f32,
                 y_min: e.y_min as f32,
                 y_max: e.y_max as f32,
                 dir: e.dir,
-                _pad: 0,
+                _pad0: 0,
+                _pad1: 0,
             });
         }
         metas.push(GpuPathMeta {

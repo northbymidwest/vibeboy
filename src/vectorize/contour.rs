@@ -55,7 +55,6 @@ impl BuildHasher for FxBuildHasher {
 }
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
-type FxHashSet<K> = HashSet<K, FxBuildHasher>;
 
 #[inline]
 fn fx_hashmap<K, V>() -> FxHashMap<K, V> {
@@ -66,6 +65,8 @@ fn fx_hashmap<K, V>() -> FxHashMap<K, V> {
 fn fx_hashmap_cap<K, V>(cap: usize) -> FxHashMap<K, V> {
     HashMap::with_capacity_and_hasher(cap, FxBuildHasher)
 }
+
+type FxHashSet<K> = HashSet<K, FxBuildHasher>;
 
 #[inline]
 fn fx_hashset_cap<K>(cap: usize) -> FxHashSet<K> {

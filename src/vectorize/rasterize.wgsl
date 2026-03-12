@@ -11,12 +11,12 @@ struct Uniforms {
 struct Edge {
     x0: f32,
     y0: f32,
-    x1: f32,
-    inv_dy: f32,
+    dx_per_dy: f32,
     y_min: f32,
     y_max: f32,
     dir: i32,
-    _pad: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 struct PathMeta {
@@ -84,16 +84,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Row 0 (sy = y + 0.25)
             if (sy0 >= e.y_min && sy0 < e.y_max) {
-                let t = (sy0 - e.y0) * e.inv_dy;
-                let ix = e.x0 + t * (e.x1 - e.x0);
+                let ix = e.x0 + (sy0 - e.y0) * e.dx_per_dy;
                 if (sx0 < ix) { w00 += e.dir; }
                 if (sx1 < ix) { w10 += e.dir; }
             }
 
             // Row 1 (sy = y + 0.75)
             if (sy1 >= e.y_min && sy1 < e.y_max) {
-                let t = (sy1 - e.y0) * e.inv_dy;
-                let ix = e.x0 + t * (e.x1 - e.x0);
+                let ix = e.x0 + (sy1 - e.y0) * e.dx_per_dy;
                 if (sx0 < ix) { w01 += e.dir; }
                 if (sx1 < ix) { w11 += e.dir; }
             }
