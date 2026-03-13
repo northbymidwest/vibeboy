@@ -44,14 +44,14 @@ pub fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
 /// Load boot ROM for the given model from bootroms/ directory.
 pub fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
     let candidates: &[&str] = match model {
-        GbModel::Dmg0 => &["bootroms/dmg0_boot.bin", "bootroms/dmg_boot.bin"],
+        GbModel::Dmg0 => &["bootroms/dmg0_boot.bin"],
         GbModel::Dmg => &["bootroms/dmg_boot.bin"],
-        GbModel::Mgb => &["bootroms/mgb_boot.bin", "bootroms/dmg_boot.bin"],
+        GbModel::Mgb => &["bootroms/mgb_boot.bin"],
         GbModel::Sgb => &["bootroms/sgb_boot.bin"],
         GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
-        GbModel::Cgb0 => &["bootroms/cgb0_boot.bin", "bootroms/cgb_boot.bin"],
-        GbModel::Cgb => &["bootroms/cgb_boot.bin", "gbc_bios.bin"],
-        GbModel::Agb => &["bootroms/cgb_agb_boot.bin", "bootroms/cgb_boot.bin"],
+        GbModel::Cgb0 => &["bootroms/cgb0_boot.bin"],
+        GbModel::Cgb => &["bootroms/cgb_boot.bin"],
+        GbModel::Agb => &["bootroms/cgb_agb_boot.bin"],
     };
     for path in candidates {
         if let Ok(data) = fs::read(path) {

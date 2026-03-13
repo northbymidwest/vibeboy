@@ -191,13 +191,14 @@ fn main() {
         }))
     } else {
         let candidates: &[&str] = match model {
-            GbModel::Dmg0 => &["dmg0_boot.bin", "bootroms/dmg0_boot.bin", "gb_bios.bin"],
-            GbModel::Dmg => &["dmg_boot.bin", "bootroms/dmg_boot.bin", "gb_bios.bin"],
-            GbModel::Mgb => &["mgb_boot.bin", "bootroms/mgb_boot.bin", "gb_bios.bin"],
-            GbModel::Sgb => &["sgb_boot.bin", "bootroms/sgb_boot.bin", "sgb_bios.bin"],
-            GbModel::Sgb2 => &["sgb2_boot.bin", "bootroms/sgb2_boot.bin", "sgb2_bios.bin"],
-            GbModel::Cgb0 => &["cgb0_boot.bin", "bootroms/cgb0_boot.bin", "gbc_bios.bin"],
-            GbModel::Cgb | GbModel::Agb => &["cgb_boot.bin", "bootroms/cgb_boot.bin", "gbc_bios.bin"],
+            GbModel::Dmg0 => &["dmg0_boot.bin", "bootroms/dmg0_boot.bin"],
+            GbModel::Dmg => &["dmg_boot.bin", "bootroms/dmg_boot.bin"],
+            GbModel::Mgb => &["mgb_boot.bin", "bootroms/mgb_boot.bin"],
+            GbModel::Sgb => &["sgb_boot.bin", "bootroms/sgb_boot.bin"],
+            GbModel::Sgb2 => &["sgb2_boot.bin", "bootroms/sgb2_boot.bin"],
+            GbModel::Cgb0 => &["cgb0_boot.bin", "bootroms/cgb0_boot.bin"],
+            GbModel::Cgb => &["cgb_boot.bin", "bootroms/cgb_boot.bin"],
+            GbModel::Agb => &["cgb_agb_boot.bin", "bootroms/cgb_agb_boot.bin"],
         };
         candidates.iter().find_map(|name| fs::read(name).ok())
     };
