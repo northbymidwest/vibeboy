@@ -19,7 +19,7 @@ use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use emulator::Emulator;
 use muda::{
-    AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
 use model::GbModel;
@@ -673,7 +673,7 @@ fn camera_thread_main(
 
 // ── Menu builder ─────────────────────────────────────────────────────────────
 
-fn build_menu() -> Menu {
+fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>) {
     let menu = Menu::new();
 
     // File menu
@@ -744,8 +744,9 @@ fn build_menu() -> Menu {
         .append_items(&[&save_sub, &load_sub])
         .unwrap();
 
-    // Filter menu
+    // Filter menu — use CheckMenuItem for checkmark support
     let filter_menu = Submenu::new("Filter", true);
+    let mut filter_items = Vec::new();
     {
         let hqx_sub = Submenu::new("HQx", true);
         let xbr_sub = Submenu::new("xBR", true);
@@ -753,7 +754,8 @@ fn build_menu() -> Menu {
         let edge_sub = Submenu::new("Edge-Directed", true);
 
         for (id, name, filter) in filter_entries() {
-            let item = MenuItem::with_id(id, name, true, None::<Accelerator>);
+            let checked = filter == scaling::ScaleFilter::Nearest;
+            let item = CheckMenuItem::with_id(id, name, true, checked, None::<Accelerator>);
             match filter {
                 scaling::ScaleFilter::Hqx(_) => { hqx_sub.append(&item).unwrap(); }
                 scaling::ScaleFilter::Xbr(_)
@@ -765,6 +767,7 @@ fn build_menu() -> Menu {
                 | scaling::ScaleFilter::Edi => { edge_sub.append(&item).unwrap(); }
                 _ => { filter_menu.append(&item).unwrap(); }
             }
+            filter_items.push((item, filter));
         }
 
         filter_menu.append(&PredefinedMenuItem::separator()).unwrap();
@@ -807,7 +810,7 @@ fn build_menu() -> Menu {
     menu.append_items(&[&file_menu, &emu_menu, &state_menu, &filter_menu, &help_menu])
         .unwrap();
 
-    menu
+    (menu, filter_items)
 }
 
 // ── Application ──────────────────────────────────────────────────────────────
@@ -820,6 +823,7 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuRenderer>,
     _menu: Option<Menu>,
+    filter_items: Vec<(CheckMenuItem, scaling::ScaleFilter)>,
     audio_ring: Arc<Mutex<AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     camera_thread: Option<CameraThread>,
@@ -852,6 +856,7 @@ impl App {
             window: None,
             gpu: None,
             _menu: None,
+            filter_items: Vec::new(),
             audio_ring,
             _audio_stream: stream,
             camera_thread: None,
@@ -921,6 +926,12 @@ impl App {
         }
     }
 
+    fn update_filter_checkmarks(&self) {
+        for (item, filter) in &self.filter_items {
+            item.set_checked(*filter == self.scale_filter);
+        }
+    }
+
     fn handle_menu_event(&mut self, id: &str) {
         match id {
             ID_OPEN => {
@@ -951,6 +962,7 @@ impl App {
                 // Check filter menu items
                 if let Some(filter) = filter_id_to_filter(other) {
                     self.scale_filter = filter;
+                    self.update_filter_checkmarks();
                     match filter {
                         scaling::ScaleFilter::Vectorize => {
                             self.vec_cache = Some(vectorize::VectorizeCache::new(false));
@@ -1187,7 +1199,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         // Set up menu bar
-        let menu = build_menu();
+        let (menu, filter_items) = build_menu();
         #[cfg(target_os = "macos")]
         {
             menu.init_for_nsapp();
@@ -1210,12 +1222,21 @@ impl ApplicationHandler for App {
         let gpu = GpuRenderer::new(window.clone());
 
         self._menu = Some(menu);
+        self.filter_items = filter_items;
         self.window = Some(window);
         self.gpu = Some(gpu);
 
-        // Load ROM if provided on command line
+        // Load ROM if provided on command line, otherwise show file dialog
         if let Some(path) = self.rom_path.clone() {
             self.load_rom(&path);
+        } else {
+            let file = rfd::FileDialog::new()
+                .add_filter("Game Boy ROMs", &["gb", "gbc"])
+                .add_filter("All files", &["*"])
+                .pick_file();
+            if let Some(path) = file {
+                self.load_rom(&path);
+            }
         }
 
         event_loop.set_control_flow(ControlFlow::Poll);
