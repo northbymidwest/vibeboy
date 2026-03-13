@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "test_runner"
-path = "src/test_runner.rs"
+path = "src/test_runner/main.rs"
 
 [dependencies]
 sdl3 = { version = "0.17", features = ["hidapi"] }

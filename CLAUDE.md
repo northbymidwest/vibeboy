@@ -25,34 +25,40 @@ Test ROMs live in `game-boy-test-roms/` (c-sp/game-boy-test-roms v7.0, includes 
 
 ```bash
 # Mooneye tests (breakpoint detection, Fibonacci register check)
-cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/
+cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/
 
 # Blargg tests (serial output detection)
-cargo run --release --bin test_runner -- game-boy-test-roms/blargg/ blargg
+cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/
 
 # Gambatte tests (hex output comparison, 15-frame capture)
-cargo run --release --bin test_runner -- game-boy-test-roms/gambatte/ gambatte
+cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambatte/
 
 # Gambatte subcategory
-cargo run --release --bin test_runner -- game-boy-test-roms/gambatte/sprites/ gambatte
+cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambatte/sprites/
 
 # Single test
-cargo run --release --bin test_runner -- game-boy-test-roms/blargg/cpu_instrs/individual/01-special.gb blargg
+cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/cpu_instrs/individual/01-special.gb
 
 # Screenshot a ROM after N frames
-cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png
 
 # Vectorize a frame to SVG
-cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.svg
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.svg
 
 # Vectorize and rasterize at 4x scale
-cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out screenshot.png --format raster --scale 4
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png --format raster --scale 4
 
 # Force a specific model
-cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
+cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
 
 # Run with boot ROM
-cargo run --release --bin test_runner -- game-boy-test-roms/mooneye-test-suite/acceptance/ --boot
+cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --boot
+
+# Verbose output (extra diagnostics per test)
+cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --verbose
+
+# Quiet mode (summary only)
+cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/ --quiet
 ```
 
 Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag. Gambatte tests encode expected hex output in filenames after `_out` (e.g. `_out3` expects "3"). DMG tests have `dmg08` in the name, CGB tests have `cgb04c`.
