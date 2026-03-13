@@ -11,6 +11,7 @@ pub mod hqx;
 pub mod nedi;
 pub mod omniscale;
 pub mod omniscale_legacy;
+pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
 pub mod xbr;
@@ -95,6 +96,9 @@ pub enum ScaleFilter {
     Scale3x,
     Scale4x,
     Eagle,
+    Sai2x,
+    Super2xSai,
+    SuperEagle,
     Xbr(XbrScale),
     Xbrz(XbrzScale),
     XbrHybrid,
@@ -126,7 +130,8 @@ impl ScaleFilter {
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => 1,
             ScaleFilter::Hqx(h) => h.factor(),
-            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
+            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
+            | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
             ScaleFilter::Scale3x => 3,
             ScaleFilter::Scale4x => 4,
             ScaleFilter::Xbr(x) => x.factor(),

@@ -101,6 +101,7 @@ fn parse_model(s: &str) -> Result<GbModel, String> {
 fn parse_filter(s: &str) -> Result<String, String> {
     let valid = [
         "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
+        "2xsai", "super-2xsai", "super-eagle",
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
@@ -111,7 +112,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -262,6 +263,9 @@ fn main() {
         "scale3x" => scaling::ScaleFilter::Scale3x,
         "scale4x" => scaling::ScaleFilter::Scale4x,
         "eagle" => scaling::ScaleFilter::Eagle,
+        "2xsai" => scaling::ScaleFilter::Sai2x,
+        "super-2xsai" => scaling::ScaleFilter::Super2xSai,
+        "super-eagle" => scaling::ScaleFilter::SuperEagle,
         "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
         "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
         "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
@@ -556,6 +560,18 @@ fn main() {
                 }
                 scaling::ScaleFilter::Eagle => {
                     scaled = scaling::eagle::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Sai2x => {
+                    scaled = scaling::sai::scale_2xsai(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Super2xSai => {
+                    scaled = scaling::sai::scale_super2xsai(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::SuperEagle => {
+                    scaled = scaling::sai::scale_super_eagle(raw_src, sw, sh);
                     &scaled
                 }
                 scaling::ScaleFilter::Bilinear => {
