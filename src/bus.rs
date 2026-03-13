@@ -785,27 +785,23 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG SCX: -2T conflict (write takes effect 2T early)
-            // Hardware: advance(pending-2), write, pending=6.
-            // No flush — live SCX read in fetcher at T2 naturally aligns for
-            // scx_low_3_bits. The high-5-bits test requires further work.
-            0xFF43 if !self.model.is_cgb() => {
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-            }
-            // DMG SCY: READ_NEW conflict (hardware: pending-1, write, pending=5)
-            // Our deferred model: write immediately (SCY read live by fetcher at T2)
+            // DMG SCY: READ_NEW conflict (hardware: advance(pending-1), write, pending=5)
+            // Flush all but 1T with old value, then write new value.
             0xFF42 if !self.model.is_cgb() => {
+                if self.ppu_deferred > 1 {
+                    let flush = self.ppu_deferred - 1;
+                    let flags = self.ppu.step(flush);
+                    self.if_ |= flags;
+                    self.ppu_deferred = 1;
+                }
                 self.ppu.write(addr, val);
                 if self.ppu.if_flags != 0 {
                     self.if_ |= self.ppu.if_flags;
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG/CGB-double SCX: write takes effect 2T early (SCX_DMG conflict)
+            // DMG/CGB-double SCX: SCX_DMG conflict (write takes effect 2T early)
+            // Hardware: advance(pending-2), write, pending=6.
             0xFF43 if !self.model.is_cgb() || self.double_speed => {
                 // Flush all but 2T with old SCX value
                 if self.ppu_deferred > 2 {
@@ -820,7 +816,8 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG LCDC: -2T conflict with glitch (old | (new & BG_EN)) for 1T
+            // DMG LCDC: conflict handler with glitch timing
+            // Hardware: advance(pending-2), write glitch(old | (new & BG_EN)), advance(1), write real, pending=5
             0xFF40 if !self.model.is_cgb() => {
                 // Flush all deferred ticks except the current M-cycle's 4T,
                 // so we check mode with up-to-date PPU state.
@@ -836,7 +833,9 @@ impl Bus {
                     let flags = self.ppu.step(2);
                     self.if_ |= flags;
                     self.ppu_deferred -= 2;
-                    // OBJ_EN suppression
+                    // OBJ_EN suppression: if disabling sprites during sprite fetch
+                    // or before any visible pixel, treat old LCDC as already having
+                    // OBJ_EN=0 (hardware aborts the fetch)
                     let mut old_lcdc = self.ppu.lcdc;
                     if (val & 0x02) == 0 {
                         if self.ppu.position_in_line <= 0 || self.ppu.sprite_fetch_active {
@@ -852,6 +851,12 @@ impl Bus {
                     self.ppu_deferred -= 1;
                     self.ppu.lcdc = saved_lcdc;
                     self.ppu.skip_retroactive_lcdc_fix = true;
+                    // Window disable during window fetch: set glitch flag
+                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0
+                        && self.ppu.fetcher_is_window()
+                    {
+                        self.ppu.disable_window_pixel_insertion_glitch = true;
+                    }
                 } else {
                     self.flush_ppu_deferred();
                 }

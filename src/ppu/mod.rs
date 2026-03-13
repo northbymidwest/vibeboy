@@ -305,7 +305,7 @@ pub struct Ppu {
     window_trigger_from_wx_write: bool,
     /// DMG glitch: when WIN_EN is disabled while window is being fetched,
     /// suppress the phantom window pixel insertion at the fetcher push state.
-    disable_window_pixel_insertion_glitch: bool,
+    pub(crate) disable_window_pixel_insertion_glitch: bool,
     /// True when processing the last tick of a step() call.
     last_tick_of_step: bool,
     /// True when processing the first tick of a step() call.
@@ -1933,7 +1933,7 @@ impl Ppu {
         let y_flip = self.cgb_mode && attrs & 0x40 != 0;
         let bank = if self.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
 
-        // CGB: use latched fetcher_y from T1; DMG: read SCY+LY fresh at T2
+        // CGB: use latched fetcher_y from T1; DMG: read SCY+LY fresh
         let pixel_y = if self.cgb_mode {
             self.fetcher.fetcher_y & 7
         } else if self.fetcher.fetching_window {
@@ -2324,6 +2324,8 @@ impl Ppu {
             }
         }
     }
+
+    pub fn fetcher_is_window(&self) -> bool { self.fetcher.fetching_window }
 
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
