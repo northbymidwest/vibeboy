@@ -310,9 +310,11 @@ impl Bus {
     }
 
     /// Create a snapshot of the bus state for rewind / save states.
-    pub fn take_snapshot(&self) -> crate::snapshot::BusSnapshot {
-        let mut apu_clone = self.apu.clone();
-        apu_clone.sample_buf.clear();
+    pub fn take_snapshot(&mut self) -> crate::snapshot::BusSnapshot {
+        // Temporarily take sample_buf to avoid cloning it (it can be large)
+        let saved_buf = std::mem::take(&mut self.apu.sample_buf);
+        let apu_clone = self.apu.clone();
+        self.apu.sample_buf = saved_buf;
         crate::snapshot::BusSnapshot {
             ppu: self.ppu.clone(),
             timer: self.timer.clone(),
@@ -345,8 +347,10 @@ impl Bus {
         self.ppu = s.ppu.clone();
         self.timer = s.timer.clone();
         self.joypad = s.joypad.clone();
+        // Preserve the existing sample_buf allocation when restoring APU state
+        let saved_buf = std::mem::take(&mut self.apu.sample_buf);
         self.apu = s.apu.clone();
-        self.apu.sample_buf.clear();
+        self.apu.sample_buf = saved_buf;
         self.wram = s.wram;
         self.wram_bank = s.wram_bank;
         self.hram = s.hram;

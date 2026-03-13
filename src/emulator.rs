@@ -153,7 +153,7 @@ impl Emulator {
     // ── Snapshot / Rewind / Save State ─────────────────────────────────────────
 
     /// Capture the full emulator state into a Snapshot.
-    pub fn save_snapshot(&self) -> Snapshot {
+    pub fn save_snapshot(&mut self) -> Snapshot {
         Snapshot {
             cpu: self.cpu.clone(),
             bus: self.bus.take_snapshot(),
@@ -231,24 +231,23 @@ impl Emulator {
             snes.feed_scanlines(&shade_snapshot);
             snes.run_frame();
         } else {
-            // Replay any queued packets from during SPC upload
+            // Replay any queued packets from during SPC upload, then process new ones
             let queued = std::mem::take(&mut self.snes_packet_queue);
-            let new_with_shade: Vec<([u8; 16], Vec<u8>)> = new_packets
-                .into_iter()
-                .map(|pkt| (pkt, shade_snapshot.clone()))
-                .collect();
+            let has_packets = !queued.is_empty() || !new_packets.is_empty();
 
-            let all_packets: Vec<([u8; 16], Vec<u8>)> = queued.into_iter()
-                .chain(new_with_shade.into_iter())
-                .collect();
-
-            // Run SNES CPU — one frame per pending packet, minimum one frame
-            if all_packets.is_empty() {
+            if !has_packets {
                 snes.feed_scanlines(&shade_snapshot);
                 snes.run_frame();
             } else {
-                for (pkt, shade) in &all_packets {
+                // Process queued packets (from SPC upload phase) with their saved shades
+                for (pkt, shade) in &queued {
                     snes.feed_scanlines(shade);
+                    snes.feed_packet(pkt);
+                    snes.run_frame();
+                }
+                // Process new packets with the current shade buffer
+                for pkt in &new_packets {
+                    snes.feed_scanlines(&shade_snapshot);
                     snes.feed_packet(pkt);
                     snes.run_frame();
                 }
