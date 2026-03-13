@@ -23,8 +23,11 @@ cargo run --release -- path/to/rom.gb
 # Force a specific hardware model
 cargo run --release -- path/to/rom.gbc --model cgb
 
-# Use a boot ROM
-cargo run --release -- path/to/rom.gb --boot-rom bootroms/dmg_boot.bin
+# Use a boot ROM (auto-detected from bootroms/ if present)
+cargo run --release -- path/to/rom.gb --bootrom bootroms/dmg_boot.bin
+
+# Skip boot ROM
+cargo run --release -- path/to/rom.gb --no-boot
 ```
 
 ### Controls
@@ -81,20 +84,20 @@ The vectorize filter converts each frame to smooth vector paths using the Kopf-L
 
 ## Test Runner
 
-A built-in test runner supports multiple test ROM formats:
+A built-in test runner with explicit subcommands for each test harness. See [`src/test_runner/README.md`](src/test_runner/README.md) for full documentation.
 
 ```bash
 # Mooneye tests (breakpoint + Fibonacci register check)
-cargo run --release --bin test_runner -- test-roms/mooneye-test-suite/build/acceptance/
+cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/
 
 # Blargg tests (serial output detection)
-cargo run --release --bin test_runner -- test-roms/blargg/ blargg
+cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/
 
 # Gambatte tests (hex output comparison, 15-frame capture)
-cargo run --release --bin test_runner -- game-boy-test-roms/gambatte/ gambatte
+cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambatte/
 
 # Screenshot any ROM after N frames
-cargo run --release --bin test_runner -- path/to/rom.gb screenshot --frames 300 --out shot.png
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out shot.png
 ```
 
 ## Architecture
@@ -116,7 +119,7 @@ src/
 ├── model.rs         GbModel enum and per-model configuration
 ├── scaling/         Pixel scaling filters (EPX, HQx, xBRZ, OmniScale, ...)
 ├── vectorize/       Kopf-Lischinski pixel-art vectorizer + rasterizer
-└── test_runner.rs   Automated test ROM runner
+└── test_runner/     Automated test ROM runner (modular harnesses)
 ```
 
 The main loop: `Emulator::step_frame()` calls `Cpu::step()` per instruction. Each M-cycle, `Bus::tick_mcycle()` advances PPU (4 T-cycles), APU, Timer, Serial, OAM DMA, and HDMA.
