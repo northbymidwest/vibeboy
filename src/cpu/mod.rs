@@ -40,6 +40,7 @@ impl Cpu {
                 bus.do_speed_toggle();
             }
             bus.tick_mcycle();
+            bus.check_hdma_hblank();
             bus.step_oam_dma();
             if self.speed_switch_remaining == 0 {
                 self.halted = false;
@@ -95,7 +96,6 @@ impl Cpu {
             self.fetch_byte(bus)
         };
 
-        bus.debug_oam_pc = self.regs.pc.wrapping_sub(1); // PC of current instruction
         let cycles = self.execute(bus, op);
 
         // Apply EI delay: IME is enabled after the instruction following EI.

@@ -420,28 +420,36 @@ fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<core_audio::AudioUnit>
             reserved: 0,
         };
 
-        core_audio::AudioUnitSetProperty(
+        if core_audio::AudioUnitSetProperty(
             audio_unit,
             core_audio::K_AUDIO_UNIT_PROPERTY_STREAM_FORMAT,
             core_audio::K_AUDIO_UNIT_SCOPE_INPUT,
             0,
             &stream_desc as *const _ as *const _,
             std::mem::size_of::<core_audio::AudioStreamBasicDescription>() as u32,
-        );
+        ) != 0 {
+            eprintln!("Failed to set audio stream format");
+            core_audio::AudioComponentInstanceDispose(audio_unit);
+            return None;
+        }
 
         let callback_struct = core_audio::AURenderCallbackStruct {
             input_proc: audio_render_callback,
             input_proc_ref_con: Arc::as_ptr(ring_buffer) as *mut _,
         };
 
-        core_audio::AudioUnitSetProperty(
+        if core_audio::AudioUnitSetProperty(
             audio_unit,
             core_audio::K_AUDIO_UNIT_PROPERTY_SET_RENDER_CALLBACK,
             core_audio::K_AUDIO_UNIT_SCOPE_INPUT,
             0,
             &callback_struct as *const _ as *const _,
             std::mem::size_of::<core_audio::AURenderCallbackStruct>() as u32,
-        );
+        ) != 0 {
+            eprintln!("Failed to set audio render callback");
+            core_audio::AudioComponentInstanceDispose(audio_unit);
+            return None;
+        }
 
         if core_audio::AudioUnitInitialize(audio_unit) != 0 {
             eprintln!("Failed to initialize audio unit");

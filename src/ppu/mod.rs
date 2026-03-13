@@ -2530,12 +2530,12 @@ impl Ppu {
             0xFF4F => self.vram_bank = (val & 0x01) as usize,
             0xFF68 => self.bcps = val & 0xBF,
             0xFF69 => {
+                let idx = (self.bcps & 0x3F) as usize;
                 if !self.cgb_palettes_blocked {
-                    let idx = (self.bcps & 0x3F) as usize;
                     self.bcpd[idx] = val;
                 }
+                // Auto-increment always advances, even when palette write is blocked
                 if self.bcps & 0x80 != 0 {
-                    let idx = (self.bcps & 0x3F) as usize;
                     let next = (idx + 1) & 0x3F;
                     self.bcps = (self.bcps & 0x80) | next as u8;
                 }

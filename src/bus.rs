@@ -112,7 +112,6 @@ pub struct Bus {
     pub(crate) model: GbModel,
 
     /// Debug: last CPU PC that triggered OAM bug
-    pub debug_oam_pc: u16,
 
     /// SGB command processor (only present for SGB/SGB2 models)
     pub sgb: Option<Sgb>,
@@ -284,7 +283,6 @@ impl Bus {
             boot_rom_active,
             save_path,
             model,
-            debug_oam_pc: 0,
             sgb: if model.is_sgb() {
                 let mut sgb = Sgb::new();
                 if !boot_rom_active {
@@ -1079,17 +1077,17 @@ impl Bus {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         self.flush_ppu_deferred();
-        self.trigger_oam_bug_inner(addr, "INSTR");
+        self.trigger_oam_bug_inner();
     }
 
     pub fn trigger_oam_bug_from_write(&mut self, addr: u16) {
         if self.model.is_cgb() { return; }
         if addr < 0xFE00 || addr > 0xFEFF { return; }
         self.flush_ppu_deferred();
-        self.trigger_oam_bug_inner(addr, "WRITE");
+        self.trigger_oam_bug_inner();
     }
 
-    fn trigger_oam_bug_inner(&mut self, addr: u16, source: &str) {
+    fn trigger_oam_bug_inner(&mut self) {
         let row = self.ppu.oam_bug_row;
 
         // Row must be valid (not 0xFF) and >= 8 for corruption to occur.
@@ -1098,9 +1096,6 @@ impl Bus {
             return;
         }
         let row = row as usize;
-        let variant = if source == "INSTR" { "W" } else { "R" };
-        log::debug!("OAM_BUG_{}: addr={:04X} row={:02X} ly={} dot={} tt={} pc={:04X}",
-            variant, addr, row, self.ppu.ly, self.ppu.dot, self.ppu.total_ticks, self.debug_oam_pc);
         // Bytes 0-1: bitwise glitch (operate as u16 little-endian)
         let a = u16::from_le_bytes([self.ppu.oam[row], self.ppu.oam[row + 1]]);
         let b = u16::from_le_bytes([self.ppu.oam[row - 8], self.ppu.oam[row - 7]]);
@@ -1113,10 +1108,6 @@ impl Bus {
         for i in 2..8 {
             self.ppu.oam[row + i] = self.ppu.oam[row - 8 + i];
         }
-        log::warn!("  AFTER: oam[{}..{}]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-            row, row+7,
-            self.ppu.oam[row], self.ppu.oam[row+1], self.ppu.oam[row+2], self.ppu.oam[row+3],
-            self.ppu.oam[row+4], self.ppu.oam[row+5], self.ppu.oam[row+6], self.ppu.oam[row+7]);
     }
 
     /// Trigger OAM read corruption bug when a memory read targets 0xFE00–0xFEFF
@@ -1130,8 +1121,6 @@ impl Bus {
         // No upper bound check — hardware allows corruption even at accessed_oam_row >= 160.
         if row == 0xFF || row < 8 { return; }
         let row = row as usize;
-        log::debug!("OAM_BUG_R: addr={:04X} row={:02X} ly={} pc={:04X}",
-            addr, row, self.ppu.ly, self.debug_oam_pc);
 
         if (row & 0x18) == 0x10 {
             // Secondary read corruption — affects row-8 word, then copies two rows back

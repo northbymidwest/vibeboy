@@ -12,7 +12,7 @@
 ///   div_divider & 3 == 3 → CH1 sweep
 ///   div_divider & 7 == 7 → volume envelopes
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
@@ -45,45 +45,44 @@ struct BlipBuf {
     out_r: i32,
 }
 
-impl BlipBuf {
-    fn new() -> Self {
-        // Compute Blackman-windowed sinc filter
-        let n = BLIP_WIDTH * BLIP_PHASES; // 16384 points
+fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
+    static TABLE: OnceLock<Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let n = BLIP_WIDTH * BLIP_PHASES;
         let lowpass = 15.0_f64 / 16.0;
         let mut master = vec![0.0_f64; n];
 
         for i in 0..n {
-            // Center the sinc at n/2
             let x = (i as f64 - n as f64 / 2.0) * std::f64::consts::PI * 2.0 * lowpass / BLIP_PHASES as f64;
             let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
-
-            // Blackman window
             let theta = 2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64;
             let a0 = 7938.0 / 18608.0;
             let a1 = 9240.0 / 18608.0;
             let a2 = 1430.0 / 18608.0;
             let window = a0 - a1 * theta.cos() + a2 * (2.0 * theta).cos();
-
             master[i] = sinc * window;
         }
 
-        // Normalize so each phase's taps sum to ~1.0 (total master sums to BLIP_PHASES)
         let sum: f64 = master.iter().sum();
         let inv = BLIP_PHASES as f64 / sum;
         for v in &mut master {
             *v *= inv;
         }
 
-        // Extract phases: phase p, tap t → master[t * BLIP_PHASES + p]
         let mut steps = Box::new([[0i32; BLIP_WIDTH]; BLIP_PHASES]);
         for p in 0..BLIP_PHASES {
             for t in 0..BLIP_WIDTH {
                 steps[p][t] = (master[t * BLIP_PHASES + p] * BLIP_ONE as f64) as i32;
             }
         }
+        Arc::from(steps)
+    }).clone()
+}
 
+impl BlipBuf {
+    fn new() -> Self {
         BlipBuf {
-            steps: Arc::from(steps),
+            steps: blip_sinc_table(),
             buf_l: [0; BLIP_BUF_SIZE],
             buf_r: [0; BLIP_BUF_SIZE],
             pos: 0,
