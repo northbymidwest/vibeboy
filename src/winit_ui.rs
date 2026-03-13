@@ -439,7 +439,8 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_edi",         "EDI",           ScaleFilter::Edi),
         ("filter_omniscale",   "OmniScale",     ScaleFilter::OmniScale),
         ("filter_aanear",      "AA Nearest",    ScaleFilter::AaNearestNeighbor),
-        ("filter_vectorize",   "Vectorize",     ScaleFilter::Vectorize),
+        ("filter_vectorize",   "Vectorize",           ScaleFilter::Vectorize),
+        ("filter_vec_adapt",   "Vectorize Adaptive",  ScaleFilter::VectorizeAdaptive),
     ]
 }
 
@@ -945,10 +946,14 @@ impl App {
                 // Check filter menu items
                 if let Some(filter) = filter_id_to_filter(other) {
                     self.scale_filter = filter;
-                    if matches!(filter, scaling::ScaleFilter::Vectorize) {
-                        if self.vec_cache.is_none() {
-                            self.vec_cache = Some(vectorize::VectorizeCache::new());
+                    match filter {
+                        scaling::ScaleFilter::Vectorize => {
+                            self.vec_cache = Some(vectorize::VectorizeCache::new(false));
                         }
+                        scaling::ScaleFilter::VectorizeAdaptive => {
+                            self.vec_cache = Some(vectorize::VectorizeCache::new(true));
+                        }
+                        _ => {}
                     }
                     eprintln!("Filter: {:?}", filter);
                     return;
@@ -1125,9 +1130,10 @@ impl App {
                 scaled = scaling::aa_nearest::scale(fb, sw, sh, disp_w, disp_h);
                 (&scaled, disp_w, disp_h)
             }
-            scaling::ScaleFilter::Vectorize => {
+            scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive => {
                 let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                let cache = self.vec_cache.get_or_insert_with(vectorize::VectorizeCache::new);
+                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
                 let (raster, vw, vh) = cache.rasterize(fb, sw, sh, scale);
                 (raster, vw, vh)
             }

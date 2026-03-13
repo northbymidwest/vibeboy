@@ -300,7 +300,7 @@ fn pack_edge(a: u32, b: u32) -> u64 {
 const ADAPTIVE_EDGE_THRESHOLD: usize = 12000;
 
 fn build_directed_boundary_edges(
-    pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell],
+    pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell], adaptive: bool,
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
     // Hash-based deduplication: O(n) instead of O(n log n) sort-merge.
     // Each edge maps to (left_color, right_color).
@@ -344,7 +344,7 @@ fn build_directed_boundary_edges(
     let boundary_count = edge_map.values()
         .filter(|(left, right, _, _)| left != right)
         .count();
-    let adaptive = boundary_count > ADAPTIVE_EDGE_THRESHOLD;
+    let adaptive = adaptive && boundary_count > ADAPTIVE_EDGE_THRESHOLD;
 
     let mut directed = Vec::with_capacity(boundary_count * 2);
     let mut visible = if adaptive {
@@ -1072,12 +1072,12 @@ fn boundary_loop_to_segments(
 /// Vectorize with B-spline smoothing (Sections 3.2–3.4).
 /// Region-based rendering: merges same-color cells into regions, traces
 /// boundaries on the cell graph, emits smooth B-spline curves as region outlines.
-pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<ColorPath> {
+pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: bool) -> Vec<ColorPath> {
     let w = graph.width;
     let h = graph.height;
 
     let all_cells = precompute_cells(w, h, graph);
-    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells);
+    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, adaptive);
 
     // Adaptive pipeline: skip expensive B-spline optimization when boundary
     // complexity is high (noisy/dithered frames). The optimization provides

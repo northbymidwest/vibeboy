@@ -129,8 +129,11 @@ pub enum ScaleFilter {
     OmniScaleLegacy(OmniScaleFactor),
     /// Anti-aliased nearest neighbor (scales to display size).
     AaNearestNeighbor,
-    /// Kopf-Lischinski vectorization (scales to display size).
+    /// Kopf-Lischinski vectorization with full B-spline optimization.
     Vectorize,
+    /// Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
+    /// optimization, uses straight line segments at boundary junctions).
+    VectorizeAdaptive,
 }
 
 impl ScaleFilter {
@@ -141,7 +144,7 @@ impl ScaleFilter {
             ScaleFilter::Nearest
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize => 1,
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
             ScaleFilter::Scale3x => 3,
@@ -158,6 +161,6 @@ impl ScaleFilter {
         matches!(self,
             ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize)
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
     }
 }

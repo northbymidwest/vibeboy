@@ -22,6 +22,7 @@ pub mod voronoi;
 /// re-vectorization and re-rasterization when the source pixel buffer
 /// and scale haven't changed.
 pub struct VectorizeCache {
+    adaptive: bool,
     prev_pixels: Vec<u32>,
     cached_paths: Vec<contour::ColorPath>,
     cached_bg_color: u32,
@@ -33,8 +34,9 @@ pub struct VectorizeCache {
 }
 
 impl VectorizeCache {
-    pub fn new() -> Self {
+    pub fn new(adaptive: bool) -> Self {
         Self {
+            adaptive,
             prev_pixels: Vec::new(),
             cached_paths: Vec::new(),
             cached_bg_color: 0,
@@ -54,7 +56,7 @@ impl VectorizeCache {
         if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
             return (&self.cached_paths, self.cached_bg_color);
         }
-        let (paths, bg_color) = vectorize_core_with_buf(pixels, width, height, &mut self.qbuf);
+        let (paths, bg_color) = vectorize_core_with_buf(pixels, width, height, &mut self.qbuf, self.adaptive);
         self.prev_pixels.clear();
         self.prev_pixels.extend_from_slice(pixels);
         self.cached_paths = paths;
@@ -157,16 +159,18 @@ pub fn vectorize_core(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, u32) {
     let mut qbuf = Vec::new();
-    vectorize_core_with_buf(pixels, width, height, &mut qbuf)
+    vectorize_core_with_buf(pixels, width, height, &mut qbuf, false)
 }
 
 /// Core vectorization with a caller-provided quantization buffer.
+/// When `adaptive` is true, allows the contour extractor to skip B-spline
+/// optimization on complex frames (boundary edges > threshold).
 fn vectorize_core_with_buf(
-    pixels: &[u32], width: usize, height: usize, qbuf: &mut Vec<u32>,
+    pixels: &[u32], width: usize, height: usize, qbuf: &mut Vec<u32>, adaptive: bool,
 ) -> (Vec<contour::ColorPath>, u32) {
     quantize_pixels_into(pixels, qbuf);
     let graph = graph::build(qbuf, width, height);
-    let paths = contour::extract_cells_smooth(qbuf, &graph);
+    let paths = contour::extract_cells_smooth(qbuf, &graph, adaptive);
     let (bg_color, _) = detect_background_color(qbuf, width, height);
     (paths, bg_color)
 }
