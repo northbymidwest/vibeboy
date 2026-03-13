@@ -7,11 +7,13 @@ mod joypad;
 mod model;
 mod ppu;
 mod printer;
+mod scaling;
 mod serial;
 mod sgb;
 mod snapshot;
 mod snes;
 mod timer;
+mod vectorize;
 #[cfg(target_os = "macos")]
 mod macos_accel;
 
@@ -146,6 +148,65 @@ struct Cli {
     no_boot: bool,
     #[arg(long)]
     printer: bool,
+    /// Scaling filter
+    #[arg(long, default_value = "nearest", value_parser = parse_filter)]
+    filter: String,
+}
+
+fn parse_filter(s: &str) -> Result<String, String> {
+    let valid = [
+        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "eagle",
+        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
+        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
+        "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
+        "omniscale", "omniscale-legacy", "omniscale-legacy2x",
+        "omniscale-legacy3x", "omniscale-legacy4x", "omniscale-legacy5x", "omniscale-legacy6x",
+        "aa-nearest", "vectorize", "vectorize-adaptive",
+    ];
+    let lower = s.to_lowercase();
+    if valid.contains(&lower.as_str()) {
+        Ok(lower)
+    } else {
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize, vectorize-adaptive]", s))
+    }
+}
+
+fn string_to_filter(s: &str) -> scaling::ScaleFilter {
+    match s {
+        "nearest" | "none" => scaling::ScaleFilter::Nearest,
+        "bilinear" => scaling::ScaleFilter::Bilinear,
+        "bicubic" => scaling::ScaleFilter::Bicubic,
+        "epx" => scaling::ScaleFilter::Epx,
+        "scale2x" => scaling::ScaleFilter::Scale2x,
+        "scale3x" => scaling::ScaleFilter::Scale3x,
+        "eagle" => scaling::ScaleFilter::Eagle,
+        "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
+        "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
+        "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
+        "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
+        "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
+        "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
+        "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz2x),
+        "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz3x),
+        "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
+        "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
+        "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
+        "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
+        "super-xbr" => scaling::ScaleFilter::SuperXbr,
+        "nedi" => scaling::ScaleFilter::Nedi,
+        "dcci" => scaling::ScaleFilter::Dcci,
+        "edi" => scaling::ScaleFilter::Edi,
+        "omniscale" => scaling::ScaleFilter::OmniScale,
+        "omniscale-legacy" | "omniscale-legacy2x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X2),
+        "omniscale-legacy3x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X3),
+        "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
+        "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
+        "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
+        "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
+        "vectorize" => scaling::ScaleFilter::Vectorize,
+        "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
+        _ => scaling::ScaleFilter::Nearest,
+    }
 }
 
 // ── CoreAudio FFI ────────────────────────────────────────────────────────────
@@ -901,6 +962,78 @@ const MENU_TAG_MODEL_AGB: isize = 307;
 const MENU_TAG_CONTROLS: isize = 400;
 const MENU_TAG_RECENT_BASE: isize = 500; // 500..509 for recent ROMs
 const MENU_TAG_CLEAR_RECENT: isize = 510;
+const MENU_TAG_FILTER_BASE: isize = 600; // 600..699 for filters
+const MENU_TAG_SHOW_FPS: isize = 700;
+
+/// Filter entries: (display_name, ScaleFilter, is_submenu_item).
+/// Items marked as submenu items go into HQx/xBR/xBRZ/Edge submenus.
+fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
+    use scaling::*;
+    vec![
+        ("Nearest",            ScaleFilter::Nearest),
+        ("Bilinear",           ScaleFilter::Bilinear),
+        ("Bicubic",            ScaleFilter::Bicubic),
+        ("EPX / Scale2x",     ScaleFilter::Epx),
+        ("Scale3x",           ScaleFilter::Scale3x),
+        ("Eagle",             ScaleFilter::Eagle),
+        ("HQ2x",             ScaleFilter::Hqx(HqxScale::Hq2x)),
+        ("HQ3x",             ScaleFilter::Hqx(HqxScale::Hq3x)),
+        ("HQ4x",             ScaleFilter::Hqx(HqxScale::Hq4x)),
+        ("xBR 2x",           ScaleFilter::Xbr(XbrScale::Xbr2x)),
+        ("xBR 3x",           ScaleFilter::Xbr(XbrScale::Xbr3x)),
+        ("xBR 4x",           ScaleFilter::Xbr(XbrScale::Xbr4x)),
+        ("xBR Hybrid",       ScaleFilter::XbrHybrid),
+        ("Super xBR",        ScaleFilter::SuperXbr),
+        ("xBRZ 2x",          ScaleFilter::Xbrz(XbrzScale::Xbrz2x)),
+        ("xBRZ 3x",          ScaleFilter::Xbrz(XbrzScale::Xbrz3x)),
+        ("xBRZ 4x",          ScaleFilter::Xbrz(XbrzScale::Xbrz4x)),
+        ("xBRZ 5x",          ScaleFilter::Xbrz(XbrzScale::Xbrz5x)),
+        ("xBRZ 6x",          ScaleFilter::Xbrz(XbrzScale::Xbrz6x)),
+        ("NEDI",             ScaleFilter::Nedi),
+        ("DCCI",             ScaleFilter::Dcci),
+        ("EDI",              ScaleFilter::Edi),
+        ("OmniScale",        ScaleFilter::OmniScale),
+        ("AA Nearest",       ScaleFilter::AaNearestNeighbor),
+        ("Vectorize",        ScaleFilter::Vectorize),
+        ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
+    ]
+}
+
+fn filter_tag_to_filter(tag: isize) -> Option<scaling::ScaleFilter> {
+    let idx = (tag - MENU_TAG_FILTER_BASE) as usize;
+    filter_entries().get(idx).map(|(_, f)| *f)
+}
+
+fn update_filter_checkmarks(app: id, selected_tag: isize) {
+    unsafe {
+        // Filter menu is at index 3 (VibeBoy, File, Emulation, Filter, ...)
+        let filter_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 3isize];
+        let filter_submenu: id = msg_send![filter_menu_item, submenu];
+        if filter_submenu == nil { return; }
+        let count: isize = msg_send![filter_submenu, numberOfItems];
+        for i in 0..count {
+            let item: id = msg_send![filter_submenu, itemAtIndex: i];
+            let tag: isize = msg_send![item, tag];
+            if tag >= MENU_TAG_FILTER_BASE {
+                let state: isize = if tag == selected_tag { 1 } else { 0 };
+                let _: () = msg_send![item, setState: state];
+            }
+            // Check submenus too
+            let sub: id = msg_send![item, submenu];
+            if sub != nil {
+                let sub_count: isize = msg_send![sub, numberOfItems];
+                for j in 0..sub_count {
+                    let sub_item: id = msg_send![sub, itemAtIndex: j];
+                    let sub_tag: isize = msg_send![sub_item, tag];
+                    if sub_tag >= MENU_TAG_FILTER_BASE {
+                        let state: isize = if sub_tag == selected_tag { 1 } else { 0 };
+                        let _: () = msg_send![sub_item, setState: state];
+                    }
+                }
+            }
+        }
+    }
+}
 
 // ── Custom key mappings ──────────────────────────────────────────────────────
 
@@ -1173,6 +1306,71 @@ unsafe fn create_menu_bar(app: id) {
     let _: () = msg_send![emu_menu_item, setSubmenu: emu_menu];
     let _: () = msg_send![main_menu, addItem: emu_menu_item];
 
+    // ── Filter menu ─────────────────────────────────────────────────────
+    let filter_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![filter_menu, setTitle: NSString::alloc(nil).init_str("Filter")];
+
+    // Group filters into submenus for organization
+    let entries = filter_entries();
+    let mut hqx_sub = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![hqx_sub, setTitle: NSString::alloc(nil).init_str("HQx")];
+    let mut xbr_sub = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![xbr_sub, setTitle: NSString::alloc(nil).init_str("xBR")];
+    let mut xbrz_sub = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![xbrz_sub, setTitle: NSString::alloc(nil).init_str("xBRZ")];
+    let mut edge_sub = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![edge_sub, setTitle: NSString::alloc(nil).init_str("Edge Detect")];
+
+    for (i, (name, f)) in entries.iter().enumerate() {
+        let tag = MENU_TAG_FILTER_BASE + i as isize;
+        let item = menu_item_with_tag(name, sel!(menuAction:), "", tag);
+
+        // Determine which submenu (if any) this filter belongs to
+        match f {
+            scaling::ScaleFilter::Hqx(_) => {
+                let _: () = msg_send![hqx_sub, addItem: item];
+            }
+            scaling::ScaleFilter::Xbr(_) | scaling::ScaleFilter::XbrHybrid | scaling::ScaleFilter::SuperXbr => {
+                let _: () = msg_send![xbr_sub, addItem: item];
+            }
+            scaling::ScaleFilter::Xbrz(_) => {
+                let _: () = msg_send![xbrz_sub, addItem: item];
+            }
+            scaling::ScaleFilter::Nedi | scaling::ScaleFilter::Dcci | scaling::ScaleFilter::Edi => {
+                let _: () = msg_send![edge_sub, addItem: item];
+            }
+            _ => {
+                let _: () = msg_send![filter_menu, addItem: item];
+            }
+        }
+    }
+
+    // Add submenus
+    let _: () = msg_send![filter_menu, addItem: NSMenuItem::separatorItem(nil)];
+    for (sub_menu, sub_title) in [
+        (hqx_sub, "HQx"), (xbr_sub, "xBR"), (xbrz_sub, "xBRZ"), (edge_sub, "Edge Detect"),
+    ] {
+        let sub_item = NSMenuItem::new(nil).autorelease();
+        let _: () = msg_send![sub_item, setTitle: NSString::alloc(nil).init_str(sub_title)];
+        let _: () = msg_send![sub_item, setSubmenu: sub_menu];
+        let _: () = msg_send![filter_menu, addItem: sub_item];
+    }
+
+    let filter_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![filter_menu_item, setSubmenu: filter_menu];
+    let _: () = msg_send![main_menu, addItem: filter_menu_item];
+
+    // ── View menu ───────────────────────────────────────────────────────
+    let view_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![view_menu, setTitle: NSString::alloc(nil).init_str("View")];
+
+    let fps_item = menu_item_with_tag("Show FPS Overlay", sel!(menuAction:), "f", MENU_TAG_SHOW_FPS);
+    let _: () = msg_send![view_menu, addItem: fps_item];
+
+    let view_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![view_menu_item, setSubmenu: view_menu];
+    let _: () = msg_send![main_menu, addItem: view_menu_item];
+
     // ── State menu ───────────────────────────────────────────────────────
     let state_menu = NSMenu::new(nil).autorelease();
     let _: () = msg_send![state_menu, setTitle: NSString::alloc(nil).init_str("State")];
@@ -1268,6 +1466,8 @@ mod menu_handler {
         pub load_state: bool,
         pub select_slot: Option<usize>,
         pub select_model: Option<isize>,  // tag of selected model
+        pub select_filter: Option<isize>, // tag of selected filter
+        pub toggle_fps: bool,
         pub open_controls: bool,
         pub open_recent: Option<usize>,   // index into recent ROMs list
         pub clear_recent: bool,
@@ -1283,6 +1483,8 @@ mod menu_handler {
                 load_state: false,
                 select_slot: None,
                 select_model: None,
+                select_filter: None,
+                toggle_fps: false,
                 open_controls: false,
                 open_recent: None,
                 clear_recent: false,
@@ -1350,6 +1552,10 @@ mod menu_handler {
                     actions.select_model = Some(t);
                 }
                 super::MENU_TAG_CONTROLS => actions.open_controls = true,
+                t if t >= super::MENU_TAG_FILTER_BASE && t < super::MENU_TAG_FILTER_BASE + 100 => {
+                    actions.select_filter = Some(t);
+                }
+                super::MENU_TAG_SHOW_FPS => actions.toggle_fps = true,
                 t if t >= super::MENU_TAG_RECENT_BASE && t < super::MENU_TAG_RECENT_BASE + 10 => {
                     actions.open_recent = Some((t - super::MENU_TAG_RECENT_BASE) as usize);
                 }
@@ -1631,6 +1837,162 @@ fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
     }
 }
 
+// ── FPS overlay (bitmap font) ────────────────────────────────────────────────
+
+/// Minimal 5x7 bitmap font for ASCII 0x20..0x7F.  Each glyph is 5 columns of
+/// 7-bit rows, packed into a [u8; 5].  Bit 0 = top row, bit 6 = bottom row.
+mod tiny_font {
+    #[rustfmt::skip]
+    static GLYPHS: [[u8; 5]; 96] = [
+        [0x00,0x00,0x00,0x00,0x00], // ' '
+        [0x00,0x00,0x5F,0x00,0x00], // '!'
+        [0x00,0x07,0x00,0x07,0x00], // '"'
+        [0x14,0x7F,0x14,0x7F,0x14], // '#'
+        [0x24,0x2A,0x7F,0x2A,0x12], // '$'
+        [0x23,0x13,0x08,0x64,0x62], // '%'
+        [0x36,0x49,0x55,0x22,0x50], // '&'
+        [0x00,0x05,0x03,0x00,0x00], // '''
+        [0x00,0x1C,0x22,0x41,0x00], // '('
+        [0x00,0x41,0x22,0x1C,0x00], // ')'
+        [0x14,0x08,0x3E,0x08,0x14], // '*'
+        [0x08,0x08,0x3E,0x08,0x08], // '+'
+        [0x00,0x50,0x30,0x00,0x00], // ','
+        [0x08,0x08,0x08,0x08,0x08], // '-'
+        [0x00,0x60,0x60,0x00,0x00], // '.'
+        [0x20,0x10,0x08,0x04,0x02], // '/'
+        [0x3E,0x51,0x49,0x45,0x3E], // '0'
+        [0x00,0x42,0x7F,0x40,0x00], // '1'
+        [0x42,0x61,0x51,0x49,0x46], // '2'
+        [0x21,0x41,0x45,0x4B,0x31], // '3'
+        [0x18,0x14,0x12,0x7F,0x10], // '4'
+        [0x27,0x45,0x45,0x45,0x39], // '5'
+        [0x3C,0x4A,0x49,0x49,0x30], // '6'
+        [0x01,0x71,0x09,0x05,0x03], // '7'
+        [0x36,0x49,0x49,0x49,0x36], // '8'
+        [0x06,0x49,0x49,0x29,0x1E], // '9'
+        [0x00,0x36,0x36,0x00,0x00], // ':'
+        [0x00,0x56,0x36,0x00,0x00], // ';'
+        [0x08,0x14,0x22,0x41,0x00], // '<'
+        [0x14,0x14,0x14,0x14,0x14], // '='
+        [0x00,0x41,0x22,0x14,0x08], // '>'
+        [0x02,0x01,0x51,0x09,0x06], // '?'
+        [0x3E,0x41,0x5D,0x55,0x1E], // '@'
+        [0x7E,0x11,0x11,0x11,0x7E], // 'A'
+        [0x7F,0x49,0x49,0x49,0x36], // 'B'
+        [0x3E,0x41,0x41,0x41,0x22], // 'C'
+        [0x7F,0x41,0x41,0x22,0x1C], // 'D'
+        [0x7F,0x49,0x49,0x49,0x41], // 'E'
+        [0x7F,0x09,0x09,0x09,0x01], // 'F'
+        [0x3E,0x41,0x49,0x49,0x7A], // 'G'
+        [0x7F,0x08,0x08,0x08,0x7F], // 'H'
+        [0x00,0x41,0x7F,0x41,0x00], // 'I'
+        [0x20,0x40,0x41,0x3F,0x01], // 'J'
+        [0x7F,0x08,0x14,0x22,0x41], // 'K'
+        [0x7F,0x40,0x40,0x40,0x40], // 'L'
+        [0x7F,0x02,0x0C,0x02,0x7F], // 'M'
+        [0x7F,0x04,0x08,0x10,0x7F], // 'N'
+        [0x3E,0x41,0x41,0x41,0x3E], // 'O'
+        [0x7F,0x09,0x09,0x09,0x06], // 'P'
+        [0x3E,0x41,0x51,0x21,0x5E], // 'Q'
+        [0x7F,0x09,0x19,0x29,0x46], // 'R'
+        [0x46,0x49,0x49,0x49,0x31], // 'S'
+        [0x01,0x01,0x7F,0x01,0x01], // 'T'
+        [0x3F,0x40,0x40,0x40,0x3F], // 'U'
+        [0x1F,0x20,0x40,0x20,0x1F], // 'V'
+        [0x3F,0x40,0x38,0x40,0x3F], // 'W'
+        [0x63,0x14,0x08,0x14,0x63], // 'X'
+        [0x07,0x08,0x70,0x08,0x07], // 'Y'
+        [0x61,0x51,0x49,0x45,0x43], // 'Z'
+        [0x00,0x7F,0x41,0x41,0x00], // '['
+        [0x02,0x04,0x08,0x10,0x20], // '\'
+        [0x00,0x41,0x41,0x7F,0x00], // ']'
+        [0x04,0x02,0x01,0x02,0x04], // '^'
+        [0x40,0x40,0x40,0x40,0x40], // '_'
+        [0x00,0x01,0x02,0x04,0x00], // '`'
+        [0x20,0x54,0x54,0x54,0x78], // 'a'
+        [0x7F,0x48,0x44,0x44,0x38], // 'b'
+        [0x38,0x44,0x44,0x44,0x20], // 'c'
+        [0x38,0x44,0x44,0x48,0x7F], // 'd'
+        [0x38,0x54,0x54,0x54,0x18], // 'e'
+        [0x08,0x7E,0x09,0x01,0x02], // 'f'
+        [0x0C,0x52,0x52,0x52,0x3E], // 'g'
+        [0x7F,0x08,0x04,0x04,0x78], // 'h'
+        [0x00,0x44,0x7D,0x40,0x00], // 'i'
+        [0x20,0x40,0x44,0x3D,0x00], // 'j'
+        [0x7F,0x10,0x28,0x44,0x00], // 'k'
+        [0x00,0x41,0x7F,0x40,0x00], // 'l'
+        [0x7C,0x04,0x18,0x04,0x78], // 'm'
+        [0x7C,0x08,0x04,0x04,0x78], // 'n'
+        [0x38,0x44,0x44,0x44,0x38], // 'o'
+        [0x7C,0x14,0x14,0x14,0x08], // 'p'
+        [0x08,0x14,0x14,0x18,0x7C], // 'q'
+        [0x7C,0x08,0x04,0x04,0x08], // 'r'
+        [0x48,0x54,0x54,0x54,0x20], // 's'
+        [0x04,0x3F,0x44,0x40,0x20], // 't'
+        [0x3C,0x40,0x40,0x20,0x7C], // 'u'
+        [0x1C,0x20,0x40,0x20,0x1C], // 'v'
+        [0x3C,0x40,0x30,0x40,0x3C], // 'w'
+        [0x44,0x28,0x10,0x28,0x44], // 'x'
+        [0x0C,0x50,0x50,0x50,0x3C], // 'y'
+        [0x44,0x64,0x54,0x4C,0x44], // 'z'
+        [0x00,0x08,0x36,0x41,0x00], // '{'
+        [0x00,0x00,0x7F,0x00,0x00], // '|'
+        [0x00,0x41,0x36,0x08,0x00], // '}'
+        [0x10,0x08,0x08,0x10,0x08], // '~'
+        [0x00,0x00,0x00,0x00,0x00], // DEL
+    ];
+
+    /// Draw a string into a BGRA pixel buffer at (x, y).
+    /// Each glyph cell is 6×8 pixels (5-wide glyph + 1px spacing, 7-high + 1px).
+    /// `scale` multiplies pixel size (1 = native, 2 = 2x).
+    pub fn draw_string(
+        buf: &mut [u32], buf_w: usize, buf_h: usize,
+        text: &str, mut x: usize, y: usize, fg: u32, bg: u32, scale: usize,
+    ) {
+        let glyph_w = 6 * scale;
+        let glyph_h = 8 * scale;
+
+        // Draw background strip
+        let strip_w = text.len() * glyph_w + scale;
+        let strip_h = glyph_h + scale;
+        for dy in 0..strip_h {
+            let py = y + dy;
+            if py >= buf_h { break; }
+            for dx in 0..strip_w {
+                let px = x + dx;
+                if px >= buf_w { break; }
+                buf[py * buf_w + px] = bg;
+            }
+        }
+
+        for ch in text.chars() {
+            let idx = if ch >= ' ' && ch <= '~' {
+                (ch as u8 - b' ') as usize
+            } else {
+                0 // space for non-printable
+            };
+            let glyph = &GLYPHS[idx];
+            for col in 0..5 {
+                let bits = glyph[col];
+                for row in 0..7 {
+                    if bits & (1 << row) != 0 {
+                        for sy in 0..scale {
+                            for sx in 0..scale {
+                                let px = x + col * scale + sx;
+                                let py = y + row * scale + sy + scale; // +scale for top padding
+                                if px < buf_w && py < buf_h {
+                                    buf[py * buf_w + px] = fg;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            x += glyph_w;
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -1743,13 +2105,41 @@ fn main() {
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
         }
 
+        // Scaling filter
+        let mut scale_filter = string_to_filter(&cli.filter);
+        let mut vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
+            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
+            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+            _ => None,
+        };
+        if scale_filter != scaling::ScaleFilter::Nearest {
+            eprintln!("  Filter: {:?}", scale_filter);
+        }
+        // Set initial filter checkmark
+        {
+            let entries = filter_entries();
+            for (i, (_, f)) in entries.iter().enumerate() {
+                if *f == scale_filter {
+                    update_filter_checkmarks(app, MENU_TAG_FILTER_BASE + i as isize);
+                    break;
+                }
+            }
+        }
+
+        // FPS overlay
+        let mut show_fps_overlay = false;
+        let mut overlay_fps: f64 = 0.0;
+        let mut overlay_emu_ms: f64 = 0.0;
+
         let is_sgb = emu.is_sgb();
         let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
+        let src_w = tex_w as usize;
+        let src_h = tex_h as usize;
         let win_w = tex_w * SCALE;
         let win_h = tex_h * SCALE;
 
         // ── Metal renderer ───────────────────────────────────────────────────
-        let renderer = MetalRenderer::new(tex_w, tex_h);
+        let mut renderer = MetalRenderer::new(tex_w, tex_h);
 
         // ── Window ───────────────────────────────────────────────────────────
         let style = NSWindowStyleMask::NSTitledWindowMask
@@ -1948,6 +2338,29 @@ fn main() {
                     }
                 }
 
+                if let Some(tag) = actions.select_filter {
+                    if let Some(new_filter) = filter_tag_to_filter(tag) {
+                        scale_filter = new_filter;
+                        vec_cache = match scale_filter {
+                            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
+                            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+                            _ => None,
+                        };
+                        update_filter_checkmarks(app, tag);
+                        eprintln!("Filter: {:?}", scale_filter);
+                    }
+                }
+
+                if actions.toggle_fps {
+                    show_fps_overlay = !show_fps_overlay;
+                    // Update menu checkmark
+                    let view_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 4isize];
+                    let view_submenu: id = msg_send![view_menu_item, submenu];
+                    let fps_item: id = msg_send![view_submenu, itemWithTag: MENU_TAG_SHOW_FPS];
+                    let state: isize = if show_fps_overlay { 1 } else { 0 };
+                    let _: () = msg_send![fps_item, setState: state];
+                }
+
                 if actions.open_controls {
                     show_controls_panel(&mut key_map);
                 }
@@ -2038,10 +2451,13 @@ fn main() {
             }
 
             // ── Update drawable size on resize ─────────────────────────────
+            let (disp_w, disp_h);
             {
                 let bounds: NSRect = msg_send![content_view, bounds];
                 let backing: NSSize = msg_send![content_view,
                     convertSizeToBacking: bounds.size];
+                disp_w = backing.width as usize;
+                disp_h = backing.height as usize;
                 renderer.layer.set_drawable_size(CGSize::new(
                     backing.width, backing.height,
                 ));
@@ -2049,17 +2465,131 @@ fn main() {
 
             // ── Render ───────────────────────────────────────────────────────
             {
-                let (src, w, h) = if is_sgb {
-                    (emu.sgb_composited_frame(), 256usize, 224usize)
+                let raw_src: &[u32] = if is_sgb {
+                    emu.sgb_composited_frame()
                 } else {
-                    (emu.frame_buffer(), 160usize, 144usize)
+                    emu.frame_buffer()
                 };
 
-                // Convert 0x00RRGGBB → BGRA8Unorm (just set alpha to 0xFF)
-                // BGRA8 on LE: u32 = A<<24 | R<<16 | G<<8 | B = 0xFF000000 | src
-                bgra_buf.resize(w * h, 0u32);
-                for i in 0..(w * h) {
-                    bgra_buf[i] = 0xFF00_0000 | src[i];
+                // Apply scaling filter
+                let scaled;
+                let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) = match scale_filter {
+                    scaling::ScaleFilter::Nearest => {
+                        (raw_src, src_w, src_h)
+                    }
+                    scaling::ScaleFilter::Bilinear => {
+                        scaled = scaling::bilinear::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
+                        (&scaled, disp_w, disp_h)
+                    }
+                    scaling::ScaleFilter::Bicubic => {
+                        scaled = scaling::bicubic::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
+                        (&scaled, disp_w, disp_h)
+                    }
+                    scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x => {
+                        scaled = scaling::epx::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::Scale3x => {
+                        scaled = scaling::scale3x::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 3, src_h * 3)
+                    }
+                    scaling::ScaleFilter::Eagle => {
+                        scaled = scaling::eagle::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::Hqx(mode) => {
+                        let f = mode.factor() as usize;
+                        scaled = scaling::hqx::scale(raw_src, src_w, src_h, mode);
+                        (&scaled, src_w * f, src_h * f)
+                    }
+                    scaling::ScaleFilter::Xbr(mode) => {
+                        let f = mode.factor() as usize;
+                        scaled = scaling::xbr::scale(raw_src, src_w, src_h, mode);
+                        (&scaled, src_w * f, src_h * f)
+                    }
+                    scaling::ScaleFilter::Xbrz(mode) => {
+                        let f = mode.factor() as usize;
+                        scaled = scaling::xbrz::scale(raw_src, src_w, src_h, mode);
+                        (&scaled, src_w * f, src_h * f)
+                    }
+                    scaling::ScaleFilter::XbrHybrid => {
+                        scaled = scaling::xbr_hybrid::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::SuperXbr => {
+                        scaled = scaling::super_xbr::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::Nedi => {
+                        scaled = scaling::nedi::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::Dcci => {
+                        scaled = scaling::dcci::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::Edi => {
+                        scaled = scaling::edi::scale(raw_src, src_w, src_h);
+                        (&scaled, src_w * 2, src_h * 2)
+                    }
+                    scaling::ScaleFilter::OmniScale => {
+                        let ceil_factor = ((disp_w as f64 / src_w as f64).ceil() as u32).max(2);
+                        let os = scaling::omniscale::scale(raw_src, src_w, src_h, ceil_factor);
+                        let os_w = src_w * ceil_factor as usize;
+                        let os_h = src_h * ceil_factor as usize;
+                        if os_w == disp_w && os_h == disp_h {
+                            scaled = os;
+                        } else {
+                            scaled = scaling::aa_nearest::scale(&os, os_w, os_h, disp_w, disp_h);
+                        }
+                        (&scaled, disp_w, disp_h)
+                    }
+                    scaling::ScaleFilter::OmniScaleLegacy(f) => {
+                        let fac = f.factor() as usize;
+                        scaled = scaling::omniscale_legacy::scale(raw_src, src_w, src_h, f.factor());
+                        (&scaled, src_w * fac, src_h * fac)
+                    }
+                    scaling::ScaleFilter::AaNearestNeighbor => {
+                        scaled = scaling::aa_nearest::scale(raw_src, src_w, src_h, disp_w, disp_h);
+                        (&scaled, disp_w, disp_h)
+                    }
+                    scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive => {
+                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
+                        let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
+                        (raster, vw, vh)
+                    }
+                };
+
+                // Resize texture if dimensions changed
+                if frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h {
+                    let tex_desc = TextureDescriptor::new();
+                    tex_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                    tex_desc.set_width(frame_w as u64);
+                    tex_desc.set_height(frame_h as u64);
+                    tex_desc.set_usage(MTLTextureUsage::ShaderRead);
+                    renderer.texture = renderer.device.new_texture(&tex_desc);
+                    renderer.tex_w = frame_w as u32;
+                    renderer.tex_h = frame_h as u32;
+                }
+
+                // Convert 0x00RRGGBB → BGRA8Unorm (set alpha to 0xFF)
+                bgra_buf.resize(frame_w * frame_h, 0u32);
+                for i in 0..(frame_w * frame_h) {
+                    bgra_buf[i] = 0xFF00_0000 | frame_pixels[i];
+                }
+
+                // Draw FPS overlay into pixel buffer
+                if show_fps_overlay {
+                    let text = format!("FPS: {:.1}  {:.2}ms", overlay_fps, overlay_emu_ms);
+                    let scale = ((frame_w / 160).max(1)).min(4);
+                    let fg = 0xFF00FF00; // green on BGRA LE = green
+                    let bg = 0xC0000000; // semi-transparent black
+                    tiny_font::draw_string(
+                        &mut bgra_buf, frame_w, frame_h,
+                        &text, 2 * scale, 2 * scale, fg, bg, scale,
+                    );
                 }
 
                 renderer.update_texture(&bgra_buf);
@@ -2074,6 +2604,8 @@ fn main() {
             if fps_elapsed >= Duration::from_secs(1) {
                 let fps = fps_count as f64 / fps_elapsed.as_secs_f64();
                 let avg_emu_ms = fps_emu_total.as_secs_f64() * 1000.0 / fps_count as f64;
+                overlay_fps = fps;
+                overlay_emu_ms = avg_emu_ms;
                 eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
                 fps_count = 0;
                 fps_emu_total = Duration::ZERO;
