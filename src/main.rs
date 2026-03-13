@@ -100,7 +100,7 @@ fn parse_model(s: &str) -> Result<GbModel, String> {
 
 fn parse_filter(s: &str) -> Result<String, String> {
     let valid = [
-        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "eagle",
+        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
@@ -111,7 +111,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -260,6 +260,7 @@ fn main() {
         "epx" => scaling::ScaleFilter::Epx,
         "scale2x" => scaling::ScaleFilter::Scale2x,
         "scale3x" => scaling::ScaleFilter::Scale3x,
+        "scale4x" => scaling::ScaleFilter::Scale4x,
         "eagle" => scaling::ScaleFilter::Eagle,
         "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
         "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
@@ -547,6 +548,10 @@ fn main() {
                 }
                 scaling::ScaleFilter::Scale3x => {
                     scaled = scaling::scale3x::scale(raw_src, sw, sh);
+                    &scaled
+                }
+                scaling::ScaleFilter::Scale4x => {
+                    scaled = scaling::epx::scale4x(raw_src, sw, sh);
                     &scaled
                 }
                 scaling::ScaleFilter::Eagle => {

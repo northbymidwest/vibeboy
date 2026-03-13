@@ -420,6 +420,7 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_bicubic",     "Bicubic",       ScaleFilter::Bicubic),
         ("filter_epx",         "EPX / Scale2x", ScaleFilter::Epx),
         ("filter_scale3x",    "Scale3x",       ScaleFilter::Scale3x),
+        ("filter_scale4x",    "Scale4x",       ScaleFilter::Scale4x),
         ("filter_eagle",       "Eagle",         ScaleFilter::Eagle),
         ("filter_hq2x",       "HQ2x",          ScaleFilter::Hqx(HqxScale::Hq2x)),
         ("filter_hq3x",       "HQ3x",          ScaleFilter::Hqx(HqxScale::Hq3x)),
@@ -1070,6 +1071,10 @@ impl App {
             scaling::ScaleFilter::Scale3x => {
                 scaled = scaling::scale3x::scale(fb, sw, sh);
                 (&scaled, sw * 3, sh * 3)
+            }
+            scaling::ScaleFilter::Scale4x => {
+                scaled = scaling::epx::scale4x(fb, sw, sh);
+                (&scaled, sw * 4, sh * 4)
             }
             scaling::ScaleFilter::Eagle => {
                 scaled = scaling::eagle::scale(fb, sw, sh);

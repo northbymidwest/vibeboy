@@ -46,3 +46,9 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     }
     dst
 }
+
+/// Scale4x: apply Scale2x/EPX twice (2x then 2x = 4x).
+pub fn scale4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
+    let pass1 = scale(src, src_w, src_h);
+    scale(&pass1, src_w * 2, src_h * 2)
+}

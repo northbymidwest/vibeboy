@@ -93,6 +93,7 @@ pub enum ScaleFilter {
     Epx,
     Scale2x,
     Scale3x,
+    Scale4x,
     Eagle,
     Xbr(XbrScale),
     Xbrz(XbrzScale),
@@ -127,6 +128,7 @@ impl ScaleFilter {
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
             ScaleFilter::Scale3x => 3,
+            ScaleFilter::Scale4x => 4,
             ScaleFilter::Xbr(x) => x.factor(),
             ScaleFilter::Xbrz(x) => x.factor(),
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
