@@ -568,6 +568,15 @@ fn main() {
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();
         if !samples.is_empty() && !fast_forward {
+            // If too much audio is queued, clear it to reduce latency.
+            // Target ~2 frames of buffer (stereo f32 at 96kHz/60fps ≈ 12800 bytes).
+            let max_queued_bytes: i32 = 3200 * 2 * 4 * 2; // ~2 frames * stereo * sizeof(f32)
+            if let Ok(queued) = audio_stream.queued_bytes() {
+                if queued > max_queued_bytes {
+                    let _ = audio_stream.clear();
+                }
+            }
+
             // Cap audio per frame to ~1 frame worth (stereo f32 at 96000/60 ≈ 3200 floats).
             // The first frame can generate excess audio during LCD-off init; discard excess.
             let max_samples = 3200 * 2; // Allow up to ~2 frames of audio
