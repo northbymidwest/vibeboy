@@ -791,11 +791,9 @@ impl Ppu {
             return 0;
         }
 
-        // Screen renderer: simplified timing without FIFO
-        // Line renderer: uses FIFO timing but overwrites scanlines with line renderer
-        if self.renderer_mode == RendererMode::Screen {
-            return self.step_alt(cycles);
-        }
+        // All renderer modes (FIFO, Line, Screen) use the same timing path.
+        // Line renderer overwrites scanlines at mode 3 end.
+        // Screen renderer overwrites the entire frame at VBlank.
 
         // Deferred window activation: process at the M-cycle boundary (start of
         // step) so the check sees CPU writes that happened between steps. This is
@@ -1222,6 +1220,10 @@ impl Ppu {
                             self.vram_write_accessible = true;
                             self.lcd_first_frame = false;
                             self.update_stat_irq();
+                            // Screen renderer: render entire frame at VBlank
+                            if self.renderer_mode == RendererMode::Screen {
+                                screen_renderer::render_frame(self);
+                            }
                         }
                     }
                     self.line_start_pending = false;
@@ -1311,6 +1313,10 @@ impl Ppu {
                         self.vram_write_accessible = true;
                         self.lcd_first_frame = false;
                         self.update_stat_irq();
+                        // Screen renderer: render entire frame at VBlank
+                        if self.renderer_mode == RendererMode::Screen {
+                            screen_renderer::render_frame(self);
+                        }
                     }
                 }
                 3 => {
@@ -2044,6 +2050,13 @@ impl Ppu {
         }
         let ly = self.ly as usize;
         if ly >= 144 {
+            return;
+        }
+
+        // Screen renderer: FIFO runs for timing only, skip pixel output.
+        // render_frame() fills the framebuffer at VBlank.
+        if self.renderer_mode == RendererMode::Screen {
+            self.position_in_line += 1;
             return;
         }
 
