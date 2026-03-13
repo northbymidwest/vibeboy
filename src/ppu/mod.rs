@@ -7,19 +7,6 @@
 ///   Mode 1: VBlank           — lines 144-153, 456 dots each
 ///   Total frame: 154 lines × 456 = 70224 T-cycles
 
-pub mod line_renderer;
-pub mod screen_renderer;
-
-/// PPU rendering mode selection.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RendererMode {
-    /// Cycle-accurate pixel FIFO renderer (default).
-    Fifo,
-    /// Line-based renderer — renders one scanline at a time.
-    Line,
-    /// Screen-based renderer — renders the entire frame at VBlank.
-    Screen,
-}
 
 // ---- Pixel FIFO types ----
 
@@ -385,10 +372,6 @@ pub struct Ppu {
     /// activates, cleared by render_pixel_if_possible after first pixel pop).
     window_is_being_fetched: bool,
 
-    /// Rendering mode: Fifo (default), Line, or Screen.
-    pub renderer_mode: RendererMode,
-    /// Set by line renderer when window was rendered on the current scanline.
-    pub alt_window_line_used: bool,
 }
 
 impl Ppu {
@@ -505,8 +488,6 @@ impl Ppu {
             skip_retroactive_lcdc_fix: false,
             line_has_fractional_scrolling: false,
             window_is_being_fetched: false,
-            renderer_mode: RendererMode::Fifo,
-            alt_window_line_used: false,
         }
     }
 
@@ -791,10 +772,6 @@ impl Ppu {
             return 0;
         }
 
-        // All renderer modes (FIFO, Line, Screen) use the same timing path.
-        // Line renderer overwrites scanlines at mode 3 end.
-        // Screen renderer overwrites the entire frame at VBlank.
-
         // Deferred window activation: process at the M-cycle boundary (start of
         // step) so the check sees CPU writes that happened between steps. This is
         // the closest approximation to per-T-cycle CPU-PPU interleaving in our
@@ -928,13 +905,6 @@ impl Ppu {
                 self.tick_mode3();
                 // Check if scanline is complete
                 if self.position_in_line >= 160 {
-                    // Line renderer: overwrite FIFO output with line-rendered scanline
-                    // Uses FIFO timing for accuracy, line renderer for rendering.
-                    if self.renderer_mode == RendererMode::Line {
-                        self.alt_window_line_used = false;
-                        line_renderer::render_scanline(self);
-                        // Don't track window_line_counter here — FIFO already does it below
-                    }
                     if self.cgb_mode {
                         // Palette stays blocked into mode 0:
                         // Single-speed: 5T after mode 3 ends
@@ -1220,10 +1190,6 @@ impl Ppu {
                             self.vram_write_accessible = true;
                             self.lcd_first_frame = false;
                             self.update_stat_irq();
-                            // Screen renderer: render entire frame at VBlank
-                            if self.renderer_mode == RendererMode::Screen {
-                                screen_renderer::render_frame(self);
-                            }
                         }
                     }
                     self.line_start_pending = false;
@@ -1313,10 +1279,6 @@ impl Ppu {
                         self.vram_write_accessible = true;
                         self.lcd_first_frame = false;
                         self.update_stat_irq();
-                        // Screen renderer: render entire frame at VBlank
-                        if self.renderer_mode == RendererMode::Screen {
-                            screen_renderer::render_frame(self);
-                        }
                     }
                 }
                 3 => {
@@ -2053,13 +2015,6 @@ impl Ppu {
             return;
         }
 
-        // Screen renderer: FIFO runs for timing only, skip pixel output.
-        // render_frame() fills the framebuffer at VBlank.
-        if self.renderer_mode == RendererMode::Screen {
-            self.position_in_line += 1;
-            return;
-        }
-
         // Determine if the sprite pixel wins over the BG pixel
         let draw_sprite = if let Some(ref oam_px) = oam {
             if oam_px.color_index == 0 {
@@ -2618,165 +2573,6 @@ impl Ppu {
         &self.frame_buffer
     }
 
-    /// Simplified PPU step for line/screen renderers.
-    /// Handles mode transitions, LY counting, and interrupts without FIFO.
-    fn step_alt(&mut self, cycles: u32) -> u8 {
-        for _ in 0..cycles {
-            self.dot += 1;
-            self.total_ticks += 1;
-
-            // End of scanline (456 dots)
-            if self.dot >= 456 {
-                self.dot = 0;
-
-                // Check frame_ready BEFORE incrementing ly, so that the
-                // post-boot state (ly=0, mode=1) correctly triggers frame_ready
-                // on the first line wrap, matching FIFO behavior.
-                let prev_ly = self.ly;
-                self.ly = self.ly.wrapping_add(1);
-
-                if self.ly >= 154 {
-                    self.ly = 0;
-                }
-
-                self.visible_ly = self.ly;
-
-                // LYC coincidence
-                let coincidence = self.ly == self.lyc;
-                if coincidence {
-                    self.stat |= 0x04;
-                } else {
-                    self.stat &= !0x04;
-                }
-
-                if (self.ly == 0 || prev_ly == 0) && self.mode == 1 {
-                    // Frame complete: either ly wrapped 153→0, or we were at ly=0
-                    // in VBlank (post-boot initial state) and just advanced to ly=1.
-                    self.frame_ready = true;
-                    self.window_line_counter = 0;
-                    self.wy_triggered = false;
-                }
-
-                if self.ly < 144 {
-                    // Start of visible line: enter Mode 2 (OAM scan)
-                    self.mode = 2;
-                    self.stat = (self.stat & !0x03) | 0x02;
-                    self.oam_accessible = false;
-                    self.oam_write_accessible = false;
-                    self.vram_accessible = true;
-                    self.vram_write_accessible = true;
-
-                    // Check WY trigger
-                    if self.ly == self.wy {
-                        self.wy_triggered = true;
-                    }
-
-                    // Mode 2 STAT interrupt
-                    if self.stat & 0x20 != 0 {
-                        self.if_flags |= 0x02;
-                    }
-                } else if self.ly == 144 {
-                    // VBlank entry
-                    self.mode = 1;
-                    self.stat = (self.stat & !0x03) | 0x01;
-                    self.oam_accessible = true;
-                    self.oam_write_accessible = true;
-                    self.vram_accessible = true;
-                    self.vram_write_accessible = true;
-                    self.hblank_entered = false;
-
-                    if !self.cgb_mode {
-                        // DMG: VBlank IF at dot 0
-                        self.if_flags |= 0x01;
-                    }
-                    // CGB: VBlank IF deferred to dot 2 (matches FIFO)
-
-                    // VBlank STAT interrupt
-                    if self.stat & 0x10 != 0 {
-                        self.if_flags |= 0x02;
-                    }
-
-                    // Screen renderer: render entire frame at VBlank
-                    if self.renderer_mode == RendererMode::Screen {
-                        screen_renderer::render_frame(self);
-                    }
-                }
-
-                // LYC coincidence STAT interrupt
-                if coincidence && self.stat & 0x40 != 0 {
-                    self.if_flags |= 0x02;
-                }
-            }
-
-            // CGB: deferred VBlank IF at dot 2 of line 144 (matches FIFO)
-            if self.cgb_mode && self.ly == 144 && self.dot == 2 {
-                self.if_flags |= 0x01;
-            }
-
-            // Mode transitions within a visible line
-            if self.ly < 144 {
-                match self.mode {
-                    0 if self.lcd_first_line && self.dot >= 78 => {
-                        // LCD first line: skip mode 2, go directly to mode 3 at dot 78
-                        // (matching FIFO: mode bits stay 0 then jump to mode 3)
-                        self.lcd_first_line = false;
-                        self.mode = 3;
-                        self.stat = (self.stat & !0x03) | 0x03;
-                        // Don't block VRAM/OAM in step_alt — scanline already rendered
-                        // at mode 3 start, and blocking causes false VRAM write failures
-                        // that diverge game state from FIFO.
-                        if self.ly == self.wy {
-                            self.wy_triggered = true;
-                        }
-                        // Line renderer: render scanline
-                        if self.renderer_mode == RendererMode::Line {
-                            self.alt_window_line_used = false;
-                            line_renderer::render_scanline(self);
-                            if self.alt_window_line_used {
-                                self.window_line_counter =
-                                    self.window_line_counter.wrapping_add(1);
-                            }
-                        }
-                    }
-                    2 => {
-                        // Mode 2 → Mode 3 at dot 80
-                        if self.dot == 80 {
-                            self.mode = 3;
-                            self.stat = (self.stat & !0x03) | 0x03;
-                            // Don't block VRAM/OAM — see comment in lcd_first_line branch
-
-                            // Line renderer: render scanline at mode 3 start
-                            if self.renderer_mode == RendererMode::Line {
-                                    self.alt_window_line_used = false;
-                                line_renderer::render_scanline(self);
-                                if self.alt_window_line_used {
-                                    self.window_line_counter =
-                                        self.window_line_counter.wrapping_add(1);
-                                }
-                            }
-                        }
-                    }
-                    3 => {
-                        // Mode 3 → Mode 0 at dot 252
-                        if self.dot == 252 {
-                            self.mode = 0;
-                            self.stat &= !0x03;
-                            self.hblank_entered = true;
-
-                            // Mode 0 STAT interrupt
-                            if self.stat & 0x08 != 0 {
-                                self.if_flags |= 0x02;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        self.oam_bug_row = 0xFF;
-        self.if_flags
-    }
 }
 
 impl Default for Ppu {

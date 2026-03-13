@@ -38,10 +38,6 @@ struct Cli {
     #[arg(long)]
     bootrom: Option<PathBuf>,
 
-    /// PPU renderer: fifo (default), line, screen
-    #[arg(long, default_value = "fifo")]
-    renderer: String,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -96,22 +92,8 @@ fn parse_model(s: &str) -> Result<GbModel, String> {
     s.parse::<GbModel>()
 }
 
-fn parse_renderer(s: &str) -> ppu::RendererMode {
-    match s.to_lowercase().as_str() {
-        "fifo" => ppu::RendererMode::Fifo,
-        "line" => ppu::RendererMode::Line,
-        "screen" => ppu::RendererMode::Screen,
-        other => {
-            eprintln!("Unknown renderer '{}'. Options: fifo, line, screen", other);
-            std::process::exit(1);
-        }
-    }
-}
-
-fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel, renderer: ppu::RendererMode) -> Emulator {
-    let mut emu = Emulator::new(rom, boot_rom, None, model, None);
-    emu.bus.ppu.renderer_mode = renderer;
-    emu
+fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emulator {
+    Emulator::new(rom, boot_rom, None, model, None)
 }
 
 fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
@@ -446,7 +428,7 @@ fn cmd_screenshot(cli: &Cli, frames: u32, out: &str, format: &str, scale: usize,
     let rom = fs::read(&cli.path).expect("Failed to read ROM");
     let model = cli.model.unwrap_or_else(|| detect_model_with_rom(&cli.path, Some(&rom)));
     let br = resolve_boot_rom(cli, model);
-    let mut emu = make_emu(rom, br, model, parse_renderer(&cli.renderer));
+    let mut emu = make_emu(rom, br, model);
     let key_events = parse_keys(keys);
     let mut key_idx = 0;
     for f in 0..frames {
@@ -536,7 +518,7 @@ fn cmd_analyze(cli: &Cli, frames: u32) {
     let rom = fs::read(&cli.path).expect("Failed to read ROM");
     let model = cli.model.unwrap_or(GbModel::Cgb);
     let br = resolve_boot_rom(cli, model);
-    let mut emu = make_emu(rom, br, model, parse_renderer(&cli.renderer));
+    let mut emu = make_emu(rom, br, model);
 
     for _ in 0..frames {
         emu.step_frame();

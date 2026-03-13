@@ -93,9 +93,6 @@ struct Cli {
     #[arg(long, default_value = "nearest")]
     filter: String,
 
-    /// PPU renderer: fifo (default, cycle-accurate), line (per-scanline), screen (per-frame)
-    #[arg(long, default_value = "fifo")]
-    renderer: String,
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -288,21 +285,6 @@ fn main() {
     eprintln!();
 
     let mut emu = Emulator::new(rom, boot_rom, Some(rom_path.as_path()), model, snes_rom);
-
-    // Set PPU renderer mode
-    let renderer_mode = match cli.renderer.to_lowercase().as_str() {
-        "fifo" => ppu::RendererMode::Fifo,
-        "line" => ppu::RendererMode::Line,
-        "screen" => ppu::RendererMode::Screen,
-        other => {
-            eprintln!("Unknown renderer '{}'. Options: fifo, line, screen", other);
-            std::process::exit(1);
-        }
-    };
-    emu.bus.ppu.renderer_mode = renderer_mode;
-    if renderer_mode != ppu::RendererMode::Fifo {
-        eprintln!("  Renderer: {:?}", renderer_mode);
-    }
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
