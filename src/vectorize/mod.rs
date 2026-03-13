@@ -64,26 +64,50 @@ pub fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
 }
 
 /// Vectorize a pixel buffer and rasterize at the given integer scale.
-/// Output is exactly (width*scale) x (height*scale).
+/// Detects nearest-neighbor upscaling and collapses to native resolution first,
+/// then scales output relative to native dimensions.
 /// Returns (pixels, output_width, output_height).
 pub fn vectorize_to_raster(
     pixels: &[u32], width: usize, height: usize, scale: usize,
 ) -> (Vec<u32>, usize, usize) {
-    let (paths, bg_color) = vectorize_core(pixels, width, height);
-    let out_w = width * scale;
-    let out_h = height * scale;
-    let buf = rasterize::rasterize(&paths, width, height, bg_color, scale);
+    let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
+    let (px, w, h) = if !native_pixels.is_empty() {
+        (native_pixels.as_slice(), nw, nh)
+    } else {
+        (pixels, width, height)
+    };
+    let tv0 = std::time::Instant::now();
+    let (paths, bg_color) = vectorize_core(px, w, h);
+    let tv1 = std::time::Instant::now();
+    let out_w = w * scale;
+    let out_h = h * scale;
+    let t0 = std::time::Instant::now();
+    let buf = rasterize::rasterize(&paths, w, h, bg_color, scale);
+    let t1 = std::time::Instant::now();
+    eprintln!("    vectorize:{:.2}ms  rasterize:{:.2}ms  total:{:.2}ms  paths:{} segs:{}",
+        (tv1-tv0).as_secs_f64()*1000.0,
+        (t1-t0).as_secs_f64()*1000.0,
+        ((tv1-tv0)+(t1-t0)).as_secs_f64()*1000.0,
+        paths.len(),
+        paths.iter().map(|p| p.segments.len()).sum::<usize>());
     (buf, out_w, out_h)
 }
 
 /// Vectorize a pixel buffer and rasterize at a floating-point scale factor.
+/// Detects nearest-neighbor upscaling and collapses to native resolution first.
 /// Uses a single uniform scale so the aspect ratio is always preserved.
 /// Returns (pixels, output_width, output_height).
 pub fn vectorize_to_raster_scaled(
     pixels: &[u32], width: usize, height: usize, scale: f64,
 ) -> (Vec<u32>, usize, usize) {
-    let (paths, bg_color) = vectorize_core(pixels, width, height);
-    rasterize::rasterize_scaled(&paths, width, height, bg_color, scale)
+    let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
+    let (px, w, h) = if !native_pixels.is_empty() {
+        (native_pixels.as_slice(), nw, nh)
+    } else {
+        (pixels, width, height)
+    };
+    let (paths, bg_color) = vectorize_core(px, w, h);
+    rasterize::rasterize_scaled(&paths, w, h, bg_color, scale)
 }
 
 /// Quantize colors into a reusable buffer to avoid allocation.

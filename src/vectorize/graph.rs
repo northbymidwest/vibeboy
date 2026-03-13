@@ -133,6 +133,17 @@ fn resolve_crossings(_pixels: &[u32], w: usize, h: usize, edges: &mut [PixelEdge
         edges[y * w + (x + 1)].down_left = false;
     }
 
+    // Fast path for noisy images: skip expensive heuristics (curve_length uses
+    // HashSet-based BFS per crossing). Conservatively remove both diagonals.
+    // Threshold: >2% of pixels have ambiguous crossings.
+    if ambiguous.len() > w * h / 50 {
+        for (x, y) in ambiguous {
+            edges[y * w + x].down_right = false;
+            edges[y * w + (x + 1)].down_left = false;
+        }
+        return;
+    }
+
     // Pass 2: For each ambiguous pair, each heuristic VOTES for one side.
     // The vote weight is the DIFFERENCE between the two sides' raw scores.
     // Paper: "choose to keep the connection that has aggregated the most weight"

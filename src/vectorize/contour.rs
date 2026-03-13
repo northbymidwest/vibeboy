@@ -296,6 +296,9 @@ fn pack_edge(a: u32, b: u32) -> u64 {
     (a as u64) << 32 | b as u64
 }
 
+/// Threshold for adaptive pipeline: above this, skip B-spline and sort.
+const ADAPTIVE_EDGE_THRESHOLD: usize = 12000;
+
 fn build_directed_boundary_edges(
     pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell],
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
@@ -337,25 +340,42 @@ fn build_directed_boundary_edges(
         }
     }
 
-    let mut visible = Vec::new();
-    let mut directed = Vec::new();
+    // Count boundary edges to decide adaptive vs full pipeline
+    let boundary_count = edge_map.values()
+        .filter(|(left, right, _, _)| left != right)
+        .count();
+    let adaptive = boundary_count > ADAPTIVE_EDGE_THRESHOLD;
 
-    for (_, (left, right, key_a, key_b)) in &edge_map {
-        if left != right {
-            visible.push(CellEdge {
-                a: *key_a,
-                b: *key_b,
-                left_color: *left,
-                right_color: *right,
-            });
-            directed.push((*key_a, *key_b, *right));
-            directed.push((*key_b, *key_a, *left));
+    let mut directed = Vec::with_capacity(boundary_count * 2);
+    let mut visible = if adaptive {
+        // Adaptive path: skip visible edge construction and both sorts.
+        // trace_all_boundary_loops builds its own HashMap, so input order is irrelevant.
+        for (_, (left, right, key_a, key_b)) in &edge_map {
+            if left != right {
+                directed.push((*key_a, *key_b, *right));
+                directed.push((*key_b, *key_a, *left));
+            }
         }
-    }
-
-    // Sort for deterministic output and better cache locality in downstream steps.
-    visible.sort_unstable_by(|a, b| (a.a, a.b).cmp(&(b.a, b.b)));
-    directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        Vec::new()
+    } else {
+        let mut vis = Vec::with_capacity(boundary_count);
+        for (_, (left, right, key_a, key_b)) in &edge_map {
+            if left != right {
+                vis.push(CellEdge {
+                    a: *key_a,
+                    b: *key_b,
+                    left_color: *left,
+                    right_color: *right,
+                });
+                directed.push((*key_a, *key_b, *right));
+                directed.push((*key_b, *key_a, *left));
+            }
+        }
+        // Sort for deterministic output and better cache locality in downstream steps.
+        vis.sort_unstable_by(|a, b| (a.a, a.b).cmp(&(b.a, b.b)));
+        directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        vis
+    };
 
     (visible, directed)
 }
@@ -977,6 +997,20 @@ fn trace_boundary_node_loops(boundary_edges: &[(NodeId, NodeId)]) -> Vec<Vec<Nod
 }
 
 /// Convert a closed boundary node loop to smooth path segments.
+/// Fast path: emit Line segments between consecutive grid-aligned nodes.
+/// Used for noisy frames where B-spline smoothing adds no visible benefit.
+fn boundary_loop_to_line_segments(nodes: &[NodeId]) -> Vec<PathSegment> {
+    let n = nodes.len();
+    if n < 2 { return Vec::new(); }
+    let mut segs = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = nodes[i].to_point();
+        let b = nodes[(i + 1) % n].to_point();
+        segs.push(PathSegment::Line(a, b));
+    }
+    segs
+}
+
 /// Uses optimized positions and splits at corners for B-spline fitting.
 fn boundary_loop_to_segments(
     nodes: &[NodeId],
@@ -1058,12 +1092,31 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
     // Adaptive pipeline: skip expensive B-spline optimization when boundary
     // complexity is high (noisy/dithered frames). The optimization provides
     // negligible visual benefit when boundaries are this dense.
-    let optimized = if visible_edges.len() <= 12000 {
+    // visible_edges is empty when adaptive mode was triggered in build_directed_boundary_edges.
+    let adaptive = visible_edges.is_empty();
+
+    if adaptive {
+        // Fast path: skip trace + loop assembly entirely.
+        // Group directed edges by color and convert directly to Line segments.
+        // The nonzero winding rule handles disconnected loops and holes correctly.
+        let mut color_segs: FxHashMap<u32, Vec<PathSegment>> =
+            fx_hashmap_cap(16);
+        for &(a, b, color) in &directed_edges {
+            if color == VOID_COLOR { continue; }
+            let pa = a.to_point();
+            let pb = b.to_point();
+            color_segs.entry(color).or_default()
+                .push(PathSegment::Line(pa, pb));
+        }
+        return color_segs.into_iter()
+            .map(|(color, segments)| ColorPath { color, segments })
+            .collect();
+    }
+
+    let optimized = {
         let mut chains = chain_visible_edges(&visible_edges);
         merge_t_junctions(&mut chains);
         build_optimized_positions(&chains)
-    } else {
-        fx_hashmap()
     };
 
     let all_loops = trace_all_boundary_loops(&directed_edges);

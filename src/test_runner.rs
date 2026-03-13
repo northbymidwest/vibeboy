@@ -507,12 +507,29 @@ fn cmd_vectorize(input: &Path, out: &str) {
         })
         .collect();
 
-    let svg = vectorize::vectorize_to_svg(&pixels, width, height);
-    fs::write(out, &svg).expect("Failed to write SVG");
-    eprintln!(
-        "Vectorized {}x{} image → {} ({} bytes)",
-        width, height, out, svg.len()
-    );
+    if out.ends_with(".svg") {
+        let svg = vectorize::vectorize_to_svg(&pixels, width, height);
+        fs::write(out, &svg).expect("Failed to write SVG");
+        eprintln!(
+            "Vectorized {}x{} image → {} ({} bytes)",
+            width, height, out, svg.len()
+        );
+    } else {
+        let scale = 4;
+        let (raster, out_w, out_h) = vectorize::vectorize_to_raster(&pixels, width, height, scale);
+        let mut rgb = Vec::with_capacity(out_w * out_h * 3);
+        for pixel in &raster {
+            rgb.push(((pixel >> 16) & 0xFF) as u8);
+            rgb.push(((pixel >> 8) & 0xFF) as u8);
+            rgb.push((pixel & 0xFF) as u8);
+        }
+        image::save_buffer(out, &rgb, out_w as u32, out_h as u32, image::ColorType::Rgb8)
+            .expect("Failed to write PNG");
+        eprintln!(
+            "Vectorized+rasterized {}x{} image → {} ({}x{} at {}x)",
+            width, height, out, out_w, out_h, scale
+        );
+    }
 }
 
 fn cmd_analyze(cli: &Cli, frames: u32) {

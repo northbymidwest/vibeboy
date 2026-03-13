@@ -116,6 +116,11 @@ pub fn rasterize_scaled(
     let mut sorted: Vec<usize> = Vec::new();
     let mut coverage = vec![0u8; out_w];
 
+    // Bucket sort: O(n) distribution into per-row buckets, then flatten.
+    // Replaces O(n log n) comparison sort for edge y_min ordering.
+    let mut bucket_heads: Vec<u32> = Vec::new();
+    let mut bucket_next: Vec<u32> = Vec::new();
+
     for path in paths {
         if path.segments.is_empty() {
             continue;
@@ -129,11 +134,25 @@ pub fn rasterize_scaled(
             continue;
         }
 
+        // Linked-list bucket sort: O(n) with zero per-bucket allocation.
+        bucket_heads.clear();
+        bucket_heads.resize(out_h, u32::MAX);
+        bucket_next.clear();
+        bucket_next.resize(edges.len(), u32::MAX);
+        for (i, e) in edges.iter().enumerate() {
+            let row = (e.y_min.floor() as usize).min(out_h - 1);
+            bucket_next[i] = bucket_heads[row];
+            bucket_heads[row] = i as u32;
+        }
         sorted.clear();
-        sorted.extend(0..edges.len());
-        sorted.sort_unstable_by(|&a, &b| {
-            edges[a].y_min.total_cmp(&edges[b].y_min)
-        });
+        sorted.reserve(edges.len());
+        for row in 0..out_h {
+            let mut idx = bucket_heads[row];
+            while idx != u32::MAX {
+                sorted.push(idx as usize);
+                idx = bucket_next[idx as usize];
+            }
+        }
 
         coverage[..out_w].fill(0);
 
