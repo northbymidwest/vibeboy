@@ -89,7 +89,7 @@ struct Cli {
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale[2-6x], omniscale-legacy[2-6x], vectorize[2-6x]
+    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize
     #[arg(long, default_value = "nearest")]
     filter: String,
 
@@ -258,28 +258,16 @@ fn main() {
         "nedi" => scaling::ScaleFilter::Nedi,
         "dcci" => scaling::ScaleFilter::Dcci,
         "edi" => scaling::ScaleFilter::Edi,
-        "omniscale" | "omniscale2x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X2),
-        "omniscale3x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X3),
-        "omniscale4x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X4),
-        "omniscale5x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X5),
-        "omniscale6x" => scaling::ScaleFilter::OmniScale(scaling::OmniScaleFactor::X6),
+        "omniscale" => scaling::ScaleFilter::OmniScale,
         "omniscale-legacy" | "omniscale-legacy2x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X2),
         "omniscale-legacy3x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X3),
         "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
         "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
         "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
-        "aa-nearest" | "aa-nearest2x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X2),
-        "aa-nearest3x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X3),
-        "aa-nearest4x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X4),
-        "aa-nearest5x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X5),
-        "aa-nearest6x" => scaling::ScaleFilter::AaNearestNeighbor(scaling::OmniScaleFactor::X6),
-        "vectorize" | "vectorize2x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X2),
-        "vectorize3x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X3),
-        "vectorize4x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X4),
-        "vectorize5x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X5),
-        "vectorize6x" => scaling::ScaleFilter::Vectorize(scaling::OmniScaleFactor::X6),
+        "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
+        "vectorize" => scaling::ScaleFilter::Vectorize,
         other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale[2-6x], omniscale-legacy[2-6x], aa-nearest[2-6x], vectorize[2-6x]", other);
+            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize", other);
             std::process::exit(1);
         }
     };
@@ -324,11 +312,8 @@ fn main() {
 
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
-    let is_resizable = matches!(scale_filter,
-        scaling::ScaleFilter::Bilinear | scaling::ScaleFilter::Bicubic
-        | scaling::ScaleFilter::OmniScale(_) | scaling::ScaleFilter::AaNearestNeighbor(_)
-        | scaling::ScaleFilter::Vectorize(_));
-    let is_vectorize = matches!(scale_filter, scaling::ScaleFilter::Vectorize(_));
+    let is_resizable = scale_filter.is_resizable();
+    let is_vectorize = matches!(scale_filter, scaling::ScaleFilter::Vectorize);
     let mut vec_cache = if is_vectorize {
         Some(crate::vectorize::VectorizeCache::new())
     } else { None };
@@ -339,6 +324,8 @@ fn main() {
     let filter_factor = scale_filter.factor();
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
+    // Resizable filters start at SCALE * src size (factor=1); fixed-factor
+    // filters compute window size from their native output dimensions.
     let win_scale = if filter_factor > 1 { SCALE / filter_factor.max(1) } else { SCALE };
     let win_scale = win_scale.max(1);
     let win_w = tex_w * win_scale;
@@ -605,7 +592,7 @@ fn main() {
                     scaled = scaling::edi::scale(raw_src, sw, sh);
                     &scaled
                 }
-                scaling::ScaleFilter::OmniScale(_) => {
+                scaling::ScaleFilter::OmniScale => {
                     // OmniScale at ceiling integer factor, then AA downscale to exact display size
                     let ceil_factor = ((disp_w as f64 / sw as f64).ceil() as u32).max(2);
                     let os = scaling::omniscale::scale(raw_src, sw, sh, ceil_factor);
@@ -622,11 +609,11 @@ fn main() {
                     scaled = scaling::omniscale_legacy::scale(raw_src, sw, sh, f.factor());
                     &scaled
                 }
-                scaling::ScaleFilter::AaNearestNeighbor(_) => {
+                scaling::ScaleFilter::AaNearestNeighbor => {
                     scaled = scaling::aa_nearest::scale(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
-                scaling::ScaleFilter::Vectorize(_) => {
+                scaling::ScaleFilter::Vectorize => {
                     let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                     let cache = vec_cache.as_mut().unwrap();
                     let (paths, bg_color) = cache.get_paths(raw_src, sw, sh);
@@ -646,7 +633,7 @@ fn main() {
             };
 
             // Output frame dimensions and display rect
-            let is_vec = matches!(scale_filter, scaling::ScaleFilter::Vectorize(_));
+            let is_vec = matches!(scale_filter, scaling::ScaleFilter::Vectorize);
             let (fw, fh) = if is_vec {
                 vec_out
             } else if is_resizable {

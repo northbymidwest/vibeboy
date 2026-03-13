@@ -123,17 +123,25 @@ pub enum ScaleFilter {
     Nedi,
     Dcci,
     Edi,
-    OmniScale(OmniScaleFactor),
+    /// Arbitrary-resolution OmniScale (scales to display size).
+    OmniScale,
+    /// Fixed-factor OmniScale legacy variant.
     OmniScaleLegacy(OmniScaleFactor),
-    AaNearestNeighbor(OmniScaleFactor),
-    Vectorize(OmniScaleFactor),
+    /// Anti-aliased nearest neighbor (scales to display size).
+    AaNearestNeighbor,
+    /// Kopf-Lischinski vectorization (scales to display size).
+    Vectorize,
 }
 
 impl ScaleFilter {
+    /// Returns the fixed scale factor for fixed-factor filters,
+    /// or 1 for resolution-adaptive filters (which scale to window size).
     pub fn factor(self) -> u32 {
         match self {
-            ScaleFilter::Nearest => 1,
-            ScaleFilter::Bilinear | ScaleFilter::Bicubic => 2,
+            ScaleFilter::Nearest
+            | ScaleFilter::Bilinear | ScaleFilter::Bicubic
+            | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
+            | ScaleFilter::Vectorize => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
             ScaleFilter::Scale3x => 3,
@@ -141,8 +149,15 @@ impl ScaleFilter {
             ScaleFilter::Xbrz(x) => x.factor(),
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
             | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
-            ScaleFilter::OmniScale(f) | ScaleFilter::OmniScaleLegacy(f)
-            | ScaleFilter::AaNearestNeighbor(f) | ScaleFilter::Vectorize(f) => f.factor(),
+            ScaleFilter::OmniScaleLegacy(f) => f.factor(),
         }
+    }
+
+    /// Whether this filter scales to arbitrary display dimensions.
+    pub fn is_resizable(self) -> bool {
+        matches!(self,
+            ScaleFilter::Bilinear | ScaleFilter::Bicubic
+            | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
+            | ScaleFilter::Vectorize)
     }
 }

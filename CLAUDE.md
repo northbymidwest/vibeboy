@@ -15,8 +15,8 @@ cargo run --release -- path/to/rom.gbc
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.bin
 
-# With vectorized scaling filter (2x-6x)
-cargo run --release -- path/to/rom.gbc --filter vectorize4x
+# With vectorized scaling filter
+cargo run --release -- path/to/rom.gbc --filter vectorize
 ```
 
 ## Testing
