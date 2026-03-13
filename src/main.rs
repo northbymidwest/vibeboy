@@ -31,7 +31,9 @@ use sdl3::sys::camera::{
     SDL_OpenCamera, SDL_ReleaseCameraFrame,
 };
 use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
+use sdl3::gamepad::{Axis as GpAxis, Button as GpButton};
 use sdl3::sensor::{SensorData, SensorType};
+use sdl3::sys::joystick::SDL_JoystickID;
 use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
 use std::fs;
@@ -291,12 +293,12 @@ fn main() {
     };
 
     eprintln!("\nControls:");
-    eprintln!("  Arrow keys  — D-pad");
-    eprintln!("  Z / X       — A / B");
-    eprintln!("  Enter       — Start");
-    eprintln!("  Right Shift — Select");
-    eprintln!("  Backspace   — Rewind");
-    eprintln!("  Tab         — Fast forward (4x)");
+    eprintln!("  Arrow keys  — D-pad         Gamepad D-pad / Left stick");
+    eprintln!("  Z / X       — B / A         Gamepad South / East");
+    eprintln!("  Enter       — Start         Gamepad Start");
+    eprintln!("  Right Shift — Select        Gamepad Back");
+    eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
+    eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  1-9         — Select state slot");
     eprintln!("  Escape      — Quit");
@@ -357,6 +359,23 @@ fn main() {
     texture.set_scale_mode(ScaleMode::Nearest);
 
     let mut event_pump = sdl.event_pump().unwrap();
+
+    // ── Gamepad ───────────────────────────────────────────────────────────────
+    let gamepad_sys = sdl.gamepad().unwrap();
+    let mut gamepad = {
+        let mut found = None;
+        if let Ok(ids) = gamepad_sys.gamepads() {
+            for id in ids {
+                if let Ok(gp) = gamepad_sys.open(id) {
+                    eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                    enable_gamepad_sensors(&gp);
+                    found = Some(gp);
+                    break;
+                }
+            }
+        }
+        found
+    };
 
     // ── Audio ─────────────────────────────────────────────────────────────────
     sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "512");
@@ -428,12 +447,38 @@ fn main() {
                         eprintln!("Slot {} selected", current_slot + 1);
                     }
                 }
+                Event::ControllerDeviceAdded { which, .. } => {
+                    if gamepad.is_none() {
+                        if let Ok(gp) = gamepad_sys.open(SDL_JoystickID(which)) {
+                            eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                            enable_gamepad_sensors(&gp);
+                            gamepad = Some(gp);
+                        }
+                    }
+                }
+                Event::ControllerDeviceRemoved { which, .. } => {
+                    if gamepad.as_ref().is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which))) {
+                        eprintln!("Gamepad disconnected");
+                        gamepad = None;
+                        // Try to pick up another connected gamepad
+                        if let Ok(ids) = gamepad_sys.gamepads() {
+                            for id in ids {
+                                if let Ok(gp) = gamepad_sys.open(id) {
+                                    eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                                    enable_gamepad_sensors(&gp);
+                                    gamepad = Some(gp);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
 
         // ── Input ─────────────────────────────────────────────────────────────
-        handle_input(&mut emu, &event_pump.keyboard_state());
+        handle_input(&mut emu, &event_pump.keyboard_state(), gamepad.as_ref());
 
         // ── Webcam → Pocket Camera ────────────────────────────────────────────
         if let Some(ref ct) = camera_thread {
@@ -450,23 +495,36 @@ fn main() {
             let mut gx: f32 = 0.0;
             let mut gy: f32 = 0.0;
 
-            match accel_source {
-                #[cfg(target_os = "macos")]
-                AccelSource::MacosNative => {
-                    if let Some((x, y, _z)) = macos_accel::poll() {
-                        gx = -x; // MacBook X axis is opposite to MBC7 convention
-                        gy = y;
-                        got = true;
-                    }
+            // Gamepad accelerometer takes priority (e.g. DualSense, Switch Pro)
+            if let Some(ref gp) = gamepad {
+                let mut data = [0.0f32; 3];
+                if gp.sensor_get_data(SensorType::Accelerometer, &mut data).is_ok() {
+                    gx = data[0] / 9.81_f32;
+                    gy = data[1] / 9.81_f32;
+                    got = true;
                 }
-                AccelSource::Sdl(ref sensor) => {
-                    if let Ok(SensorData::Accel([raw_x, raw_y, _])) = sensor.get_data() {
-                        gx = raw_x / 9.81_f32;
-                        gy = raw_y / 9.81_f32;
-                        got = true;
+            }
+
+            // Fall back to device accelerometer (MacBook, SDL sensor)
+            if !got {
+                match accel_source {
+                    #[cfg(target_os = "macos")]
+                    AccelSource::MacosNative => {
+                        if let Some((x, y, _z)) = macos_accel::poll() {
+                            gx = -x; // MacBook X axis is opposite to MBC7 convention
+                            gy = y;
+                            got = true;
+                        }
                     }
+                    AccelSource::Sdl(ref sensor) => {
+                        if let Ok(SensorData::Accel([raw_x, raw_y, _])) = sensor.get_data() {
+                            gx = raw_x / 9.81_f32;
+                            gy = raw_y / 9.81_f32;
+                            got = true;
+                        }
+                    }
+                    AccelSource::None => {}
                 }
-                AccelSource::None => {}
             }
 
             if got {
@@ -478,9 +536,18 @@ fn main() {
 
         // ── Rewind / Fast-forward ─────────────────────────────────────────────
         let ks = event_pump.keyboard_state();
-        let backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
-        let fast_forward = ks.is_scancode_pressed(Scancode::Tab);
+        let mut backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
+        let mut fast_forward = ks.is_scancode_pressed(Scancode::Tab);
         drop(ks);
+        // Left shoulder = rewind, right shoulder = fast forward
+        if let Some(ref gp) = gamepad {
+            if gp.button(GpButton::LeftShoulder) {
+                backspace_held = true;
+            }
+            if gp.button(GpButton::RightShoulder) {
+                fast_forward = true;
+            }
+        }
         emu.rewinding = backspace_held;
 
         if backspace_held {
@@ -722,7 +789,9 @@ fn main() {
     emu.save();
 }
 
-fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {
+fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState, gp: Option<&sdl3::gamepad::Gamepad>) {
+    const STICK_DEADZONE: i16 = 8000;
+
     let map: &[(Scancode, u8)] = &[
         (Scancode::Z,      Emulator::BTN_B),
         (Scancode::X,      Emulator::BTN_A),
@@ -733,8 +802,51 @@ fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState) {
         (Scancode::Up,     Emulator::BTN_UP),
         (Scancode::Down,   Emulator::BTN_DOWN),
     ];
-    for (sc, btn) in map {
-        emu.set_button(*btn, ks.is_scancode_pressed(*sc));
+
+    if let Some(gp) = gp {
+        // Gamepad buttons (OR'd with keyboard — either source can press)
+        let gp_map: &[(GpButton, u8)] = &[
+            (GpButton::East,      Emulator::BTN_A),
+            (GpButton::South,     Emulator::BTN_B),
+            (GpButton::Start,     Emulator::BTN_START),
+            (GpButton::Back,      Emulator::BTN_SELECT),
+            (GpButton::DPadRight, Emulator::BTN_RIGHT),
+            (GpButton::DPadLeft,  Emulator::BTN_LEFT),
+            (GpButton::DPadUp,    Emulator::BTN_UP),
+            (GpButton::DPadDown,  Emulator::BTN_DOWN),
+        ];
+
+        // Left analog stick → d-pad
+        let lx = gp.axis(GpAxis::LeftX);
+        let ly = gp.axis(GpAxis::LeftY);
+
+        for (sc, btn) in map {
+            let kb = ks.is_scancode_pressed(*sc);
+            let gp_btn = gp_map.iter().find(|(_, b)| b == btn).map_or(false, |(gb, _)| gp.button(*gb));
+            let stick = match *btn {
+                b if b == Emulator::BTN_RIGHT => lx > STICK_DEADZONE,
+                b if b == Emulator::BTN_LEFT  => lx < -STICK_DEADZONE,
+                b if b == Emulator::BTN_DOWN  => ly > STICK_DEADZONE,
+                b if b == Emulator::BTN_UP    => ly < -STICK_DEADZONE,
+                _ => false,
+            };
+            emu.set_button(*btn, kb || gp_btn || stick);
+        }
+    } else {
+        for (sc, btn) in map {
+            emu.set_button(*btn, ks.is_scancode_pressed(*sc));
+        }
+    }
+}
+
+// ── Gamepad helpers ──────────────────────────────────────────────────────────
+
+/// Open a gamepad and enable its accelerometer if present. Logs the result.
+fn enable_gamepad_sensors(gp: &sdl3::gamepad::Gamepad) {
+    if unsafe { gp.has_sensor(SensorType::Accelerometer) } {
+        if gp.sensor_set_enabled(SensorType::Accelerometer, true).is_ok() {
+            eprintln!("  Accelerometer enabled");
+        }
     }
 }
 

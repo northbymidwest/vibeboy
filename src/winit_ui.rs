@@ -34,6 +34,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+use gilrs::{Gilrs, GamepadId, Button as GilButton, Axis as GilAxis};
 
 const SCALE: u32 = 3;
 const GB_W: u32 = 160;
@@ -840,6 +841,10 @@ struct App {
     fps_timer: Instant,
     fps_count: u32,
     fps_emu_total: Duration,
+    gilrs: Option<Gilrs>,
+    active_gamepad: Option<GamepadId>,
+    kb_buttons: u8,  // bitmask of keyboard-pressed buttons
+    gp_buttons: u8,  // bitmask of gamepad-pressed buttons
 }
 
 impl App {
@@ -873,6 +878,10 @@ impl App {
             fps_timer: Instant::now(),
             fps_count: 0,
             fps_emu_total: Duration::ZERO,
+            gilrs: Gilrs::new().ok(),
+            active_gamepad: None,
+            kb_buttons: 0,
+            gp_buttons: 0,
         }
     }
 
@@ -1252,7 +1261,7 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
 
-                    if let Some(ref mut emu) = self.emu {
+                    {
                         let btn = match key {
                             KeyCode::KeyZ => Some(Emulator::BTN_B),
                             KeyCode::KeyX => Some(Emulator::BTN_A),
@@ -1265,7 +1274,23 @@ impl ApplicationHandler for App {
                             _ => None,
                         };
                         if let Some(b) = btn {
-                            emu.set_button(b, pressed);
+                            if pressed {
+                                self.kb_buttons |= b;
+                            } else {
+                                self.kb_buttons &= !b;
+                            }
+                        }
+                    }
+
+                    if let Some(ref mut emu) = self.emu {
+                        // Apply combined keyboard + gamepad state
+                        let combined = self.kb_buttons | self.gp_buttons;
+                        let all_btns: &[u8] = &[
+                            Emulator::BTN_RIGHT, Emulator::BTN_LEFT, Emulator::BTN_UP, Emulator::BTN_DOWN,
+                            Emulator::BTN_A, Emulator::BTN_B, Emulator::BTN_SELECT, Emulator::BTN_START,
+                        ];
+                        for &b in all_btns {
+                            emu.set_button(b, combined & b != 0);
                         }
 
                         if key == KeyCode::Backspace {
@@ -1325,6 +1350,94 @@ impl ApplicationHandler for App {
         // Process menu events
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id().0.as_str());
+        }
+
+        // ── Gamepad polling ─────────────────────────────────────────────
+        if let Some(ref mut gilrs) = self.gilrs {
+            while let Some(ev) = gilrs.next_event() {
+                match ev.event {
+                    gilrs::EventType::Connected => {
+                        if self.active_gamepad.is_none() {
+                            self.active_gamepad = Some(ev.id);
+                            let gp = gilrs.gamepad(ev.id);
+                            eprintln!("Gamepad connected: {}", gp.name());
+                        }
+                    }
+                    gilrs::EventType::Disconnected => {
+                        if self.active_gamepad == Some(ev.id) {
+                            eprintln!("Gamepad disconnected");
+                            self.active_gamepad = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Find first connected gamepad if none active
+            if self.active_gamepad.is_none() {
+                for (id, gp) in gilrs.gamepads() {
+                    if gp.is_connected() {
+                        self.active_gamepad = Some(id);
+                        eprintln!("Gamepad connected: {}", gp.name());
+                        break;
+                    }
+                }
+            }
+
+            if let Some(gp_id) = self.active_gamepad {
+                let gp = gilrs.gamepad(gp_id);
+                const DEADZONE: f32 = 0.3;
+
+                let gp_map: &[(GilButton, u8)] = &[
+                    (GilButton::East,      Emulator::BTN_A),
+                    (GilButton::South,     Emulator::BTN_B),
+                    (GilButton::Start,     Emulator::BTN_START),
+                    (GilButton::Select,    Emulator::BTN_SELECT),
+                    (GilButton::DPadUp,    Emulator::BTN_UP),
+                    (GilButton::DPadDown,  Emulator::BTN_DOWN),
+                    (GilButton::DPadLeft,  Emulator::BTN_LEFT),
+                    (GilButton::DPadRight, Emulator::BTN_RIGHT),
+                ];
+
+                // Left stick
+                let lx = gp.axis_data(GilAxis::LeftStickX).map_or(0.0, |a| a.value());
+                let ly = gp.axis_data(GilAxis::LeftStickY).map_or(0.0, |a| a.value());
+
+                let mut gp_bits: u8 = 0;
+                for &(gb, btn) in gp_map {
+                    let pressed = gp.is_pressed(gb);
+                    let stick = match btn {
+                        b if b == Emulator::BTN_RIGHT => lx > DEADZONE,
+                        b if b == Emulator::BTN_LEFT  => lx < -DEADZONE,
+                        b if b == Emulator::BTN_UP    => ly > DEADZONE,
+                        b if b == Emulator::BTN_DOWN  => ly < -DEADZONE,
+                        _ => false,
+                    };
+                    if pressed || stick {
+                        gp_bits |= btn;
+                    }
+                }
+                self.gp_buttons = gp_bits;
+
+                // Apply combined state
+                if let Some(ref mut emu) = self.emu {
+                    let combined = self.kb_buttons | self.gp_buttons;
+                    let all_btns: &[u8] = &[
+                        Emulator::BTN_RIGHT, Emulator::BTN_LEFT, Emulator::BTN_UP, Emulator::BTN_DOWN,
+                        Emulator::BTN_A, Emulator::BTN_B, Emulator::BTN_SELECT, Emulator::BTN_START,
+                    ];
+                    for &b in all_btns {
+                        emu.set_button(b, combined & b != 0);
+                    }
+
+                    // Shoulders for rewind
+                    if gp.is_pressed(GilButton::LeftTrigger) {
+                        emu.rewinding = true;
+                    }
+                }
+            } else {
+                self.gp_buttons = 0;
+            }
         }
 
         // Handle rewind
