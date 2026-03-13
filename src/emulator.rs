@@ -196,9 +196,9 @@ impl Emulator {
     /// Load state from the given slot. Returns true if a state was loaded.
     pub fn load_state(&mut self, slot: usize) -> bool {
         if slot < 9 {
-            if let Some(ref snap) = self.save_slots[slot] {
-                let snap = snap.clone();
+            if let Some(snap) = self.save_slots[slot].take() {
                 self.restore_snapshot(&snap);
+                self.save_slots[slot] = Some(snap);
                 self.rewind_buffer.clear();
                 log::info!("State loaded from slot {}", slot + 1);
                 return true;

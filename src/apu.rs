@@ -1493,7 +1493,7 @@ impl Apu {
 
     /// Drain and return all pending audio samples (interleaved L/R f32).
     pub fn drain_samples(&mut self) -> Vec<f32> {
-        std::mem::take(&mut self.sample_buf)
+        self.sample_buf.drain(..).collect()
     }
 
     /// Set CH1 volume to 0 after post-boot trigger. On real hardware, the boot

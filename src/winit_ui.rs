@@ -40,7 +40,7 @@ const GB_W: u32 = 160;
 const GB_H: u32 = 144;
 const SGB_W: u32 = 256;
 const SGB_H: u32 = 224;
-const AUDIO_SAMPLE_RATE: u32 = 48_000;
+const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
 fn frame_duration(model: GbModel) -> Duration {
     let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
@@ -208,6 +208,7 @@ impl GpuRenderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
+        self.bind_group = None;
     }
 
     fn render(&mut self, pixels: &[u32], frame_w: u32, frame_h: u32, src_w: u32, src_h: u32) {
@@ -286,7 +287,7 @@ impl GpuRenderer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        if self.bind_group.is_none() || true {
+        if self.bind_group.is_none() {
             // Recreate bind group (texture or uniform changed)
             let view = texture.create_view(&Default::default());
             self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -845,7 +846,7 @@ impl App {
     fn new(cli: Cli) -> Self {
         let model = cli.model.unwrap_or(GbModel::Cgb);
 
-        let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize * 2)));
+        let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize * 2 /* channels */)));
         let stream = start_audio(Arc::clone(&audio_ring));
 
         App {
@@ -1018,20 +1019,11 @@ impl App {
 
         emu.step_frame();
 
-        // Audio: resample 96kHz → 48kHz (2:1 decimation), push directly to ring
+        // Push audio samples directly to ring buffer (96kHz stereo, matching APU output)
         let samples = emu.bus.apu.drain_samples();
         if !samples.is_empty() {
             let mut ring = self.audio_ring.lock().unwrap();
-            for i in (0..samples.len()).step_by(2) {
-                let wp = ring.write_pos;
-                let cap = ring.capacity;
-                let next = (wp + 1) % cap;
-                if next == ring.read_pos {
-                    ring.read_pos = (ring.read_pos + 1) % cap;
-                }
-                ring.buf[wp] = samples[i];
-                ring.write_pos = next;
-            }
+            ring.push(&samples);
         }
 
         // Render via wgpu
