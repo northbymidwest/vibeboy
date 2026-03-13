@@ -26,7 +26,6 @@ wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 winit = { version = "0.30", optional = true }
-softbuffer = { version = "0.4", optional = true }
 muda = { version = "0.15", optional = true }
 cpal = { version = "0.15", optional = true }
 rfd = { version = "0.15", optional = true }
@@ -52,4 +51,4 @@ required-features = ["winit-ui"]
 [features]
 macos-ui = []
 gpu = ["wgpu", "bytemuck", "pollster"]
-winit-ui = ["winit", "softbuffer", "muda", "cpal", "rfd", "nokhwa"]
+winit-ui = ["winit", "wgpu", "bytemuck", "pollster", "muda", "cpal", "rfd", "nokhwa"]

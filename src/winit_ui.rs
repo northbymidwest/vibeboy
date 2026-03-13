@@ -24,7 +24,6 @@ use muda::{
 };
 use model::GbModel;
 use std::fs;
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +46,335 @@ fn frame_duration(model: GbModel) -> Duration {
     let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
     Duration::from_nanos(nanos)
 }
+
+// ── GPU Renderer ─────────────────────────────────────────────────────────────
+
+struct GpuRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    bind_group_layout: wgpu::BindGroupLayout,
+    // Cached texture + bind group, recreated when frame dimensions change
+    texture: Option<wgpu::Texture>,
+    bind_group: Option<wgpu::BindGroup>,
+    tex_w: u32,
+    tex_h: u32,
+}
+
+impl GpuRenderer {
+    fn new(window: Arc<Window>) -> Self {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let surface = instance.create_surface(window.clone()).unwrap();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            },
+            None,
+        ))
+        .unwrap();
+
+        let size = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .find(|f| !f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        GpuRenderer {
+            device,
+            queue,
+            surface,
+            surface_config,
+            pipeline,
+            sampler,
+            bind_group_layout,
+            texture: None,
+            bind_group: None,
+            tex_w: 0,
+            tex_h: 0,
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+    }
+
+    fn render(&mut self, pixels: &[u32], frame_w: u32, frame_h: u32, src_w: u32, src_h: u32) {
+        // Recreate texture if frame dimensions changed
+        if self.tex_w != frame_w || self.tex_h != frame_h {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: frame_w,
+                    height: frame_h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.texture = Some(texture);
+            self.tex_w = frame_w;
+            self.tex_h = frame_h;
+            // bind_group will be recreated below
+            self.bind_group = None;
+        }
+
+        let texture = self.texture.as_ref().unwrap();
+
+        // Convert 0x00RRGGBB to BGRA bytes for upload
+        let bgra: Vec<u8> = pixels
+            .iter()
+            .flat_map(|&p| {
+                let r = ((p >> 16) & 0xFF) as u8;
+                let g = ((p >> 8) & 0xFF) as u8;
+                let b = (p & 0xFF) as u8;
+                [b, g, r, 0xFF]
+            })
+            .collect();
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bgra,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(frame_w * 4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: frame_w,
+                height: frame_h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Compute aspect-correct viewport as normalized rect [-1,1]
+        let win_w = self.surface_config.width as f32;
+        let win_h = self.surface_config.height as f32;
+        let src_aspect = src_w as f32 / src_h as f32;
+        let win_aspect = win_w / win_h;
+        let (scale_x, scale_y) = if win_aspect > src_aspect {
+            (src_aspect / win_aspect, 1.0)
+        } else {
+            (1.0, win_aspect / src_aspect)
+        };
+
+        // Uniform buffer: [scale_x, scale_y, 0, 0]
+        let uniform_data = [scale_x, scale_y, 0.0f32, 0.0f32];
+        let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&uniform_data),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        if self.bind_group.is_none() || true {
+            // Recreate bind group (texture or uniform changed)
+            let view = texture.create_view(&Default::default());
+            self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: uniform_buf.as_entire_binding(),
+                    },
+                ],
+            }));
+        }
+
+        let frame = match self.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+            pass.draw(0..4, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+    }
+}
+
+use wgpu::util::DeviceExt;
+
+const BLIT_SHADER: &str = r#"
+struct Uniforms {
+    scale: vec2<f32>,
+};
+
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var tex_sampler: sampler;
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+struct VsOutput {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOutput {
+    // Fullscreen quad as triangle strip: 0=TL, 1=TR, 2=BL, 3=BR
+    let x = f32(vi & 1u);
+    let y = f32((vi >> 1u) & 1u);
+    let uv = vec2<f32>(x, y);
+    // Map to clip space with aspect-correct scaling
+    let pos = vec2<f32>(
+        (x * 2.0 - 1.0) * uniforms.scale.x,
+        (1.0 - y * 2.0) * uniforms.scale.y,
+    );
+    var out: VsOutput;
+    out.pos = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
+    return textureSample(tex, tex_sampler, in.uv);
+}
+"#;
 
 #[derive(Parser)]
 #[command(name = "vibeboy", about = "Game Boy / Game Boy Color emulator (winit frontend)")]
@@ -484,7 +812,7 @@ struct App {
     emu: Option<Emulator>,
     model: GbModel,
     window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    gpu: Option<GpuRenderer>,
     _menu: Option<Menu>,
     audio_ring: Arc<Mutex<AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
@@ -500,6 +828,7 @@ struct App {
     src_h: u32,
     fps_timer: Instant,
     fps_count: u32,
+    fps_emu_total: Duration,
 }
 
 impl App {
@@ -515,7 +844,7 @@ impl App {
             emu: None,
             model,
             window: None,
-            surface: None,
+            gpu: None,
             _menu: None,
             audio_ring,
             _audio_stream: stream,
@@ -531,6 +860,7 @@ impl App {
             src_h: GB_H,
             fps_timer: Instant::now(),
             fps_count: 0,
+            fps_emu_total: Duration::ZERO,
         }
     }
 
@@ -666,20 +996,25 @@ impl App {
 
         emu.step_frame();
 
-        // Audio: resample 96kHz → 48kHz (2:1 decimation)
+        // Audio: resample 96kHz → 48kHz (2:1 decimation), push directly to ring
         let samples = emu.bus.apu.drain_samples();
         if !samples.is_empty() {
-            let mut resampled = Vec::with_capacity(samples.len() / 2);
-            for i in (0..samples.len()).step_by(2) {
-                resampled.push(samples[i]);
-            }
             let mut ring = self.audio_ring.lock().unwrap();
-            ring.push(&resampled);
+            for i in (0..samples.len()).step_by(2) {
+                let wp = ring.write_pos;
+                let cap = ring.capacity;
+                let next = (wp + 1) % cap;
+                if next == ring.read_pos {
+                    ring.read_pos = (ring.read_pos + 1) % cap;
+                }
+                ring.buf[wp] = samples[i];
+                ring.write_pos = next;
+            }
         }
 
-        // Render via softbuffer
-        let surface = match self.surface.as_mut() {
-            Some(s) => s,
+        // Render via wgpu
+        let gpu = match self.gpu.as_mut() {
+            Some(g) => g,
             None => return,
         };
         let window = match self.window.as_ref() {
@@ -703,27 +1038,11 @@ impl App {
             return;
         }
 
-        surface
-            .resize(
-                NonZeroU32::new(win_w as u32).unwrap(),
-                NonZeroU32::new(win_h as u32).unwrap(),
-            )
-            .unwrap();
-
-        let mut buf = surface.buffer_mut().unwrap();
+        gpu.resize(win_w as u32, win_h as u32);
 
         // Apply scaling filter
-        let is_resizable = self.scale_filter == scaling::ScaleFilter::Nearest
-            || self.scale_filter.is_resizable();
-
-        // Aspect-correct display dimensions
-        let src_aspect = sw as f64 / sh as f64;
-        let win_aspect = win_w as f64 / win_h as f64;
-        let (disp_w, disp_h) = if win_aspect > src_aspect {
-            ((win_h as f64 * src_aspect) as usize, win_h)
-        } else {
-            (win_w, (win_w as f64 / src_aspect) as usize)
-        };
+        let disp_w = win_w;
+        let disp_h = win_h;
 
         let scaled;
         let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) = match self.scale_filter {
@@ -809,66 +1128,24 @@ impl App {
             scaling::ScaleFilter::Vectorize => {
                 let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let cache = self.vec_cache.get_or_insert_with(vectorize::VectorizeCache::new);
-                let (paths, bg_color) = cache.get_paths(fb, sw, sh);
-                let (vbuf, vw, vh) = vectorize::rasterize::rasterize_scaled(
-                    paths, sw, sh, bg_color, scale,
-                );
-                scaled = vbuf;
-                (&scaled, vw, vh)
+                let (raster, vw, vh) = cache.rasterize(fb, sw, sh, scale);
+                (raster, vw, vh)
             }
         };
 
-        // Compute output rect with aspect ratio preservation
-        let out_w;
-        let out_h;
-        let offset_x;
-        let offset_y;
-        if is_resizable || frame_w == disp_w {
-            // Filter already produced display-sized output or nearest (scale to fit)
-            if frame_w == sw && frame_h == sh {
-                // Nearest: scale to window
-                let s = (win_w as f64 / sw as f64).min(win_h as f64 / sh as f64);
-                out_w = (sw as f64 * s) as usize;
-                out_h = (sh as f64 * s) as usize;
-            } else {
-                out_w = frame_w;
-                out_h = frame_h;
-            }
-            offset_x = (win_w - out_w) / 2;
-            offset_y = (win_h - out_h) / 2;
-        } else {
-            // Fixed-factor filter: nearest-neighbor scale to window
-            let s = (win_w as f64 / frame_w as f64).min(win_h as f64 / frame_h as f64).max(1.0);
-            out_w = (frame_w as f64 * s) as usize;
-            out_h = (frame_h as f64 * s) as usize;
-            offset_x = win_w.saturating_sub(out_w) / 2;
-            offset_y = win_h.saturating_sub(out_h) / 2;
-        }
-
-        // Clear letterbox/pillarbox to black
-        buf.fill(0);
-
-        // Blit frame to window buffer with nearest-neighbor scaling
-        for dy in 0..out_h.min(win_h) {
-            let sy = dy * frame_h / out_h;
-            let dst_row = (offset_y + dy) * win_w + offset_x;
-            if offset_y + dy >= win_h { break; }
-            for dx in 0..out_w.min(win_w - offset_x) {
-                let sx = dx * frame_w / out_w;
-                let argb = frame_pixels[sy * frame_w + sx];
-                buf[dst_row + dx] = argb & 0x00FFFFFF;
-            }
-        }
-
-        buf.present().unwrap();
+        gpu.render(frame_pixels, frame_w as u32, frame_h as u32, self.src_w, self.src_h);
 
         // FPS counter
+        let emu_time = self.frame_start.elapsed();
         self.fps_count += 1;
+        self.fps_emu_total += emu_time;
         let elapsed = self.fps_timer.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let fps = self.fps_count as f64 / elapsed.as_secs_f64();
-            eprintln!("FPS: {:.1}", fps);
+            let avg_emu_ms = self.fps_emu_total.as_secs_f64() * 1000.0 / self.fps_count as f64;
+            eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
             self.fps_count = 0;
+            self.fps_emu_total = Duration::ZERO;
             self.fps_timer = Instant::now();
         }
     }
@@ -912,13 +1189,11 @@ impl ApplicationHandler for App {
             // For now, skip — muda will use gtk_application_set_menubar if available
         }
 
-        // Create softbuffer surface
-        let context = softbuffer::Context::new(window.clone()).unwrap();
-        let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+        let gpu = GpuRenderer::new(window.clone());
 
         self._menu = Some(menu);
         self.window = Some(window);
-        self.surface = Some(surface);
+        self.gpu = Some(gpu);
 
         // Load ROM if provided on command line
         if let Some(path) = self.rom_path.clone() {
