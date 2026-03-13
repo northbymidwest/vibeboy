@@ -83,28 +83,6 @@ impl HqxScale {
 pub use xbr::XbrScale;
 pub use xbrz::XbrzScale;
 
-/// OmniScale factor (works at any integer scale).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OmniScaleFactor {
-    X2,
-    X3,
-    X4,
-    X5,
-    X6,
-}
-
-impl OmniScaleFactor {
-    pub fn factor(self) -> u32 {
-        match self {
-            OmniScaleFactor::X2 => 2,
-            OmniScaleFactor::X3 => 3,
-            OmniScaleFactor::X4 => 4,
-            OmniScaleFactor::X5 => 5,
-            OmniScaleFactor::X6 => 6,
-        }
-    }
-}
-
 /// Scaling filter for the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaleFilter {
@@ -125,8 +103,8 @@ pub enum ScaleFilter {
     Edi,
     /// Arbitrary-resolution OmniScale (scales to display size).
     OmniScale,
-    /// Fixed-factor OmniScale legacy variant.
-    OmniScaleLegacy(OmniScaleFactor),
+    /// Arbitrary-resolution OmniScale legacy variant (scales to display size).
+    OmniScaleLegacy,
     /// Anti-aliased nearest neighbor (scales to display size).
     AaNearestNeighbor,
     /// Kopf-Lischinski vectorization with full B-spline optimization.
@@ -143,7 +121,8 @@ impl ScaleFilter {
         match self {
             ScaleFilter::Nearest
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
-            | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
+            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
+            | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle => 2,
@@ -152,15 +131,26 @@ impl ScaleFilter {
             ScaleFilter::Xbrz(x) => x.factor(),
             ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
             | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
-            ScaleFilter::OmniScaleLegacy(f) => f.factor(),
         }
     }
 
-    /// Whether this filter scales to arbitrary display dimensions.
+    /// Whether the window should be freely resizable with this filter.
     pub fn is_resizable(self) -> bool {
         matches!(self,
+            ScaleFilter::Nearest
+            | ScaleFilter::Bilinear | ScaleFilter::Bicubic
+            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
+            | ScaleFilter::AaNearestNeighbor
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
+    }
+
+    /// Whether this filter produces output scaled to the display dimensions.
+    /// Nearest is resizable but relies on GPU texture stretching instead.
+    pub fn scales_to_display(self) -> bool {
+        matches!(self,
             ScaleFilter::Bilinear | ScaleFilter::Bicubic
-            | ScaleFilter::OmniScale | ScaleFilter::AaNearestNeighbor
+            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
+            | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
     }
 }

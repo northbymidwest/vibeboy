@@ -159,15 +159,14 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
-        "omniscale", "omniscale-legacy", "omniscale-legacy2x",
-        "omniscale-legacy3x", "omniscale-legacy4x", "omniscale-legacy5x", "omniscale-legacy6x",
+        "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive",
     ];
     let lower = s.to_lowercase();
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -197,11 +196,7 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
         "dcci" => scaling::ScaleFilter::Dcci,
         "edi" => scaling::ScaleFilter::Edi,
         "omniscale" => scaling::ScaleFilter::OmniScale,
-        "omniscale-legacy" | "omniscale-legacy2x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X2),
-        "omniscale-legacy3x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X3),
-        "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
-        "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
-        "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
+        "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
         "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
         "vectorize" => scaling::ScaleFilter::Vectorize,
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
@@ -993,6 +988,7 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("DCCI",             ScaleFilter::Dcci),
         ("EDI",              ScaleFilter::Edi),
         ("OmniScale",        ScaleFilter::OmniScale),
+        ("OmniScale Legacy", ScaleFilter::OmniScaleLegacy),
         ("AA Nearest",       ScaleFilter::AaNearestNeighbor),
         ("Vectorize",        ScaleFilter::Vectorize),
         ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
@@ -2536,10 +2532,9 @@ fn main() {
                         scaled = scaling::omniscale::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
                         (&scaled, disp_w, disp_h)
                     }
-                    scaling::ScaleFilter::OmniScaleLegacy(f) => {
-                        let fac = f.factor() as usize;
-                        scaled = scaling::omniscale_legacy::scale(raw_src, src_w, src_h, f.factor());
-                        (&scaled, src_w * fac, src_h * fac)
+                    scaling::ScaleFilter::OmniScaleLegacy => {
+                        scaled = scaling::omniscale_legacy::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
+                        (&scaled, disp_w, disp_h)
                     }
                     scaling::ScaleFilter::AaNearestNeighbor => {
                         scaled = scaling::aa_nearest::scale(raw_src, src_w, src_h, disp_w, disp_h);

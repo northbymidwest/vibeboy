@@ -104,15 +104,14 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
-        "omniscale", "omniscale-legacy", "omniscale-legacy2x",
-        "omniscale-legacy3x", "omniscale-legacy4x", "omniscale-legacy5x", "omniscale-legacy6x",
+        "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive",
     ];
     let lower = s.to_lowercase();
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -279,11 +278,7 @@ fn main() {
         "dcci" => scaling::ScaleFilter::Dcci,
         "edi" => scaling::ScaleFilter::Edi,
         "omniscale" => scaling::ScaleFilter::OmniScale,
-        "omniscale-legacy" | "omniscale-legacy2x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X2),
-        "omniscale-legacy3x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X3),
-        "omniscale-legacy4x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X4),
-        "omniscale-legacy5x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X5),
-        "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
+        "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
         "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
         "vectorize" => scaling::ScaleFilter::Vectorize,
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
@@ -316,6 +311,7 @@ fn main() {
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
+    let scales_to_display = scale_filter.scales_to_display();
     let is_vectorize = matches!(scale_filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive);
     let mut vec_cache = match scale_filter {
         scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
@@ -524,7 +520,7 @@ fn main() {
             let sw = src_w as usize;
             let sh = src_h as usize;
 
-            // For resizable filters, compute aspect-correct display area
+            // For resizable windows, compute aspect-correct display area
             let (disp_w, disp_h) = if is_resizable {
                 let (ww, wh) = canvas.window().size();
                 let src_aspect = src_w as f64 / src_h as f64;
@@ -597,8 +593,8 @@ fn main() {
                     scaled = scaling::omniscale::scale_to(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
-                scaling::ScaleFilter::OmniScaleLegacy(f) => {
-                    scaled = scaling::omniscale_legacy::scale(raw_src, sw, sh, f.factor());
+                scaling::ScaleFilter::OmniScaleLegacy => {
+                    scaled = scaling::omniscale_legacy::scale_to(raw_src, sw, sh, disp_w, disp_h);
                     &scaled
                 }
                 scaling::ScaleFilter::AaNearestNeighbor => {
@@ -619,7 +615,7 @@ fn main() {
             let is_vec = matches!(scale_filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive);
             let (fw, fh) = if is_vec {
                 vec_out
-            } else if is_resizable {
+            } else if scales_to_display {
                 (disp_w, disp_h)
             } else {
                 (tex_w as usize, tex_h as usize)

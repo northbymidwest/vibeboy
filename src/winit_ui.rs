@@ -438,6 +438,7 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_dcci",        "DCCI",          ScaleFilter::Dcci),
         ("filter_edi",         "EDI",           ScaleFilter::Edi),
         ("filter_omniscale",   "OmniScale",     ScaleFilter::OmniScale),
+        ("filter_omniscale_l", "OmniScale Legacy", ScaleFilter::OmniScaleLegacy),
         ("filter_aanear",      "AA Nearest",    ScaleFilter::AaNearestNeighbor),
         ("filter_vectorize",   "Vectorize",           ScaleFilter::Vectorize),
         ("filter_vec_adapt",   "Vectorize Adaptive",  ScaleFilter::VectorizeAdaptive),
@@ -1113,10 +1114,9 @@ impl App {
                 scaled = scaling::omniscale::scale_to(fb, sw, sh, disp_w, disp_h);
                 (&scaled, disp_w, disp_h)
             }
-            scaling::ScaleFilter::OmniScaleLegacy(f) => {
-                let fac = f.factor() as usize;
-                scaled = scaling::omniscale_legacy::scale(fb, sw, sh, f.factor());
-                (&scaled, sw * fac, sh * fac)
+            scaling::ScaleFilter::OmniScaleLegacy => {
+                scaled = scaling::omniscale_legacy::scale_to(fb, sw, sh, disp_w, disp_h);
+                (&scaled, disp_w, disp_h)
             }
             scaling::ScaleFilter::AaNearestNeighbor => {
                 scaled = scaling::aa_nearest::scale(fb, sw, sh, disp_w, disp_h);
