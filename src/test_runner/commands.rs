@@ -181,6 +181,8 @@ pub fn cmd_trace_timer(
     let model = force_model.unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
     let br = resolve_boot_rom(boot, bootrom, model);
     let mut emu = Emulator::new(rom, br, None, model, None);
+    emu.headless = true;
+    emu.bus.apu.headless = true;
     if boot || bootrom.is_some() {
         let mut history: Vec<(u16, u8, u16, u16)> = Vec::new();
         loop {
@@ -250,6 +252,8 @@ pub fn cmd_calibrate(path: &Path) {
     for model in &models {
         if let Some(br) = load_boot_rom(*model) {
             let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
+            emu.headless = true;
+            emu.bus.apu.headless = true;
             for _ in 0..100_000_000u64 {
                 if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
                     let div_val = emu.bus.read_byte(0xFF04);

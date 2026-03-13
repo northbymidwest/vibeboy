@@ -625,6 +625,9 @@ pub struct Apu {
     // Output buffer (interleaved L/R f32 pairs)
     pub sample_buf: Vec<f32>,
 
+    // When true, skip sample_buf accumulation (headless / test runner mode)
+    pub headless: bool,
+
     // BLIP buffer for band-limited resampling
     blip: BlipBuf,
     prev_left: i32,
@@ -663,6 +666,7 @@ impl Apu {
             pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
+            headless: false,
             blip: BlipBuf::new(),
             prev_left: 0,
             prev_right: 0,
@@ -709,6 +713,7 @@ impl Apu {
             pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
+            headless: false,
             blip: BlipBuf::new(),
             prev_left: 0,
             prev_right: 0,
@@ -1433,8 +1438,10 @@ impl Apu {
         self.hpf_prev_in_l = l;
         self.hpf_prev_in_r = r;
 
-        self.sample_buf.push(self.hpf_left);
-        self.sample_buf.push(self.hpf_right);
+        if !self.headless {
+            self.sample_buf.push(self.hpf_left);
+            self.sample_buf.push(self.hpf_right);
+        }
     }
 
     // ── Main step ──────────────────────────────────────────────────────────

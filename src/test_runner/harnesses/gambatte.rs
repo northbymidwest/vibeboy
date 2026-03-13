@@ -121,6 +121,8 @@ impl TestHarness for GambatteHarness {
         };
 
         let mut emu = Emulator::new(rom, None, None, model, None);
+        emu.headless = true;
+        emu.bus.apu.headless = true;
 
         // Run for 15 frames
         for _ in 0..15 {

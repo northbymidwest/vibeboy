@@ -73,6 +73,8 @@ impl TestHarness for TearoomHarness {
         };
 
         let mut emu = Emulator::new(rom, None, None, model, None);
+        emu.headless = true;
+        emu.bus.apu.headless = true;
         let hit = emu.run_until_breakpoint(300);
         if hit.is_none() {
             return TestResult::Timeout;

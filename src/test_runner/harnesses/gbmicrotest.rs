@@ -20,6 +20,8 @@ impl TestHarness for GbMicrotestHarness {
         };
         let model = self.force_model.unwrap_or(GbModel::Dmg);
         let mut emu = Emulator::new(rom, None, None, model, None);
+        emu.headless = true;
+        emu.bus.apu.headless = true;
         // Run for 2 frames (sufficient per gbmicrotest docs)
         for _ in 0..2 {
             emu.step_frame();

@@ -34,6 +34,8 @@ pub struct Emulator {
     save_slots: [Option<Box<Snapshot>>; 9],
     /// True while the user is holding the rewind key.
     pub rewinding: bool,
+    /// When true, skip rewind snapshots and audio accumulation (test runner mode).
+    pub headless: bool,
 }
 
 impl Emulator {
@@ -102,6 +104,7 @@ impl Emulator {
             rewind_buffer: VecDeque::with_capacity(REWIND_BUFFER_CAPACITY),
             save_slots: Default::default(),
             rewinding: false,
+            headless: false,
         }
     }
 
@@ -113,7 +116,7 @@ impl Emulator {
     /// Run until one full frame has been rendered (VBlank).
     pub fn step_frame(&mut self) {
         // Push a snapshot for rewind (before emulating this frame)
-        if !self.rewinding {
+        if !self.rewinding && !self.headless {
             let snap = self.save_snapshot();
             if self.rewind_buffer.len() >= REWIND_BUFFER_CAPACITY {
                 self.rewind_buffer.pop_front();

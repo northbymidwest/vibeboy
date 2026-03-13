@@ -24,6 +24,8 @@ impl TestHarness for BlarggHarness {
             .unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
         let br: Option<Vec<u8>> = None;
         let mut emu = Emulator::new(rom, br, None, model, None);
+        emu.headless = true;
+        emu.bus.apu.headless = true;
         let output = emu.run_until_serial_result(6000);
         if verbose && !output.is_empty() {
             for line in output.lines() {

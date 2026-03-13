@@ -5,7 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emulator {
-    Emulator::new(rom, boot_rom, None, model, None)
+    let mut emu = Emulator::new(rom, boot_rom, None, model, None);
+    emu.headless = true;
+    emu.bus.apu.headless = true;
+    emu
 }
 
 pub fn collect_roms(dir: &Path, out: &mut Vec<PathBuf>) {

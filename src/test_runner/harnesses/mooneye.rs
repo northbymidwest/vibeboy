@@ -42,6 +42,8 @@ impl TestHarness for MooneyeHarness {
             None
         };
         let mut emu = Emulator::new(rom, br, None, model, None);
+        emu.headless = true;
+        emu.bus.apu.headless = true;
         match emu.run_until_breakpoint(300) {
             Some(regs) => {
                 if mooneye_passed(regs) {
