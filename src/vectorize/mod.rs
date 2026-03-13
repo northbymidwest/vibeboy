@@ -133,22 +133,10 @@ pub fn vectorize_core(
 fn vectorize_core_with_buf(
     pixels: &[u32], width: usize, height: usize, qbuf: &mut Vec<u32>,
 ) -> (Vec<contour::ColorPath>, u32) {
-    let t0 = std::time::Instant::now();
     quantize_pixels_into(pixels, qbuf);
-    let t1 = std::time::Instant::now();
     let graph = graph::build(qbuf, width, height);
-    let t2 = std::time::Instant::now();
     let paths = contour::extract_cells_smooth(qbuf, &graph);
-    let t3 = std::time::Instant::now();
     let (bg_color, _) = detect_background_color(qbuf, width, height);
-    let t4 = std::time::Instant::now();
-    eprintln!("[vectorize] {}x{}: quantize={:.2}ms graph={:.2}ms contour={:.2}ms bg={:.2}ms total={:.2}ms",
-        width, height,
-        t1.duration_since(t0).as_secs_f64() * 1000.0,
-        t2.duration_since(t1).as_secs_f64() * 1000.0,
-        t3.duration_since(t2).as_secs_f64() * 1000.0,
-        t4.duration_since(t3).as_secs_f64() * 1000.0,
-        t4.duration_since(t0).as_secs_f64() * 1000.0);
     (paths, bg_color)
 }
 
@@ -216,7 +204,6 @@ fn detect_and_collapse(pixels: &[u32], width: usize, height: usize) -> (Vec<u32>
         }
     }
 
-    eprintln!("Detected ~{}x upscaling: {}x{} → {}x{}", scale, width, height, nw, nh);
     (native, nw, nh)
 }
 

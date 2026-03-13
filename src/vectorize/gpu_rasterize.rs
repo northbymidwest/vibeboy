@@ -129,7 +129,6 @@ impl GpuRasterizer {
             cache: None,
         });
 
-        eprintln!("GPU rasterizer initialized: {}", adapter.get_info().name);
         Some(Self { device, queue, pipeline, bind_group_layout })
     }
 
