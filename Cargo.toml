@@ -25,6 +25,12 @@ svg = "0.18.0"
 wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+muda = { version = "0.15", optional = true }
+cpal = { version = "0.15", optional = true }
+rfd = { version = "0.15", optional = true }
+nokhwa = { version = "0.10", features = ["input-native", "output-threaded"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
@@ -38,6 +44,12 @@ name = "vibeboy_cocoa"
 path = "src/cocoa_ui.rs"
 required-features = ["macos-ui"]
 
+[[bin]]
+name = "vibeboy_winit"
+path = "src/winit_ui.rs"
+required-features = ["winit-ui"]
+
 [features]
 macos-ui = []
 gpu = ["wgpu", "bytemuck", "pollster"]
+winit-ui = ["winit", "softbuffer", "muda", "cpal", "rfd", "nokhwa"]

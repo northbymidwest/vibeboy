@@ -8,6 +8,7 @@ use crate::sgb::Sgb;
 use crate::timer::Timer;
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// OAM DMA state.
 ///
@@ -152,10 +153,10 @@ fn ram_random(state: &mut u64) -> u8 {
 /// CGB/AGB: random fill.
 fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
     let mut wram = [[0u8; 0x1000]; 8];
-    let mut rng: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    let mut rng: u64 = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x12345678);
     let bank_count = if model.is_cgb() { 8 } else { 2 };
     for bank in 0..bank_count {
         for i in 0..0x1000 {
@@ -181,10 +182,10 @@ fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
 /// CGB/AGB: random fill.
 fn init_hram(model: GbModel) -> [u8; 0x7F] {
     let mut hram = [0u8; 0x7F];
-    let mut rng: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    let mut rng: u64 = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x12345678);
     for i in 0..0x7F {
         hram[i] = if model.is_cgb() {
             ram_random(&mut rng)
@@ -491,7 +492,11 @@ impl Bus {
         match addr {
             0x0000..=0x7FFF => self.cart.read_rom(addr),
             0x8000..=0x9FFF => {
-                if !self.ppu.vram_accessible { 0xFF } else { self.ppu.read_vram(addr) }
+                if !self.ppu.vram_accessible {
+                    0xFF
+                } else {
+                    self.ppu.read_vram(addr)
+                }
             }
             0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize],
@@ -569,7 +574,9 @@ impl Bus {
         match addr {
             0x0000..=0x7FFF => self.cart.write_rom(addr, val),
             0x8000..=0x9FFF => {
-                if self.ppu.vram_write_accessible { self.ppu.write_vram(addr, val); }
+                if self.ppu.vram_write_accessible {
+                    self.ppu.write_vram(addr, val);
+                }
             }
             0xA000..=0xBFFF => self.cart.write_ram(addr, val),
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = val,

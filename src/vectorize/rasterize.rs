@@ -105,6 +105,7 @@ pub fn rasterize_scaled(
     bg_color: u32,
     scale: f64,
 ) -> (Vec<u32>, usize, usize) {
+    let t0 = std::time::Instant::now();
     let out_w = (width as f64 * scale).round() as usize;
     let out_h = (height as f64 * scale).round() as usize;
     let mut buffer = vec![bg_color; out_w * out_h];
@@ -121,6 +122,7 @@ pub fn rasterize_scaled(
     let mut bucket_heads: Vec<u32> = Vec::new();
     let mut bucket_next: Vec<u32> = Vec::new();
 
+    let mut paths_rendered = 0usize;
     for path in paths {
         if path.segments.is_empty() {
             continue;
@@ -133,6 +135,7 @@ pub fn rasterize_scaled(
         if edges.is_empty() {
             continue;
         }
+        paths_rendered += 1;
 
         // Linked-list bucket sort: O(n) with zero per-bucket allocation.
         bucket_heads.clear();
@@ -166,6 +169,11 @@ pub fn rasterize_scaled(
             &mut coverage,
         );
     }
+
+    let t1 = std::time::Instant::now();
+    eprintln!("[rasterize] {}x{} → {}x{} ({} paths): {:.2}ms",
+        width, height, out_w, out_h, paths_rendered,
+        t1.duration_since(t0).as_secs_f64() * 1000.0);
 
     (buffer, out_w, out_h)
 }

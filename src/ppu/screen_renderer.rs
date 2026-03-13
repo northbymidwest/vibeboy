@@ -39,11 +39,11 @@ pub fn render_frame(ppu: &mut Ppu) {
                 let tile_id = ppu.vram[0][map_addr];
 
                 let attrs = if ppu.cgb_mode { ppu.vram[1][map_addr] } else { 0 };
-                let vram_bank = if attrs & 0x08 != 0 { 1 } else { 0 };
-                let x_flip = attrs & 0x20 != 0;
-                let y_flip = attrs & 0x40 != 0;
-                let bg_priority = attrs & 0x80 != 0;
-                let cgb_palette = (attrs & 0x07) as usize;
+                let vram_bank = if attrs & 0x08 != 0 && !ppu.dmg_compat { 1 } else { 0 };
+                let x_flip = attrs & 0x20 != 0 && !ppu.dmg_compat;
+                let y_flip = attrs & 0x40 != 0 && !ppu.dmg_compat;
+                let bg_priority = attrs & 0x80 != 0 && !ppu.dmg_compat;
+                let cgb_palette = if ppu.dmg_compat { 0 } else { (attrs & 0x07) as usize };
 
                 let actual_fine_y = if y_flip { 7 - fine_y } else { fine_y };
                 let actual_fine_x = if x_flip { 7 - fine_x } else { fine_x };
@@ -92,11 +92,11 @@ pub fn render_frame(ppu: &mut Ppu) {
                 let tile_id = ppu.vram[0][map_addr];
 
                 let attrs = if ppu.cgb_mode { ppu.vram[1][map_addr] } else { 0 };
-                let vram_bank = if attrs & 0x08 != 0 { 1 } else { 0 };
-                let x_flip = attrs & 0x20 != 0;
-                let y_flip = attrs & 0x40 != 0;
-                let bg_priority = attrs & 0x80 != 0;
-                let cgb_palette = (attrs & 0x07) as usize;
+                let vram_bank = if attrs & 0x08 != 0 && !ppu.dmg_compat { 1 } else { 0 };
+                let x_flip = attrs & 0x20 != 0 && !ppu.dmg_compat;
+                let y_flip = attrs & 0x40 != 0 && !ppu.dmg_compat;
+                let bg_priority = attrs & 0x80 != 0 && !ppu.dmg_compat;
+                let cgb_palette = if ppu.dmg_compat { 0 } else { (attrs & 0x07) as usize };
 
                 let actual_fine_y = if y_flip { 7 - fine_y } else { fine_y };
                 let actual_fine_x = if x_flip { 7 - fine_x } else { fine_x };
@@ -151,8 +151,12 @@ pub fn render_frame(ppu: &mut Ppu) {
                 let x_flip = attrs & 0x20 != 0;
                 let y_flip = attrs & 0x40 != 0;
                 let bg_over = attrs & 0x80 != 0;
-                let vram_bank = if ppu.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
-                let cgb_palette = (attrs & 0x07) as usize;
+                let vram_bank = if ppu.cgb_mode && !ppu.dmg_compat && attrs & 0x08 != 0 { 1 } else { 0 };
+                let cgb_palette = if ppu.dmg_compat {
+                    if attrs & 0x10 != 0 { 1usize } else { 0 }
+                } else {
+                    (attrs & 0x07) as usize
+                };
                 let dmg_palette = if attrs & 0x10 != 0 { 1u8 } else { 0u8 };
 
                 let sprite_y = (ly as u8).wrapping_sub(sy.wrapping_sub(16));

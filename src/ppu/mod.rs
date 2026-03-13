@@ -791,8 +791,9 @@ impl Ppu {
             return 0;
         }
 
-        // Alt renderers: simplified timing without FIFO
-        if self.renderer_mode != RendererMode::Fifo {
+        // Screen renderer: simplified timing without FIFO
+        // Line renderer: uses FIFO timing but overwrites scanlines with line renderer
+        if self.renderer_mode == RendererMode::Screen {
             return self.step_alt(cycles);
         }
 
@@ -929,6 +930,13 @@ impl Ppu {
                 self.tick_mode3();
                 // Check if scanline is complete
                 if self.position_in_line >= 160 {
+                    // Line renderer: overwrite FIFO output with line-rendered scanline
+                    // Uses FIFO timing for accuracy, line renderer for rendering.
+                    if self.renderer_mode == RendererMode::Line {
+                        self.alt_window_line_used = false;
+                        line_renderer::render_scanline(self);
+                        // Don't track window_line_counter here — FIFO already does it below
+                    }
                     if self.cgb_mode {
                         // Palette stays blocked into mode 0:
                         // Single-speed: 5T after mode 3 ends
@@ -2401,7 +2409,7 @@ impl Ppu {
 
 
                 if lcd_was_on && !lcd_now_on {
-                    // LCD off: reset LY, dot, mode; preserve coincidence bit
+// LCD off: reset LY, dot, mode; preserve coincidence bit
                     // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
                     self.ly = 0;
                     self.visible_ly = 0;
@@ -2422,7 +2430,7 @@ impl Ppu {
                         *p = 0x00FFFFFF;
                     }
                 } else if !lcd_was_on && lcd_now_on {
-                    // LCD on: start at line 0, mode reads as 0 initially
+// LCD on: start at line 0, mode reads as 0 initially
                     // DMG first line is ~449T (7T shorter): 1T initial sleep + 8T
                     // phantom cycles_for_line adjustment that shortens Mode 0.
                     self.ly = 0;
@@ -2607,6 +2615,11 @@ impl Ppu {
             // End of scanline (456 dots)
             if self.dot >= 456 {
                 self.dot = 0;
+
+                // Check frame_ready BEFORE incrementing ly, so that the
+                // post-boot state (ly=0, mode=1) correctly triggers frame_ready
+                // on the first line wrap, matching FIFO behavior.
+                let prev_ly = self.ly;
                 self.ly = self.ly.wrapping_add(1);
 
                 if self.ly >= 154 {
@@ -2621,6 +2634,14 @@ impl Ppu {
                     self.stat |= 0x04;
                 } else {
                     self.stat &= !0x04;
+                }
+
+                if (self.ly == 0 || prev_ly == 0) && self.mode == 1 {
+                    // Frame complete: either ly wrapped 153→0, or we were at ly=0
+                    // in VBlank (post-boot initial state) and just advanced to ly=1.
+                    self.frame_ready = true;
+                    self.window_line_counter = 0;
+                    self.wy_triggered = false;
                 }
 
                 if self.ly < 144 {
@@ -2649,8 +2670,13 @@ impl Ppu {
                     self.oam_write_accessible = true;
                     self.vram_accessible = true;
                     self.vram_write_accessible = true;
-                    self.if_flags |= 0x01; // VBlank IF
                     self.hblank_entered = false;
+
+                    if !self.cgb_mode {
+                        // DMG: VBlank IF at dot 0
+                        self.if_flags |= 0x01;
+                    }
+                    // CGB: VBlank IF deferred to dot 2 (matches FIFO)
 
                     // VBlank STAT interrupt
                     if self.stat & 0x10 != 0 {
@@ -2661,10 +2687,6 @@ impl Ppu {
                     if self.renderer_mode == RendererMode::Screen {
                         screen_renderer::render_frame(self);
                     }
-
-                    self.frame_ready = true;
-                    self.window_line_counter = 0;
-                    self.wy_triggered = false;
                 }
 
                 // LYC coincidence STAT interrupt
@@ -2673,22 +2695,46 @@ impl Ppu {
                 }
             }
 
+            // CGB: deferred VBlank IF at dot 2 of line 144 (matches FIFO)
+            if self.cgb_mode && self.ly == 144 && self.dot == 2 {
+                self.if_flags |= 0x01;
+            }
+
             // Mode transitions within a visible line
             if self.ly < 144 {
                 match self.mode {
+                    0 if self.lcd_first_line && self.dot >= 78 => {
+                        // LCD first line: skip mode 2, go directly to mode 3 at dot 78
+                        // (matching FIFO: mode bits stay 0 then jump to mode 3)
+                        self.lcd_first_line = false;
+                        self.mode = 3;
+                        self.stat = (self.stat & !0x03) | 0x03;
+                        // Don't block VRAM/OAM in step_alt — scanline already rendered
+                        // at mode 3 start, and blocking causes false VRAM write failures
+                        // that diverge game state from FIFO.
+                        if self.ly == self.wy {
+                            self.wy_triggered = true;
+                        }
+                        // Line renderer: render scanline
+                        if self.renderer_mode == RendererMode::Line {
+                            self.alt_window_line_used = false;
+                            line_renderer::render_scanline(self);
+                            if self.alt_window_line_used {
+                                self.window_line_counter =
+                                    self.window_line_counter.wrapping_add(1);
+                            }
+                        }
+                    }
                     2 => {
                         // Mode 2 → Mode 3 at dot 80
                         if self.dot == 80 {
                             self.mode = 3;
                             self.stat = (self.stat & !0x03) | 0x03;
-                            self.oam_accessible = false;
-                            self.vram_accessible = false;
-                            self.vram_write_accessible = false;
-                            self.cgb_palettes_blocked = true;
+                            // Don't block VRAM/OAM — see comment in lcd_first_line branch
 
                             // Line renderer: render scanline at mode 3 start
                             if self.renderer_mode == RendererMode::Line {
-                                self.alt_window_line_used = false;
+                                    self.alt_window_line_used = false;
                                 line_renderer::render_scanline(self);
                                 if self.alt_window_line_used {
                                     self.window_line_counter =
@@ -2698,15 +2744,10 @@ impl Ppu {
                         }
                     }
                     3 => {
-                        // Mode 3 → Mode 0 at dot 252 (fixed approximation)
+                        // Mode 3 → Mode 0 at dot 252
                         if self.dot == 252 {
                             self.mode = 0;
                             self.stat &= !0x03;
-                            self.oam_accessible = true;
-                            self.oam_write_accessible = true;
-                            self.vram_accessible = true;
-                            self.vram_write_accessible = true;
-                            self.cgb_palettes_blocked = false;
                             self.hblank_entered = true;
 
                             // Mode 0 STAT interrupt
