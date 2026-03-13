@@ -1,9 +1,9 @@
 //! xBRZ — pixel-art scaling by Zenju (2x–6x).
 //!
 //! A refined variant of xBR with improved edge detection using "dominance
-//! counting" — each corner tests how many of the surrounding pixels support
-//! a diagonal vs orthogonal edge, then applies steep/shallow line detection
-//! for more accurate sub-pixel blending.
+//! counting" — each corner tests two competing diagonal hypotheses from the
+//! extended neighborhood, then applies steep/shallow line detection for more
+//! accurate sub-pixel blending.
 
 use super::get;
 use super::color_dist;
@@ -33,9 +33,9 @@ impl XbrzScale {
 
 // ── Color equality threshold ────────────────────────────────────────────────
 
-const EQ_THRESHOLD: f32 = 30.0;
 const DOMINANT_DIR_THRESHOLD: f32 = 3.6;
 const STEEP_DIR_THRESHOLD: f32 = 2.2;
+const EQ_THRESHOLD: f32 = 30.0;
 
 #[inline(always)]
 fn colors_equal(a: u32, b: u32) -> bool {
@@ -46,6 +46,14 @@ fn colors_equal(a: u32, b: u32) -> bool {
 
 /// Sample a rotated 4x4 kernel for a given corner.
 /// rot: 0=BR, 1=BL (flip x), 2=TL (flip both), 3=TR (flip y)
+///
+/// Kernel layout (rot=0, BR orientation):
+/// ```text
+///   A(0)  B(1)  C(2)  D(3)
+///   E(4)  F(5)  G(6)  H(7)
+///   I(8)  J(9)  K(10) L(11)
+///   M(12) N(13) O(14) P(15)
+/// ```
 fn sample_kernel(src: &[u32], w: usize, h: usize, cx: isize, cy: isize, rot: u8) -> [u32; 16] {
     let (dx, dy) = match rot {
         0 => (1_isize, 1_isize),
@@ -73,43 +81,67 @@ enum BlendType {
     Dominant,
 }
 
-/// Classify corner blend type and steep/shallow flags from the rotated 4x4 kernel.
-/// Kernel layout (oriented toward BR corner):
-/// ```text
-///   0  1  2  3
-///   4  5  6  7
-///   8  9 10 11
-///  12 13 14 15
-/// ```
-/// p[5] = center, p[6] = right, p[9] = below, p[10] = diagonal
+/// Classify corner blend type using the Zenju two-diagonal comparison.
+///
+/// Compares two competing diagonal hypotheses:
+///   jg: support for anti-diagonal (G↔J, i.e. `/` direction)
+///   fk: support for main diagonal (F↔K, i.e. `\` direction)
+///
+/// If jg < fk, the anti-diagonal dominates → blend the K corner.
 fn classify_corner(p: &[u32; 16]) -> (BlendType, bool, bool) {
-    let f = p[5];
-    let g = p[6];
-    let j = p[9];
-    let k = p[10];
+    let f = p[5];   // center
+    let g = p[6];   // right of center
+    let j = p[9];   // below center
+    let k = p[10];  // diagonal (bottom-right of center)
 
+    // Early exit: if center equals diagonal, no edge to smooth
     if colors_equal(f, k) {
         return (BlendType::None, false, false);
     }
 
-    let d_fg = color_dist(f, g);
-    let d_fj = color_dist(f, j);
-    let d_gk = color_dist(g, k);
-    let d_jk = color_dist(j, k);
-
-    let diag_weight = d_fg + d_fj + d_gk + d_jk;
-    let ortho_weight = color_dist(f, k) * 2.0;
-
-    if diag_weight >= ortho_weight {
+    // Early exit: if horizontal edge (F→G) is at least as strong as
+    // the cross-diagonal edge (H→C), no diagonal blending needed
+    if color_dist(f, g) >= color_dist(p[7], p[2]) {
         return (BlendType::None, false, false);
     }
 
-    let is_dominant = diag_weight * DOMINANT_DIR_THRESHOLD < ortho_weight;
+    // Two-diagonal comparison (Zenju):
+    // jg measures support for the anti-diagonal (G↔J):
+    //   d(I,F) + d(K,H) + d(N,K) + d(L,G) + 4*d(G,J)
+    let jg = color_dist(p[8], p[5])
+        + color_dist(p[10], p[7])
+        + color_dist(p[13], p[10])
+        + color_dist(p[11], p[6])
+        + 4.0 * color_dist(p[6], p[9]);
 
-    let is_steep = d_fj + d_jk > STEEP_DIR_THRESHOLD * (d_fg + d_gk) &&
-                   !colors_equal(f, j) && !colors_equal(p[8], j);
-    let is_shallow = d_fg + d_gk > STEEP_DIR_THRESHOLD * (d_fj + d_jk) &&
-                     !colors_equal(f, g) && !colors_equal(p[2], g);
+    // fk measures support for the main diagonal (F↔K):
+    //   d(E,J) + d(G,N) + d(J,O) + d(F,L) + 4*d(F,K)
+    let fk = color_dist(p[4], p[9])
+        + color_dist(p[6], p[13])
+        + color_dist(p[9], p[14])
+        + color_dist(p[5], p[11])
+        + 4.0 * color_dist(p[5], p[10]);
+
+    if jg >= fk {
+        return (BlendType::None, false, false);
+    }
+
+    let is_dominant = DOMINANT_DIR_THRESHOLD * jg < fk;
+
+    // Steep: edge runs more vertically (toward J direction)
+    let d_fj = color_dist(f, j);
+    let d_jk = color_dist(j, k);
+    let d_fg = color_dist(f, g);
+    let d_gk = color_dist(g, k);
+
+    let is_steep = d_fj + d_jk > STEEP_DIR_THRESHOLD * (d_fg + d_gk)
+        && !colors_equal(f, j)
+        && !colors_equal(p[8], j);
+
+    // Shallow: edge runs more horizontally (toward G direction)
+    let is_shallow = d_fg + d_gk > STEEP_DIR_THRESHOLD * (d_fj + d_jk)
+        && !colors_equal(f, g)
+        && !colors_equal(p[2], g);
 
     let blend = if is_dominant { BlendType::Dominant } else { BlendType::Normal };
     (blend, is_steep, is_shallow)

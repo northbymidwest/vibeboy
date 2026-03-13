@@ -61,10 +61,9 @@ impl Neighborhood {
     }
 }
 
-/// xBR edge weight for the bottom-right corner direction.
-/// Compares diagonal vs orthogonal color distances to detect dominant edges.
+/// Hyllian xBR edge weight for a given corner direction.
 ///
-/// Neighborhood layout (indexed into the 5x5 grid):
+/// 5x5 neighborhood layout:
 /// ```text
 ///   0  1  2  3  4
 ///   5  6  7  8  9
@@ -72,27 +71,50 @@ impl Neighborhood {
 ///  15 16  17 18 19
 ///  20 21  22 23 24
 /// ```
+///
+/// Returns (wd1, wd2) where wd1 < wd2 indicates a diagonal edge
+/// toward the specified corner. E=12 is always the center pixel.
+///
+/// Formula (Hyllian):
+///   wd1 = d(E,C) + d(E,G) + d(I,F4) + d(I,H4) + 4*d(H,F)
+///   wd2 = d(H,D) + d(H,I4) + d(F,B) + d(F,I5) + 4*d(E,I)
+///
+/// Where for each corner:
+///   F = neighbor along axis 1, H = neighbor along axis 2
+///   I = diagonal corner, C = cross-diagonal from E
+///   G = opposite cross-diagonal from E
+///   F4, H4 = one beyond I in each axis direction
+///   I4, I5 = one beyond I in each axis direction (for wd2)
 #[inline(always)]
-fn edge_weight_br(n: &Neighborhood) -> (f32, f32) {
-    let p = &n.p;
-    // Diagonal weight (bottom-right direction: 6→18 diagonal)
-    let d_diag =
-        color_dist(p[12], p[18]) +
-        color_dist(p[12], p[8]) +
-        color_dist(p[16], p[22]) +
-        color_dist(p[7], p[14]) +
-        4.0 * color_dist(p[13], p[17]);
+fn edge_weight(p: &[u32; 25], corner: Corner) -> (f32, f32) {
+    let (c, f, g, h, i, f4, h4, d, i4, b, i5) = match corner {
+        // BR: F=right(13), H=below(17), I=BR(18)
+        Corner::Br => (8, 13, 16, 17, 18, 14, 22, 11, 23, 7, 19),
+        // BL: F=left(11), H=below(17), I=BL(16)
+        Corner::Bl => (6, 11, 18, 17, 16, 10, 22, 13, 21, 7, 15),
+        // TR: F=right(13), H=above(7), I=TR(8)
+        Corner::Tr => (18, 13, 6, 7, 8, 14, 2, 11, 3, 17, 9),
+        // TL: F=left(11), H=above(7), I=TL(6)
+        Corner::Tl => (16, 11, 8, 7, 6, 10, 2, 13, 1, 17, 5),
+    };
 
-    // Orthogonal weight (bottom and right edges)
-    let d_ortho =
-        color_dist(p[12], p[17]) +
-        color_dist(p[12], p[13]) +
-        color_dist(p[11], p[18]) +
-        color_dist(p[8], p[23]) +
-        4.0 * color_dist(p[7], p[16]);
+    let wd1 = color_dist(p[12], p[c])
+        + color_dist(p[12], p[g])
+        + color_dist(p[i], p[f4])
+        + color_dist(p[i], p[h4])
+        + 4.0 * color_dist(p[h], p[f]);
 
-    (d_diag, d_ortho)
+    let wd2 = color_dist(p[h], p[d])
+        + color_dist(p[h], p[i4])
+        + color_dist(p[f], p[b])
+        + color_dist(p[f], p[i5])
+        + 4.0 * color_dist(p[12], p[i]);
+
+    (wd1, wd2)
 }
+
+#[derive(Clone, Copy)]
+enum Corner { Br, Bl, Tr, Tl }
 
 // ── xBR2x ──────────────────────────────────────────────────────────────────
 
@@ -111,7 +133,7 @@ pub fn scale2x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             // Start with all center
             let mut out = [e; 4];
 
-            // Process all 4 corners by rotating the neighborhood
+            // Process all 4 corners
             xbr2x_corner(&n, &mut out);
 
             let dx = x * 2;
@@ -132,8 +154,8 @@ fn xbr2x_corner(n: &Neighborhood, out: &mut [u32; 4]) {
 
     // Bottom-right corner
     {
-        let (d_diag, d_ortho) = edge_weight_br(n);
-        if d_diag < d_ortho && !eq(p[12], p[18]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Br);
+        if wd1 < wd2 && !eq(p[12], p[18]) {
             let r = p[13];
             let d = p[17];
             if eq(r, d) {
@@ -146,22 +168,10 @@ fn xbr2x_corner(n: &Neighborhood, out: &mut [u32; 4]) {
         }
     }
 
-    // Bottom-left corner (mirror horizontally: swap left/right)
+    // Bottom-left corner
     {
-        let d_diag =
-            color_dist(p[12], p[16]) +
-            color_dist(p[12], p[6]) +
-            color_dist(p[18], p[20]) +
-            color_dist(p[7], p[10]) +
-            4.0 * color_dist(p[11], p[17]);
-        let d_ortho =
-            color_dist(p[12], p[17]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[16]) +
-            color_dist(p[6], p[21]) +
-            4.0 * color_dist(p[7], p[18]);
-
-        if d_diag < d_ortho && !eq(p[12], p[16]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Bl);
+        if wd1 < wd2 && !eq(p[12], p[16]) {
             let l = p[11];
             let d = p[17];
             if eq(l, d) {
@@ -174,22 +184,10 @@ fn xbr2x_corner(n: &Neighborhood, out: &mut [u32; 4]) {
         }
     }
 
-    // Top-right corner (mirror vertically: swap top/bottom)
+    // Top-right corner
     {
-        let d_diag =
-            color_dist(p[12], p[8]) +
-            color_dist(p[12], p[18]) +
-            color_dist(p[6], p[4]) +
-            color_dist(p[17], p[9]) +
-            4.0 * color_dist(p[13], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[13]) +
-            color_dist(p[11], p[8]) +
-            color_dist(p[18], p[3]) +
-            4.0 * color_dist(p[17], p[6]);
-
-        if d_diag < d_ortho && !eq(p[12], p[8]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tr);
+        if wd1 < wd2 && !eq(p[12], p[8]) {
             let r = p[13];
             let u = p[7];
             if eq(r, u) {
@@ -202,22 +200,10 @@ fn xbr2x_corner(n: &Neighborhood, out: &mut [u32; 4]) {
         }
     }
 
-    // Top-left corner (mirror both)
+    // Top-left corner
     {
-        let d_diag =
-            color_dist(p[12], p[6]) +
-            color_dist(p[12], p[16]) +
-            color_dist(p[8], p[0]) +
-            color_dist(p[17], p[5]) +
-            4.0 * color_dist(p[11], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[6]) +
-            color_dist(p[16], p[1]) +
-            4.0 * color_dist(p[17], p[8]);
-
-        if d_diag < d_ortho && !eq(p[12], p[6]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tl);
+        if wd1 < wd2 && !eq(p[12], p[6]) {
             let l = p[11];
             let u = p[7];
             if eq(l, u) {
@@ -267,8 +253,8 @@ fn xbr3x_corners(n: &Neighborhood, out: &mut [u32; 9]) {
 
     // Bottom-right corner: affects out[5], out[7], out[8]
     {
-        let (d_diag, d_ortho) = edge_weight_br(n);
-        if d_diag < d_ortho && !eq(p[12], p[18]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Br);
+        if wd1 < wd2 && !eq(p[12], p[18]) {
             let r = p[13];
             let d = p[17];
             if eq(r, d) {
@@ -287,20 +273,8 @@ fn xbr3x_corners(n: &Neighborhood, out: &mut [u32; 9]) {
 
     // Bottom-left corner: affects out[3], out[7], out[6]
     {
-        let d_diag =
-            color_dist(p[12], p[16]) +
-            color_dist(p[12], p[6]) +
-            color_dist(p[18], p[20]) +
-            color_dist(p[7], p[10]) +
-            4.0 * color_dist(p[11], p[17]);
-        let d_ortho =
-            color_dist(p[12], p[17]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[16]) +
-            color_dist(p[6], p[21]) +
-            4.0 * color_dist(p[7], p[18]);
-
-        if d_diag < d_ortho && !eq(p[12], p[16]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Bl);
+        if wd1 < wd2 && !eq(p[12], p[16]) {
             let l = p[11];
             let d = p[17];
             if eq(l, d) {
@@ -319,20 +293,8 @@ fn xbr3x_corners(n: &Neighborhood, out: &mut [u32; 9]) {
 
     // Top-right corner: affects out[1], out[5], out[2]
     {
-        let d_diag =
-            color_dist(p[12], p[8]) +
-            color_dist(p[12], p[18]) +
-            color_dist(p[6], p[4]) +
-            color_dist(p[17], p[9]) +
-            4.0 * color_dist(p[13], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[13]) +
-            color_dist(p[11], p[8]) +
-            color_dist(p[18], p[3]) +
-            4.0 * color_dist(p[17], p[6]);
-
-        if d_diag < d_ortho && !eq(p[12], p[8]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tr);
+        if wd1 < wd2 && !eq(p[12], p[8]) {
             let r = p[13];
             let u = p[7];
             if eq(r, u) {
@@ -351,20 +313,8 @@ fn xbr3x_corners(n: &Neighborhood, out: &mut [u32; 9]) {
 
     // Top-left corner: affects out[1], out[3], out[0]
     {
-        let d_diag =
-            color_dist(p[12], p[6]) +
-            color_dist(p[12], p[16]) +
-            color_dist(p[8], p[0]) +
-            color_dist(p[17], p[5]) +
-            4.0 * color_dist(p[11], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[6]) +
-            color_dist(p[16], p[1]) +
-            4.0 * color_dist(p[17], p[8]);
-
-        if d_diag < d_ortho && !eq(p[12], p[6]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tl);
+        if wd1 < wd2 && !eq(p[12], p[6]) {
             let l = p[11];
             let u = p[7];
             if eq(l, u) {
@@ -418,8 +368,8 @@ fn xbr4x_corners(n: &Neighborhood, out: &mut [u32; 16]) {
 
     // Bottom-right corner: affects out[7], out[11], out[13], out[14], out[15]
     {
-        let (d_diag, d_ortho) = edge_weight_br(n);
-        if d_diag < d_ortho && !eq(p[12], p[18]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Br);
+        if wd1 < wd2 && !eq(p[12], p[18]) {
             let r = p[13];
             let d = p[17];
             if eq(r, d) {
@@ -440,22 +390,10 @@ fn xbr4x_corners(n: &Neighborhood, out: &mut [u32; 16]) {
         }
     }
 
-    // Bottom-left corner: affects out[4], out[8], out[12], out[13], out[14] → mapped to BL
+    // Bottom-left corner
     {
-        let d_diag =
-            color_dist(p[12], p[16]) +
-            color_dist(p[12], p[6]) +
-            color_dist(p[18], p[20]) +
-            color_dist(p[7], p[10]) +
-            4.0 * color_dist(p[11], p[17]);
-        let d_ortho =
-            color_dist(p[12], p[17]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[16]) +
-            color_dist(p[6], p[21]) +
-            4.0 * color_dist(p[7], p[18]);
-
-        if d_diag < d_ortho && !eq(p[12], p[16]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Bl);
+        if wd1 < wd2 && !eq(p[12], p[16]) {
             let l = p[11];
             let d = p[17];
             if eq(l, d) {
@@ -476,22 +414,10 @@ fn xbr4x_corners(n: &Neighborhood, out: &mut [u32; 16]) {
         }
     }
 
-    // Top-right corner: affects out[2], out[3], out[7] → mapped to TR
+    // Top-right corner
     {
-        let d_diag =
-            color_dist(p[12], p[8]) +
-            color_dist(p[12], p[18]) +
-            color_dist(p[6], p[4]) +
-            color_dist(p[17], p[9]) +
-            4.0 * color_dist(p[13], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[13]) +
-            color_dist(p[11], p[8]) +
-            color_dist(p[18], p[3]) +
-            4.0 * color_dist(p[17], p[6]);
-
-        if d_diag < d_ortho && !eq(p[12], p[8]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tr);
+        if wd1 < wd2 && !eq(p[12], p[8]) {
             let r = p[13];
             let u = p[7];
             if eq(r, u) {
@@ -512,22 +438,10 @@ fn xbr4x_corners(n: &Neighborhood, out: &mut [u32; 16]) {
         }
     }
 
-    // Top-left corner: affects out[0], out[1], out[4] → mapped to TL
+    // Top-left corner
     {
-        let d_diag =
-            color_dist(p[12], p[6]) +
-            color_dist(p[12], p[16]) +
-            color_dist(p[8], p[0]) +
-            color_dist(p[17], p[5]) +
-            4.0 * color_dist(p[11], p[7]);
-        let d_ortho =
-            color_dist(p[12], p[7]) +
-            color_dist(p[12], p[11]) +
-            color_dist(p[13], p[6]) +
-            color_dist(p[16], p[1]) +
-            4.0 * color_dist(p[17], p[8]);
-
-        if d_diag < d_ortho && !eq(p[12], p[6]) {
+        let (wd1, wd2) = edge_weight(p, Corner::Tl);
+        if wd1 < wd2 && !eq(p[12], p[6]) {
             let l = p[11];
             let u = p[7];
             if eq(l, u) {
