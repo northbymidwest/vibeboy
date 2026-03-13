@@ -40,9 +40,8 @@ impl TestHarness for TearoomHarness {
     }
 
     fn run_test(&self, path: &Path, verbose: bool) -> TestResult {
-        let rom = match fs::read(path) {
-            Ok(r) => r,
-            Err(_) => return TestResult::Err,
+        let Ok(rom) = fs::read(path) else {
+            return TestResult::Err;
         };
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let dir = path.parent().unwrap_or(Path::new("."));
@@ -66,14 +65,11 @@ impl TestHarness for TearoomHarness {
                 .find(|p| p.exists())
         };
 
-        let ref_path = match ref_path {
-            Some(p) => p,
-            None => {
-                if verbose {
-                    eprintln!("  no reference image found");
-                }
-                return TestResult::Skip;
+        let Some(ref_path) = ref_path else {
+            if verbose {
+                eprintln!("  no reference image found");
             }
+            return TestResult::Skip;
         };
 
         let mut emu = Emulator::new(rom, None, None, model, None);
@@ -83,14 +79,11 @@ impl TestHarness for TearoomHarness {
         }
 
         // Load reference image
-        let ref_img = match image::open(&ref_path) {
-            Ok(img) => img.to_rgb8(),
-            Err(_) => {
-                if verbose {
-                    eprintln!("  failed to load reference: {}", ref_path.display());
-                }
-                return TestResult::Err;
+        let Ok(ref_img) = image::open(&ref_path).map(|img| img.to_rgb8()) else {
+            if verbose {
+                eprintln!("  failed to load reference: {}", ref_path.display());
             }
+            return TestResult::Err;
         };
 
         if ref_img.width() != 160 || ref_img.height() != 144 {

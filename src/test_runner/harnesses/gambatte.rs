@@ -102,14 +102,12 @@ impl TestHarness for GambatteHarness {
     }
 
     fn run_test(&self, path: &Path, verbose: bool) -> TestResult {
-        let rom = match fs::read(path) {
-            Ok(r) => r,
-            Err(_) => return TestResult::Err,
+        let Ok(rom) = fs::read(path) else {
+            return TestResult::Err;
         };
 
-        let (expected_hex, is_dmg, is_cgb) = match parse_gambatte_test(path) {
-            Some(v) => v,
-            None => return TestResult::Skip,
+        let Some((expected_hex, is_dmg, is_cgb)) = parse_gambatte_test(path) else {
+            return TestResult::Skip;
         };
 
         // Determine which model to test
@@ -133,9 +131,8 @@ impl TestHarness for GambatteHarness {
 
         // Compare each hex digit
         for (i, c) in expected_hex.chars().enumerate() {
-            let digit = match gambatte_digit_index(c) {
-                Some(d) => d,
-                None => return TestResult::Err,
+            let Some(digit) = gambatte_digit_index(c) else {
+                return TestResult::Err;
             };
             if !gambatte_tile_matches(fb, i, digit) {
                 if verbose {

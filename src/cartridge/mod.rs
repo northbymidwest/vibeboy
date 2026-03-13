@@ -1837,7 +1837,7 @@ impl PocketCamera {
 
         // Apply gain
         let gain_idx = (self.camera_regs[4] & 0x1F) as usize;
-        #[allow(clippy::excessive_precision)]
+        #[expect(clippy::excessive_precision)]
         const GAIN: [f64; 32] = [
             0.881, 0.915, 0.946, 0.974, 1.000, 1.024, 1.047, 1.068,
             1.088, 1.124, 1.157, 1.187, 1.214, 1.240, 1.274, 1.316,
