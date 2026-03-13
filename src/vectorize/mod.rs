@@ -76,20 +76,10 @@ pub fn vectorize_to_raster(
     } else {
         (pixels, width, height)
     };
-    let tv0 = std::time::Instant::now();
     let (paths, bg_color) = vectorize_core(px, w, h);
-    let tv1 = std::time::Instant::now();
     let out_w = w * scale;
     let out_h = h * scale;
-    let t0 = std::time::Instant::now();
     let buf = rasterize::rasterize(&paths, w, h, bg_color, scale);
-    let t1 = std::time::Instant::now();
-    eprintln!("    vectorize:{:.2}ms  rasterize:{:.2}ms  total:{:.2}ms  paths:{} segs:{}",
-        (tv1-tv0).as_secs_f64()*1000.0,
-        (t1-t0).as_secs_f64()*1000.0,
-        ((tv1-tv0)+(t1-t0)).as_secs_f64()*1000.0,
-        paths.len(),
-        paths.iter().map(|p| p.segments.len()).sum::<usize>());
     (buf, out_w, out_h)
 }
 

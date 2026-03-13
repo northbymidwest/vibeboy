@@ -4,7 +4,6 @@
 //! (4-connected and diagonal). For ambiguous 2x2 diagonal crossings, applies
 //! heuristics: curves length, sparse pixels, and island size.
 
-use std::collections::HashSet;
 
 /// Edge connectivity for a pixel. Each bool indicates whether the pixel is
 /// "similar" (connected) to that neighbor.
@@ -136,13 +135,8 @@ fn resolve_crossings(_pixels: &[u32], w: usize, h: usize, edges: &mut [PixelEdge
     // Fast path for noisy images: skip expensive heuristics (curve_length uses
     // HashSet-based BFS per crossing). Conservatively remove both diagonals.
     // Threshold: >2% of pixels have ambiguous crossings.
-    if ambiguous.len() > w * h / 50 {
-        for (x, y) in ambiguous {
-            edges[y * w + x].down_right = false;
-            edges[y * w + (x + 1)].down_left = false;
-        }
-        return;
-    }
+    // Note: with allocation-free curve_length (walk_valence2_chain), the
+    // heuristics are fast enough to always run. No early-exit needed.
 
     // Pass 2: For each ambiguous pair, each heuristic VOTES for one side.
     // The vote weight is the DIFFERENCE between the two sides' raw scores.
@@ -202,8 +196,8 @@ fn resolve_crossings(_pixels: &[u32], w: usize, h: usize, edges: &mut [PixelEdge
 }
 
 /// Curve heuristic: count edges in the curve containing this diagonal edge.
-/// A curve is a sequence of edges connecting only valence-2 nodes.
-/// Traces through valence-2 nodes from both endpoints. Returns length (min 1).
+/// A curve is a maximal chain of valence-2 nodes. Walks both directions from
+/// the diagonal endpoints with zero allocations (prev/cur pointer chasing).
 fn curve_length(
     edges: &[PixelEdges],
     w: usize,
@@ -213,39 +207,37 @@ fn curve_length(
     x1: usize,
     y1: usize,
 ) -> i32 {
-    let mut seen_edges: HashSet<((usize, usize), (usize, usize))> = HashSet::new();
-    seen_edges.insert(sorted_edge((x0, y0), (x1, y1)));
-    let mut stack = vec![(x0, y0), (x1, y1)];
-
-    while let Some(node) = stack.pop() {
-        let (nbuf, ncount) = pixel_neighbors(edges, w, h, node.0, node.1);
-        if ncount != 2 {
-            continue;
-        }
-
-        for i in 0..ncount {
-            let (nx, ny) = nbuf[i];
-            let key = sorted_edge(node, (nx, ny));
-            if !seen_edges.contains(&key) {
-                seen_edges.insert(key);
-                stack.push((nx, ny));
-            }
-        }
-    }
-
-    seen_edges.len() as i32
+    // Walk from x0,y0 away from x1,y1, then from x1,y1 away from x0,y0.
+    // Count = 1 (initial diagonal) + both walk lengths.
+    1 + walk_valence2_chain(edges, w, h, x0, y0, x1, y1)
+      + walk_valence2_chain(edges, w, h, x1, y1, x0, y0)
 }
 
-fn sorted_edge(
-    a: (usize, usize),
-    b: (usize, usize),
-) -> ((usize, usize), (usize, usize)) {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
+/// Walk along valence-2 nodes starting at (sx,sy), coming from (fx,fy).
+/// Returns the number of edges traversed before hitting a non-valence-2 node.
+/// Bounded by max_steps to prevent infinite loops on closed valence-2 cycles.
+#[inline]
+fn walk_valence2_chain(
+    edges: &[PixelEdges], w: usize, h: usize,
+    sx: usize, sy: usize, fx: usize, fy: usize,
+) -> i32 {
+    let max_steps = (w + h) as i32;
+    let mut prev = (fx, fy);
+    let mut cur = (sx, sy);
+    let mut len = 0;
+    loop {
+        if len >= max_steps { break; }
+        let (nbuf, ncount) = pixel_neighbors(edges, w, h, cur.0, cur.1);
+        if ncount != 2 { break; }
+        // Exactly 2 neighbors — advance to the one that isn't prev
+        let next = if nbuf[0] == prev { nbuf[1] } else { nbuf[0] };
+        len += 1;
+        prev = cur;
+        cur = next;
     }
+    len
 }
+
 
 /// Sparse heuristic: BFS from both endpoints within an 8×8 window.
 /// Returns connected component size (smaller = sparser = should be kept).

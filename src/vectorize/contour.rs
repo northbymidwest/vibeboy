@@ -857,26 +857,19 @@ fn angle_cmp(adx: i32, ady: i32, bdx: i32, bdy: i32) -> std::cmp::Ordering {
 fn trace_all_boundary_loops(
     directed_edges: &[(NodeId, NodeId, u32)],
 ) -> Vec<(Vec<NodeId>, u32)> {
-    // Build outgoing edges sorted by angle at each node, using integer angle comparison.
-    // Store index into directed_edges for color lookup.
-    let mut outgoing: FxHashMap<NodeId, Vec<(NodeId, i32, i32)>> =
+    // Build outgoing edges sorted by angle at each node.
+    // Store (dest, dx, dy, edge_index) to avoid a separate edge_to_idx HashMap.
+    let mut outgoing: FxHashMap<NodeId, Vec<(NodeId, i32, i32, u32)>> =
         fx_hashmap_cap(directed_edges.len());
-    for &(a, b, _) in directed_edges {
-        outgoing.entry(a).or_default().push((b, b.x4 - a.x4, b.y4 - a.y4));
+    for (i, &(a, b, _)) in directed_edges.iter().enumerate() {
+        outgoing.entry(a).or_default().push((b, b.x4 - a.x4, b.y4 - a.y4, i as u32));
     }
     for (_, edges) in outgoing.iter_mut() {
         edges.sort_unstable_by(|a, b| angle_cmp(a.1, a.2, b.1, b.2));
     }
 
-    // Build next-edge + color arrays indexed by directed edge index.
-    // Map each directed edge to an index for O(1) lookup during tracing.
+    // Build next-edge index array using planar face algorithm.
     let n_edges = directed_edges.len();
-    let mut edge_to_idx: FxHashMap<(NodeId, NodeId), u32> = fx_hashmap_cap(n_edges);
-    for (i, &(a, b, _)) in directed_edges.iter().enumerate() {
-        edge_to_idx.insert((a, b), i as u32);
-    }
-
-    // Build next-edge index array
     let mut next_idx: Vec<u32> = vec![u32::MAX; n_edges];
 
     for (i, &(p, c, _)) in directed_edges.iter().enumerate() {
@@ -888,10 +881,7 @@ fn trace_all_boundary_loops(
                 angle_cmp(e.1, e.2, rdx, rdy) == std::cmp::Ordering::Less
             );
             let prev_idx = if pos == 0 { edges.len() - 1 } else { pos - 1 };
-            let next_node = edges[prev_idx].0;
-            if let Some(&ni) = edge_to_idx.get(&(c, next_node)) {
-                next_idx[i] = ni;
-            }
+            next_idx[i] = edges[prev_idx].3;
         }
     }
 
@@ -1096,21 +1086,29 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph) -> Vec<Colo
     let adaptive = visible_edges.is_empty();
 
     if adaptive {
-        // Fast path: skip trace + loop assembly entirely.
-        // Group directed edges by color and convert directly to Line segments.
-        // The nonzero winding rule handles disconnected loops and holes correctly.
-        let mut color_segs: FxHashMap<u32, Vec<PathSegment>> =
-            fx_hashmap_cap(16);
-        for &(a, b, color) in &directed_edges {
-            if color == VOID_COLOR { continue; }
-            let pa = a.to_point();
-            let pb = b.to_point();
-            color_segs.entry(color).or_default()
-                .push(PathSegment::Line(pa, pb));
+        // Adaptive path: trace loops but skip chain+tjunc+optimize.
+        // Use B-spline fitting on traced loops for smooth boundaries.
+        let all_loops = trace_all_boundary_loops(&directed_edges);
+        let optimized: FxHashMap<NodeId, Point> = fx_hashmap();
+
+        let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
+        for (node_loop, color) in &all_loops {
+            let segs = boundary_loop_to_segments(node_loop, &optimized);
+            if !segs.is_empty() {
+                color_loops.entry(*color).or_default().push(segs);
+            }
         }
-        return color_segs.into_iter()
-            .map(|(color, segments)| ColorPath { color, segments })
-            .collect();
+
+        let mut result: Vec<ColorPath> = Vec::new();
+        for (color, loop_segments) in color_loops {
+            if color == VOID_COLOR { continue; }
+            let mut all_segments = Vec::new();
+            for segs in loop_segments {
+                all_segments.extend(segs);
+            }
+            result.push(ColorPath { color, segments: all_segments });
+        }
+        return result;
     }
 
     let optimized = {
