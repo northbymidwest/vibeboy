@@ -474,7 +474,19 @@ impl AudioRingBuffer {
         }
     }
 
+    fn len(&self) -> usize {
+        if self.write_pos >= self.read_pos {
+            self.write_pos - self.read_pos
+        } else {
+            self.capacity - self.read_pos + self.write_pos
+        }
+    }
+
     fn write(&mut self, data: &[f32]) {
+        // If buffer is more than half full, skip ahead to stay low-latency
+        if self.len() > self.capacity / 2 {
+            self.read_pos = self.write_pos;
+        }
         for &sample in data {
             let next = (self.write_pos + 1) % self.capacity;
             if next == self.read_pos {
@@ -2332,7 +2344,7 @@ fn main() {
 
         // ── Audio ────────────────────────────────────────────────────────────
         let audio_ring: SharedAudioBuffer =
-            Arc::new(Mutex::new(AudioRingBuffer::new(96_000)));
+            Arc::new(Mutex::new(AudioRingBuffer::new(96_000 / 60 * 4 * 2))); // ~4 frames stereo
         let _audio_unit = setup_audio(&audio_ring);
 
         // ── Camera ───────────────────────────────────────────────────────────

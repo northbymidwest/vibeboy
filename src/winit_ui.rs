@@ -474,7 +474,19 @@ impl AudioRing {
         }
     }
 
+    fn len(&self) -> usize {
+        if self.write_pos >= self.read_pos {
+            self.write_pos - self.read_pos
+        } else {
+            self.capacity - self.read_pos + self.write_pos
+        }
+    }
+
     fn push(&mut self, samples: &[f32]) {
+        // If buffer is more than half full, skip ahead to stay low-latency
+        if self.len() > self.capacity / 2 {
+            self.read_pos = self.write_pos;
+        }
         for &s in samples {
             let next = (self.write_pos + 1) % self.capacity;
             if next == self.read_pos {
@@ -851,7 +863,7 @@ impl App {
     fn new(cli: Cli) -> Self {
         let model = cli.model.unwrap_or(GbModel::Cgb);
 
-        let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize * 2 /* channels */)));
+        let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2))); // ~4 frames stereo
         let stream = start_audio(Arc::clone(&audio_ring));
 
         App {
