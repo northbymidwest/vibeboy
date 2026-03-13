@@ -60,7 +60,7 @@ fn frame_duration(model: GbModel) -> Duration {
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
 #[derive(Parser)]
-#[command(name = "gbcemu", about = "Game Boy / Game Boy Color emulator")]
+#[command(name = "vibeboy", about = "Game Boy / Game Boy Color emulator")]
 struct Cli {
     /// Path to ROM file (.gb / .gbc). If omitted, a file dialog will open.
     rom: Option<PathBuf>,
@@ -69,9 +69,9 @@ struct Cli {
     #[arg(long)]
     bootrom: Option<PathBuf>,
 
-    /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc, agb/gba
-    #[arg(long, default_value = "auto")]
-    model: String,
+    /// Hardware model (auto-detected from cart header if not specified)
+    #[arg(long, value_parser = parse_model)]
+    model: Option<GbModel>,
 
     /// Path to SNES program ROM for SGB LLE (auto-detected if not specified)
     #[arg(long)]
@@ -83,16 +83,37 @@ struct Cli {
 
     /// Skip boot ROM (start at PC=0x100 with post-boot state)
     #[arg(long)]
-    no_bootrom: bool,
+    no_boot: bool,
 
     /// Connect a Game Boy Printer (saves PNGs to prints/ directory)
     #[arg(long)]
     printer: bool,
 
-    /// Scaling filter: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize
-    #[arg(long, default_value = "nearest")]
+    /// Scaling filter
+    #[arg(long, default_value = "nearest", value_parser = parse_filter)]
     filter: String,
+}
 
+fn parse_model(s: &str) -> Result<GbModel, String> {
+    s.parse::<GbModel>()
+}
+
+fn parse_filter(s: &str) -> Result<String, String> {
+    let valid = [
+        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "eagle",
+        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
+        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
+        "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
+        "omniscale", "omniscale-legacy", "omniscale-legacy2x",
+        "omniscale-legacy3x", "omniscale-legacy4x", "omniscale-legacy5x", "omniscale-legacy6x",
+        "aa-nearest", "vectorize",
+    ];
+    let lower = s.to_lowercase();
+    if valid.contains(&lower.as_str()) {
+        Ok(lower)
+    } else {
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize]", s))
+    }
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -170,19 +191,19 @@ fn main() {
     });
 
     // Resolve hardware model
-    let model = if cli.model == "auto" {
-        GbModel::Cgb
-    } else {
-        cli.model.parse::<GbModel>().unwrap_or_else(|e| {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        })
-    };
+    let model = cli.model.unwrap_or_else(|| {
+        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
+        if cgb_flag == 0x80 || cgb_flag == 0xC0 {
+            GbModel::Cgb
+        } else {
+            GbModel::Dmg
+        }
+    });
 
     let frame_dur = frame_duration(model);
 
     // Resolve boot ROM: explicit path, or auto-detect by model
-    let boot_rom: Option<Vec<u8>> = if cli.no_bootrom {
+    let boot_rom: Option<Vec<u8>> = if cli.no_boot {
         None
     } else if let Some(ref p) = cli.bootrom {
         Some(fs::read(p).unwrap_or_else(|e| {
@@ -190,17 +211,17 @@ fn main() {
             std::process::exit(1);
         }))
     } else {
-        let candidates: &[&str] = match model {
-            GbModel::Dmg0 => &["bootroms/dmg0_boot.bin"],
-            GbModel::Dmg => &["bootroms/dmg_boot.bin"],
-            GbModel::Mgb => &["bootroms/mgb_boot.bin"],
-            GbModel::Sgb => &["bootroms/sgb_boot.bin"],
-            GbModel::Sgb2 => &["bootroms/sgb2_boot.bin"],
-            GbModel::Cgb0 => &["bootroms/cgb0_boot.bin"],
-            GbModel::Cgb => &["bootroms/cgb_boot.bin"],
-            GbModel::Agb => &["bootroms/cgb_agb_boot.bin"],
+        let path = match model {
+            GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
+            GbModel::Dmg => "bootroms/dmg_boot.bin",
+            GbModel::Mgb => "bootroms/mgb_boot.bin",
+            GbModel::Sgb => "bootroms/sgb_boot.bin",
+            GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
+            GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
+            GbModel::Cgb => "bootroms/cgb_boot.bin",
+            GbModel::Agb => "bootroms/cgb_agb_boot.bin",
         };
-        candidates.iter().find_map(|name| fs::read(name).ok())
+        fs::read(path).ok()
     };
 
     if boot_rom.is_some() {
@@ -232,7 +253,8 @@ fn main() {
     }
 
     // Parse scaling filter
-    let scale_filter: scaling::ScaleFilter = match cli.filter.to_lowercase().as_str() {
+    // Filter string is already validated and lowercased by parse_filter
+    let scale_filter: scaling::ScaleFilter = match cli.filter.as_str() {
         "nearest" | "none" => scaling::ScaleFilter::Nearest,
         "bilinear" => scaling::ScaleFilter::Bilinear,
         "bicubic" => scaling::ScaleFilter::Bicubic,
@@ -264,10 +286,7 @@ fn main() {
         "omniscale-legacy6x" => scaling::ScaleFilter::OmniScaleLegacy(scaling::OmniScaleFactor::X6),
         "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
         "vectorize" => scaling::ScaleFilter::Vectorize,
-        other => {
-            eprintln!("Unknown filter '{}'. Options: nearest, bilinear, bicubic, epx, scale2x, scale3x, eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy[2-6x], aa-nearest, vectorize", other);
-            std::process::exit(1);
-        }
+        _ => unreachable!("filter validated by parse_filter"),
     };
 
     eprintln!("\nControls:");

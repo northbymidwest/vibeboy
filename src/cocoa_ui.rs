@@ -136,14 +136,14 @@ struct Cli {
     rom: Option<PathBuf>,
     #[arg(long)]
     bootrom: Option<PathBuf>,
-    #[arg(long, default_value = "auto")]
-    model: String,
+    #[arg(long, value_parser = |s: &str| s.parse::<GbModel>())]
+    model: Option<GbModel>,
     #[arg(long)]
     snes_rom: Option<PathBuf>,
     #[arg(long)]
     lle: bool,
     #[arg(long)]
-    no_bootrom: bool,
+    no_boot: bool,
     #[arg(long)]
     printer: bool,
 }
@@ -1661,21 +1661,11 @@ fn main() {
             std::process::exit(1);
         });
 
-        let cli_model: Option<GbModel> = if cli.model == "auto" {
-            None
-        } else {
-            Some(cli.model.parse::<GbModel>().unwrap_or_else(|e| {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }))
-        };
-
-        // forced_model: None = auto-detect, Some(m) = user override
-        let mut forced_model: Option<GbModel> = cli_model;
+        let mut forced_model: Option<GbModel> = cli.model;
         let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
         let frame_dur = frame_duration(model);
 
-        let boot_rom: Option<Vec<u8>> = if cli.no_bootrom {
+        let boot_rom: Option<Vec<u8>> = if cli.no_boot {
             None
         } else if let Some(ref p) = cli.bootrom {
             Some(fs::read(p).unwrap_or_else(|e| {
@@ -1683,18 +1673,17 @@ fn main() {
                 std::process::exit(1);
             }))
         } else {
-            let candidates: &[&str] = match model {
-                GbModel::Dmg0 => &["dmg0_boot.bin", "bootroms/dmg0_boot.bin", "gb_bios.bin"],
-                GbModel::Dmg => &["dmg_boot.bin", "bootroms/dmg_boot.bin", "gb_bios.bin"],
-                GbModel::Mgb => &["mgb_boot.bin", "bootroms/mgb_boot.bin", "gb_bios.bin"],
-                GbModel::Sgb => &["sgb_boot.bin", "bootroms/sgb_boot.bin", "sgb_bios.bin"],
-                GbModel::Sgb2 => &["sgb2_boot.bin", "bootroms/sgb2_boot.bin", "sgb2_bios.bin"],
-                GbModel::Cgb0 => &["cgb0_boot.bin", "bootroms/cgb0_boot.bin", "gbc_bios.bin"],
-                GbModel::Cgb | GbModel::Agb => {
-                    &["cgb_boot.bin", "bootroms/cgb_boot.bin", "gbc_bios.bin"]
-                }
+            let path = match model {
+                GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
+                GbModel::Dmg => "bootroms/dmg_boot.bin",
+                GbModel::Mgb => "bootroms/mgb_boot.bin",
+                GbModel::Sgb => "bootroms/sgb_boot.bin",
+                GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
+                GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
+                GbModel::Cgb => "bootroms/cgb_boot.bin",
+                GbModel::Agb => "bootroms/cgb_agb_boot.bin",
             };
-            candidates.iter().find_map(|name| fs::read(name).ok())
+            fs::read(path).ok()
         };
 
         if boot_rom.is_some() {

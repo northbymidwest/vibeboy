@@ -58,13 +58,13 @@ struct Cli {
     #[arg(long)]
     bootrom: Option<PathBuf>,
 
-    /// Hardware model: auto, dmg0, dmg, mgb, sgb, sgb2, cgb/gbc, agb/gba
-    #[arg(long, default_value = "auto")]
-    model: String,
+    /// Hardware model (auto-detected from cart header if not specified)
+    #[arg(long, value_parser = |s: &str| s.parse::<GbModel>())]
+    model: Option<GbModel>,
 
     /// Skip boot ROM
     #[arg(long)]
-    no_bootrom: bool,
+    no_boot: bool,
 }
 
 // ── Menu item IDs ────────────────────────────────────────────────────────────
@@ -504,14 +504,7 @@ struct App {
 
 impl App {
     fn new(cli: Cli) -> Self {
-        let model = if cli.model == "auto" {
-            GbModel::Cgb
-        } else {
-            cli.model.parse::<GbModel>().unwrap_or_else(|e| {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            })
-        };
+        let model = cli.model.unwrap_or(GbModel::Cgb);
 
         let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize * 2)));
         let stream = start_audio(Arc::clone(&audio_ring));
@@ -550,27 +543,22 @@ impl App {
             return;
         }
 
-        let boot_rom: Option<Vec<u8>> = if self.cli.no_bootrom {
+        let boot_rom: Option<Vec<u8>> = if self.cli.no_boot {
             None
         } else if let Some(ref p) = self.cli.bootrom {
             fs::read(p).ok()
         } else {
-            let candidates: &[&str] = match self.model {
-                GbModel::Dmg0 => &["dmg0_boot.bin", "bootroms/dmg0_boot.bin", "gb_bios.bin"],
-                GbModel::Dmg => &["dmg_boot.bin", "bootroms/dmg_boot.bin", "gb_bios.bin"],
-                GbModel::Mgb => &["mgb_boot.bin", "bootroms/mgb_boot.bin", "gb_bios.bin"],
-                GbModel::Sgb => &["sgb_boot.bin", "bootroms/sgb_boot.bin", "sgb_bios.bin"],
-                GbModel::Sgb2 => {
-                    &["sgb2_boot.bin", "bootroms/sgb2_boot.bin", "sgb2_bios.bin"]
-                }
-                GbModel::Cgb0 => {
-                    &["cgb0_boot.bin", "bootroms/cgb0_boot.bin", "gbc_bios.bin"]
-                }
-                GbModel::Cgb | GbModel::Agb => {
-                    &["cgb_boot.bin", "bootroms/cgb_boot.bin", "gbc_bios.bin"]
-                }
+            let path = match self.model {
+                GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
+                GbModel::Dmg => "bootroms/dmg_boot.bin",
+                GbModel::Mgb => "bootroms/mgb_boot.bin",
+                GbModel::Sgb => "bootroms/sgb_boot.bin",
+                GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
+                GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
+                GbModel::Cgb => "bootroms/cgb_boot.bin",
+                GbModel::Agb => "bootroms/cgb_agb_boot.bin",
             };
-            candidates.iter().find_map(|name| fs::read(name).ok())
+            fs::read(path).ok()
         };
 
         let emu = Emulator::new(rom, boot_rom, Some(path.as_path()), self.model, None);
