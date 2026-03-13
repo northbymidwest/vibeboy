@@ -30,7 +30,7 @@ pub struct SnesSys {
 impl SnesSys {
     /// Create a new SNES system with the given program ROM.
     pub fn new(rom: Vec<u8>) -> Self {
-        let mut bus = SnesBus::new(rom);
+        let bus = SnesBus::new(rom);
         let mut cpu = Cpu65816::new();
         // Reset the CPU — reads reset vector from ROM
         let bus_ref = &bus;

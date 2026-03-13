@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
@@ -184,7 +185,7 @@ pub fn cmd_trace_timer(
     emu.headless = true;
     emu.bus.apu.headless = true;
     if boot || bootrom.is_some() {
-        let mut history: Vec<(u16, u8, u16, u16)> = Vec::new();
+        let mut history: VecDeque<(u16, u8, u16, u16)> = VecDeque::new();
         loop {
             let pc = emu.cpu.regs.pc;
             let opcode = emu.bus.read_byte(pc);
@@ -194,9 +195,9 @@ pub fn cmd_trace_timer(
             }
             emu.cpu.step(&mut emu.bus);
             let tc_after = emu.bus.timer.counter();
-            history.push((pc, opcode, tc_before, tc_after));
+            history.push_back((pc, opcode, tc_before, tc_after));
             if history.len() > 30 {
-                history.remove(0);
+                history.pop_front();
             }
         }
         eprintln!("Last {} instructions of boot ROM:", history.len());

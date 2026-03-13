@@ -82,7 +82,7 @@ fn detect_direction(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u8 {
 
     let gx2 = gx * gx;
     let gy2 = gy * gy;
-    let gxy = gx * gy;
+    let _gxy = gx * gy;
 
     let strength = (gx2 + gy2).sqrt();
     if strength < 10.0 {

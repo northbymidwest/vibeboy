@@ -253,12 +253,8 @@ impl Sgb {
         }
 
         if self.packets_received >= self.expected_packets {
-            if !self.lle_mode {
-                self.execute_command();
-            } else {
-                // Also run HLE for palette/mask commands to keep SGB state in sync
-                self.execute_command();
-            }
+            // Run HLE command processing even in LLE mode to keep SGB state in sync
+            self.execute_command();
             self.packets_received = 0;
             self.expected_packets = 0;
             self.packet_buf.clear();
@@ -402,7 +398,7 @@ impl Sgb {
             let pal_border = (pal_data >> 2) & 0x03;
             let pal_outside = (pal_data >> 4) & 0x03;
 
-            let mut set_inside = ctrl & 0x01 != 0;
+            let set_inside = ctrl & 0x01 != 0;
             let mut set_border = ctrl & 0x02 != 0;
             let set_outside = ctrl & 0x04 != 0;
 

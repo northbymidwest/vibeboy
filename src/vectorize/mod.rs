@@ -71,7 +71,7 @@ impl VectorizeCache {
     pub fn rasterize(&mut self, pixels: &[u32], width: usize, height: usize, scale: f64)
         -> (&[u32], usize, usize)
     {
-        let (paths, bg_color) = self.get_paths(pixels, width, height);
+        let (_paths, _bg_color) = self.get_paths(pixels, width, height);
         if scale == self.cached_scale && !self.cached_raster.is_empty() {
             return (&self.cached_raster, self.cached_raster_w, self.cached_raster_h);
         }

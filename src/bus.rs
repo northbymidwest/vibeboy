@@ -1488,11 +1488,11 @@ impl Bus {
         // The game writes data as tiles at $8000-$8FFF, sets up the tilemap with
         // tiles $00-$FF in order, then sends the TRN command.
         let lcdc = self.ppu.read(0xFF40);
-        let tile_data_base: usize = if lcdc & 0x10 != 0 { 0x0000 } else { 0x0800 };
+        let _tile_data_base: usize = if lcdc & 0x10 != 0 { 0x0000 } else { 0x0800 };
         let tile_map_base: usize = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
         let signed_addr = lcdc & 0x10 == 0;
 
-        let mut vram_data = vec![0u8; 4096];
+        let mut vram_data = [0u8; 4096];
         for tile_idx in 0..256usize {
             let map_x = tile_idx % 20;
             let map_y = tile_idx / 20;

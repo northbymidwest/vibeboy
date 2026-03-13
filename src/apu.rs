@@ -897,7 +897,7 @@ impl Apu {
                 // did_tick frequency change edge case (must check BEFORE freq update)
                 if val & 0x80 == 0 && self.ch1.enabled {
                     let old_hi = (old_freq >> 8) & 7;
-                    let new_hi = ((val & 0x07) as u16) as u32;
+                    let new_hi = (val & 0x07) as u32;
                     if old_hi == 7 && new_hi != 7 && self.ch1.did_tick {
                         if (self.ch1.freq_timer.wrapping_sub(2)) / 4 == (old_freq ^ 0x7FF) as u32 {
                             self.ch1.duty_pos = self.ch1.duty_pos.wrapping_sub(1) & 7;
@@ -950,7 +950,7 @@ impl Apu {
                 // did_tick frequency change edge case (must check BEFORE freq update)
                 if val & 0x80 == 0 && self.ch2.enabled {
                     let old_hi = (old_freq >> 8) & 7;
-                    let new_hi = ((val & 0x07) as u16) as u32;
+                    let new_hi = (val & 0x07) as u32;
                     if old_hi == 7 && new_hi != 7 && self.ch2.did_tick {
                         if (self.ch2.freq_timer.wrapping_sub(2)) / 4 == (old_freq ^ 0x7FF) as u32 {
                             self.ch2.duty_pos = self.ch2.duty_pos.wrapping_sub(1) & 7;

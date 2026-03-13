@@ -347,7 +347,7 @@ fn build_directed_boundary_edges(
     let adaptive = adaptive && boundary_count > ADAPTIVE_EDGE_THRESHOLD;
 
     let mut directed = Vec::with_capacity(boundary_count * 2);
-    let mut visible = if adaptive {
+    let visible = if adaptive {
         // Adaptive path: skip visible edge construction and both sorts.
         // trace_all_boundary_loops builds its own HashMap, so input order is irrelevant.
         for (_, (left, right, key_a, key_b)) in &edge_map {
@@ -702,7 +702,7 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
             merged[ci_b] = true;
 
             // Update active list: remove both, add new endpoint of merged chain
-            let new_is_start_a = false; // junction was placed at end for chain_a part
+            let _new_is_start_a = false; // junction was placed at end for chain_a part
             // The new chain's start is what was the far end of chain_a,
             // and its end is what was the far end of chain_b
             // We don't re-add to active since we consumed both endpoints at this junction

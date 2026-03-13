@@ -27,7 +27,7 @@ use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::pixels::PixelFormat;
 use sdl3::render::ScaleMode;
 use sdl3::sys::camera::{
-    SDL_AcquireCameraFrame, SDL_Camera, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
+    SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
     SDL_OpenCamera, SDL_ReleaseCameraFrame,
 };
 use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
@@ -317,7 +317,6 @@ fn main() {
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
     let scales_to_display = scale_filter.scales_to_display();
-    let is_vectorize = matches!(scale_filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive);
     let mut vec_cache = match scale_filter {
         scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
         scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
@@ -445,8 +444,8 @@ fn main() {
 
         // ── Accelerometer → MBC7 ─────────────────────────────────────────────
         {
-            const CENTER: f32 = 0x81D0 as u16 as f32; // 33232.0
-            const RANGE: f32 = 0x70 as u16 as f32;   // 112.0
+            const CENTER: f32 = 0x81D0 as f32;
+            const RANGE: f32 = 0x70 as f32;
             let mut got = false;
             let mut gx: f32 = 0.0;
             let mut gy: f32 = 0.0;

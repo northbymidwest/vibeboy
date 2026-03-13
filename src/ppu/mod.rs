@@ -625,7 +625,7 @@ impl Ppu {
             } else {
                 (self.pixel_history_next + 1) % 2 // newer pixel (T4: real)
             };
-            let (fb_idx, pt, cidx, bg_cidx, is_sprite) = self.pixel_history[idx];
+            let (fb_idx, pt, _cidx, bg_cidx, is_sprite) = self.pixel_history[idx];
             if self.lcd_first_frame || is_sprite {
                 continue; // sprite pixels not affected by BG_EN
             }
@@ -698,7 +698,7 @@ impl Ppu {
     /// Populate VRAM bank 0 with the state left by the boot ROM.
     fn init_post_boot_vram(&mut self, rom: &[u8]) {
         // Clear VRAM first (boot ROM does this)
-        for b in self.vram[0].iter_mut() { *b = 0; }
+        self.vram[0].fill(0);
 
         // Decompress Nintendo logo from cart header $0104-$0133 into tiles 1-$18.
         // Each input byte encodes two 4-pixel rows (high nibble first).
