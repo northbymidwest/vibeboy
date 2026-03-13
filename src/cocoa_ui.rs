@@ -2533,15 +2533,7 @@ fn main() {
                         (&scaled, src_w * 2, src_h * 2)
                     }
                     scaling::ScaleFilter::OmniScale => {
-                        let ceil_factor = ((disp_w as f64 / src_w as f64).ceil() as u32).max(2);
-                        let os = scaling::omniscale::scale(raw_src, src_w, src_h, ceil_factor);
-                        let os_w = src_w * ceil_factor as usize;
-                        let os_h = src_h * ceil_factor as usize;
-                        if os_w == disp_w && os_h == disp_h {
-                            scaled = os;
-                        } else {
-                            scaled = scaling::aa_nearest::scale(&os, os_w, os_h, disp_w, disp_h);
-                        }
+                        scaled = scaling::omniscale::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
                         (&scaled, disp_w, disp_h)
                     }
                     scaling::ScaleFilter::OmniScaleLegacy(f) => {
