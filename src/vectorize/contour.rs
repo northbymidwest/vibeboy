@@ -1118,18 +1118,37 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         return result;
     }
 
-    let (optimized, junctions) = {
+    // Build junction set: endpoints of open chains (valence >= 3 nodes)
+    let junctions = {
         let mut chains = chain_visible_edges(&visible_edges);
         merge_t_junctions(&mut chains);
-        build_optimized_positions(&chains)
+        let mut j: HashSet<NodeId> = HashSet::new();
+        for chain in &chains {
+            let is_closed = chain.len() > 2 && chain.first() == chain.last();
+            if !is_closed && chain.len() >= 2 {
+                j.insert(chain[0]);
+                j.insert(chain[chain.len() - 1]);
+            }
+        }
+        j
     };
 
+    // Trace boundary loops, then optimize each loop directly.
     let all_loops = trace_all_boundary_loops(&directed_edges);
+
+    let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
+    for (node_loop, _) in &all_loops {
+        for nd in node_loop {
+            node_positions.entry(*nd).or_insert_with(|| nd.to_point());
+        }
+    }
+
+    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
 
     // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
     for (node_loop, color) in &all_loops {
-        let segs = boundary_loop_to_segments(node_loop, &optimized, &junctions);
+        let segs = boundary_loop_to_segments(node_loop, &node_positions, &junctions);
         if !segs.is_empty() {
             color_loops.entry(*color).or_default().push(segs);
         }
@@ -1148,8 +1167,78 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
             segments: all_segments,
         });
     }
-
     result
+}
+
+// --- Loop optimization (Paper Section 3.4) ---
+
+/// Optimize boundary loop paths directly using gradient descent.
+/// Works on full closed loops instead of short chains, so the optimizer
+/// sees the complete contour shape for each color region.
+/// Junction nodes (valence >= 3) are fixed.
+fn optimize_boundary_loops(
+    all_loops: &[(Vec<NodeId>, u32)],
+    positions: &mut FxHashMap<NodeId, Point>,
+    junctions: &HashSet<NodeId>,
+) {
+    // Build a contiguous points array per loop for fast energy evaluation.
+    // Map loop nodes to indices in the array; junction nodes are pinned.
+    for (node_loop, _) in all_loops {
+        let n = node_loop.len();
+        if n < 4 { continue; }
+
+        let mut pts: Vec<Point> = node_loop.iter()
+            .map(|nd| *positions.get(nd).unwrap())
+            .collect();
+        let orig: Vec<Point> = pts.clone();
+        let corners = detect_corners(&orig, true);
+
+        let pinned: Vec<bool> = node_loop.iter()
+            .map(|nd| junctions.contains(nd))
+            .collect();
+
+        let eps = GRADIENT_STEP;
+        for _iter in 0..OPT_ITERATIONS {
+            for i in 0..n {
+                if pinned[i] || corners[i] { continue; }
+
+                let current = pts[i];
+                let e0 = local_energy(&pts, &orig, &corners, i, n, true);
+                if e0 < 1e-12 { continue; }
+
+                pts[i] = Point::new(current.x + eps, current.y);
+                let ex_fwd = local_energy(&pts, &orig, &corners, i, n, true);
+                pts[i] = Point::new(current.x, current.y + eps);
+                let ey_fwd = local_energy(&pts, &orig, &corners, i, n, true);
+
+                let inv_eps = 1.0 / eps;
+                let gx = (ex_fwd - e0) * inv_eps;
+                let gy = (ey_fwd - e0) * inv_eps;
+
+                let grad_len = (gx * gx + gy * gy).sqrt();
+                if grad_len < 1e-12 {
+                    pts[i] = current;
+                    continue;
+                }
+
+                let step = (e0 / grad_len).min(MAX_MOVE);
+                let candidate = Point::new(
+                    current.x - step * gx / grad_len,
+                    current.y - step * gy / grad_len,
+                );
+                pts[i] = candidate;
+                let e_new = local_energy(&pts, &orig, &corners, i, n, true);
+                if e_new >= e0 {
+                    pts[i] = current;
+                }
+            }
+        }
+
+        // Write back optimized positions
+        for (i, nd) in node_loop.iter().enumerate() {
+            positions.insert(*nd, pts[i]);
+        }
+    }
 }
 
 // --- B-spline fitting ---
