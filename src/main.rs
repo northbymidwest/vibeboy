@@ -23,9 +23,9 @@ use model::GbModel;
 use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::dialog::{self, DialogFileFilter};
 use sdl3::event::Event;
+#[cfg(feature = "sdl3-gpu-shaders")]
+use sdl3::gpu;
 use sdl3::keyboard::{Keycode, Scancode};
-use sdl3::pixels::PixelFormat;
-use sdl3::render::ScaleMode;
 use sdl3::sys::camera::{
     SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
     SDL_OpenCamera, SDL_ReleaseCameraFrame,
@@ -318,7 +318,7 @@ fn main() {
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
-    let scales_to_display = scale_filter.scales_to_display();
+    let _scales_to_display = scale_filter.scales_to_display();
     let mut vec_cache = match scale_filter {
         scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
         scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
@@ -339,7 +339,7 @@ fn main() {
     let video = sdl.video().unwrap();
     let audio = sdl.audio().unwrap();
 
-    // ── Video ─────────────────────────────────────────────────────────────────
+    // ── Video + GPU ──────────────────────────────────────────────────────────
     let mut window_builder = video.window("GBC Emulator", win_w, win_h);
     window_builder.position_centered();
     if is_resizable {
@@ -347,16 +347,61 @@ fn main() {
     }
     let window = window_builder.build().unwrap();
 
+    // ── Renderer init ────────────────────────────────────────────────────────
+    // With sdl3-gpu-shaders: use SDL3 GPU API with shader pipelines.
+    // Without: use SDL 2D canvas renderer with CPU-only scaling.
+
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
+         mut transfer_buf, mut transfer_buf_size,
+         omniscale_pipeline, omniscale_sampler, hqx_pipeline, vectorize_compute) = {
+        let all_formats = gpu::ShaderFormat::PRIVATE
+            | gpu::ShaderFormat::SPIRV
+            | gpu::ShaderFormat::MSL
+            | gpu::ShaderFormat::DXBC
+            | gpu::ShaderFormat::DXIL;
+        let dev = gpu::Device::new(all_formats, false)
+            .expect("Failed to create GPU device")
+            .with_window(&window)
+            .expect("Failed to claim window for GPU device");
+        if dev.set_swapchain_parameters(
+            &window, gpu::PresentMode::Mailbox, gpu::SwapchainComposition::Sdr,
+        ).is_err() {
+            let _ = dev.set_swapchain_parameters(
+                &window, gpu::PresentMode::Immediate, gpu::SwapchainComposition::Sdr,
+            );
+        }
+        let tex = scaling::gpu::create_texture(&dev, src_w, src_h);
+        let max_xfer = src_w * src_h * 4;
+        let xfer = dev.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(max_xfer)
+            .build().expect("Failed to create transfer buffer");
+        let omniscale = scaling::gpu::init_omniscale_pipeline(&dev, &window);
+        let sampler = dev.create_sampler(
+            gpu::SamplerCreateInfo::new()
+                .with_min_filter(gpu::Filter::Nearest)
+                .with_mag_filter(gpu::Filter::Nearest)
+        ).expect("Failed to create sampler");
+        let hqx = scaling::gpu::init_hqx_pipeline(&dev, &window);
+        let vec_compute = scaling::gpu::init_vectorize_compute_pipeline(&dev);
+        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, vec_compute)
+    };
+
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
     let mut canvas = window.into_canvas();
-
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
     let texture_creator = canvas.texture_creator();
-
-    let mut tex_cur_w = tex_w;
-    let mut tex_cur_h = tex_h;
-    let mut texture = texture_creator
-        .create_texture_streaming(PixelFormat::ARGB8888, tex_cur_w, tex_cur_h)
-        .unwrap();
-    texture.set_scale_mode(ScaleMode::Nearest);
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    let mut sdl_texture = {
+        let mut tex = texture_creator.create_texture_streaming(
+            sdl3::pixels::PixelFormat::ARGB8888, tex_w, tex_h,
+        ).unwrap();
+        tex.set_scale_mode(sdl3::render::ScaleMode::Nearest);
+        tex
+    };
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    let (mut tex_cur_w, mut tex_cur_h) = (tex_w, tex_h);
 
     let mut event_pump = sdl.event_pump().unwrap();
 
@@ -588,7 +633,11 @@ fn main() {
             }
         }
 
-        // ── Render (skip when window is fully occluded to avoid compositor throttle) ──
+        // ── Render ────────────────────────────────────────────────────────────
+        #[cfg(feature = "sdl3-gpu-shaders")]
+        let occluded = window.window_flags()
+            & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
+        #[cfg(not(feature = "sdl3-gpu-shaders"))]
         let occluded = canvas.window().window_flags()
             & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
         if !occluded {
@@ -600,163 +649,165 @@ fn main() {
             let sw = src_w as usize;
             let sh = src_h as usize;
 
-            // For resizable windows, compute aspect-correct display area
-            let (disp_w, disp_h) = if is_resizable {
+            #[cfg(feature = "sdl3-gpu-shaders")]
+            {
+                let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
+                    && hqx_pipeline.is_some();
+                let gpu_native = matches!(
+                    scale_filter,
+                    scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
+                        | scaling::ScaleFilter::OmniScale
+                ) || gpu_hqx;
+                let gpu_vectorize = matches!(
+                    scale_filter,
+                    scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
+                ) && vectorize_compute.is_some();
+
+                if gpu_vectorize {
+                    let (ww, wh) = window.size();
+                    let src_aspect = src_w as f64 / src_h as f64;
+                    let win_aspect = ww as f64 / wh as f64;
+                    let (disp_w, disp_h) = if win_aspect > src_aspect {
+                        ((wh as f64 * src_aspect) as usize, wh as usize)
+                    } else {
+                        (ww as usize, (ww as f64 / src_aspect) as usize)
+                    };
+                    let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                    let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+                        vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
+                    if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
+                        if out_w != gpu_tex_w || out_h != gpu_tex_h {
+                            gpu_tex_w = out_w; gpu_tex_h = out_h;
+                            gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
+                        }
+                        scaling::gpu::vectorize_and_blit(
+                            &gpu_device, &window, &gpu_tex,
+                            vectorize_compute.as_ref().unwrap(),
+                            &gpu_edges, &row_ranges, &edge_indices,
+                            out_w, out_h, bg_color,
+                        );
+                    }
+                } else if gpu_native {
+                    if src_w != gpu_tex_w || src_h != gpu_tex_h {
+                        gpu_tex_w = src_w; gpu_tex_h = src_h;
+                        gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
+                    }
+                    let needed = src_w * src_h * 4;
+                    if needed > transfer_buf_size {
+                        transfer_buf = gpu_device.create_transfer_buffer()
+                            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+                            .with_size(needed).build().expect("transfer buf");
+                        transfer_buf_size = needed;
+                    }
+                    if gpu_hqx {
+                        let hqx_scale = match scale_filter {
+                            scaling::ScaleFilter::Hqx(h) => h.factor() as f32, _ => 2.0,
+                        };
+                        scaling::gpu::render_hqx(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            hqx_pipeline.as_ref().unwrap(), &omniscale_sampler, hqx_scale,
+                        );
+                    } else if scale_filter == scaling::ScaleFilter::OmniScale {
+                        if let Some(ref pipeline) = omniscale_pipeline {
+                            scaling::gpu::render_omniscale(
+                                &gpu_device, &window, &gpu_tex, &transfer_buf,
+                                raw_src, src_w, src_h, pipeline, &omniscale_sampler,
+                            );
+                        } else {
+                            scaling::gpu::upload_and_blit(
+                                &gpu_device, &window, &gpu_tex, &transfer_buf,
+                                raw_src, src_w, src_h, gpu::Filter::Nearest,
+                            );
+                        }
+                    } else {
+                        let f = if scale_filter == scaling::ScaleFilter::Bilinear {
+                            gpu::Filter::Linear } else { gpu::Filter::Nearest };
+                        scaling::gpu::upload_and_blit(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h, f,
+                        );
+                    }
+                } else {
+                    let (ww, wh) = window.size();
+                    let src_aspect = src_w as f64 / src_h as f64;
+                    let win_aspect = ww as f64 / wh as f64;
+                    let (disp_w, disp_h) = if win_aspect > src_aspect {
+                        ((wh as f64 * src_aspect) as usize, wh as usize)
+                    } else {
+                        (ww as usize, (ww as f64 / src_aspect) as usize)
+                    };
+                    let (scaled, fw, fh) = cpu_scale_frame(
+                        &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                    );
+                    if fw != gpu_tex_w || fh != gpu_tex_h {
+                        gpu_tex_w = fw; gpu_tex_h = fh;
+                        gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
+                    }
+                    let needed = fw * fh * 4;
+                    if needed > transfer_buf_size {
+                        transfer_buf = gpu_device.create_transfer_buffer()
+                            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+                            .with_size(needed).build().expect("transfer buf");
+                        transfer_buf_size = needed;
+                    }
+                    scaling::gpu::upload_and_blit(
+                        &gpu_device, &window, &gpu_tex, &transfer_buf,
+                        &scaled, fw, fh, gpu::Filter::Nearest,
+                    );
+                }
+            }
+
+            #[cfg(not(feature = "sdl3-gpu-shaders"))]
+            {
+                // CPU-only path: scale everything on CPU, render via SDL 2D canvas
                 let (ww, wh) = canvas.window().size();
                 let src_aspect = src_w as f64 / src_h as f64;
                 let win_aspect = ww as f64 / wh as f64;
-                if win_aspect > src_aspect {
-                    ((wh as f64 * src_aspect) as usize, wh as usize)
-                } else {
-                    (ww as usize, (ww as f64 / src_aspect) as usize)
-                }
-            } else {
-                (0, 0)
-            };
+                let (disp_w, disp_h) = if is_resizable {
+                    if win_aspect > src_aspect {
+                        ((wh as f64 * src_aspect) as usize, wh as usize)
+                    } else {
+                        (ww as usize, (ww as f64 / src_aspect) as usize)
+                    }
+                } else { (0, 0) };
 
-            let scaled;
-            let mut vec_out: (usize, usize) = (0, 0);
-            let final_src: &[u32] = match scale_filter {
-                scaling::ScaleFilter::Hqx(mode) => {
-                    scaled = scaling::hqx::scale(raw_src, sw, sh, mode);
-                    &scaled
-                }
-                scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x => {
-                    scaled = scaling::epx::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Scale3x => {
-                    scaled = scaling::scale3x::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Scale4x => {
-                    scaled = scaling::epx::scale4x(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Eagle => {
-                    scaled = scaling::eagle::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Sai2x => {
-                    scaled = scaling::sai::scale_2xsai(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Super2xSai => {
-                    scaled = scaling::sai::scale_super2xsai(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::SuperEagle => {
-                    scaled = scaling::sai::scale_super_eagle(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Bilinear => {
-                    scaled = scaling::bilinear::scale_to(raw_src, sw, sh, disp_w, disp_h);
-                    &scaled
-                }
-                scaling::ScaleFilter::Bicubic => {
-                    scaled = scaling::bicubic::scale_to(raw_src, sw, sh, disp_w, disp_h);
-                    &scaled
-                }
-                scaling::ScaleFilter::Xbr(mode) => {
-                    scaled = scaling::xbr::scale(raw_src, sw, sh, mode);
-                    &scaled
-                }
-                scaling::ScaleFilter::Xbrz(mode) => {
-                    scaled = scaling::xbrz::scale(raw_src, sw, sh, mode);
-                    &scaled
-                }
-                scaling::ScaleFilter::XbrHybrid => {
-                    scaled = scaling::xbr_hybrid::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::SuperXbr => {
-                    scaled = scaling::super_xbr::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Nedi => {
-                    scaled = scaling::nedi::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Dcci => {
-                    scaled = scaling::dcci::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::Edi => {
-                    scaled = scaling::edi::scale(raw_src, sw, sh);
-                    &scaled
-                }
-                scaling::ScaleFilter::OmniScale => {
-                    scaled = scaling::omniscale::scale_to(raw_src, sw, sh, disp_w, disp_h);
-                    &scaled
-                }
-                scaling::ScaleFilter::OmniScaleLegacy => {
-                    scaled = scaling::omniscale_legacy::scale_to(raw_src, sw, sh, disp_w, disp_h);
-                    &scaled
-                }
-                scaling::ScaleFilter::AaNearestNeighbor => {
-                    scaled = scaling::aa_nearest::scale(raw_src, sw, sh, disp_w, disp_h);
-                    &scaled
-                }
-                scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive => {
-                    let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                    let cache = vec_cache.as_mut().unwrap();
-                    let (raster, w, h) = cache.rasterize(raw_src, sw, sh, scale);
-                    vec_out = (w, h);
-                    raster
-                }
-                scaling::ScaleFilter::Nearest => raw_src,
-            };
+                let (scaled, fw, fh) = cpu_scale_frame(
+                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                );
+                let (fw, fh) = (fw as usize, fh as usize);
+                let final_src = if fw == sw && fh == sh { raw_src } else { &scaled };
 
-            // Output frame dimensions and display rect
-            let is_vec = matches!(scale_filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive);
-            let (fw, fh) = if is_vec {
-                vec_out
-            } else if scales_to_display {
-                (disp_w, disp_h)
-            } else {
-                (tex_w as usize, tex_h as usize)
-            };
-
-            // Aspect-correct destination rect (letterbox/pillarbox)
-            let dst_rect: Option<sdl3::render::FRect> = if is_resizable {
-                let (ww, wh) = canvas.window().size();
-                // For vectorize, center the actual rasterized output
-                let (dw, dh) = if is_vec { vec_out } else { (disp_w, disp_h) };
-                let dx = (ww as usize).saturating_sub(dw) / 2;
-                let dy = (wh as usize).saturating_sub(dh) / 2;
-                Some(sdl3::render::FRect::new(dx as f32, dy as f32, dw as f32, dh as f32))
-            } else {
-                None
-            };
-
-            // Recreate texture if dimensions changed (vectorize resize)
-            if fw as u32 != tex_cur_w || fh as u32 != tex_cur_h {
-                tex_cur_w = fw as u32;
-                tex_cur_h = fh as u32;
-                texture = texture_creator
-                    .create_texture_streaming(PixelFormat::ARGB8888, tex_cur_w, tex_cur_h)
-                    .unwrap();
-                texture.set_scale_mode(ScaleMode::Nearest);
-            }
-
-            texture
-                .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                if fw as u32 != tex_cur_w || fh as u32 != tex_cur_h {
+                    tex_cur_w = fw as u32; tex_cur_h = fh as u32;
+                    sdl_texture = texture_creator.create_texture_streaming(
+                        sdl3::pixels::PixelFormat::ARGB8888, tex_cur_w, tex_cur_h,
+                    ).unwrap();
+                    sdl_texture.set_scale_mode(sdl3::render::ScaleMode::Nearest);
+                }
+                sdl_texture.with_lock(None, |pixels: &mut [u8], pitch: usize| {
                     for y in 0..fh {
                         for x in 0..fw {
                             let argb = final_src[y * fw + x];
                             let off = y * pitch + x * 4;
-                            pixels[off]     =  argb        as u8; // B
-                            pixels[off + 1] = (argb >>  8) as u8; // G
-                            pixels[off + 2] = (argb >> 16) as u8; // R
-                            pixels[off + 3] = 0xFF;                // A
+                            pixels[off]     =  argb        as u8;
+                            pixels[off + 1] = (argb >>  8) as u8;
+                            pixels[off + 2] = (argb >> 16) as u8;
+                            pixels[off + 3] = 0xFF;
                         }
                     }
-                })
-                .unwrap();
+                }).unwrap();
 
-            canvas.clear();
-            canvas.copy(&texture, None, dst_rect).unwrap();
-            canvas.present();
+                let dst_rect: Option<sdl3::render::FRect> = if is_resizable {
+                    let dx = (ww as usize).saturating_sub(fw) / 2;
+                    let dy = (wh as usize).saturating_sub(fh) / 2;
+                    Some(sdl3::render::FRect::new(dx as f32, dy as f32, fw as f32, fh as f32))
+                } else { None };
+                canvas.clear();
+                canvas.copy(&sdl_texture, None, dst_rect).unwrap();
+                canvas.present();
+            }
         }
 
         // ── FPS counter ───────────────────────────────────────────────────────
@@ -847,6 +898,28 @@ fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState, gp: Opti
         }
     }
 }
+
+// ── CPU scaling helper ───────────────────────────────────────────────────────
+
+/// Run a CPU scaling filter and return (pixels, width, height).
+fn cpu_scale_frame(
+    filter: &scaling::ScaleFilter,
+    src: &[u32], sw: usize, sh: usize,
+    disp_w: usize, disp_h: usize,
+    vec_cache: &mut Option<crate::vectorize::VectorizeCache>,
+) -> (Vec<u32>, u32, u32) {
+    // Vectorize uses its own cache-based path
+    if matches!(filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
+        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+        let cache = vec_cache.as_mut().unwrap();
+        let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
+        return (raster.to_vec(), w as u32, h as u32);
+    }
+    // All other CPU filters use the shared dispatcher
+    scaling::cpu_scale(*filter, src, sw, sh, disp_w, disp_h)
+        .unwrap_or_else(|| (src.to_vec(), sw as u32, sh as u32))
+}
+
 
 // ── Gamepad helpers ──────────────────────────────────────────────────────────
 

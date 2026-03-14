@@ -17,6 +17,8 @@ pub mod super_xbr;
 pub mod xbr;
 pub mod xbr_hybrid;
 pub mod xbrz;
+#[cfg(feature = "sdl3-gpu-shaders")]
+pub mod gpu;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]
@@ -160,4 +162,106 @@ impl ScaleFilter {
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
     }
+}
+
+/// Apply a CPU scaling filter to a frame buffer.
+///
+/// Returns `(scaled_pixels, output_width, output_height)`.
+/// For filters that scale to a fixed factor, `disp_w`/`disp_h` are ignored.
+/// For resolution-adaptive filters (Bilinear, Bicubic, OmniScale, etc.),
+/// the output is sized to `disp_w` x `disp_h`.
+///
+/// Returns `None` for Nearest (which should use GPU blit instead).
+pub fn cpu_scale(
+    filter: ScaleFilter,
+    src: &[u32], sw: usize, sh: usize,
+    disp_w: usize, disp_h: usize,
+) -> Option<(Vec<u32>, u32, u32)> {
+    Some(match filter {
+        ScaleFilter::Hqx(mode) => {
+            let s = hqx::scale(src, sw, sh, mode);
+            let f = mode.factor() as u32;
+            (s, sw as u32 * f, sh as u32 * f)
+        }
+        ScaleFilter::Epx | ScaleFilter::Scale2x => {
+            let s = epx::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Scale3x => {
+            let s = scale3x::scale(src, sw, sh);
+            (s, sw as u32 * 3, sh as u32 * 3)
+        }
+        ScaleFilter::Scale4x => {
+            let s = epx::scale4x(src, sw, sh);
+            (s, sw as u32 * 4, sh as u32 * 4)
+        }
+        ScaleFilter::Eagle => {
+            let s = eagle::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Sai2x => {
+            let s = sai::scale_2xsai(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Super2xSai => {
+            let s = sai::scale_super2xsai(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::SuperEagle => {
+            let s = sai::scale_super_eagle(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Bilinear => {
+            let s = bilinear::scale_to(src, sw, sh, disp_w, disp_h);
+            (s, disp_w as u32, disp_h as u32)
+        }
+        ScaleFilter::Bicubic => {
+            let s = bicubic::scale_to(src, sw, sh, disp_w, disp_h);
+            (s, disp_w as u32, disp_h as u32)
+        }
+        ScaleFilter::Xbr(mode) => {
+            let s = xbr::scale(src, sw, sh, mode);
+            let f = mode.factor() as u32;
+            (s, sw as u32 * f, sh as u32 * f)
+        }
+        ScaleFilter::Xbrz(mode) => {
+            let s = xbrz::scale(src, sw, sh, mode);
+            let f = mode.factor() as u32;
+            (s, sw as u32 * f, sh as u32 * f)
+        }
+        ScaleFilter::XbrHybrid => {
+            let s = xbr_hybrid::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::SuperXbr => {
+            let s = super_xbr::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Nedi => {
+            let s = nedi::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Dcci => {
+            let s = dcci::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Edi => {
+            let s = edi::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::OmniScale => {
+            let s = omniscale::scale_to(src, sw, sh, disp_w, disp_h);
+            (s, disp_w as u32, disp_h as u32)
+        }
+        ScaleFilter::OmniScaleLegacy => {
+            let s = omniscale_legacy::scale_to(src, sw, sh, disp_w, disp_h);
+            (s, disp_w as u32, disp_h as u32)
+        }
+        ScaleFilter::AaNearestNeighbor => {
+            let s = aa_nearest::scale(src, sw, sh, disp_w, disp_h);
+            (s, disp_w as u32, disp_h as u32)
+        }
+        // Nearest, Vectorize handled elsewhere (GPU blit / compute)
+        _ => return None,
+    })
 }

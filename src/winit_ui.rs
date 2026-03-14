@@ -1080,101 +1080,21 @@ impl App {
         let disp_h = win_h;
 
         let scaled;
-        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) = match self.scale_filter {
-            scaling::ScaleFilter::Nearest => {
+        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
+            if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
                 (fb, sw, sh)
-            }
-            scaling::ScaleFilter::Bilinear => {
-                scaled = scaling::bilinear::scale_to(fb, sw, sh, disp_w, disp_h);
-                (&scaled, disp_w, disp_h)
-            }
-            scaling::ScaleFilter::Bicubic => {
-                scaled = scaling::bicubic::scale_to(fb, sw, sh, disp_w, disp_h);
-                (&scaled, disp_w, disp_h)
-            }
-            scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x => {
-                scaled = scaling::epx::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Scale3x => {
-                scaled = scaling::scale3x::scale(fb, sw, sh);
-                (&scaled, sw * 3, sh * 3)
-            }
-            scaling::ScaleFilter::Scale4x => {
-                scaled = scaling::epx::scale4x(fb, sw, sh);
-                (&scaled, sw * 4, sh * 4)
-            }
-            scaling::ScaleFilter::Eagle => {
-                scaled = scaling::eagle::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Sai2x => {
-                scaled = scaling::sai::scale_2xsai(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Super2xSai => {
-                scaled = scaling::sai::scale_super2xsai(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::SuperEagle => {
-                scaled = scaling::sai::scale_super_eagle(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Hqx(mode) => {
-                let f = mode.factor() as usize;
-                scaled = scaling::hqx::scale(fb, sw, sh, mode);
-                (&scaled, sw * f, sh * f)
-            }
-            scaling::ScaleFilter::Xbr(mode) => {
-                let f = mode.factor() as usize;
-                scaled = scaling::xbr::scale(fb, sw, sh, mode);
-                (&scaled, sw * f, sh * f)
-            }
-            scaling::ScaleFilter::Xbrz(mode) => {
-                let f = mode.factor() as usize;
-                scaled = scaling::xbrz::scale(fb, sw, sh, mode);
-                (&scaled, sw * f, sh * f)
-            }
-            scaling::ScaleFilter::XbrHybrid => {
-                scaled = scaling::xbr_hybrid::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::SuperXbr => {
-                scaled = scaling::super_xbr::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Nedi => {
-                scaled = scaling::nedi::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Dcci => {
-                scaled = scaling::dcci::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::Edi => {
-                scaled = scaling::edi::scale(fb, sw, sh);
-                (&scaled, sw * 2, sh * 2)
-            }
-            scaling::ScaleFilter::OmniScale => {
-                scaled = scaling::omniscale::scale_to(fb, sw, sh, disp_w, disp_h);
-                (&scaled, disp_w, disp_h)
-            }
-            scaling::ScaleFilter::OmniScaleLegacy => {
-                scaled = scaling::omniscale_legacy::scale_to(fb, sw, sh, disp_w, disp_h);
-                (&scaled, disp_w, disp_h)
-            }
-            scaling::ScaleFilter::AaNearestNeighbor => {
-                scaled = scaling::aa_nearest::scale(fb, sw, sh, disp_w, disp_h);
-                (&scaled, disp_w, disp_h)
-            }
-            scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive => {
+            } else if matches!(self.scale_filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
                 let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
                 let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
                 let (raster, vw, vh) = cache.rasterize(fb, sw, sh, scale);
                 (raster, vw, vh)
-            }
-        };
+            } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
+                scaled = s;
+                (&scaled, w as usize, h as usize)
+            } else {
+                (fb, sw, sh)
+            };
 
         gpu.render(frame_pixels, frame_w as u32, frame_h as u32, self.src_w, self.src_h);
 

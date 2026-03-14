@@ -50,6 +50,8 @@ path = "src/winit_ui.rs"
 required-features = ["winit-ui"]
 
 [features]
+default = ["sdl3-gpu-shaders"]
 macos-ui = []
+sdl3-gpu-shaders = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 winit-ui = ["winit", "wgpu", "bytemuck", "pollster", "muda", "cpal", "rfd", "nokhwa", "gilrs"]
