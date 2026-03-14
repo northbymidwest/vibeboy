@@ -269,11 +269,11 @@ fn apply_rotated_blend(
         block[idx4] = blend_argb(block[idx4], blend_color, a3);
 
         if steep {
-            let idx = rotate_idx(last - 2, last - 2, n, rot);
+            let idx = rotate_idx(last - 1, last - 3, n, rot);
             block[idx] = blend_argb(block[idx], blend_color, a4);
         }
         if shallow {
-            let idx = rotate_idx(last - 2, last - 2, n, rot);
+            let idx = rotate_idx(last - 3, last - 1, n, rot);
             block[idx] = blend_argb(block[idx], blend_color, a4);
         }
     }

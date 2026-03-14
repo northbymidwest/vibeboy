@@ -1,519 +1,278 @@
-//! HQx (High Quality Magnification) scaling algorithms.
+//! HQx (hq2x, hq3x, hq4x) pixel-art magnification filters.
 //!
-//! Implements hq2x, hq3x, and hq4x pixel-art scaling filters based on
-//! Maxim Stepin's original algorithm. Uses YUV color-space distance comparison
-//! to detect edges, then applies smooth interpolation patterns.
-//!
-//! Each function takes a source buffer of u32 ARGB pixels and produces a
-//! scaled output buffer.
+//! Implements Maxim Stepin's HQx algorithm using rotation symmetry: each scale
+//! factor has a single kernel function that is applied once per quadrant with
+//! a rotated view of the 3x3 neighborhood. Edge detection uses inline YUV
+//! color distance with integer arithmetic.
 
 use super::HqxScale;
 
-// ── YUV color distance ──────────────────────────────────────────────────────
+// ── Color comparison ────────────────────────────────────────────────────────
 
-/// Default color-distance threshold (tuned to match the original hqx C code).
-const THRESHOLD: u32 = 48;
-/// Luma weight for Y difference.
-const Y_WEIGHT: u32 = 48;
-/// Chroma weight for U difference.
-const U_WEIGHT: u32 = 7;
-/// Chroma weight for V difference.
-const V_WEIGHT: u32 = 6;
-
-/// Convert ARGB u32 to (Y, U, V) components, each as i32.
+/// Returns true if two colors are perceptually different in YUV space.
+/// Computes YUV delta inline using integer math (no lookup table).
+/// Thresholds: dY > 48, dU > 7, dV > 6 (matching Stepin's original,
+/// scaled by 1000 to avoid floating point).
 #[inline(always)]
-fn to_yuv(c: u32) -> (i32, i32, i32) {
-    let r = ((c >> 16) & 0xFF) as i32;
-    let g = ((c >> 8) & 0xFF) as i32;
-    let b = (c & 0xFF) as i32;
-    let y = (r + g + b) as i32;         // simplified luminance (0..765)
-    let u = (r - b) as i32;             // -255..255
-    let v = (2 * g - r - b) as i32;     // -510..510
-    (y, u, v)
+fn colors_differ(a: u32, b: u32) -> bool {
+    if a == b { return false; }
+    let dr = ((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32;
+    let dg = ((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32;
+    let db = (a & 0xFF) as i32 - (b & 0xFF) as i32;
+    let dy = (299 * dr + 587 * dg + 114 * db).unsigned_abs();
+    let du = (-169 * dr - 331 * dg + 500 * db).unsigned_abs();
+    let dv = (500 * dr - 419 * dg - 81 * db).unsigned_abs();
+    dy > 48000 || du > 7000 || dv > 6000
 }
 
-/// Return true if two colors are "different" (exceed the YUV threshold).
+// ── Pixel blending ──────────────────────────────────────────────────────────
+
 #[inline(always)]
-fn diff(a: u32, b: u32) -> bool {
-    if a == b {
-        return false;
+fn mix2(c1: u32, w1: u32, c2: u32, w2: u32, shift: u32) -> u32 {
+    let hi = ((c1 & 0xFF00FF00) >> 8).wrapping_mul(w1)
+        .wrapping_add(((c2 & 0xFF00FF00) >> 8).wrapping_mul(w2));
+    let lo = (c1 & 0x00FF00FF).wrapping_mul(w1)
+        .wrapping_add((c2 & 0x00FF00FF).wrapping_mul(w2));
+    ((hi << (8 - shift)) & 0xFF00FF00) | ((lo >> shift) & 0x00FF00FF)
+}
+
+#[inline(always)]
+fn mix3(c1: u32, w1: u32, c2: u32, w2: u32, c3: u32, w3: u32, shift: u32) -> u32 {
+    let hi = ((c1 & 0xFF00FF00) >> 8).wrapping_mul(w1)
+        .wrapping_add(((c2 & 0xFF00FF00) >> 8).wrapping_mul(w2))
+        .wrapping_add(((c3 & 0xFF00FF00) >> 8).wrapping_mul(w3));
+    let lo = (c1 & 0x00FF00FF).wrapping_mul(w1)
+        .wrapping_add((c2 & 0x00FF00FF).wrapping_mul(w2))
+        .wrapping_add((c3 & 0x00FF00FF).wrapping_mul(w3));
+    ((hi << (8 - shift)) & 0xFF00FF00) | ((lo >> shift) & 0x00FF00FF)
+}
+
+// ── Rotatable 3x3 neighborhood ──────────────────────────────────────────────
+
+struct CornerView {
+    edge: u32,
+    diag: u32, top: u32, left: u32, center: u32, right: u32, bot: u32,
+}
+
+const TRANSFORMS: [[usize; 9]; 4] = [
+    [0,1,2,3,4,5,6,7,8], [2,1,0,5,4,3,8,7,6],
+    [6,7,8,3,4,5,0,1,2], [8,7,6,5,4,3,2,1,0],
+];
+
+const ROTATIONS: [[usize; 9]; 4] = [
+    [0,1,2,3,4,5,6,7,8], [2,5,8,1,4,7,0,3,6],
+    [6,3,0,7,4,1,8,5,2], [8,7,6,5,4,3,2,1,0],
+];
+
+#[inline(always)]
+fn remap_edge_pattern(pattern: u32, perm: &[usize; 9], reverse: bool) -> u32 {
+    let mut out = 0u32;
+    let indices = [0,1,2,3,5,6,7,8];
+    for (bit_pos, &idx) in indices.iter().enumerate() {
+        let src_idx = perm[idx];
+        let src_bit = if src_idx > 4 { src_idx - 1 } else { src_idx };
+        let actual_bit = if reverse { 7 - src_bit } else { src_bit };
+        out |= ((pattern >> actual_bit) & 1) << bit_pos;
     }
-    let (y1, u1, v1) = to_yuv(a);
-    let (y2, u2, v2) = to_yuv(b);
-    let dy = (y1 - y2).unsigned_abs();
-    let du = (u1 - u2).unsigned_abs();
-    let dv = (v1 - v2).unsigned_abs();
-    dy * Y_WEIGHT + du * U_WEIGHT + dv * V_WEIGHT > THRESHOLD * Y_WEIGHT
+    out
 }
 
-// ── Pixel interpolation helpers ─────────────────────────────────────────────
+fn build_corner_view(pixels: &[u32; 9], pattern: u32, perm: &[usize; 9], reverse: bool) -> CornerView {
+    CornerView {
+        edge: remap_edge_pattern(pattern, perm, reverse),
+        diag: pixels[perm[0]], top: pixels[perm[1]], left: pixels[perm[3]],
+        center: pixels[perm[4]], right: pixels[perm[5]], bot: pixels[perm[7]],
+    }
+}
 
-/// Linear interpolation: (a + b) / 2
 #[inline(always)]
-fn interp_2(a: u32, b: u32) -> u32 {
-    // Per-channel average without overflow
-    let mask = 0xFEFEFEFE_u32;
-    ((a & mask) >> 1) + ((b & mask) >> 1) + (a & b & 0x01010101)
+fn edge_match(v: &CornerView, mask: u32, expected: u32) -> bool {
+    (v.edge & mask) == expected
 }
 
-/// Weighted interpolation: (2a + b) / 3
+// ── Edge pattern constants ──────────────────────────────────────────────────
+
+const EDGE_HORIZ: [(u32,u32); 2] = [(0xbf,0x37), (0xdb,0x13)];
+const EDGE_VERT: [(u32,u32); 2] = [(0xdb,0x49), (0xef,0x6d)];
+const EDGE_SHARP_DIAG: [(u32,u32); 3] = [(0x0b,0x0b), (0xfe,0x4a), (0xfe,0x1a)];
+const EDGE_PARTIAL_DIAG: [(u32,u32); 13] = [
+    (0x6f,0x2a),(0x5b,0x0a),(0xbf,0x3a),(0xdf,0x5a),(0x9f,0x8a),(0xcf,0x8a),
+    (0xef,0x4e),(0x3f,0x0e),(0xfb,0x5a),(0xbb,0x8a),(0x7f,0x5a),(0xaf,0x8a),(0xeb,0x8a),
+];
+
 #[inline(always)]
-fn interp_3(a: u32, b: u32) -> u32 {
-    blend(a, b, 2, 1)
+fn any_match(v: &CornerView, pairs: &[(u32,u32)]) -> bool {
+    pairs.iter().any(|&(m,e)| edge_match(v, m, e))
 }
 
-/// Weighted interpolation: (2a + b + c) / 4
-#[inline(always)]
-fn interp_4(a: u32, b: u32, c: u32) -> u32 {
-    blend3(a, b, c, 2, 1, 1)
+// ── hq2x ────────────────────────────────────────────────────────────────────
+
+fn hq2x_corner(v: &CornerView) -> u32 {
+    let CornerView { diag, top, left, center, right, bot, .. } = *v;
+    if any_match(v, &EDGE_HORIZ) && colors_differ(top, right) { return mix2(center,3,left,1,2); }
+    if any_match(v, &EDGE_VERT) && colors_differ(bot, left) { return mix2(center,3,top,1,2); }
+    if any_match(v, &EDGE_SHARP_DIAG) && colors_differ(left, top) { return center; }
+    if any_match(v, &EDGE_PARTIAL_DIAG) && colors_differ(left, top) { return mix2(center,3,diag,1,2); }
+    if edge_match(v,0x0b,0x08) { return mix3(center,2,diag,1,top,1,2); }
+    if edge_match(v,0x0b,0x02) { return mix3(center,2,diag,1,left,1,2); }
+    if edge_match(v,0x2f,0x2f) { return mix3(center,14,left,1,top,1,4); }
+    if any_match(v, &EDGE_HORIZ) { return mix3(center,5,top,2,left,1,3); }
+    if any_match(v, &EDGE_VERT) { return mix3(center,5,left,2,top,1,3); }
+    if edge_match(v,0x1b,0x03)||edge_match(v,0x4f,0x43)||edge_match(v,0x8b,0x83)||edge_match(v,0x6b,0x43) { return mix2(center,3,left,1,2); }
+    if edge_match(v,0x4b,0x09)||edge_match(v,0x8b,0x89)||edge_match(v,0x1f,0x19)||edge_match(v,0x3b,0x19) { return mix2(center,3,top,1,2); }
+    if edge_match(v,0x7e,0x2a)||edge_match(v,0xef,0xab)||edge_match(v,0xbf,0x8f)||edge_match(v,0x7e,0x0e) { return mix3(center,2,left,3,top,3,3); }
+    if edge_match(v,0xfb,0x6a)||edge_match(v,0x6f,0x6e)||edge_match(v,0x3f,0x3e)||edge_match(v,0xfb,0xfa)||edge_match(v,0xdf,0xde)||edge_match(v,0xdf,0x1e) { return mix2(center,3,diag,1,2); }
+    if edge_match(v,0x0a,0x00)||edge_match(v,0x4f,0x4b)||edge_match(v,0x9f,0x1b)||edge_match(v,0x2f,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0xee,0x0a)||edge_match(v,0x7e,0x0a)||edge_match(v,0xeb,0x4b)||edge_match(v,0x3b,0x1b) { return mix3(center,2,left,1,top,1,2); }
+    mix3(center,6,left,1,top,1,3)
 }
 
-/// Two-component blend: (wa*a + wb*b) / (wa+wb)
-#[inline(always)]
-fn blend(a: u32, b: u32, wa: u32, wb: u32) -> u32 {
-    let total = wa + wb;
-    let r = (((a >> 16) & 0xFF) * wa + ((b >> 16) & 0xFF) * wb) / total;
-    let g = (((a >> 8) & 0xFF) * wa + ((b >> 8) & 0xFF) * wb) / total;
-    let bl = ((a & 0xFF) * wa + (b & 0xFF) * wb) / total;
-    0xFF000000 | (r << 16) | (g << 8) | bl
+// ── hq3x ────────────────────────────────────────────────────────────────────
+
+fn hq3x_corner_and_edge(v: &CornerView) -> (u32, u32) {
+    let CornerView { diag, top, left, center, right, bot, .. } = *v;
+    let corner = if any_match(v, &EDGE_VERT) && colors_differ(bot, left) { mix2(center,3,top,1,2) }
+    else if any_match(v, &EDGE_HORIZ) && colors_differ(top, right) { mix2(center,3,left,1,2) }
+    else if any_match(v, &EDGE_SHARP_DIAG) && colors_differ(left, top) { center }
+    else if any_match(v, &EDGE_PARTIAL_DIAG) && colors_differ(left, top) { mix2(center,3,diag,1,2) }
+    else if edge_match(v,0x4b,0x09)||edge_match(v,0x8b,0x89)||edge_match(v,0x1f,0x19)||edge_match(v,0x3b,0x19) { mix2(center,3,top,1,2) }
+    else if edge_match(v,0x1b,0x03)||edge_match(v,0x4f,0x43)||edge_match(v,0x8b,0x83)||edge_match(v,0x6b,0x43) { mix2(center,3,left,1,2) }
+    else if edge_match(v,0x7e,0x2a)||edge_match(v,0xef,0xab)||edge_match(v,0xbf,0x8f)||edge_match(v,0x7e,0x0e) { mix2(left,1,top,1,1) }
+    else if edge_match(v,0x4f,0x4b)||edge_match(v,0x9f,0x1b)||edge_match(v,0x2f,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0xee,0x0a)||edge_match(v,0x7e,0x0a)||edge_match(v,0xeb,0x4b)||edge_match(v,0x3b,0x1b) { mix3(center,2,left,7,top,7,4) }
+    else if edge_match(v,0x0b,0x08)||edge_match(v,0xf9,0x68)||edge_match(v,0xf3,0x62)||edge_match(v,0x6d,0x6c)||edge_match(v,0x67,0x66)||edge_match(v,0x3d,0x3c)||edge_match(v,0x37,0x36)||edge_match(v,0xf9,0xf8)||edge_match(v,0xdd,0xdc)||edge_match(v,0xf3,0xf2)||edge_match(v,0xd7,0xd6)||edge_match(v,0xdd,0x1c)||edge_match(v,0xd7,0x16)||edge_match(v,0x0b,0x02) { mix2(center,3,diag,1,2) }
+    else { mix3(center,2,left,1,top,1,2) };
+
+    let edge = if (edge_match(v,0xfe,0xde)||edge_match(v,0x9e,0x16)||edge_match(v,0xda,0x12)||edge_match(v,0x17,0x16)||edge_match(v,0x5b,0x12)||edge_match(v,0xbb,0x12)) && colors_differ(top, right) { center }
+    else if (edge_match(v,0x0f,0x0b)||edge_match(v,0x5e,0x0a)||edge_match(v,0xfb,0x7b)||edge_match(v,0x3b,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0x7a,0x0a)) && colors_differ(left, top) { center }
+    else if edge_match(v,0xbf,0x8f)||edge_match(v,0x7e,0x0e)||edge_match(v,0xbf,0x37)||edge_match(v,0xdb,0x13) { mix2(top,3,center,1,2) }
+    else if edge_match(v,0x02,0x00)||edge_match(v,0x7c,0x28)||edge_match(v,0xed,0xa9)||edge_match(v,0xf5,0xb4)||edge_match(v,0xd9,0x90) { mix2(center,3,top,1,2) }
+    else if edge_match(v,0x4f,0x4b)||edge_match(v,0xfb,0x7b)||edge_match(v,0xfe,0x7e)||edge_match(v,0x9f,0x1b)||edge_match(v,0x2f,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0x7e,0x0a)||edge_match(v,0xfb,0x4b)||edge_match(v,0xfb,0xdb)||edge_match(v,0xfe,0xde)||edge_match(v,0xfe,0x56)||edge_match(v,0x57,0x56)||edge_match(v,0x97,0x16)||edge_match(v,0x3f,0x1e)||edge_match(v,0xdb,0x12)||edge_match(v,0xbb,0x12) { mix2(center,7,top,1,3) }
+    else { center };
+    (corner, edge)
 }
 
-/// Three-component blend: (wa*a + wb*b + wc*c) / (wa+wb+wc)
-#[inline(always)]
-fn blend3(a: u32, b: u32, c: u32, wa: u32, wb: u32, wc: u32) -> u32 {
-    let total = wa + wb + wc;
-    let r = (((a >> 16) & 0xFF) * wa + ((b >> 16) & 0xFF) * wb + ((c >> 16) & 0xFF) * wc) / total;
-    let g = (((a >> 8) & 0xFF) * wa + ((b >> 8) & 0xFF) * wb + ((c >> 8) & 0xFF) * wc) / total;
-    let bl = ((a & 0xFF) * wa + (b & 0xFF) * wb + (c & 0xFF) * wc) / total;
-    0xFF000000 | (r << 16) | (g << 8) | bl
+// ── hq4x ────────────────────────────────────────────────────────────────────
+
+fn hq4x_quadrant(v: &CornerView) -> [u32; 4] {
+    let CornerView { diag, top, left, center, right, bot, .. } = *v;
+    let horiz_edge = any_match(v, &EDGE_HORIZ) && colors_differ(top, right);
+    let vert_edge = any_match(v, &EDGE_VERT) && colors_differ(bot, left);
+    let partial_diag = any_match(v, &EDGE_PARTIAL_DIAG) && colors_differ(left, top);
+    let has_vert = any_match(v, &EDGE_VERT);
+    let has_horiz = any_match(v, &EDGE_HORIZ);
+    let left_edge = edge_match(v,0x1b,0x03)||edge_match(v,0x4f,0x43)||edge_match(v,0x8b,0x83)||edge_match(v,0x6b,0x43);
+    let top_edge = edge_match(v,0x4b,0x09)||edge_match(v,0x8b,0x89)||edge_match(v,0x1f,0x19)||edge_match(v,0x3b,0x19);
+    let near_diag = edge_match(v,0x0b,0x08)||edge_match(v,0xf9,0x68)||edge_match(v,0xf3,0x62)||edge_match(v,0x6d,0x6c)||edge_match(v,0x67,0x66)||edge_match(v,0x3d,0x3c)||edge_match(v,0x37,0x36)||edge_match(v,0xf9,0xf8)||edge_match(v,0xdd,0xdc)||edge_match(v,0xf3,0xf2)||edge_match(v,0xd7,0xd6)||edge_match(v,0xdd,0x1c)||edge_match(v,0xd7,0x16)||edge_match(v,0x0b,0x02);
+    let sharp = any_match(v, &EDGE_SHARP_DIAG) && colors_differ(left, top);
+    let cross = (edge_match(v,0x0f,0x0b)||edge_match(v,0x2b,0x0b)||edge_match(v,0xfe,0x4a)||edge_match(v,0xfe,0x1a)) && colors_differ(left, top);
+    let all_diff = edge_match(v,0x2f,0x2f);
+    let smooth = edge_match(v,0x0a,0x00);
+    let inner_top = edge_match(v,0x0b,0x09);
+    let diag_a = edge_match(v,0x7e,0x2a)||edge_match(v,0xef,0xab);
+    let diag_b = edge_match(v,0xbf,0x8f)||edge_match(v,0x7e,0x0e);
+    let gradient = edge_match(v,0x4f,0x4b)||edge_match(v,0x9f,0x1b)||edge_match(v,0x2f,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0xee,0x0a)||edge_match(v,0x7e,0x0a)||edge_match(v,0xeb,0x4b)||edge_match(v,0x3b,0x1b);
+    let inner_left = edge_match(v,0x0b,0x03);
+
+    let px00 = if horiz_edge { mix2(center,5,left,3,3) } else if vert_edge { mix2(center,5,top,3,3) } else if sharp { center } else if partial_diag { mix2(center,5,diag,3,3) } else if has_vert { mix2(center,3,left,1,2) } else if has_horiz { mix2(center,3,top,1,2) } else if left_edge { mix2(center,5,left,3,3) } else if top_edge { mix2(center,5,top,3,3) } else if (edge_match(v,0x0f,0x0b)||edge_match(v,0x5e,0x0a)||edge_match(v,0x2b,0x0b)||edge_match(v,0xbe,0x0a)||edge_match(v,0x7a,0x0a)||edge_match(v,0xee,0x0a)) { mix2(top,1,left,1,1) } else if near_diag { mix2(center,5,diag,3,3) } else { mix3(center,2,top,1,left,1,2) };
+
+    let px01 = if horiz_edge { mix2(center,7,left,1,3) } else if cross { center } else if partial_diag { mix2(center,3,diag,1,2) } else if all_diff { center } else if smooth { mix3(center,5,top,2,left,1,3) } else if edge_match(v,0x0b,0x08) { mix3(center,5,top,2,diag,1,3) } else if inner_top { mix2(center,5,top,3,3) } else if has_horiz { mix2(top,3,center,1,2) } else if diag_a { mix3(top,2,center,1,left,1,2) } else if diag_b { mix2(top,5,left,3,3) } else if left_edge { mix2(center,7,left,1,3) } else if edge_match(v,0xf3,0x62)||edge_match(v,0x67,0x66)||edge_match(v,0x37,0x36)||edge_match(v,0xf3,0xf2)||edge_match(v,0xd7,0xd6)||edge_match(v,0xd7,0x16)||edge_match(v,0x0b,0x02) { mix2(center,3,diag,1,2) } else if gradient { mix2(top,1,center,1,1) } else { mix2(center,3,top,1,2) };
+
+    let px10 = if vert_edge { mix2(center,7,top,1,3) } else if cross { center } else if partial_diag { mix2(center,3,diag,1,2) } else if all_diff { center } else if smooth { mix3(center,5,left,2,top,1,3) } else if edge_match(v,0x0b,0x02) { mix3(center,5,left,2,diag,1,3) } else if inner_left { mix2(center,5,left,3,3) } else if has_vert { mix2(left,3,center,1,2) } else if diag_b { mix3(left,2,center,1,top,1,2) } else if diag_a { mix2(left,5,top,3,3) } else if top_edge { mix2(center,7,top,1,3) } else if edge_match(v,0x0b,0x08)||edge_match(v,0xf9,0x68)||edge_match(v,0x6d,0x6c)||edge_match(v,0x3d,0x3c)||edge_match(v,0xf9,0xf8)||edge_match(v,0xdd,0xdc)||edge_match(v,0xdd,0x1c) { mix2(center,3,diag,1,2) } else if gradient { mix2(left,1,center,1,1) } else { mix2(center,3,left,1,2) };
+
+    let px11 = if (edge_match(v,0x7f,0x2b)||edge_match(v,0xef,0xab)||edge_match(v,0xbf,0x8f)||edge_match(v,0x7f,0x0f)) && colors_differ(left, top) { center } else if partial_diag { mix2(center,7,diag,1,3) } else if inner_left { mix2(center,7,left,1,3) } else if inner_top { mix2(center,7,top,1,3) } else if smooth||edge_match(v,0x7e,0x2a)||edge_match(v,0xef,0xab)||edge_match(v,0xbf,0x8f)||edge_match(v,0x7e,0x0e) { mix3(center,6,left,1,top,1,3) } else if near_diag { mix2(center,7,diag,1,3) } else { center };
+
+    [px00, px01, px10, px11]
 }
 
-// ── Neighbor sampling ───────────────────────────────────────────────────────
+// ── Neighborhood ────────────────────────────────────────────────────────────
 
-/// Neighbor indices:
-///   0 1 2
-///   3 4 5
-///   6 7 8
-/// where 4 is the center pixel.
-struct Neighbors {
-    w: [u32; 9],
-    /// Bit pattern: bit i set if w[i] differs from w[4]
-    pattern: u16,
+fn sample_neighborhood(src: &[u32], w: usize, h: usize, x: usize, y: usize) -> [u32; 9] {
+    let x0 = x.saturating_sub(1); let x1 = (x+1).min(w-1);
+    let y0 = y.saturating_sub(1); let y1 = (y+1).min(h-1);
+    [src[y0*w+x0], src[y0*w+x], src[y0*w+x1],
+     src[y*w+x0],  src[y*w+x],  src[y*w+x1],
+     src[y1*w+x0], src[y1*w+x], src[y1*w+x1]]
 }
 
-impl Neighbors {
-    fn sample(src: &[u32], src_w: usize, src_h: usize, x: usize, y: usize) -> Self {
-        let c = src[y * src_w + x];
-
-        let x0 = if x > 0 { x - 1 } else { 0 };
-        let x2 = if x + 1 < src_w { x + 1 } else { src_w - 1 };
-        let y0 = if y > 0 { y - 1 } else { 0 };
-        let y2 = if y + 1 < src_h { y + 1 } else { src_h - 1 };
-
-        let w = [
-            src[y0 * src_w + x0], // 0: top-left
-            src[y0 * src_w + x],  // 1: top
-            src[y0 * src_w + x2], // 2: top-right
-            src[y * src_w + x0],  // 3: left
-            c,                    // 4: center
-            src[y * src_w + x2],  // 5: right
-            src[y2 * src_w + x0], // 6: bottom-left
-            src[y2 * src_w + x],  // 7: bottom
-            src[y2 * src_w + x2], // 8: bottom-right
-        ];
-
-        let mut pattern: u16 = 0;
-        for i in 0..9 {
-            if i != 4 && diff(c, w[i]) {
-                pattern |= 1 << i;
-            }
+fn compute_edge_pattern(pixels: &[u32; 9]) -> u32 {
+    let c = pixels[4];
+    let mut pat = 0u32;
+    for i in 0..9 {
+        if i == 4 { continue; }
+        let bit = if i > 4 { i - 1 } else { i };
+        if colors_differ(c, pixels[i]) {
+            pat |= 1 << bit;
         }
-
-        Neighbors { w, pattern }
     }
+    pat
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Scale a source image using hq2x.
-/// `src` must have `src_w * src_h` pixels.
-/// Returns a buffer of `(src_w*2) * (src_h*2)` pixels.
-pub fn hq2x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
-    let dst_w = src_w * 2;
-    let dst_h = src_h * 2;
-    let mut dst = vec![0u32; dst_w * dst_h];
+pub fn hq2x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
 
-    for y in 0..src_h {
-        for x in 0..src_w {
-            let n = Neighbors::sample(src, src_w, src_h, x, y);
-            let mut out = [n.w[4]; 4]; // [top-left, top-right, bottom-left, bottom-right]
-            hq2x_kernel(&n, &mut out);
-            let dx = x * 2;
-            let dy = y * 2;
-            dst[dy * dst_w + dx] = out[0];
-            dst[dy * dst_w + dx + 1] = out[1];
-            dst[(dy + 1) * dst_w + dx] = out[2];
-            dst[(dy + 1) * dst_w + dx + 1] = out[3];
-        }
-    }
-
-    dst
-}
-
-/// Scale a source image using hq3x.
-pub fn hq3x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
-    let dst_w = src_w * 3;
-    let dst_h = src_h * 3;
-    let mut dst = vec![0u32; dst_w * dst_h];
-
-    for y in 0..src_h {
-        for x in 0..src_w {
-            let n = Neighbors::sample(src, src_w, src_h, x, y);
-            let mut out = [n.w[4]; 9];
-            hq3x_kernel(&n, &mut out);
-            let dx = x * 3;
-            let dy = y * 3;
-            for oy in 0..3 {
-                for ox in 0..3 {
-                    dst[(dy + oy) * dst_w + dx + ox] = out[oy * 3 + ox];
-                }
+    let dw = w * 2;
+    let mut dst = vec![0u32; dw * h * 2];
+    for y in 0..h {
+        for x in 0..w {
+            let nb = sample_neighborhood(src, w, h, x, y);
+            let pat = compute_edge_pattern(&nb);
+            let dx = x * 2; let dy = y * 2;
+            for (i, xform) in TRANSFORMS.iter().enumerate() {
+                let view = build_corner_view(&nb, pat, xform, false);
+                dst[(dy + i/2) * dw + dx + (i%2)] = hq2x_corner(&view);
             }
         }
     }
-
     dst
 }
 
-/// Scale a source image using hq4x.
-pub fn hq4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
-    let dst_w = src_w * 4;
-    let dst_h = src_h * 4;
-    let mut dst = vec![0u32; dst_w * dst_h];
+pub fn hq3x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
 
-    for y in 0..src_h {
-        for x in 0..src_w {
-            let n = Neighbors::sample(src, src_w, src_h, x, y);
-            let mut out = [n.w[4]; 16];
-            hq4x_kernel(&n, &mut out);
-            let dx = x * 4;
-            let dy = y * 4;
-            for oy in 0..4 {
-                for ox in 0..4 {
-                    dst[(dy + oy) * dst_w + dx + ox] = out[oy * 4 + ox];
-                }
-            }
+    let dw = w * 3;
+    let mut dst = vec![0u32; dw * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let nb = sample_neighborhood(src, w, h, x, y);
+            let pat = compute_edge_pattern(&nb);
+            let dx = x * 3; let dy = y * 3;
+            let (c00,e01) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[0], false));
+            let (c02,e12) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[1], true));
+            let (c20,e10) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[2], true));
+            let (c22,e21) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[3], false));
+            dst[dy*dw+dx]=c00; dst[dy*dw+dx+1]=e01; dst[dy*dw+dx+2]=c02;
+            dst[(dy+1)*dw+dx]=e10; dst[(dy+1)*dw+dx+1]=nb[4]; dst[(dy+1)*dw+dx+2]=e12;
+            dst[(dy+2)*dw+dx]=c20; dst[(dy+2)*dw+dx+1]=e21; dst[(dy+2)*dw+dx+2]=c22;
         }
     }
-
     dst
 }
 
-/// Apply the appropriate hqx scale to a source buffer.
+pub fn hq4x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
+
+    let dw = w * 4;
+    let mut dst = vec![0u32; dw * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let nb = sample_neighborhood(src, w, h, x, y);
+            let pat = compute_edge_pattern(&nb);
+            let dx = x * 4; let dy = y * 4;
+            let tl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[0], false));
+            let tr = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[1], false));
+            let bl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[2], false));
+            let br = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[3], false));
+            dst[dy*dw+dx]=tl[0]; dst[dy*dw+dx+1]=tl[1]; dst[dy*dw+dx+2]=tr[1]; dst[dy*dw+dx+3]=tr[0];
+            dst[(dy+1)*dw+dx]=tl[2]; dst[(dy+1)*dw+dx+1]=tl[3]; dst[(dy+1)*dw+dx+2]=tr[3]; dst[(dy+1)*dw+dx+3]=tr[2];
+            dst[(dy+2)*dw+dx]=bl[2]; dst[(dy+2)*dw+dx+1]=bl[3]; dst[(dy+2)*dw+dx+2]=br[3]; dst[(dy+2)*dw+dx+3]=br[2];
+            dst[(dy+3)*dw+dx]=bl[0]; dst[(dy+3)*dw+dx+1]=bl[1]; dst[(dy+3)*dw+dx+2]=br[1]; dst[(dy+3)*dw+dx+3]=br[0];
+        }
+    }
+    dst
+}
+
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, mode: HqxScale) -> Vec<u32> {
     match mode {
         HqxScale::Hq2x => hq2x(src, src_w, src_h),
         HqxScale::Hq3x => hq3x(src, src_w, src_h),
         HqxScale::Hq4x => hq4x(src, src_w, src_h),
     }
-}
-
-// ── HQ2x kernel ─────────────────────────────────────────────────────────────
-
-/// Compute 4 output pixels (2x2) for center pixel based on neighbor pattern.
-/// out layout: [0]=top-left, [1]=top-right, [2]=bottom-left, [3]=bottom-right
-fn hq2x_kernel(n: &Neighbors, out: &mut [u32; 4]) {
-    let w = &n.w;
-    let p = n.pattern;
-    let c = w[4];
-
-    // Each output pixel is determined by which neighbors differ from center.
-    // This uses simplified hq2x rules derived from the original lookup tables.
-
-    // Top-left pixel
-    out[0] = if !diff_bit(p, 3) && !diff_bit(p, 1) {
-        interp_2(interp_2(c, w[3]), interp_2(c, w[1]))
-    } else if !diff_bit(p, 3) && diff_bit(p, 1) {
-        interp_2(c, w[3])
-    } else if diff_bit(p, 3) && !diff_bit(p, 1) {
-        interp_2(c, w[1])
-    } else if !diff(w[3], w[1]) {
-        interp_2(c, interp_2(w[3], w[1]))
-    } else {
-        c
-    };
-
-    // Top-right pixel
-    out[1] = if !diff_bit(p, 1) && !diff_bit(p, 5) {
-        interp_2(interp_2(c, w[1]), interp_2(c, w[5]))
-    } else if !diff_bit(p, 1) && diff_bit(p, 5) {
-        interp_2(c, w[1])
-    } else if diff_bit(p, 1) && !diff_bit(p, 5) {
-        interp_2(c, w[5])
-    } else if !diff(w[1], w[5]) {
-        interp_2(c, interp_2(w[1], w[5]))
-    } else {
-        c
-    };
-
-    // Bottom-left pixel
-    out[2] = if !diff_bit(p, 7) && !diff_bit(p, 3) {
-        interp_2(interp_2(c, w[7]), interp_2(c, w[3]))
-    } else if !diff_bit(p, 7) && diff_bit(p, 3) {
-        interp_2(c, w[7])
-    } else if diff_bit(p, 7) && !diff_bit(p, 3) {
-        interp_2(c, w[3])
-    } else if !diff(w[7], w[3]) {
-        interp_2(c, interp_2(w[7], w[3]))
-    } else {
-        c
-    };
-
-    // Bottom-right pixel
-    out[3] = if !diff_bit(p, 5) && !diff_bit(p, 7) {
-        interp_2(interp_2(c, w[5]), interp_2(c, w[7]))
-    } else if !diff_bit(p, 5) && diff_bit(p, 7) {
-        interp_2(c, w[5])
-    } else if diff_bit(p, 5) && !diff_bit(p, 7) {
-        interp_2(c, w[7])
-    } else if !diff(w[5], w[7]) {
-        interp_2(c, interp_2(w[5], w[7]))
-    } else {
-        c
-    };
-}
-
-// ── HQ3x kernel ─────────────────────────────────────────────────────────────
-
-/// Compute 9 output pixels (3x3) for center pixel.
-/// out layout: row-major [0..8] = 3x3 grid
-fn hq3x_kernel(n: &Neighbors, out: &mut [u32; 9]) {
-    let w = &n.w;
-    let p = n.pattern;
-    let c = w[4];
-
-    // Center pixel always stays
-    out[4] = c;
-
-    // Top-left corner (out[0])
-    out[0] = if !diff_bit(p, 3) && !diff_bit(p, 1) {
-        interp_2(interp_2(c, w[3]), interp_2(c, w[1]))
-    } else if !diff_bit(p, 3) && diff_bit(p, 1) {
-        interp_3(c, w[3])
-    } else if diff_bit(p, 3) && !diff_bit(p, 1) {
-        interp_3(c, w[1])
-    } else if !diff(w[3], w[1]) {
-        interp_4(c, w[3], w[1])
-    } else {
-        c
-    };
-
-    // Top center (out[1])
-    out[1] = if !diff_bit(p, 1) {
-        interp_3(c, w[1])
-    } else {
-        c
-    };
-
-    // Top-right corner (out[2])
-    out[2] = if !diff_bit(p, 1) && !diff_bit(p, 5) {
-        interp_2(interp_2(c, w[1]), interp_2(c, w[5]))
-    } else if !diff_bit(p, 1) && diff_bit(p, 5) {
-        interp_3(c, w[1])
-    } else if diff_bit(p, 1) && !diff_bit(p, 5) {
-        interp_3(c, w[5])
-    } else if !diff(w[1], w[5]) {
-        interp_4(c, w[1], w[5])
-    } else {
-        c
-    };
-
-    // Middle-left (out[3])
-    out[3] = if !diff_bit(p, 3) {
-        interp_3(c, w[3])
-    } else {
-        c
-    };
-
-    // Middle-right (out[5])
-    out[5] = if !diff_bit(p, 5) {
-        interp_3(c, w[5])
-    } else {
-        c
-    };
-
-    // Bottom-left corner (out[6])
-    out[6] = if !diff_bit(p, 7) && !diff_bit(p, 3) {
-        interp_2(interp_2(c, w[7]), interp_2(c, w[3]))
-    } else if !diff_bit(p, 7) && diff_bit(p, 3) {
-        interp_3(c, w[7])
-    } else if diff_bit(p, 7) && !diff_bit(p, 3) {
-        interp_3(c, w[3])
-    } else if !diff(w[7], w[3]) {
-        interp_4(c, w[7], w[3])
-    } else {
-        c
-    };
-
-    // Bottom center (out[7])
-    out[7] = if !diff_bit(p, 7) {
-        interp_3(c, w[7])
-    } else {
-        c
-    };
-
-    // Bottom-right corner (out[8])
-    out[8] = if !diff_bit(p, 5) && !diff_bit(p, 7) {
-        interp_2(interp_2(c, w[5]), interp_2(c, w[7]))
-    } else if !diff_bit(p, 5) && diff_bit(p, 7) {
-        interp_3(c, w[5])
-    } else if diff_bit(p, 5) && !diff_bit(p, 7) {
-        interp_3(c, w[7])
-    } else if !diff(w[5], w[7]) {
-        interp_4(c, w[5], w[7])
-    } else {
-        c
-    };
-
-    // Diagonal refinement: blend corners with diagonals when they're similar
-    if !diff_bit(p, 0) && diff_bit(p, 3) && diff_bit(p, 1) {
-        out[0] = interp_3(out[0], w[0]);
-    }
-    if !diff_bit(p, 2) && diff_bit(p, 1) && diff_bit(p, 5) {
-        out[2] = interp_3(out[2], w[2]);
-    }
-    if !diff_bit(p, 6) && diff_bit(p, 7) && diff_bit(p, 3) {
-        out[6] = interp_3(out[6], w[6]);
-    }
-    if !diff_bit(p, 8) && diff_bit(p, 5) && diff_bit(p, 7) {
-        out[8] = interp_3(out[8], w[8]);
-    }
-}
-
-// ── HQ4x kernel ─────────────────────────────────────────────────────────────
-
-/// Compute 16 output pixels (4x4) for center pixel.
-/// out layout: row-major [0..15] = 4x4 grid
-fn hq4x_kernel(n: &Neighbors, out: &mut [u32; 16]) {
-    let w = &n.w;
-    let p = n.pattern;
-    let c = w[4];
-
-    // Start with all center color
-    for px in out.iter_mut() {
-        *px = c;
-    }
-
-    // ── Top-left quadrant (out[0], out[1], out[4], out[5]) ──
-    if !diff_bit(p, 3) && !diff_bit(p, 1) {
-        // Smooth corner: blend with both neighbors
-        out[0] = interp_2(interp_2(c, w[3]), interp_2(c, w[1]));
-        out[1] = interp_3(c, w[1]);
-        out[4] = interp_3(c, w[3]);
-        out[5] = c;
-    } else if !diff_bit(p, 3) {
-        out[0] = interp_3(c, w[3]);
-        out[4] = interp_3(c, w[3]);
-        out[1] = c;
-        out[5] = c;
-    } else if !diff_bit(p, 1) {
-        out[0] = interp_3(c, w[1]);
-        out[1] = interp_3(c, w[1]);
-        out[4] = c;
-        out[5] = c;
-    } else if !diff(w[3], w[1]) {
-        out[0] = interp_4(c, w[3], w[1]);
-        out[1] = interp_3(c, w[1]);
-        out[4] = interp_3(c, w[3]);
-        out[5] = c;
-    }
-    // Diagonal refinement
-    if !diff_bit(p, 0) && diff_bit(p, 3) && diff_bit(p, 1) {
-        out[0] = interp_3(out[0], w[0]);
-    }
-
-    // ── Top-right quadrant (out[2], out[3], out[6], out[7]) ──
-    if !diff_bit(p, 1) && !diff_bit(p, 5) {
-        out[2] = interp_3(c, w[1]);
-        out[3] = interp_2(interp_2(c, w[1]), interp_2(c, w[5]));
-        out[6] = c;
-        out[7] = interp_3(c, w[5]);
-    } else if !diff_bit(p, 1) {
-        out[2] = interp_3(c, w[1]);
-        out[3] = interp_3(c, w[1]);
-        out[6] = c;
-        out[7] = c;
-    } else if !diff_bit(p, 5) {
-        out[2] = c;
-        out[3] = interp_3(c, w[5]);
-        out[6] = c;
-        out[7] = interp_3(c, w[5]);
-    } else if !diff(w[1], w[5]) {
-        out[2] = interp_3(c, w[1]);
-        out[3] = interp_4(c, w[1], w[5]);
-        out[6] = c;
-        out[7] = interp_3(c, w[5]);
-    }
-    if !diff_bit(p, 2) && diff_bit(p, 1) && diff_bit(p, 5) {
-        out[3] = interp_3(out[3], w[2]);
-    }
-
-    // ── Bottom-left quadrant (out[8], out[9], out[12], out[13]) ──
-    if !diff_bit(p, 7) && !diff_bit(p, 3) {
-        out[8] = interp_3(c, w[3]);
-        out[9] = c;
-        out[12] = interp_2(interp_2(c, w[7]), interp_2(c, w[3]));
-        out[13] = interp_3(c, w[7]);
-    } else if !diff_bit(p, 3) {
-        out[8] = interp_3(c, w[3]);
-        out[9] = c;
-        out[12] = interp_3(c, w[3]);
-        out[13] = c;
-    } else if !diff_bit(p, 7) {
-        out[8] = c;
-        out[9] = c;
-        out[12] = interp_3(c, w[7]);
-        out[13] = interp_3(c, w[7]);
-    } else if !diff(w[7], w[3]) {
-        out[8] = interp_3(c, w[3]);
-        out[9] = c;
-        out[12] = interp_4(c, w[7], w[3]);
-        out[13] = interp_3(c, w[7]);
-    }
-    if !diff_bit(p, 6) && diff_bit(p, 7) && diff_bit(p, 3) {
-        out[12] = interp_3(out[12], w[6]);
-    }
-
-    // ── Bottom-right quadrant (out[10], out[11], out[14], out[15]) ──
-    if !diff_bit(p, 5) && !diff_bit(p, 7) {
-        out[10] = c;
-        out[11] = interp_3(c, w[5]);
-        out[14] = interp_3(c, w[7]);
-        out[15] = interp_2(interp_2(c, w[5]), interp_2(c, w[7]));
-    } else if !diff_bit(p, 5) {
-        out[10] = c;
-        out[11] = interp_3(c, w[5]);
-        out[14] = c;
-        out[15] = interp_3(c, w[5]);
-    } else if !diff_bit(p, 7) {
-        out[10] = c;
-        out[11] = c;
-        out[14] = interp_3(c, w[7]);
-        out[15] = interp_3(c, w[7]);
-    } else if !diff(w[5], w[7]) {
-        out[10] = c;
-        out[11] = interp_3(c, w[5]);
-        out[14] = interp_3(c, w[7]);
-        out[15] = interp_4(c, w[5], w[7]);
-    }
-    if !diff_bit(p, 8) && diff_bit(p, 5) && diff_bit(p, 7) {
-        out[15] = interp_3(out[15], w[8]);
-    }
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Check if bit `i` is set in the neighbor-difference pattern.
-#[inline(always)]
-fn diff_bit(pattern: u16, bit: u8) -> bool {
-    pattern & (1 << bit) != 0
 }

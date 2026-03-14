@@ -34,8 +34,20 @@ fn edge_direction(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> (f32, 
             let r = get(src, w, h, cx + 1, cy);
             let d = get(src, w, h, cx, cy + 1);
 
-            let dx = color_dist(c, r).sqrt();
-            let dy = color_dist(c, d).sqrt();
+            // Use signed luma gradients so gxy can be negative,
+            // allowing the structure tensor to detect all edge orientations
+            let luma_c = 0.299 * ((c >> 16) & 0xFF) as f32
+                       + 0.587 * ((c >> 8) & 0xFF) as f32
+                       + 0.114 * (c & 0xFF) as f32;
+            let luma_r = 0.299 * ((r >> 16) & 0xFF) as f32
+                       + 0.587 * ((r >> 8) & 0xFF) as f32
+                       + 0.114 * (r & 0xFF) as f32;
+            let luma_d = 0.299 * ((d >> 16) & 0xFF) as f32
+                       + 0.587 * ((d >> 8) & 0xFF) as f32
+                       + 0.114 * (d & 0xFF) as f32;
+
+            let dx = luma_r - luma_c;
+            let dy = luma_d - luma_c;
 
             gxx += dx * dx;
             gyy += dy * dy;
