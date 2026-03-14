@@ -742,14 +742,22 @@ fn chain_tangent_at_endpoint(chain: &[NodeId], is_start: bool) -> (f64, f64) {
 
 // --- Optimized node positions ---
 
-/// Build map from NodeId to optimized Point position.
-/// Interior chain nodes get optimized positions; junction/corner nodes stay fixed.
-fn build_optimized_positions(chains: &[Vec<NodeId>]) -> FxHashMap<NodeId, Point> {
+/// Build map from NodeId to optimized Point position, and collect junction nodes.
+/// Junction nodes are endpoints of open chains (valence >= 3 in visible edge graph).
+fn build_optimized_positions(chains: &[Vec<NodeId>])
+    -> (FxHashMap<NodeId, Point>, HashSet<NodeId>)
+{
     let mut positions: FxHashMap<NodeId, Point> = fx_hashmap();
+    let mut junctions: HashSet<NodeId> = HashSet::new();
 
     for chain in chains {
         let is_closed = chain.len() > 2 && chain.first() == chain.last();
         let ctrl_nodes = if is_closed { &chain[..chain.len() - 1] } else { &chain[..] };
+
+        if !is_closed && chain.len() >= 2 {
+            junctions.insert(chain[0]);
+            junctions.insert(chain[chain.len() - 1]);
+        }
 
         let mut points: Vec<Point> = ctrl_nodes.iter().map(|n| n.to_point()).collect();
         if points.len() >= 4 {
@@ -761,7 +769,7 @@ fn build_optimized_positions(chains: &[Vec<NodeId>]) -> FxHashMap<NodeId, Point>
         }
     }
 
-    positions
+    (positions, junctions)
 }
 
 // --- Region-based boundary tracing ---
@@ -1001,10 +1009,11 @@ fn boundary_loop_to_line_segments(nodes: &[NodeId]) -> Vec<PathSegment> {
     segs
 }
 
-/// Uses optimized positions and splits at corners for B-spline fitting.
+/// Split B-splines at junction nodes (valence >= 3 in visible edge graph).
 fn boundary_loop_to_segments(
     nodes: &[NodeId],
     optimized: &FxHashMap<NodeId, Point>,
+    junctions: &HashSet<NodeId>,
 ) -> Vec<PathSegment> {
     let n = nodes.len();
     let points: Vec<Point> = nodes
@@ -1020,16 +1029,15 @@ fn boundary_loop_to_segments(
         return segs;
     }
 
-    let corners = detect_corners(&points, true);
-    let corner_indices: Vec<usize> = (0..n).filter(|&i| corners[i]).collect();
+    let corner_indices: Vec<usize> = (0..n)
+        .filter(|&i| junctions.contains(&nodes[i]))
+        .collect();
 
     if corner_indices.is_empty() {
-        // No corners: closed B-spline over entire loop
         return bspline_closed(&points);
     }
 
     if corner_indices.len() == 1 {
-        // Single corner: open B-spline from corner around the full loop back to corner
         let c = corner_indices[0];
         let mut span_points = Vec::with_capacity(n + 1);
         for i in 0..=n {
@@ -1038,7 +1046,6 @@ fn boundary_loop_to_segments(
         return bspline_open(&span_points);
     }
 
-    // Split loop into spans between consecutive corners
     let mut segments = Vec::new();
     let num_corners = corner_indices.len();
 
@@ -1046,7 +1053,6 @@ fn boundary_loop_to_segments(
         let start = corner_indices[ci];
         let end = corner_indices[(ci + 1) % num_corners];
 
-        // Collect points from start to end (inclusive), wrapping around
         let mut span_points = Vec::new();
         let mut idx = start;
         loop {
@@ -1090,10 +1096,11 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         // Use B-spline fitting on traced loops for smooth boundaries.
         let all_loops = trace_all_boundary_loops(&directed_edges);
         let optimized: FxHashMap<NodeId, Point> = fx_hashmap();
+        let junctions: HashSet<NodeId> = HashSet::new();
 
         let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
         for (node_loop, color) in &all_loops {
-            let segs = boundary_loop_to_segments(node_loop, &optimized);
+            let segs = boundary_loop_to_segments(node_loop, &optimized, &junctions);
             if !segs.is_empty() {
                 color_loops.entry(*color).or_default().push(segs);
             }
@@ -1111,7 +1118,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         return result;
     }
 
-    let optimized = {
+    let (optimized, junctions) = {
         let mut chains = chain_visible_edges(&visible_edges);
         merge_t_junctions(&mut chains);
         build_optimized_positions(&chains)
@@ -1122,7 +1129,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
     // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
     for (node_loop, color) in &all_loops {
-        let segs = boundary_loop_to_segments(node_loop, &optimized);
+        let segs = boundary_loop_to_segments(node_loop, &optimized, &junctions);
         if !segs.is_empty() {
             color_loops.entry(*color).or_default().push(segs);
         }
