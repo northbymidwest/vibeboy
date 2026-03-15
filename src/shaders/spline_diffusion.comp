@@ -1,0 +1,95 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// SDL3 SPIRV compute: set 0 = readonly storage buffers
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
+    uint src_pixels[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer RegionBuf {
+    // Flat color buffer from scanline rasterization pass (GPU-resident).
+    // [out_h][out_w] packed ARGB u32.
+    uint region_colors[];
+};
+
+// SDL3 SPIRV compute: set 1 = readwrite storage textures
+layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
+
+// SDL3 SPIRV compute: set 2 = uniform buffers
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint out_w;
+    uint out_h;
+    uint src_w;
+    uint src_h;
+    float inv_scale;
+    float sigma_sq_2;
+    float radius;
+    uint scale_int;
+};
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    if (ox >= out_w || oy >= out_h) return;
+
+    // This output pixel's region = its rasterized color from the spline paths
+    uint my_region = region_colors[oy * out_w + ox];
+
+    // Output pixel center in source coordinates
+    float sx = (float(ox) + 0.5) * inv_scale;
+    float sy = (float(oy) + 0.5) * inv_scale;
+
+    // Search window in source pixels
+    float r_sq = radius * radius;
+    int min_px = max(int(floor(sx - radius)), 0);
+    int max_px = min(int(ceil(sx + radius)), int(src_w) - 1);
+    int min_py = max(int(floor(sy - radius)), 0);
+    int max_py = min(int(ceil(sy + radius)), int(src_h) - 1);
+
+    // Gaussian-weighted color accumulation
+    float tr = 0.0, tg = 0.0, tb = 0.0, tw = 0.0;
+
+    uint half_scale = scale_int / 2u;
+    for (int py = min_py; py <= max_py; py++) {
+        for (int px = min_px; px <= max_px; px++) {
+            // Check if this centroid's output position has the same region color
+            uint cx_out = min(uint(px) * scale_int + half_scale, out_w - 1u);
+            uint cy_out = min(uint(py) * scale_int + half_scale, out_h - 1u);
+            if (region_colors[cy_out * out_w + cx_out] != my_region) continue;
+
+            float dx = sx - (float(px) + 0.5);
+            float dy = sy - (float(py) + 0.5);
+            float d_sq = dx * dx + dy * dy;
+            if (d_sq > r_sq) continue;
+
+            float w = exp(-d_sq / sigma_sq_2);
+            uint color = src_pixels[uint(py) * src_w + uint(px)];
+            tr += w * float((color >> 16u) & 0xFFu);
+            tg += w * float((color >> 8u) & 0xFFu);
+            tb += w * float(color & 0xFFu);
+            tw += w;
+        }
+    }
+
+    vec4 rgba;
+    if (tw > 0.0) {
+        float inv_tw = 1.0 / tw;
+        rgba = vec4(
+            clamp(tr * inv_tw / 255.0, 0.0, 1.0),
+            clamp(tg * inv_tw / 255.0, 0.0, 1.0),
+            clamp(tb * inv_tw / 255.0, 0.0, 1.0),
+            1.0
+        );
+    } else {
+        uint c = my_region;
+        rgba = vec4(
+            float((c >> 16u) & 0xFFu) / 255.0,
+            float((c >> 8u) & 0xFFu) / 255.0,
+            float(c & 0xFFu) / 255.0,
+            1.0
+        );
+    }
+
+    imageStore(output_img, ivec2(ox, oy), rgba);
+}

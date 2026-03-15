@@ -374,7 +374,7 @@ fn main() {
          mut omniscale_pipeline, omniscale_sampler, mut hqx_pipeline,
          mut bicubic_pipeline, mut omniscale_legacy_pipeline,
          mut scale3x_pipeline, mut eagle_pipeline, mut aa_nearest_pipeline,
-         mut epx_pipeline, mut xbr_pipeline, mut xbrz_pipeline, mut super_xbr_pipeline, mut vectorize_compute, mut diffusion_compute) = {
+         mut epx_pipeline, mut xbr_pipeline, mut xbrz_pipeline, mut super_xbr_pipeline, mut vectorize_compute, mut diffusion_compute, mut spline_diff_pipelines) = {
         let all_formats = gpu::ShaderFormat::PRIVATE
             | gpu::ShaderFormat::SPIRV
             | gpu::ShaderFormat::MSL
@@ -416,7 +416,8 @@ fn main() {
         let sxbr: Option<gpu::GraphicsPipeline> = None;
         let vec_compute: Option<gpu::ComputePipeline> = None;
         let diff_compute: Option<gpu::ComputePipeline> = None;
-        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, bicubic, omni_legacy, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute, diff_compute)
+        let sdiff_pipes: Option<(gpu::ComputePipeline, gpu::ComputePipeline)> = None;
+        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, bicubic, omni_legacy, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute, diff_compute, sdiff_pipes)
     };
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
@@ -727,8 +728,39 @@ fn main() {
                     scale_filter,
                     scaling::ScaleFilter::VectorizeDiffusion
                 ) && ensure_pipeline!(diffusion_compute, scaling::gpu::init_diffusion_compute_pipeline(&gpu_device));
+                let gpu_spline_diff = !force_cpu && matches!(
+                    scale_filter,
+                    scaling::ScaleFilter::VectorizeSplineDiffusion
+                ) && ensure_pipeline!(spline_diff_pipelines, scaling::gpu::init_spline_diffusion_pipelines(&gpu_device));
 
-                if gpu_diffusion {
+                if gpu_spline_diff {
+                    let (ww, wh) = window.size();
+                    let src_aspect = src_w as f64 / src_h as f64;
+                    let win_aspect = ww as f64 / wh as f64;
+                    let (disp_w, disp_h) = if win_aspect > src_aspect {
+                        ((wh as f64 * src_aspect) as usize, wh as usize)
+                    } else {
+                        (ww as usize, (ww as f64 / src_aspect) as usize)
+                    };
+                    let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                    let scale = scale_f.round().max(1.0) as usize;
+                    let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+                        vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
+                    if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
+                        if out_w != gpu_tex_w || out_h != gpu_tex_h {
+                            gpu_tex_w = out_w; gpu_tex_h = out_h;
+                            gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
+                        }
+                        let (p1, p2) = spline_diff_pipelines.as_ref().unwrap();
+                        scaling::gpu::spline_diffusion_and_blit(
+                            &gpu_device, &window, &gpu_tex, p1, p2,
+                            &gpu_edges, &row_ranges, &edge_indices,
+                            raw_src, out_w, out_h, sw as u32, sh as u32,
+                            bg_color, scale as u32,
+                        );
+                    }
+                } else if gpu_diffusion {
                     let (ww, wh) = window.size();
                     let src_aspect = src_w as f64 / src_h as f64;
                     let win_aspect = ww as f64 / wh as f64;

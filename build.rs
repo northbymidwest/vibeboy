@@ -105,6 +105,22 @@ const SHADERS: &[ShaderInfo] = &[
         // SDL3 MSL compute expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions, buffer(3)=diags
         msl_buffer_remap: &[(0, 3), (1, 0), (3, 1)],
     },
+    ShaderInfo {
+        glsl_src: "vectorize_to_buf.comp",
+        spv_name: "vectorize_to_buf_comp.spv",
+        msl_name: "vectorize_to_buf_comp.metal",
+        // spirv-cross: buffer(0)=edges, buffer(1)=rows, buffer(2)=uniforms, buffer(3)=indices, buffer(4)=output
+        // SDL3 expects: buffer(0)=uniforms, buffer(1)=edges, buffer(2)=rows, buffer(3)=indices, buffer(4)=output
+        msl_buffer_remap: &[(0, 1), (1, 2), (2, 0)],
+    },
+    ShaderInfo {
+        glsl_src: "spline_diffusion.comp",
+        spv_name: "spline_diffusion_comp.spv",
+        msl_name: "spline_diffusion_comp.metal",
+        // spirv-cross: buffer(0)=uniforms, buffer(1)=regions, buffer(2)=pixels
+        // SDL3 expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions
+        msl_buffer_remap: &[(1, 2), (2, 1)],
+    },
 ];
 
 fn main() {

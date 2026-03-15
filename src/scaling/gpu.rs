@@ -1116,6 +1116,204 @@ pub fn diffusion_and_blit(
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 
+// ── Spline-diffusion compute pipeline (2-pass) ─────────────────────────────
+
+pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::ComputePipeline, gpu::ComputePipeline)> {
+    let pass1_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.spv"));
+    let pass1_msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.metal"));
+    let pass2_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.spv"));
+    let pass2_msl = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.metal"));
+
+    // Pass 1: scanline rasterize edges → storage buffer
+    let p1 = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, pass1_spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(3)        // edges, rows, indices
+        .with_readwrite_storage_buffers(1)       // output color buffer
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, pass1_msl)
+            .with_entrypoint(c"main0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(3)
+            .with_readwrite_storage_buffers(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    // Pass 2: Gaussian diffusion reading buffer → texture
+    let p2 = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, pass2_spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(2)        // src_pixels, region_colors
+        .with_readwrite_storage_textures(1)      // output texture
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, pass2_msl)
+            .with_entrypoint(c"main0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(2)
+            .with_readwrite_storage_textures(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    match (p1, p2) {
+        (Ok(a), Ok(b)) => { eprintln!("Spline-diffusion GPU pipeline ready (2-pass)"); Some((a, b)) }
+        _ => { eprintln!("Spline-diffusion GPU: pipeline creation failed"); None }
+    }
+}
+
+pub fn spline_diffusion_and_blit(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    pass1: &gpu::ComputePipeline,
+    pass2: &gpu::ComputePipeline,
+    edges: &[crate::vectorize::rasterize::GpuEdgeV2],
+    row_ranges: &[crate::vectorize::rasterize::GpuRowRange],
+    edge_indices: &[u32],
+    src_pixels: &[u32],
+    out_w: u32, out_h: u32,
+    src_w: u32, src_h: u32,
+    bg_color: u32,
+    scale: u32,
+) {
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+
+    fn upload_buf(device: &gpu::Device, data: &[u8], usage: gpu::BufferUsageFlags)
+        -> (gpu::TransferBuffer, gpu::Buffer)
+    {
+        let size = data.len().max(4) as u32;
+        let transfer = device.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(size)
+            .build().expect("transfer buf");
+        {
+            let mut map = transfer.map::<u8>(device, true);
+            map.mem_mut()[..data.len()].copy_from_slice(data);
+            map.unmap();
+        }
+        let buf = device.create_buffer()
+            .with_usage(usage)
+            .with_size(size)
+            .build().expect("storage buf");
+        (transfer, buf)
+    }
+
+    fn as_bytes<T>(slice: &[T]) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, slice.len() * std::mem::size_of::<T>()) }
+    }
+
+    // Upload edge data (readonly)
+    let (edge_xfer, edge_buf) = upload_buf(device, as_bytes(edges), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    let (row_xfer, row_buf) = upload_buf(device, as_bytes(row_ranges), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    let (idx_xfer, idx_buf) = upload_buf(device, as_bytes(edge_indices), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    // Upload source pixels (readonly)
+    let (px_xfer, px_buf) = upload_buf(device, as_bytes(src_pixels), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+
+    // Intermediate buffer: flat colors from scanline rasterization (GPU-resident, readwrite then readonly)
+    let region_buf_size = (out_w * out_h * 4).max(4);
+    let region_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
+        .with_size(region_buf_size)
+        .build().expect("region buf");
+
+    // Copy pass: upload all readonly data
+    {
+        let copy_pass = device.begin_copy_pass(&cmd).expect("copy pass");
+        for (xfer, buf, size) in [
+            (&edge_xfer, &edge_buf, as_bytes(edges).len()),
+            (&row_xfer, &row_buf, as_bytes(row_ranges).len()),
+            (&idx_xfer, &idx_buf, as_bytes(edge_indices).len()),
+            (&px_xfer, &px_buf, as_bytes(src_pixels).len()),
+        ] {
+            copy_pass.upload_to_gpu_buffer(
+                gpu::TransferBufferLocation::new().with_transfer_buffer(xfer),
+                gpu::BufferRegion::new().with_buffer(buf).with_size(size.max(4) as u32),
+                false,
+            );
+        }
+        device.end_copy_pass(copy_pass);
+    }
+
+    // Pass 1: scanline rasterize edges → region_buf
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[], // no storage textures
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&region_buf).with_cycle(false)],
+        ).expect("compute pass 1");
+        compute_pass.bind_compute_pipeline(pass1);
+        compute_pass.bind_compute_storage_buffers(0, &[edge_buf, row_buf, idx_buf]);
+
+        #[repr(C)]
+        struct Pass1Uniforms { out_w: u32, out_h: u32, num_edges: u32, bg_color: u32 }
+        cmd.push_compute_uniform_data(0, &Pass1Uniforms {
+            out_w, out_h, num_edges: edges.len() as u32, bg_color,
+        });
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    // Pass 2: Gaussian diffusion reading region_buf → output texture
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
+            &[],
+        ).expect("compute pass 2");
+        compute_pass.bind_compute_pipeline(pass2);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf, region_buf]);
+
+        #[repr(C)]
+        struct Pass2Uniforms {
+            out_w: u32, out_h: u32, src_w: u32, src_h: u32,
+            inv_scale: f32, sigma_sq_2: f32, radius: f32, scale_int: u32,
+        }
+        cmd.push_compute_uniform_data(0, &Pass2Uniforms {
+            out_w, out_h, src_w, src_h,
+            inv_scale: 1.0 / scale as f32,
+            sigma_sq_2: 2.0,
+            radius: 2.0,
+            scale_int: scale,
+        });
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    // Blit to swapchain
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let (dx, dy, dw, dh) = {
+            let src_aspect = out_w as f32 / out_h as f32;
+            let dst_aspect = sw_w as f32 / sw_h as f32;
+            if dst_aspect > src_aspect {
+                let dh = sw_h; let dw = (sw_h as f32 * src_aspect) as u32;
+                ((sw_w - dw) / 2, 0, dw, dh)
+            } else {
+                let dw = sw_w; let dh = (sw_w as f32 / src_aspect) as u32;
+                (0, (sw_h - dh) / 2, dw, dh)
+            }
+        };
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = out_w;
+        blit_info.source.h = out_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = dx;
+        blit_info.destination.y = dy;
+        blit_info.destination.w = dw;
+        blit_info.destination.h = dh;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Nearest as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 // ── Headless GPU screenshot ────────────────────────────────────────────────
 
 /// Render a scaling filter on the GPU and read pixels back to CPU.
