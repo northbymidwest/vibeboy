@@ -20,10 +20,11 @@ vec4 fetch(ivec2 coord) {
 
 bool colors_differ(vec4 a, vec4 b) {
     vec3 d = (a.rgb - b.rgb) * 255.0;
-    float dy = abs(d.r + d.g + d.b);
-    float du = abs(d.r - d.b);
-    float dv = abs(2.0 * d.g - d.r - d.b);
-    return dy * 48.0 + du * 7.0 + dv * 6.0 > 2304.0;
+    // BT.601 YUV with individual thresholds (matching CPU hqx.rs)
+    float dy = abs(0.299 * d.r + 0.587 * d.g + 0.114 * d.b);
+    float du = abs(-0.169 * d.r - 0.331 * d.g + 0.500 * d.b);
+    float dv = abs(0.500 * d.r - 0.419 * d.g - 0.081 * d.b);
+    return dy > 48.0 || du > 7.0 || dv > 6.0;
 }
 
 vec4 mix2(vec4 c1, float w1, vec4 c2, float w2) {
