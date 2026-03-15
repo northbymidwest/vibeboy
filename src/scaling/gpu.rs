@@ -1078,3 +1078,161 @@ pub fn gpu_screenshot(
 
     Some((pixels, out_w, out_h))
 }
+
+/// GPU-accelerated vectorize screenshot.
+///
+/// Runs CPU vectorization to extract paths, then dispatches the compute
+/// shader to rasterize them on the GPU, downloads the result.
+pub fn gpu_vectorize_screenshot(
+    src: &[u32], src_w: usize, src_h: usize, scale: f64, adaptive: bool,
+) -> Option<(Vec<u32>, u32, u32)> {
+    let mut cache = crate::vectorize::VectorizeCache::new(adaptive);
+    let (paths, bg_color) = cache.get_paths(src, src_w, src_h);
+    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+        crate::vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, src_w, src_h);
+
+    if out_w == 0 || out_h == 0 || gpu_edges.is_empty() {
+        return None;
+    }
+
+    let sdl = sdl3::init().ok()?;
+    let video = sdl.video().ok()?;
+    let window = video.window("gpu_vectorize", 1, 1).hidden().build().ok()?;
+
+    let all_formats = gpu::ShaderFormat::PRIVATE
+        | gpu::ShaderFormat::SPIRV | gpu::ShaderFormat::MSL
+        | gpu::ShaderFormat::DXBC | gpu::ShaderFormat::DXIL;
+    let device = gpu::Device::new(all_formats, false).ok()?.with_window(&window).ok()?;
+
+    let compute_pipeline = init_vectorize_compute_pipeline(&device)?;
+
+    // Create the output storage texture
+    let out_tex = device.create_texture(
+        gpu::TextureCreateInfo::new()
+            .with_type(gpu::TextureType::_2D)
+            .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
+            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
+            .with_width(out_w)
+            .with_height(out_h)
+            .with_layer_count_or_depth(1)
+            .with_num_levels(1)
+    ).ok()?;
+
+    let cmd = device.acquire_command_buffer().ok()?;
+
+    // Upload edge data to GPU storage buffers
+    fn upload_buf(
+        device: &gpu::Device, data: &[u8], usage: gpu::BufferUsageFlags,
+    ) -> Option<(gpu::TransferBuffer, gpu::Buffer)> {
+        let size = data.len().max(4) as u32;
+        let xfer = device.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(size)
+            .build().ok()?;
+        {
+            let mut map = xfer.map::<u8>(device, true);
+            map.mem_mut()[..data.len()].copy_from_slice(data);
+            map.unmap();
+        }
+        let buf = device.create_buffer().with_usage(usage).with_size(size).build().ok()?;
+        Some((xfer, buf))
+    }
+
+    let edge_bytes = unsafe {
+        std::slice::from_raw_parts(
+            gpu_edges.as_ptr() as *const u8,
+            gpu_edges.len() * std::mem::size_of::<crate::vectorize::rasterize::GpuEdgeV2>(),
+        )
+    };
+    let row_bytes = unsafe {
+        std::slice::from_raw_parts(
+            row_ranges.as_ptr() as *const u8,
+            row_ranges.len() * std::mem::size_of::<crate::vectorize::rasterize::GpuRowRange>(),
+        )
+    };
+    let idx_bytes = unsafe {
+        std::slice::from_raw_parts(edge_indices.as_ptr() as *const u8, edge_indices.len() * 4)
+    };
+
+    let (edge_xfer, edge_buf) = upload_buf(&device, edge_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+    let (row_xfer, row_buf) = upload_buf(&device, row_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+    let (idx_xfer, idx_buf) = upload_buf(&device, idx_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+
+    // Upload buffers to GPU
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&edge_xfer),
+            gpu::BufferRegion::new().with_buffer(&edge_buf).with_size(edge_bytes.len().max(4) as u32),
+            false,
+        );
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&row_xfer),
+            gpu::BufferRegion::new().with_buffer(&row_buf).with_size(row_bytes.len().max(4) as u32),
+            false,
+        );
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&idx_xfer),
+            gpu::BufferRegion::new().with_buffer(&idx_buf).with_size(idx_bytes.len().max(4) as u32),
+            false,
+        );
+        device.end_copy_pass(cp);
+    }
+
+    // Dispatch compute shader
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
+            &[],
+        ).ok()?;
+        compute_pass.bind_compute_pipeline(&compute_pipeline);
+        compute_pass.bind_compute_storage_buffers(0, &[edge_buf, row_buf, idx_buf]);
+
+        #[repr(C)]
+        struct Uniforms { out_w: u32, out_h: u32, num_edges: u32, bg_color: u32 }
+        cmd.push_compute_uniform_data(0, &Uniforms {
+            out_w, out_h, num_edges: gpu_edges.len() as u32, bg_color,
+        });
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    // Download pixels
+    let dl_buf = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
+        .with_size(out_w * out_h * 4)
+        .build().ok()?;
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        unsafe {
+            let mut src_region = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+            src_region.texture = out_tex.raw();
+            src_region.w = out_w;
+            src_region.h = out_h;
+            src_region.d = 1;
+            let mut dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+            dst_info.transfer_buffer = dl_buf.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_region, &dst_info);
+        }
+        device.end_copy_pass(cp);
+    }
+
+    let fence = cmd.submit_and_acquire_fence(&device).ok()?;
+    device.wait_fences(true, &[fence]).ok()?;
+
+    // Read back (BGRA → ARGB)
+    let map = dl_buf.map::<u8>(&device, false);
+    let bytes = map.mem();
+    let mut pixels = vec![0u32; (out_w * out_h) as usize];
+    for i in 0..pixels.len() {
+        let off = i * 4;
+        let b = bytes[off] as u32;
+        let g = bytes[off + 1] as u32;
+        let r = bytes[off + 2] as u32;
+        pixels[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+    drop(map);
+
+    Some((pixels, out_w, out_h))
+}

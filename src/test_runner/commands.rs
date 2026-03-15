@@ -83,20 +83,33 @@ pub fn cmd_screenshot(
             "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
             "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
             "bicubic" => scaling::ScaleFilter::Bicubic,
+            "vectorize" | "vectorize-adaptive" => scaling::ScaleFilter::Vectorize,
             other => {
                 eprintln!("Unknown filter '{}', using nearest", other);
                 scaling::ScaleFilter::Nearest
             }
         };
+        let is_vectorize = f == "vectorize" || f == "vectorize-adaptive";
+        let is_adaptive = f == "vectorize-adaptive";
 
         // Try GPU path if requested
         #[cfg(feature = "sdl3-gpu-shaders")]
         if use_gpu {
-            if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(raw_fb, 160, 144, sf) {
+            if is_vectorize {
+                let s = scale as f64;
+                if let Some((pix, w, h)) = scaling::gpu::gpu_vectorize_screenshot(
+                    raw_fb, 160, 144, s, is_adaptive,
+                ) {
+                    scaled_buf = pix;
+                    return save_pixels(&scaled_buf, w as usize, h as usize, out, format, frames);
+                }
+                eprintln!("GPU vectorize screenshot failed, falling back to CPU");
+            } else if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(raw_fb, 160, 144, sf) {
                 scaled_buf = s;
                 return save_pixels(&scaled_buf, w as usize, h as usize, out, format, frames);
+            } else {
+                eprintln!("GPU screenshot failed for filter '{}', falling back to CPU", f);
             }
-            eprintln!("GPU screenshot failed for filter '{}', falling back to CPU", f);
         }
         #[cfg(not(feature = "sdl3-gpu-shaders"))]
         if use_gpu {
@@ -104,12 +117,20 @@ pub fn cmd_screenshot(
         }
 
         // CPU path
-        let disp_w = 160 * scale;
-        let disp_h = 144 * scale;
-        let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, disp_w, disp_h)
-            .unwrap_or_else(|| (raw_fb.to_vec(), 160, 144));
-        scaled_buf = s;
-        (scaled_buf.as_slice(), w as usize, h as usize)
+        if is_vectorize {
+            let s = scale as f64;
+            let mut cache = crate::vectorize::VectorizeCache::new(is_adaptive);
+            let (raster, rw, rh) = cache.rasterize(raw_fb, 160, 144, s);
+            scaled_buf = raster.to_vec();
+            (scaled_buf.as_slice(), rw, rh)
+        } else {
+            let disp_w = 160 * scale;
+            let disp_h = 144 * scale;
+            let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, disp_w, disp_h)
+                .unwrap_or_else(|| (raw_fb.to_vec(), 160, 144));
+            scaled_buf = s;
+            (scaled_buf.as_slice(), w as usize, h as usize)
+        }
     } else {
         (raw_fb, 160, 144)
     };
