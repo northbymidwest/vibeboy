@@ -30,7 +30,6 @@ pub struct VectorizeCache {
     cached_raster_w: usize,
     cached_raster_h: usize,
     cached_scale: f64,
-    qbuf: Vec<u32>,
 }
 
 impl VectorizeCache {
@@ -44,7 +43,6 @@ impl VectorizeCache {
             cached_raster_w: 0,
             cached_raster_h: 0,
             cached_scale: 0.0,
-            qbuf: Vec::new(),
         }
     }
 
@@ -56,7 +54,7 @@ impl VectorizeCache {
         if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
             return (&self.cached_paths, self.cached_bg_color);
         }
-        let (paths, bg_color) = vectorize_core_with_buf(pixels, width, height, &mut self.qbuf, self.adaptive);
+        let (paths, bg_color) = vectorize_core_inner(pixels, width, height, self.adaptive);
         self.prev_pixels.clear();
         self.prev_pixels.extend_from_slice(pixels);
         self.cached_paths = paths;
@@ -133,45 +131,22 @@ pub fn vectorize_to_raster_scaled(
     rasterize::rasterize_scaled(&paths, w, h, bg_color, scale)
 }
 
-/// Quantize colors into a reusable buffer to avoid allocation.
-/// Uses byte-level saturating_add + mask which LLVM auto-vectorizes
-/// to NEON vqadd+vand (aarch64) or SSE paddusb+pand (x86_64).
-fn quantize_pixels_into(pixels: &[u32], out: &mut Vec<u32>) {
-    out.resize(pixels.len(), 0);
-    // Safety: reinterpret &[u32] as &[u8] and &mut [u32] as &mut [u8]
-    // for byte-level auto-vectorizable processing.
-    let src_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-    };
-    let dst_bytes: &mut [u8] = unsafe {
-        std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4)
-    };
-    // saturating_add(2) clamps at 255, then & 0xFC rounds down to multiple of 4.
-    // Alpha byte (0x00) → 0+2=2, 2&0xFC=0 — correctly stays zero.
-    for i in 0..dst_bytes.len() {
-        dst_bytes[i] = src_bytes[i].saturating_add(2) & 0xFC;
-    }
-}
-
 /// Core vectorization: graph → contour → paths. No upscale collapse.
-/// Uses a reusable quantization buffer to avoid per-frame allocation.
 pub fn vectorize_core(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, u32) {
-    let mut qbuf = Vec::new();
-    vectorize_core_with_buf(pixels, width, height, &mut qbuf, false)
+    vectorize_core_inner(pixels, width, height, false)
 }
 
-/// Core vectorization with a caller-provided quantization buffer.
+/// Core vectorization pipeline.
 /// When `adaptive` is true, allows the contour extractor to skip B-spline
 /// optimization on complex frames (boundary edges > threshold).
-fn vectorize_core_with_buf(
-    pixels: &[u32], width: usize, height: usize, qbuf: &mut Vec<u32>, adaptive: bool,
+fn vectorize_core_inner(
+    pixels: &[u32], width: usize, height: usize, adaptive: bool,
 ) -> (Vec<contour::ColorPath>, u32) {
-    quantize_pixels_into(pixels, qbuf);
-    let graph = graph::build(qbuf, width, height);
-    let paths = contour::extract_cells_smooth(qbuf, &graph, adaptive);
-    let (bg_color, _) = detect_background_color(qbuf, width, height);
+    let graph = graph::build(pixels, width, height);
+    let paths = contour::extract_cells_smooth(pixels, &graph, adaptive);
+    let (bg_color, _) = detect_background_color(pixels, width, height);
     (paths, bg_color)
 }
 
