@@ -507,9 +507,10 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
 }
 
 /// Chain visible edges through valence-2 nodes into paths.
+/// Returns each chain with its canonical color pair (cpair).
 /// Precomputes per-(node, cpair) valence for O(1) lookup instead of
 /// O(degree) scan on every step.
-fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
+fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
     // Build adjacency as (neighbor_node, cpair, edge_index).
     let mut adj: FxHashMap<NodeId, Vec<(NodeId, (u32, u32), usize)>> =
         fx_hashmap_cap(edges.len());
@@ -530,7 +531,7 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
     }
 
     let mut visited = vec![false; edges.len()];
-    let mut chains: Vec<Vec<NodeId>> = Vec::new();
+    let mut chains: Vec<(Vec<NodeId>, (u32, u32))> = Vec::new();
 
     let all_nodes: Vec<NodeId> = adj.keys().copied().collect();
 
@@ -567,7 +568,7 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                 }
 
                 if chain.len() >= 2 {
-                    chains.push(chain);
+                    chains.push((chain, cpair));
                 }
             }
         }
@@ -603,7 +604,7 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
                 }
 
                 if chain.len() >= 3 {
-                    chains.push(chain);
+                    chains.push((chain, cpair));
                 }
             }
         }
@@ -614,13 +615,32 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<Vec<NodeId>> {
 
 // --- Section 3.3: T-junction merging ---
 
-/// At junction nodes (valence >= 3 in visible edge graph), find pairs of chain
-/// endpoints with the most aligned tangent vectors and merge them.
-/// Paper Section 3.3: merge if angle between tangents < 160°.
-fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
+/// Check if a color pair represents a "shading edge" — the two colors are
+/// somewhat different (enough to be a visible edge) but not strongly dissimilar.
+/// Paper Section 3.3: shading edge if YUV distance ≤ 100/255.
+/// We use luminance (Y channel): |ΔY| ≤ 100 in 0-255 scale.
+#[inline]
+fn is_shading_cpair(cpair: (u32, u32)) -> bool {
+    let (a, b) = cpair;
+    if a == b { return true; }
+    if a == VOID_COLOR || b == VOID_COLOR { return false; }
+    let dr = ((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32;
+    let dg = ((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32;
+    let db = (a & 0xFF) as i32 - (b & 0xFF) as i32;
+    // Y = 0.299R + 0.587G + 0.114B scaled by 1000
+    let dy1000 = 299 * dr + 587 * dg + 114 * db;
+    dy1000.abs() <= 100_000
+}
+
+/// At junction nodes (valence >= 3 in visible edge graph), merge chain pairs.
+/// Paper Section 3.3 two-step heuristic:
+///   1. Classify each edge as shading (similar colors) or contour (dissimilar).
+///      If exactly 1 shading + 2 contour edges meet, connect the 2 contour edges.
+///   2. Otherwise, connect the pair with the angle closest to 180°.
+fn merge_t_junctions(chains: &mut Vec<(Vec<NodeId>, (u32, u32))>) {
     // Build map: node → list of (chain_index, is_start_endpoint)
     let mut endpoint_map: FxHashMap<NodeId, Vec<(usize, bool)>> = fx_hashmap();
-    for (ci, chain) in chains.iter().enumerate() {
+    for (ci, (chain, _)) in chains.iter().enumerate() {
         if chain.len() < 2 { continue; }
         // Skip closed loops (first == last)
         if chain.first() == chain.last() { continue; }
@@ -640,44 +660,60 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
             .copied()
             .collect();
 
-        // Greedily merge the most aligned pair
+        // Greedily merge pairs at this junction
         loop {
             if active.len() < 2 { break; }
 
-            let mut best_cos = f64::NEG_INFINITY;
-            let mut best_pair = (0usize, 1usize);
+            // Step 1: Shading/contour classification (Paper Section 3.3)
+            // If exactly 3 endpoints with 1 shading + 2 contour, merge the contour pair.
+            let merge_pair = if active.len() == 3 {
+                let shading: Vec<usize> = (0..3)
+                    .filter(|&i| is_shading_cpair(chains[active[i].0].1))
+                    .collect();
+                let contour: Vec<usize> = (0..3)
+                    .filter(|&i| !is_shading_cpair(chains[active[i].0].1))
+                    .collect();
+                if shading.len() == 1 && contour.len() == 2 {
+                    Some((contour[0], contour[1]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-            for i in 0..active.len() {
-                for j in (i + 1)..active.len() {
-                    let (ci_a, is_start_a) = active[i];
-                    let (ci_b, is_start_b) = active[j];
-                    if ci_a == ci_b { continue; }
+            // Step 2: Fall back to angle-based merging (straightest pair)
+            let (idx_a, idx_b) = if let Some(pair) = merge_pair {
+                pair
+            } else {
+                let mut best_cos = f64::NEG_INFINITY;
+                let mut best_pair = (0usize, 1usize);
 
-                    // Get tangent vectors pointing AWAY from the junction node
-                    let tan_a = chain_tangent_at_endpoint(&chains[ci_a], is_start_a);
-                    let tan_b = chain_tangent_at_endpoint(&chains[ci_b], is_start_b);
+                for i in 0..active.len() {
+                    for j in (i + 1)..active.len() {
+                        let (ci_a, is_start_a) = active[i];
+                        let (ci_b, is_start_b) = active[j];
+                        if ci_a == ci_b { continue; }
 
-                    // Tangents point away from junction; for merging, they should
-                    // point in opposite directions, so we check cos of angle between them
-                    // cos(180°) = -1.0. Paper: merge if angle < 160° → cos > -0.94
-                    let dot = tan_a.0 * tan_b.0 + tan_a.1 * tan_b.1;
-                    let len_a = (tan_a.0 * tan_a.0 + tan_a.1 * tan_a.1).sqrt();
-                    let len_b = (tan_b.0 * tan_b.0 + tan_b.1 * tan_b.1).sqrt();
-                    if len_a < 1e-12 || len_b < 1e-12 { continue; }
-                    let cos_angle = dot / (len_a * len_b);
+                        let tan_a = chain_tangent_at_endpoint(&chains[ci_a].0, is_start_a);
+                        let tan_b = chain_tangent_at_endpoint(&chains[ci_b].0, is_start_b);
 
-                    // Most aligned = most negative cosine (closest to 180°)
-                    if cos_angle < best_cos || best_cos == f64::NEG_INFINITY {
-                        best_cos = cos_angle;
-                        best_pair = (i, j);
+                        let dot = tan_a.0 * tan_b.0 + tan_a.1 * tan_b.1;
+                        let len_a = (tan_a.0 * tan_a.0 + tan_a.1 * tan_a.1).sqrt();
+                        let len_b = (tan_b.0 * tan_b.0 + tan_b.1 * tan_b.1).sqrt();
+                        if len_a < 1e-12 || len_b < 1e-12 { continue; }
+                        let cos_angle = dot / (len_a * len_b);
+
+                        // Most aligned = most negative cosine (closest to 180°)
+                        if cos_angle < best_cos || best_cos == f64::NEG_INFINITY {
+                            best_cos = cos_angle;
+                            best_pair = (i, j);
+                        }
                     }
                 }
-            }
+                best_pair
+            };
 
-            // Only merge if angle > 160° (cos < -0.94)
-            if best_cos > -0.94 { break; }
-
-            let (idx_a, idx_b) = best_pair;
             let (ci_a, is_start_a) = active[idx_a];
             let (ci_b, is_start_b) = active[idx_b];
 
@@ -686,43 +722,34 @@ fn merge_t_junctions(chains: &mut Vec<Vec<NodeId>>) {
             let mut new_chain = Vec::new();
 
             if is_start_a {
-                // Junction is at start of chain_a → reverse it so junction is at end
-                for i in (0..chains[ci_a].len()).rev() {
-                    new_chain.push(chains[ci_a][i]);
+                for i in (0..chains[ci_a].0.len()).rev() {
+                    new_chain.push(chains[ci_a].0[i]);
                 }
             } else {
-                // Junction is at end of chain_a → already correct
-                new_chain.extend_from_slice(&chains[ci_a]);
+                new_chain.extend_from_slice(&chains[ci_a].0);
             }
 
-            // Skip the junction node (it's already the last element of new_chain)
             if is_start_b {
-                // Junction is at start of chain_b → skip first element
-                for i in 1..chains[ci_b].len() {
-                    new_chain.push(chains[ci_b][i]);
+                for i in 1..chains[ci_b].0.len() {
+                    new_chain.push(chains[ci_b].0[i]);
                 }
             } else {
-                // Junction is at end of chain_b → reverse, skip first (was junction)
-                for i in (0..chains[ci_b].len() - 1).rev() {
-                    new_chain.push(chains[ci_b][i]);
+                for i in (0..chains[ci_b].0.len() - 1).rev() {
+                    new_chain.push(chains[ci_b].0[i]);
                 }
             }
 
-            // Replace chain_a with merged, mark chain_b as merged
-            chains[ci_a] = new_chain;
+            // Merged chain inherits cpair from chain_a (arbitrary; cpair is only
+            // used for shading classification and this chain won't be re-classified)
+            chains[ci_a].0 = new_chain;
             merged[ci_b] = true;
 
-            // Update active list: remove both, add new endpoint of merged chain
-            let _new_is_start_a = false; // junction was placed at end for chain_a part
-            // The new chain's start is what was the far end of chain_a,
-            // and its end is what was the far end of chain_b
-            // We don't re-add to active since we consumed both endpoints at this junction
             active.remove(idx_b.max(idx_a));
             active.remove(idx_b.min(idx_a));
         }
     }
 
-    // Remove merged chains in O(n) by filtering
+    // Remove merged chains
     let mut kept = Vec::with_capacity(chains.len());
     for (i, chain) in chains.drain(..).enumerate() {
         if !merged[i] {
@@ -1134,7 +1161,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         let mut chains = chain_visible_edges(&visible_edges);
         merge_t_junctions(&mut chains);
         let mut j: HashSet<NodeId> = HashSet::new();
-        for chain in &chains {
+        for (chain, _) in &chains {
             let is_closed = chain.len() > 2 && chain.first() == chain.last();
             if !is_closed && chain.len() >= 2 {
                 j.insert(chain[0]);
