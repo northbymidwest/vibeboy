@@ -353,7 +353,7 @@ fn main() {
     #[cfg(feature = "sdl3-gpu-shaders")]
     let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
          mut transfer_buf, mut transfer_buf_size,
-         omniscale_pipeline, omniscale_sampler, hqx_pipeline, vectorize_compute) = {
+         omniscale_pipeline, omniscale_sampler, hqx_pipeline, xbr_pipeline, xbrz_pipeline, super_xbr_pipeline, vectorize_compute) = {
         let all_formats = gpu::ShaderFormat::PRIVATE
             | gpu::ShaderFormat::SPIRV
             | gpu::ShaderFormat::MSL
@@ -383,8 +383,11 @@ fn main() {
                 .with_mag_filter(gpu::Filter::Nearest)
         ).expect("Failed to create sampler");
         let hqx = scaling::gpu::init_hqx_pipeline(&dev, &window);
+        let xbr = scaling::gpu::init_xbr_pipeline(&dev, &window);
+        let xbrz = scaling::gpu::init_xbrz_pipeline(&dev, &window);
+        let sxbr = scaling::gpu::init_super_xbr_pipeline(&dev, &window);
         let vec_compute = scaling::gpu::init_vectorize_compute_pipeline(&dev);
-        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, vec_compute)
+        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, xbr, xbrz, sxbr, vec_compute)
     };
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
@@ -652,11 +655,17 @@ fn main() {
             {
                 let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
                     && hqx_pipeline.is_some();
+                let gpu_xbr = matches!(scale_filter, scaling::ScaleFilter::Xbr(_))
+                    && xbr_pipeline.is_some();
+                let gpu_xbrz = matches!(scale_filter, scaling::ScaleFilter::Xbrz(_))
+                    && xbrz_pipeline.is_some();
+                let gpu_super_xbr = scale_filter == scaling::ScaleFilter::SuperXbr
+                    && super_xbr_pipeline.is_some();
                 let gpu_native = matches!(
                     scale_filter,
                     scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
                         | scaling::ScaleFilter::OmniScale
-                ) || gpu_hqx;
+                ) || gpu_hqx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
                 let gpu_vectorize = matches!(
                     scale_filter,
                     scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
@@ -707,6 +716,30 @@ fn main() {
                             &gpu_device, &window, &gpu_tex, &transfer_buf,
                             raw_src, src_w, src_h,
                             hqx_pipeline.as_ref().unwrap(), &omniscale_sampler, hqx_scale,
+                        );
+                    } else if gpu_xbr {
+                        let xbr_scale = match scale_filter {
+                            scaling::ScaleFilter::Xbr(x) => x.factor() as f32, _ => 2.0,
+                        };
+                        scaling::gpu::render_xbr(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            xbr_pipeline.as_ref().unwrap(), &omniscale_sampler, xbr_scale,
+                        );
+                    } else if gpu_xbrz {
+                        let xbrz_scale = match scale_filter {
+                            scaling::ScaleFilter::Xbrz(x) => x.factor() as f32, _ => 2.0,
+                        };
+                        scaling::gpu::render_xbrz(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            xbrz_pipeline.as_ref().unwrap(), &omniscale_sampler, xbrz_scale,
+                        );
+                    } else if gpu_super_xbr {
+                        scaling::gpu::render_super_xbr(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            super_xbr_pipeline.as_ref().unwrap(), &omniscale_sampler,
                         );
                     } else if scale_filter == scaling::ScaleFilter::OmniScale {
                         if let Some(ref pipeline) = omniscale_pipeline {

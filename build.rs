@@ -35,6 +35,24 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "xbr.frag",
+        spv_name: "xbr_frag.spv",
+        msl_name: "xbr_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "xbrz.frag",
+        spv_name: "xbrz_frag.spv",
+        msl_name: "xbrz_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "super_xbr.frag",
+        spv_name: "super_xbr_frag.spv",
+        msl_name: "super_xbr_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "vectorize_raster.comp",
         spv_name: "vectorize_raster_comp.spv",
         msl_name: "vectorize_raster_comp.metal",

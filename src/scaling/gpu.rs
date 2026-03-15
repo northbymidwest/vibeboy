@@ -347,6 +347,181 @@ pub fn render_hqx(
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 
+// ── xBR pipeline ────────────────────────────────────────────────────────────
+
+pub fn init_xbr_pipeline(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("xBR GPU: vertex shader failed: {e}")).ok()?;
+    let fs = load_fragment_shader(
+        device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbr_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbr_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("xBR GPU: fragment shader failed: {e}")).ok()?;
+
+    match create_fullscreen_pipeline(device, window, &vs, &fs) {
+        Ok(p) => { eprintln!("xBR GPU shader pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("xBR GPU: pipeline creation failed: {e}"); None }
+    }
+}
+
+pub fn render_xbr(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32],
+    tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline,
+    sampler: &gpu::Sampler,
+    xbr_scale: f32,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(render_pass) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        render_pass.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&render_pass, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        render_pass.bind_fragment_samplers(0, &[
+            gpu::TextureSamplerBinding::new()
+                .with_texture(gpu_tex)
+                .with_sampler(sampler)
+        ]);
+
+        #[repr(C)]
+        struct XbrUniforms { src_size: [f32; 2], scale: f32, pad0: f32 }
+        cmd.push_fragment_uniform_data(0, &XbrUniforms {
+            src_size: [tex_w as f32, tex_h as f32],
+            scale: xbr_scale,
+            pad0: 0.0,
+        });
+        render_pass.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(render_pass);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
+// ── xBRZ pipeline ───────────────────────────────────────────────────────────
+
+pub fn init_xbrz_pipeline(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("xBRZ GPU: vertex shader failed: {e}")).ok()?;
+    let fs = load_fragment_shader(
+        device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("xBRZ GPU: fragment shader failed: {e}")).ok()?;
+
+    match create_fullscreen_pipeline(device, window, &vs, &fs) {
+        Ok(p) => { eprintln!("xBRZ GPU shader pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("xBRZ GPU: pipeline creation failed: {e}"); None }
+    }
+}
+
+pub fn render_xbrz(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32],
+    tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline,
+    sampler: &gpu::Sampler,
+    xbrz_scale: f32,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(render_pass) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        render_pass.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&render_pass, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        render_pass.bind_fragment_samplers(0, &[
+            gpu::TextureSamplerBinding::new()
+                .with_texture(gpu_tex)
+                .with_sampler(sampler)
+        ]);
+
+        #[repr(C)]
+        struct XbrzUniforms { src_size: [f32; 2], scale: f32, pad0: f32 }
+        cmd.push_fragment_uniform_data(0, &XbrzUniforms {
+            src_size: [tex_w as f32, tex_h as f32],
+            scale: xbrz_scale,
+            pad0: 0.0,
+        });
+        render_pass.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(render_pass);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
+// ── Super xBR pipeline ──────────────────────────────────────────────────────
+
+pub fn init_super_xbr_pipeline(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("Super xBR GPU: vertex shader failed: {e}")).ok()?;
+    let fs = load_fragment_shader(
+        device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("Super xBR GPU: fragment shader failed: {e}")).ok()?;
+
+    match create_fullscreen_pipeline(device, window, &vs, &fs) {
+        Ok(p) => { eprintln!("Super xBR GPU shader pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("Super xBR GPU: pipeline creation failed: {e}"); None }
+    }
+}
+
+pub fn render_super_xbr(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32],
+    tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline,
+    sampler: &gpu::Sampler,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(render_pass) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        render_pass.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&render_pass, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        render_pass.bind_fragment_samplers(0, &[
+            gpu::TextureSamplerBinding::new()
+                .with_texture(gpu_tex)
+                .with_sampler(sampler)
+        ]);
+
+        #[repr(C)]
+        struct SuperXbrUniforms { src_size: [f32; 2], pad0: f32, pad1: f32 }
+        cmd.push_fragment_uniform_data(0, &SuperXbrUniforms {
+            src_size: [tex_w as f32, tex_h as f32],
+            pad0: 0.0, pad1: 0.0,
+        });
+        render_pass.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(render_pass);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 // ── Vectorize compute pipeline ──────────────────────────────────────────────
 
 pub fn init_vectorize_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
