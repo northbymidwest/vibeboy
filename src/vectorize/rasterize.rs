@@ -482,3 +482,341 @@ fn blend4(bg: u32, fg: u32, coverage: u8) -> u32 {
 
     0xFF000000 | (r << 16) | (g << 8) | b
 }
+
+// --- Gaussian diffusion rasterizer (Paper Section 3.5) ---
+//
+// "We place truncated Gaussian influence functions (σ = 1, radius 2 pixels)
+// at the cell centroids and set their support to zero outside the region
+// visible from the cell centroid. The final color at a point is computed as
+// the weighted average of all pixel colors according to their respective
+// influence."
+//
+// Region boundaries follow the smooth Voronoi cell contours (not the pixel
+// grid). Each cell polygon is scanline-filled to an ownership map at the
+// output resolution, giving smooth diagonal boundaries at deformed corners.
+
+use super::graph::SimilarityGraph;
+
+/// Rasterize using Gaussian color diffusion (Paper Section 3.5).
+///
+/// Each pixel centroid emits its color with a truncated Gaussian (σ=1, r=2).
+/// Color propagation is blocked by contour lines (visible edges between
+/// Voronoi cells). Region boundaries follow the smooth cell geometry, not
+/// the pixel grid.
+pub fn rasterize_diffusion(
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    scale: usize,
+) -> (Vec<u32>, usize, usize) {
+    let out_w = width * scale;
+    let out_h = height * scale;
+
+    // Build resolved similarity graph (with crossing resolution)
+    let graph = super::graph::build(pixels, width, height);
+
+    // Flood-fill source pixels along graph edges to find contour-bounded regions.
+    let src_regions = build_graph_regions(width, height, &graph);
+
+    // Scanline-fill each Voronoi cell polygon at output resolution to build
+    // a smooth ownership map. Each output pixel is assigned to the source
+    // pixel whose deformed Voronoi cell contains it.
+    let ownership = build_voronoi_ownership(width, height, &graph, scale);
+
+    let inv_scale = 1.0 / scale as f64;
+    let sigma_sq_2 = 2.0; // 2 * σ² with σ = 1
+    let radius = 2.0f64;
+    let r_sq = radius * radius;
+
+    let mut buffer = vec![0u32; out_w * out_h];
+
+    for oy in 0..out_h {
+        let sy = (oy as f64 + 0.5) * inv_scale;
+        let min_py = ((sy - radius).floor() as i32).max(0) as usize;
+        let max_py = ((sy + radius).ceil() as i32).min(height as i32 - 1) as usize;
+
+        for ox in 0..out_w {
+            let sx = (ox as f64 + 0.5) * inv_scale;
+
+            // Region of this output pixel via Voronoi ownership
+            let owner = ownership[oy * out_w + ox] as usize;
+            let my_region = src_regions[owner];
+
+            let min_px = ((sx - radius).floor() as i32).max(0) as usize;
+            let max_px = ((sx + radius).ceil() as i32).min(width as i32 - 1) as usize;
+
+            let mut tr = 0.0f64;
+            let mut tg = 0.0f64;
+            let mut tb = 0.0f64;
+            let mut tw = 0.0f64;
+
+            for py in min_py..=max_py {
+                for px in min_px..=max_px {
+                    if src_regions[py * width + px] != my_region { continue; }
+
+                    let dx = sx - (px as f64 + 0.5);
+                    let dy = sy - (py as f64 + 0.5);
+                    let d_sq = dx * dx + dy * dy;
+                    if d_sq > r_sq { continue; }
+
+                    let w = (-d_sq / sigma_sq_2).exp();
+                    let color = pixels[py * width + px];
+                    tr += w * ((color >> 16) & 0xFF) as f64;
+                    tg += w * ((color >> 8) & 0xFF) as f64;
+                    tb += w * (color & 0xFF) as f64;
+                    tw += w;
+                }
+            }
+
+            if tw > 0.0 {
+                let inv_tw = 1.0 / tw;
+                let r = (tr * inv_tw).round().min(255.0) as u32;
+                let g = (tg * inv_tw).round().min(255.0) as u32;
+                let b = (tb * inv_tw).round().min(255.0) as u32;
+                buffer[oy * out_w + ox] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    (buffer, out_w, out_h)
+}
+
+/// Build region labels by flood-filling along resolved similarity graph edges.
+/// Two pixels are in the same region if connected (directly or transitively)
+/// through graph edges — i.e., no visible edge (contour line) separates them.
+fn build_graph_regions(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<u32> {
+    let mut regions = vec![u32::MAX; w * h];
+    let mut region_id = 0u32;
+
+    for start_y in 0..h {
+        for start_x in 0..w {
+            if regions[start_y * w + start_x] != u32::MAX { continue; }
+
+            regions[start_y * w + start_x] = region_id;
+            let mut stack = vec![(start_x, start_y)];
+
+            while let Some((cx, cy)) = stack.pop() {
+                let e = graph.edge(cx, cy);
+
+                // Right
+                if e.right && cx + 1 < w && regions[cy * w + cx + 1] == u32::MAX {
+                    regions[cy * w + cx + 1] = region_id;
+                    stack.push((cx + 1, cy));
+                }
+                // Down
+                if e.down && cy + 1 < h && regions[(cy + 1) * w + cx] == u32::MAX {
+                    regions[(cy + 1) * w + cx] = region_id;
+                    stack.push((cx, cy + 1));
+                }
+                // Down-right
+                if e.down_right && cx + 1 < w && cy + 1 < h
+                    && regions[(cy + 1) * w + cx + 1] == u32::MAX
+                {
+                    regions[(cy + 1) * w + cx + 1] = region_id;
+                    stack.push((cx + 1, cy + 1));
+                }
+                // Down-left
+                if e.down_left && cx > 0 && cy + 1 < h
+                    && regions[(cy + 1) * w + cx - 1] == u32::MAX
+                {
+                    regions[(cy + 1) * w + cx - 1] = region_id;
+                    stack.push((cx - 1, cy + 1));
+                }
+                // Left (reverse of neighbor's right)
+                if cx > 0 && graph.edge(cx - 1, cy).right
+                    && regions[cy * w + cx - 1] == u32::MAX
+                {
+                    regions[cy * w + cx - 1] = region_id;
+                    stack.push((cx - 1, cy));
+                }
+                // Up (reverse of neighbor's down)
+                if cy > 0 && graph.edge(cx, cy - 1).down
+                    && regions[(cy - 1) * w + cx] == u32::MAX
+                {
+                    regions[(cy - 1) * w + cx] = region_id;
+                    stack.push((cx, cy - 1));
+                }
+                // Up-right (reverse of neighbor's down-left)
+                if cx + 1 < w && cy > 0 && graph.edge(cx + 1, cy - 1).down_left
+                    && regions[(cy - 1) * w + cx + 1] == u32::MAX
+                {
+                    regions[(cy - 1) * w + cx + 1] = region_id;
+                    stack.push((cx + 1, cy - 1));
+                }
+                // Up-left (reverse of neighbor's down-right)
+                if cx > 0 && cy > 0 && graph.edge(cx - 1, cy - 1).down_right
+                    && regions[(cy - 1) * w + cx - 1] == u32::MAX
+                {
+                    regions[(cy - 1) * w + cx - 1] = region_id;
+                    stack.push((cx - 1, cy - 1));
+                }
+            }
+
+            region_id += 1;
+        }
+    }
+
+    regions
+}
+
+/// Get diagonal state at grid corner (cx, cy): 0=none, 1=backslash, 2=slash.
+#[inline(always)]
+fn corner_diag(graph: &SimilarityGraph, cx: usize, cy: usize) -> u8 {
+    let w = graph.width;
+    let h = graph.height;
+    if cx == 0 || cy == 0 || cx >= w || cy >= h { return 0; }
+    if graph.edge(cx - 1, cy - 1).down_right { return 1; }
+    if graph.edge(cx, cy - 1).down_left { return 2; }
+    0
+}
+
+/// Compute Voronoi cell vertices for pixel (px, py) in source-space coordinates.
+/// Returns up to 8 vertices in CW order.
+fn cell_vertices_f64(px: usize, py: usize, graph: &SimilarityGraph) -> [(f64, f64); 8] {
+    let mut verts = [(0.0, 0.0); 8];
+    let mut n = 0usize;
+    let bx = px as f64;
+    let by = py as f64;
+
+    // TL corner (rel=BR)
+    match corner_diag(graph, px, py) {
+        1 => { verts[n] = (bx - 0.25, by + 0.25); n += 1;
+               verts[n] = (bx + 0.25, by - 0.25); n += 1; }
+        2 => { verts[n] = (bx + 0.25, by + 0.25); n += 1; }
+        _ => { verts[n] = (bx, by); n += 1; }
+    }
+    // TR corner (rel=BL)
+    match corner_diag(graph, px + 1, py) {
+        1 => { verts[n] = (bx + 0.75, by + 0.25); n += 1; }
+        2 => { verts[n] = (bx + 0.75, by - 0.25); n += 1;
+               verts[n] = (bx + 1.25, by + 0.25); n += 1; }
+        _ => { verts[n] = (bx + 1.0, by); n += 1; }
+    }
+    // BR corner (rel=TL)
+    match corner_diag(graph, px + 1, py + 1) {
+        1 => { verts[n] = (bx + 1.25, by + 0.75); n += 1;
+               verts[n] = (bx + 0.75, by + 1.25); n += 1; }
+        2 => { verts[n] = (bx + 0.75, by + 0.75); n += 1; }
+        _ => { verts[n] = (bx + 1.0, by + 1.0); n += 1; }
+    }
+    // BL corner (rel=TR)
+    match corner_diag(graph, px, py + 1) {
+        1 => { verts[n] = (bx + 0.25, by + 0.75); n += 1; }
+        2 => { verts[n] = (bx + 0.25, by + 1.25); n += 1;
+               verts[n] = (bx - 0.25, by + 0.75); n += 1; }
+        _ => { verts[n] = (bx, by + 1.0); n += 1; }
+    }
+
+    // Store count in unused slots (we know n <= 8)
+    // Return full array; caller uses cell_vertex_count to get n
+    verts
+}
+
+/// Count of vertices for a cell (same logic as cell_vertices_f64).
+#[inline]
+fn cell_vertex_count(px: usize, py: usize, graph: &SimilarityGraph) -> usize {
+    let mut n = 0;
+    for &(cx, cy) in &[(px, py), (px + 1, py), (px + 1, py + 1), (px, py + 1)] {
+        let d = corner_diag(graph, cx, cy);
+        n += if d == 1 || d == 2 { if (cx == px && cy == py && d == 1)
+            || (cx == px + 1 && cy == py && d == 2)
+            || (cx == px + 1 && cy == py + 1 && d == 1)
+            || (cx == px && cy == py + 1 && d == 2) { 2 } else { 1 }
+        } else { 1 };
+    }
+    n
+}
+
+/// Build Voronoi ownership map at output resolution by scanline-filling
+/// each cell polygon. Each output pixel is assigned to the source pixel
+/// whose deformed Voronoi cell contains it.
+fn build_voronoi_ownership(
+    w: usize, h: usize, graph: &SimilarityGraph, scale: usize,
+) -> Vec<u32> {
+    let out_w = w * scale;
+    let out_h = h * scale;
+    let sf = scale as f64;
+    let mut ownership = vec![u32::MAX; out_w * out_h];
+
+    for py in 0..h {
+        for px in 0..w {
+            let owner_id = (py * w + px) as u32;
+            let raw_verts = cell_vertices_f64(px, py, graph);
+
+            // Count actual vertices (same corner logic)
+            let tl = corner_diag(graph, px, py);
+            let tr = corner_diag(graph, px + 1, py);
+            let br = corner_diag(graph, px + 1, py + 1);
+            let bl = corner_diag(graph, px, py + 1);
+            let nv = [tl, tr, br, bl].iter()
+                .zip(&[(px, py, true), (px+1, py, false), (px+1, py+1, true), (px, py+1, false)])
+                .map(|(&d, &(_, _, is_br_or_tl))| {
+                    // Corners that produce 2 vertices: TL with \, TR with /, BR with \, BL with /
+                    if d == 1 && is_br_or_tl { 2 }
+                    else if d == 2 && !is_br_or_tl { 2 }
+                    else { 1 }
+                })
+                .sum::<usize>();
+
+            // Scale vertices to output space
+            let mut verts: [(f64, f64); 8] = [(0.0, 0.0); 8];
+            for i in 0..nv {
+                verts[i] = (raw_verts[i].0 * sf, raw_verts[i].1 * sf);
+            }
+
+            // Find Y bounds
+            let mut y_min = f64::MAX;
+            let mut y_max = f64::MIN;
+            for i in 0..nv {
+                if verts[i].1 < y_min { y_min = verts[i].1; }
+                if verts[i].1 > y_max { y_max = verts[i].1; }
+            }
+
+            let iy_min = (y_min.floor() as usize).min(out_h);
+            let iy_max = (y_max.ceil() as usize).min(out_h);
+
+            // Scanline fill the convex polygon
+            for iy in iy_min..iy_max {
+                let sy = iy as f64 + 0.5;
+                let mut x_min = f64::MAX;
+                let mut x_max = f64::MIN;
+
+                for i in 0..nv {
+                    let (x0, y0) = verts[i];
+                    let (x1, y1) = verts[(i + 1) % nv];
+
+                    if (y0 <= sy && y1 > sy) || (y1 <= sy && y0 > sy) {
+                        let t = (sy - y0) / (y1 - y0);
+                        let x = x0 + t * (x1 - x0);
+                        if x < x_min { x_min = x; }
+                        if x > x_max { x_max = x; }
+                    }
+                }
+
+                if x_min >= x_max { continue; }
+
+                let ix_min = (x_min.ceil() as usize).max(0).min(out_w);
+                let ix_max = (x_max.floor() as usize + 1).min(out_w);
+
+                for ix in ix_min..ix_max {
+                    ownership[iy * out_w + ix] = owner_id;
+                }
+            }
+        }
+    }
+
+    // Fallback for any unfilled pixels (floating point edge cases)
+    let inv_scale = 1.0 / sf;
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            if ownership[oy * out_w + ox] == u32::MAX {
+                let spx = ((ox as f64 + 0.5) * inv_scale).floor() as usize;
+                let spy = ((oy as f64 + 0.5) * inv_scale).floor() as usize;
+                ownership[oy * out_w + ox] =
+                    (spy.min(h - 1) * w + spx.min(w - 1)) as u32;
+            }
+        }
+    }
+
+    ownership
+}

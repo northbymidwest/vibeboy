@@ -138,6 +138,9 @@ pub fn cmd_screenshot(
     if format == "raster" {
         let (pixels, out_w, out_h) = vectorize::vectorize_to_raster(fb, 160, 144, scale);
         save_pixels(&pixels, out_w, out_h, out, "png", frames);
+    } else if format == "diffusion" {
+        let (pixels, out_w, out_h) = vectorize::rasterize::rasterize_diffusion(fb, 160, 144, scale);
+        save_pixels(&pixels, out_w, out_h, out, "png", frames);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
     }
