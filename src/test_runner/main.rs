@@ -113,6 +113,9 @@ enum Command {
         /// Rasterizer format: raster (default), diffusion, spline-diffusion
         #[arg(long, default_value = "raster")]
         format: String,
+        /// Scale factor for raster output (default 4)
+        #[arg(long, default_value = "4")]
+        scale: usize,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -248,8 +251,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, format } => {
-            commands::cmd_vectorize(&path, &out, &format);
+        Command::Vectorize { path, out, format, scale } => {
+            commands::cmd_vectorize(&path, &out, &format, scale);
         }
         Command::Analyze {
             path,

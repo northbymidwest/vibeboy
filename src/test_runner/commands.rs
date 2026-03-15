@@ -155,7 +155,7 @@ pub fn cmd_screenshot(
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str, format: &str) {
+pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -182,7 +182,6 @@ pub fn cmd_vectorize(input: &Path, out: &str, format: &str) {
             svg.len()
         );
     } else {
-        let scale = 4;
         let raster_pixels = if format == "spline-diffusion" {
             vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
             let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);

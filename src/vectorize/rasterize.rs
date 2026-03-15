@@ -955,6 +955,144 @@ fn flood_fill_output_regions(colors: &[u32], w: usize, h: usize) -> Vec<u32> {
     ids
 }
 
+/// Flatten all B-spline contour paths into line segments at source resolution.
+/// Returns (x0, y0, x1, y1) segments in source-pixel coordinates.
+fn flatten_contour_segments(paths: &[ColorPath]) -> Vec<[f64; 4]> {
+    let mut segs = Vec::new();
+    let tol_sq = 0.01; // tighter tolerance at source resolution
+
+    for path in paths {
+        for seg in &path.segments {
+            match seg {
+                PathSegment::Line(a, b) => {
+                    let dx = b.x - a.x;
+                    let dy = b.y - a.y;
+                    if dx * dx + dy * dy > 1e-12 {
+                        segs.push([a.x, a.y, b.x, b.y]);
+                    }
+                }
+                PathSegment::QuadBezier(start, ctrl, end) => {
+                    flatten_quad_to_segs(
+                        start.x, start.y, ctrl.x, ctrl.y, end.x, end.y,
+                        tol_sq, &mut segs,
+                    );
+                }
+            }
+        }
+    }
+    segs
+}
+
+/// Recursively flatten a quadratic Bezier into line segments.
+fn flatten_quad_to_segs(
+    x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64,
+    tol_sq: f64, out: &mut Vec<[f64; 4]>,
+) {
+    let mx = (x0 + x1) * 0.5;
+    let my = (y0 + y1) * 0.5;
+    let dx = cx - mx;
+    let dy = cy - my;
+    if dx * dx + dy * dy <= tol_sq {
+        let d = (x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0);
+        if d > 1e-12 {
+            out.push([x0, y0, x1, y1]);
+        }
+        return;
+    }
+    let mx01 = (x0 + cx) * 0.5;
+    let my01 = (y0 + cy) * 0.5;
+    let mx12 = (cx + x1) * 0.5;
+    let my12 = (cy + y1) * 0.5;
+    let midx = (mx01 + mx12) * 0.5;
+    let midy = (my01 + my12) * 0.5;
+    flatten_quad_to_segs(x0, y0, mx01, my01, midx, midy, tol_sq, out);
+    flatten_quad_to_segs(midx, midy, mx12, my12, x1, y1, tol_sq, out);
+}
+
+/// Spatial grid: for each source pixel cell, store indices of contour segments
+/// that overlap or pass near it (within 0.5 pixel margin).
+fn build_segment_grid(segs: &[[f64; 4]], w: usize, h: usize) -> Vec<Vec<u32>> {
+    let mut grid = vec![Vec::new(); w * h];
+    for (i, s) in segs.iter().enumerate() {
+        let x_min = s[0].min(s[2]) - 0.5;
+        let x_max = s[0].max(s[2]) + 0.5;
+        let y_min = s[1].min(s[3]) - 0.5;
+        let y_max = s[1].max(s[3]) + 0.5;
+        let gx0 = (x_min.floor() as i32).max(0) as usize;
+        let gx1 = (x_max.ceil() as i32).min(w as i32) as usize;
+        let gy0 = (y_min.floor() as i32).max(0) as usize;
+        let gy1 = (y_max.ceil() as i32).min(h as i32) as usize;
+        for gy in gy0..gy1 {
+            for gx in gx0..gx1 {
+                grid[gy * w + gx].push(i as u32);
+            }
+        }
+    }
+    grid
+}
+
+/// Count how many contour segments the line from (ax, ay) to (bx, by) crosses.
+/// Odd count = blocked (different side of contour). Even = visible (same side).
+/// Uses the spatial grid to test only nearby segments.
+fn ray_crossing_count(
+    ax: f64, ay: f64, bx: f64, by: f64,
+    segs: &[[f64; 4]], grid: &[Vec<u32>], grid_w: usize,
+) -> u32 {
+    let x_min = ax.min(bx) - 0.1;
+    let x_max = ax.max(bx) + 0.1;
+    let y_min = ay.min(by) - 0.1;
+    let y_max = ay.max(by) + 0.1;
+    let gx0 = (x_min.floor() as usize).min(grid_w.saturating_sub(1));
+    let gx1 = (x_max.ceil() as usize).min(grid_w);
+    let gy0 = y_min.floor() as usize;
+    let gy1 = y_max.ceil() as usize;
+    let grid_h = grid.len() / grid_w;
+    let gy1 = gy1.min(grid_h);
+
+    let mut tested = [u32::MAX; 128];
+    let mut n_tested = 0usize;
+    let mut crossings = 0u32;
+
+    for gy in gy0..gy1 {
+        for gx in gx0..gx1 {
+            for &si in &grid[gy * grid_w + gx] {
+                if n_tested < 128 && tested[..n_tested].contains(&si) { continue; }
+                if n_tested < 128 { tested[n_tested] = si; n_tested += 1; }
+
+                let s = &segs[si as usize];
+                if segments_intersect(ax, ay, bx, by, s[0], s[1], s[2], s[3]) {
+                    crossings += 1;
+                }
+            }
+        }
+    }
+    crossings
+}
+
+/// Test if two line segments intersect (strict interior intersection only).
+#[inline]
+fn segments_intersect(
+    p1x: f64, p1y: f64, p2x: f64, p2y: f64,
+    p3x: f64, p3y: f64, p4x: f64, p4y: f64,
+) -> bool {
+    let d1x = p2x - p1x;
+    let d1y = p2y - p1y;
+    let d2x = p4x - p3x;
+    let d2y = p4y - p3y;
+
+    let cross = d1x * d2y - d1y * d2x;
+    if cross.abs() < 1e-12 { return false; }
+
+    let inv_cross = 1.0 / cross;
+    let dx = p3x - p1x;
+    let dy = p3y - p1y;
+    let t = (dx * d2y - dy * d2x) * inv_cross;
+    let u = (dx * d1y - dy * d1x) * inv_cross;
+
+    // Strict interior: exclude endpoints to avoid self-intersection at corners
+    t > 0.01 && t < 0.99 && u > 0.01 && u < 0.99
+}
+
 /// Snap a color to the nearest palette color by RGB Euclidean distance.
 fn snap_to_nearest(palette: &[u32], color: u32) -> u32 {
     let cr = ((color >> 16) & 0xFF) as i32;
@@ -1004,33 +1142,51 @@ pub fn rasterize_spline_diffusion(
     let out_w = width * scale;
     let out_h = height * scale;
 
-    // Step 1: Scanline-rasterize the B-spline paths with AA, then snap each pixel
-    // to the nearest source color. The AA rasterizer gives accurate boundary
-    // placement; snapping removes intermediate blended colors that would break
-    // region flood fill.
+    // Step 1: Scanline-rasterize with AA, snap to palette for region boundaries,
+    // then flood-fill connected components for region IDs.
     let aa_buf = rasterize(paths, width, height, bg_color, scale);
     let palette: Vec<u32> = paths.iter().map(|p| p.color).chain(std::iter::once(bg_color)).collect();
     let color_buf: Vec<u32> = aa_buf.iter().map(|&c| snap_to_nearest(&palette, c)).collect();
-
-    // Step 2: Flood-fill connected components on the snapped color buffer.
-    // Two adjacent output pixels with the same snapped color are in the same region.
-    // This correctly separates same-color areas divided by spline boundaries
-    // (e.g., white belly vs white background on opposite sides of an outline).
     let region_ids = flood_fill_output_regions(&color_buf, out_w, out_h);
 
-    // Map each source pixel centroid to its output-space region ID
-    let mut src_region_ids = vec![0u32; width * height];
+    // Step 2: Map source centroids to regions. Each source pixel's snapped color
+    // determines which output region it belongs to.
+    let mut src_region = vec![0u32; width * height];
     for py in 0..height {
         for px in 0..width {
-            let cx_out = ((px as f64 + 0.5) * scale as f64) as usize;
-            let cy_out = ((py as f64 + 0.5) * scale as f64) as usize;
-            let cx_out = cx_out.min(out_w - 1);
-            let cy_out = cy_out.min(out_h - 1);
-            src_region_ids[py * width + px] = region_ids[cy_out * out_w + cx_out];
+            // Find a point in the centroid's output cell with the right color
+            let src_color = snap_to_nearest(&palette, pixels[py * width + px]);
+            let base_ox = px * scale;
+            let base_oy = py * scale;
+            let mut assigned = false;
+            // Scan in spiral from center outward
+            let cx = (base_ox + scale / 2).min(out_w - 1);
+            let cy = (base_oy + scale / 2).min(out_h - 1);
+            if color_buf[cy * out_w + cx] == src_color {
+                src_region[py * width + px] = region_ids[cy * out_w + cx];
+                assigned = true;
+            }
+            if !assigned {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let ox = (base_ox + dx).min(out_w - 1);
+                        let oy = (base_oy + dy).min(out_h - 1);
+                        if color_buf[oy * out_w + ox] == src_color {
+                            src_region[py * width + px] = region_ids[oy * out_w + ox];
+                            assigned = true;
+                            break;
+                        }
+                    }
+                    if assigned { break; }
+                }
+            }
+            if !assigned {
+                src_region[py * width + px] = region_ids[cy * out_w + cx];
+            }
         }
     }
 
-    // Step 3: Gaussian diffusion within connected regions
+    // Step 3: Gaussian diffusion within connected regions.
     let inv_scale = 1.0 / scale as f64;
     let sigma_sq_2 = 2.0;
     let radius = 2.0f64;
@@ -1045,7 +1201,6 @@ pub fn rasterize_spline_diffusion(
 
         for ox in 0..out_w {
             let sx = (ox as f64 + 0.5) * inv_scale;
-
             let my_region = region_ids[oy * out_w + ox];
 
             let min_px = ((sx - radius).floor() as i32).max(0) as usize;
@@ -1058,7 +1213,7 @@ pub fn rasterize_spline_diffusion(
 
             for py in min_py..=max_py {
                 for px in min_px..=max_px {
-                    if src_region_ids[py * width + px] != my_region {
+                    if src_region[py * width + px] != my_region {
                         continue;
                     }
 
