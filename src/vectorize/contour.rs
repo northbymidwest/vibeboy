@@ -13,6 +13,11 @@ use super::graph::SimilarityGraph;
 use super::voronoi::Point;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::AtomicBool;
+
+/// When true, visible edges use YUV similarity threshold (Paper Section 3.2).
+/// When false, any color difference creates a visible edge (default, more robust).
+pub static YUV_VISIBLE_EDGES: AtomicBool = AtomicBool::new(false);
 
 /// Sentinel color for the void outside the image. No real pixel has this value
 /// (PPU format is 0x00RRGGBB). Border edges use this instead of collapsing,
@@ -408,14 +413,19 @@ fn pack_edge(a: u32, b: u32) -> u64 {
 }
 
 /// Check if two colors are dissimilar enough to form a visible edge.
-/// Uses the same YUV threshold as the similarity graph (Section 3.2):
-/// colors are dissimilar if Y, U, or V difference exceeds 48/255, 7/255, 6/255.
+/// When YUV_VISIBLE_EDGES is true, uses the same YUV threshold as the
+/// similarity graph (Paper Section 3.2). When false, any color difference
+/// creates a visible edge (more robust for games with dithering/gradients).
 /// VOID_COLOR edges (image border) are always visible.
 #[inline(always)]
 fn is_visible_edge(left: u32, right: u32) -> bool {
     if left == right { return false; }
     if left == VOID_COLOR || right == VOID_COLOR { return true; }
-    !super::graph::similar(left, right)
+    if YUV_VISIBLE_EDGES.load(std::sync::atomic::Ordering::Relaxed) {
+        !super::graph::similar(left, right)
+    } else {
+        true
+    }
 }
 
 /// Threshold for adaptive pipeline: above this, skip B-spline and sort.
@@ -1230,9 +1240,14 @@ fn boundary_loop_to_segments(
 pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: bool) -> Vec<ColorPath> {
     let w = graph.width;
     let h = graph.height;
+    let verbose = std::env::var("VECTORIZE_BENCH").is_ok();
+    let t0 = std::time::Instant::now();
 
     let all_cells = precompute_cells(w, h, graph);
+    let t1 = std::time::Instant::now();
+
     let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, adaptive);
+    let t2 = std::time::Instant::now();
 
     // Adaptive pipeline: skip expensive B-spline optimization when boundary
     // complexity is high (noisy/dithered frames). The optimization provides
@@ -1281,9 +1296,11 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         }
         j
     };
+    let t3 = std::time::Instant::now();
 
     // Trace boundary loops, then optimize each loop directly.
     let all_loops = trace_all_boundary_loops(&directed_edges);
+    let t4 = std::time::Instant::now();
 
     let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
     for (node_loop, _) in &all_loops {
@@ -1293,6 +1310,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
     }
 
     optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+    let t5 = std::time::Instant::now();
 
     // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
@@ -1316,6 +1334,17 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
             segments: all_segments,
         });
     }
+    let t6 = std::time::Instant::now();
+
+    if verbose {
+        eprintln!("    cells:         {:>8.3}ms", (t1 - t0).as_secs_f64() * 1000.0);
+        eprintln!("    boundary edges:{:>8.3}ms", (t2 - t1).as_secs_f64() * 1000.0);
+        eprintln!("    chain+tjunc:   {:>8.3}ms", (t3 - t2).as_secs_f64() * 1000.0);
+        eprintln!("    trace loops:   {:>8.3}ms", (t4 - t3).as_secs_f64() * 1000.0);
+        eprintln!("    optimize:      {:>8.3}ms", (t5 - t4).as_secs_f64() * 1000.0);
+        eprintln!("    bspline emit:  {:>8.3}ms", (t6 - t5).as_secs_f64() * 1000.0);
+    }
+
     result
 }
 
@@ -1454,7 +1483,7 @@ fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
 
 // --- Section 3.4: B-spline optimization ---
 
-const OPT_ITERATIONS: usize = 8;
+const OPT_ITERATIONS: usize = 1;
 const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
 const CURVATURE_INTERVALS: usize = 3;

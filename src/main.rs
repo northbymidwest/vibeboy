@@ -98,6 +98,12 @@ struct Cli {
     /// Force CPU-only scaling (disable GPU shader pipeline even if available)
     #[arg(long)]
     cpu_filter: bool,
+
+    /// Use YUV similarity threshold for visible edges in vectorize filters
+    /// (Paper Section 3.2). Merges near-similar colors into the same region.
+    /// Off by default; can produce artifacts in games with dithering/gradients.
+    #[arg(long)]
+    yuv_edges: bool,
 }
 
 fn parse_model(s: &str) -> Result<GbModel, String> {
@@ -183,6 +189,10 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
+
+    if cli.yuv_edges {
+        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Resolve ROM path: use CLI argument or show a file dialog
     let rom_path: PathBuf = if let Some(ref p) = cli.rom {
