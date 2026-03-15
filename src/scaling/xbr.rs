@@ -7,7 +7,7 @@
 
 use super::get;
 use super::color_dist;
-use super::blend_argb as blend;
+use super::blend_argb;
 
 /// xBR scaling factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,23 +248,23 @@ fn filt2x(p: &[u32; 25], cp: &CornerParams, out: &mut [u32; 4], n3: usize, n2: u
         // Level 2: directional blending
         let (left, up) = detect_direction(p, cp);
         if left && up {
-            out[n3] = blend(out[n3], px, B224);
-            let side = blend(out[n2], px, B64);
+            out[n3] = blend_argb(out[n3], px, B224);
+            let side = blend_argb(out[n2], px, B64);
             out[n2] = side;
             out[n1] = side;
         } else if left {
-            out[n3] = blend(out[n3], px, B192);
-            out[n2] = blend(out[n2], px, B64);
+            out[n3] = blend_argb(out[n3], px, B192);
+            out[n2] = blend_argb(out[n2], px, B64);
         } else if up {
-            out[n3] = blend(out[n3], px, B192);
-            out[n1] = blend(out[n1], px, B64);
+            out[n3] = blend_argb(out[n3], px, B192);
+            out[n1] = blend_argb(out[n1], px, B64);
         } else {
             // Pure diagonal
-            out[n3] = blend(out[n3], px, B128);
+            out[n3] = blend_argb(out[n3], px, B128);
         }
     } else {
         // Fallback: basic diagonal blend
-        out[n3] = blend(out[n3], px, B128);
+        out[n3] = blend_argb(out[n3], px, B128);
     }
 }
 
@@ -342,30 +342,30 @@ fn filt3x(
     if ew < iw && sub_condition_3(p, cp) {
         let (left, up) = detect_direction(p, cp);
         if left && up {
-            let blended_n7 = blend(out[n7], px, B192);
-            let blended_n6 = blend(out[n6], px, B64);
+            let blended_n7 = blend_argb(out[n7], px, B192);
+            let blended_n6 = blend_argb(out[n6], px, B64);
             out[n7] = blended_n7;
             out[n6] = blended_n6;
             out[n5] = blended_n7;
             out[n2] = blended_n6;
             out[n8] = px;
         } else if left {
-            out[n7] = blend(out[n7], px, B192);
-            out[n5] = blend(out[n5], px, B64);
-            out[n6] = blend(out[n6], px, B64);
+            out[n7] = blend_argb(out[n7], px, B192);
+            out[n5] = blend_argb(out[n5], px, B64);
+            out[n6] = blend_argb(out[n6], px, B64);
             out[n8] = px;
         } else if up {
-            out[n5] = blend(out[n5], px, B192);
-            out[n7] = blend(out[n7], px, B64);
-            out[n2] = blend(out[n2], px, B64);
+            out[n5] = blend_argb(out[n5], px, B192);
+            out[n7] = blend_argb(out[n7], px, B64);
+            out[n2] = blend_argb(out[n2], px, B64);
             out[n8] = px;
         } else {
-            out[n8] = blend(out[n8], px, B224);
-            out[n5] = blend(out[n5], px, B32);
-            out[n7] = blend(out[n7], px, B32);
+            out[n8] = blend_argb(out[n8], px, B224);
+            out[n5] = blend_argb(out[n5], px, B32);
+            out[n7] = blend_argb(out[n7], px, B32);
         }
     } else {
-        out[n8] = blend(out[n8], px, B128);
+        out[n8] = blend_argb(out[n8], px, B128);
     }
 }
 
@@ -447,8 +447,8 @@ fn filt4x(p: &[u32; 25], cp: &CornerParams, out: &mut [u32; 16], o: &Out4x) {
     if ew < iw && sub_condition_24(p, cp) {
         let (left, up) = detect_direction(p, cp);
         if left && up {
-            let blended_n13 = blend(out[o.n13], px, B192);
-            let blended_n12 = blend(out[o.n12], px, B64);
+            let blended_n13 = blend_argb(out[o.n13], px, B192);
+            let blended_n12 = blend_argb(out[o.n12], px, B64);
             out[o.n13] = blended_n13;
             out[o.n12] = blended_n12;
             out[o.n15] = px;
@@ -458,26 +458,26 @@ fn filt4x(p: &[u32; 25], cp: &CornerParams, out: &mut [u32; 16], o: &Out4x) {
             out[o.n3] = blended_n12;
             out[o.n7] = blended_n13;
         } else if left {
-            out[o.n11] = blend(out[o.n11], px, B192);
-            out[o.n13] = blend(out[o.n13], px, B192);
-            out[o.n10] = blend(out[o.n10], px, B64);
-            out[o.n12] = blend(out[o.n12], px, B64);
+            out[o.n11] = blend_argb(out[o.n11], px, B192);
+            out[o.n13] = blend_argb(out[o.n13], px, B192);
+            out[o.n10] = blend_argb(out[o.n10], px, B64);
+            out[o.n12] = blend_argb(out[o.n12], px, B64);
             out[o.n14] = px;
             out[o.n15] = px;
         } else if up {
-            out[o.n14] = blend(out[o.n14], px, B192);
-            out[o.n7] = blend(out[o.n7], px, B192);
-            out[o.n10] = blend(out[o.n10], px, B64);
-            out[o.n3] = blend(out[o.n3], px, B64);
+            out[o.n14] = blend_argb(out[o.n14], px, B192);
+            out[o.n7] = blend_argb(out[o.n7], px, B192);
+            out[o.n10] = blend_argb(out[o.n10], px, B64);
+            out[o.n3] = blend_argb(out[o.n3], px, B64);
             out[o.n11] = px;
             out[o.n15] = px;
         } else {
-            out[o.n11] = blend(out[o.n11], px, B128);
-            out[o.n14] = blend(out[o.n14], px, B128);
+            out[o.n11] = blend_argb(out[o.n11], px, B128);
+            out[o.n14] = blend_argb(out[o.n14], px, B128);
             out[o.n15] = px;
         }
     } else {
-        out[o.n15] = blend(out[o.n15], px, B128);
+        out[o.n15] = blend_argb(out[o.n15], px, B128);
     }
 }
 

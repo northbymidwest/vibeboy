@@ -18,6 +18,8 @@
 //! blend between cubic-filtered candidates accordingly.
 
 use super::get;
+use super::channels;
+use super::pack_channels;
 
 // ── Neighborhood ────────────────────────────────────────────────────────────
 
@@ -50,45 +52,15 @@ impl Neighborhood {
         Self { px: pixels, lum }
     }
 
-    // Named accessors for the 4x4 grid positions.
-    #[inline(always)] fn corner_tl(&self) -> usize { 0 }
-    #[inline(always)] fn top_l(&self)     -> usize { 1 }
-    #[inline(always)] fn top_r(&self)     -> usize { 2 }
-    #[inline(always)] fn corner_tr(&self) -> usize { 3 }
-    #[inline(always)] fn left_t(&self)    -> usize { 4 }
-    #[inline(always)] fn inner_tl(&self)  -> usize { 5 }
-    #[inline(always)] fn inner_tr(&self)  -> usize { 6 }
-    #[inline(always)] fn right_t(&self)   -> usize { 7 }
-    #[inline(always)] fn left_b(&self)    -> usize { 8 }
-    #[inline(always)] fn inner_bl(&self)  -> usize { 9 }
-    #[inline(always)] fn inner_br(&self)  -> usize { 10 }
-    #[inline(always)] fn right_b(&self)   -> usize { 11 }
-    #[inline(always)] fn corner_bl(&self) -> usize { 12 }
-    #[inline(always)] fn bot_l(&self)     -> usize { 13 }
-    #[inline(always)] fn bot_r(&self)     -> usize { 14 }
-    #[inline(always)] fn corner_br(&self) -> usize { 15 }
 }
+
+// Named position constants for the 4x4 grid.
+const CTL: usize = 0;  const TL: usize = 1;  const TR: usize = 2;  const CTR: usize = 3;
+const LT: usize = 4;   const ITL: usize = 5;  const ITR: usize = 6;  const RT: usize = 7;
+const LB: usize = 8;   const IBL: usize = 9;  const IBR: usize = 10; const RB: usize = 11;
+const CBL: usize = 12;  const BL: usize = 13;  const BR: usize = 14;  const CBR: usize = 15;
 
 // ── Color math ──────────────────────────────────────────────────────────────
-
-/// Extract RGB channels from a packed ARGB pixel.
-#[inline(always)]
-fn channels(c: u32) -> [f32; 3] {
-    [
-        ((c >> 16) & 0xFF) as f32,
-        ((c >> 8) & 0xFF) as f32,
-        (c & 0xFF) as f32,
-    ]
-}
-
-/// Pack floating-point RGB channels into an ARGB u32.
-#[inline(always)]
-fn pack_channels(ch: [f32; 3]) -> u32 {
-    let r = ch[0].round().clamp(0.0, 255.0) as u32;
-    let g = ch[1].round().clamp(0.0, 255.0) as u32;
-    let b = ch[2].round().clamp(0.0, 255.0) as u32;
-    0xFF000000 | (r << 16) | (g << 8) | b
-}
 
 /// Apply a symmetric 4-tap cubic-like kernel to four RGB values.
 /// `sharpness` controls the negative lobes (higher = sharper, with ringing risk).
@@ -228,30 +200,24 @@ const EDGE_THRESHOLD: f32 = 5.000001;
 fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     let l = &nb.lum;
 
-    // Indices for readability.
-    let ctl = nb.corner_tl(); let tl = nb.top_l();     let tr = nb.top_r();     let ctr = nb.corner_tr();
-    let lt = nb.left_t();     let itl = nb.inner_tl();  let itr = nb.inner_tr(); let rt = nb.right_t();
-    let lb = nb.left_b();     let ibl = nb.inner_bl();  let ibr = nb.inner_br(); let rb = nb.right_b();
-    let cbl = nb.corner_bl(); let bl = nb.bot_l();      let br = nb.bot_r();     let cbr = nb.corner_br();
-
     // ── Diagonal gradient analysis ──
     // Measure variation along the backslash (\) diagonal axis.
     let grad_bs = diagonal_gradient(
         gp,
-        l[lt], l[tl],   // outer pair
-        l[lb], l[itl], l[tr],  // near-axis triple
-        l[cbl], l[ibl], l[itr], l[ctr],  // core + far
-        l[bl], l[ibr], l[rt],  // parallel support
-        l[br], l[rb],   // cross pair
+        l[LT], l[TL],   // outer pair
+        l[LB], l[ITL], l[TR],  // near-axis triple
+        l[CBL], l[IBL], l[ITR], l[CTR],  // core + far
+        l[BL], l[IBR], l[RT],  // parallel support
+        l[BR], l[RB],   // cross pair
     );
     // Measure variation along the slash (/) diagonal axis.
     let grad_sl = diagonal_gradient(
         gp,
-        l[tr], l[rt],   // outer pair
-        l[tl], l[itr], l[rb],  // near-axis triple
-        l[ctl], l[itl], l[ibr], l[cbr],  // core + far
-        l[lt], l[ibl], l[br],  // parallel support
-        l[lb], l[bl],   // cross pair
+        l[TR], l[RT],   // outer pair
+        l[TL], l[ITR], l[RB],  // near-axis triple
+        l[CTL], l[ITL], l[IBR], l[CBR],  // core + far
+        l[LT], l[IBL], l[BR],  // parallel support
+        l[LB], l[BL],   // cross pair
     );
 
     // Positive = backslash has more variation → prefer slash interpolation.
@@ -261,13 +227,13 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     // ── Cardinal gradient analysis ──
     let grad_h = cardinal_gradient(
         gp,
-        [l[itr], l[ibr], l[itl], l[ibl]],
-        [l[tr], l[br], l[tl], l[bl]],
+        [l[ITR], l[IBR], l[ITL], l[IBL]],
+        [l[TR], l[BR], l[TL], l[BL]],
     );
     let grad_v = cardinal_gradient(
         gp,
-        [l[itl], l[itr], l[ibl], l[ibr]],
-        [l[lt], l[rt], l[lb], l[rb]],
+        [l[ITL], l[ITR], l[IBL], l[IBR]],
+        [l[LT], l[RT], l[LB], l[RB]],
     );
     let cardinal_bias = grad_h - grad_v;
 
@@ -277,12 +243,12 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     // Slash (/) diagonal: corner_bl → inner_bl → inner_tr → corner_tr
     let slash_color = cubic_filter(
         DIAG_SHARPNESS,
-        [nb.px[cbl], nb.px[ibl], nb.px[itr], nb.px[ctr]],
+        [nb.px[CBL], nb.px[IBL], nb.px[ITR], nb.px[CTR]],
     );
     // Backslash (\) diagonal: corner_tl → inner_tl → inner_br → corner_br
     let backslash_color = cubic_filter(
         DIAG_SHARPNESS,
-        [nb.px[ctl], nb.px[itl], nb.px[ibr], nb.px[cbr]],
+        [nb.px[CTL], nb.px[ITL], nb.px[IBR], nb.px[CBR]],
     );
 
     // Cardinal candidates: 4-tap cubic on paired rows/columns.
@@ -290,20 +256,20 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     let horiz_color = cubic_filter_paired(
         ORTHO_SHARPNESS,
         [
-            (nb.px[lt], nb.px[lb]),
-            (nb.px[itl], nb.px[ibl]),
-            (nb.px[itr], nb.px[ibr]),
-            (nb.px[rt], nb.px[rb]),
+            (nb.px[LT], nb.px[LB]),
+            (nb.px[ITL], nb.px[IBL]),
+            (nb.px[ITR], nb.px[IBR]),
+            (nb.px[RT], nb.px[RB]),
         ],
     );
     // Vertical candidate (averaging top/bottom row pairs).
     let vert_color = cubic_filter_paired(
         ORTHO_SHARPNESS,
         [
-            (nb.px[tr], nb.px[tl]),
-            (nb.px[itr], nb.px[itl]),
-            (nb.px[ibr], nb.px[ibl]),
-            (nb.px[br], nb.px[bl]),
+            (nb.px[TR], nb.px[TL]),
+            (nb.px[ITR], nb.px[ITL]),
+            (nb.px[IBR], nb.px[IBL]),
+            (nb.px[BR], nb.px[BL]),
         ],
     );
 
@@ -323,10 +289,10 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     // ── Anti-ringing ──
     // Clamp to the color range of the inner 2x2 to prevent overshoot
     // from the negative cubic taps.
-    let c_itl = channels(nb.px[itl]);
-    let c_itr = channels(nb.px[itr]);
-    let c_ibl = channels(nb.px[ibl]);
-    let c_ibr = channels(nb.px[ibr]);
+    let c_itl = channels(nb.px[ITL]);
+    let c_itr = channels(nb.px[ITR]);
+    let c_ibl = channels(nb.px[IBL]);
+    let c_ibr = channels(nb.px[IBR]);
     for k in 0..3 {
         let lo = c_itl[k].min(c_itr[k]).min(c_ibl[k]).min(c_ibr[k]);
         let hi = c_itl[k].max(c_itr[k]).max(c_ibl[k]).max(c_ibr[k]);

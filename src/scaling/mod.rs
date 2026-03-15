@@ -64,6 +64,44 @@ fn blend_argb(a: u32, b: u32, alpha: f32) -> u32 {
     0xFF000000 | (r.min(255) << 16) | (g.min(255) << 8) | bl.min(255)
 }
 
+/// Extract RGB channels from a packed ARGB pixel as `[R, G, B]` floats.
+#[inline(always)]
+fn channels(c: u32) -> [f32; 3] {
+    [
+        ((c >> 16) & 0xFF) as f32,
+        ((c >> 8) & 0xFF) as f32,
+        (c & 0xFF) as f32,
+    ]
+}
+
+/// Pack floating-point RGB channels into an ARGB u32 (alpha = 0xFF).
+#[inline(always)]
+fn pack_channels(ch: [f32; 3]) -> u32 {
+    let r = ch[0].round().clamp(0.0, 255.0) as u32;
+    let g = ch[1].round().clamp(0.0, 255.0) as u32;
+    let b = ch[2].round().clamp(0.0, 255.0) as u32;
+    0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+/// YCbCr color distance using ITU-R BT.2020 conversion.
+/// Used by xBRZ; also suitable for any perceptual color comparison.
+#[inline(always)]
+fn color_dist_bt2020(a: u32, b: u32) -> f32 {
+    if a == b { return 0.0; }
+    let dr = ((a >> 16) & 0xFF) as f32 - ((b >> 16) & 0xFF) as f32;
+    let dg = ((a >> 8) & 0xFF) as f32 - ((b >> 8) & 0xFF) as f32;
+    let db = (a & 0xFF) as f32 - (b & 0xFF) as f32;
+    const K_R: f32 = 0.2627;
+    const K_G: f32 = 0.6780;
+    const K_B: f32 = 0.0593;
+    const S_B: f32 = 0.5 / (1.0 - K_B);
+    const S_R: f32 = 0.5 / (1.0 - K_R);
+    let y = K_R * dr + K_G * dg + K_B * db;
+    let cb = S_B * (db - y);
+    let cr = S_R * (dr - y);
+    (y * y + cb * cb + cr * cr).sqrt()
+}
+
 /// HQx scaling factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HqxScale {

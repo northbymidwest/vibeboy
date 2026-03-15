@@ -9,6 +9,7 @@
 
 use super::get;
 use super::blend_argb;
+use super::color_dist_bt2020 as dist;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XbrzScale { Xbrz2x, Xbrz3x, Xbrz4x, Xbrz5x, Xbrz6x }
@@ -26,27 +27,6 @@ impl XbrzScale {
 const DOMINANT_RATIO: f32 = 3.6;
 const LINE_DETECT_RATIO: f32 = 2.2;
 const EQ_TOLERANCE: f32 = 30.0;
-
-// ── Color distance (BT.2020 YCbCr) ─────────────────────────────────────────
-
-/// YCbCr color distance using ITU-R BT.2020 conversion.
-#[inline(always)]
-fn dist(a: u32, b: u32) -> f32 {
-    if a == b { return 0.0; }
-    let dr = ((a >> 16) & 0xFF) as f32 - ((b >> 16) & 0xFF) as f32;
-    let dg = ((a >> 8) & 0xFF) as f32 - ((b >> 8) & 0xFF) as f32;
-    let db = (a & 0xFF) as f32 - (b & 0xFF) as f32;
-    const K_R: f32 = 0.2627;
-    const K_G: f32 = 0.6780;
-    const K_B: f32 = 0.0593;
-    const S_B: f32 = 0.5 / (1.0 - K_B);
-    const S_R: f32 = 0.5 / (1.0 - K_R);
-    let y = K_R * dr + K_G * dg + K_B * db;
-    let cb = S_B * (db - y);
-    let cr = S_R * (dr - y);
-    // luminanceWeight = 1.0
-    (y * y + cb * cb + cr * cr).sqrt()
-}
 
 #[inline(always)]
 fn eq(a: u32, b: u32) -> bool { dist(a, b) < EQ_TOLERANCE }
