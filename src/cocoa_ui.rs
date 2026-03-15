@@ -343,6 +343,7 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
         "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
         "vectorize" => scaling::ScaleFilter::Vectorize,
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
+        "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
         _ => scaling::ScaleFilter::Nearest,
     }
 }
@@ -1158,6 +1159,7 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("AA Nearest",       ScaleFilter::AaNearestNeighbor),
         ("Vectorize",        ScaleFilter::Vectorize),
         ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
+        ("Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
     ]
 }
 
@@ -2735,6 +2737,13 @@ fn main() {
                         let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
                         let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
                         (raster, vw, vh)
+                    }
+                    scaling::ScaleFilter::VectorizeDiffusion => {
+                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                        let scale = s.round().max(1.0) as usize;
+                        let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(raw_src, src_w, src_h, scale);
+                        scaled = buf;
+                        (&scaled, dw, dh)
                     }
                 };
 

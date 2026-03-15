@@ -155,6 +155,10 @@ pub enum ScaleFilter {
     /// Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
     /// optimization, uses straight line segments at boundary junctions).
     VectorizeAdaptive,
+    /// Kopf-Lischinski vectorization with Gaussian diffusion rendering
+    /// (Paper Section 3.5). Uses truncated Gaussians at cell centroids
+    /// instead of scanline-filled vector paths.
+    VectorizeDiffusion,
 }
 
 impl ScaleFilter {
@@ -166,7 +170,8 @@ impl ScaleFilter {
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => 1,
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeDiffusion => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -186,7 +191,8 @@ impl ScaleFilter {
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeDiffusion)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -196,7 +202,8 @@ impl ScaleFilter {
             ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive)
+            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeDiffusion)
     }
 }
 

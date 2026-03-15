@@ -112,13 +112,13 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
-        "aa-nearest", "vectorize", "vectorize-adaptive",
+        "aa-nearest", "vectorize", "vectorize-adaptive", "vectorize-diffusion",
     ];
     let lower = s.to_lowercase();
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive, vectorize-diffusion]", s))
     }
 }
 
@@ -292,6 +292,7 @@ fn main() {
         "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
         "vectorize" => scaling::ScaleFilter::Vectorize,
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
+        "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
         _ => unreachable!("filter validated by parse_filter"),
     };
 
@@ -1029,6 +1030,13 @@ fn cpu_scale_frame(
         let cache = vec_cache.as_mut().unwrap();
         let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
         return (raster.to_vec(), w as u32, h as u32);
+    }
+    // Diffusion rasterizer works directly from pixels (no vector paths)
+    if matches!(filter, scaling::ScaleFilter::VectorizeDiffusion) {
+        let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+        let scale = scale_f.round().max(1.0) as usize;
+        let (raster, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
+        return (raster, w as u32, h as u32);
     }
     // All other CPU filters use the shared dispatcher
     scaling::cpu_scale(*filter, src, sw, sh, disp_w, disp_h)
