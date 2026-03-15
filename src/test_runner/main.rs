@@ -107,9 +107,12 @@ enum Command {
     Vectorize {
         /// Path to input image
         path: PathBuf,
-        /// Output SVG file path
+        /// Output file path (.svg for vector, .png for raster)
         #[arg(long, default_value = "output.svg")]
         out: String,
+        /// Rasterizer format: raster (default), diffusion, spline-diffusion
+        #[arg(long, default_value = "raster")]
+        format: String,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -245,8 +248,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out } => {
-            commands::cmd_vectorize(&path, &out);
+        Command::Vectorize { path, out, format } => {
+            commands::cmd_vectorize(&path, &out, &format);
         }
         Command::Analyze {
             path,

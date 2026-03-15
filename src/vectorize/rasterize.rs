@@ -837,6 +837,90 @@ pub fn build_voronoi_ownership(
     ownership
 }
 
+/// Rasterize vector paths with NO anti-aliasing (single center-point sample).
+/// Produces hard region boundaries suitable for region-map usage in the
+/// spline-diffusion pipeline. Blended colors would break region matching.
+fn rasterize_noaa(
+    paths: &[ColorPath],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+    scale: usize,
+) -> Vec<u32> {
+    let out_w = width * scale;
+    let out_h = height * scale;
+    let mut buffer = vec![bg_color; out_w * out_h];
+    let sx = scale as f64;
+    let sy = scale as f64;
+    let tol_sq = 0.25;
+
+    let mut edges = Vec::new();
+
+    for path in paths {
+        if path.segments.is_empty() || path.color == bg_color { continue; }
+
+        extract_edges(&path.segments, sx, sy, tol_sq, &mut edges);
+        if edges.is_empty() { continue; }
+
+        // Sort edges by y_min for scanline traversal
+        edges.sort_unstable_by(|a, b| a.y_min.total_cmp(&b.y_min));
+
+        let fill_color = path.color;
+        let mut scan_start = 0usize;
+
+        for py in 0..out_h {
+            let scan_y = py as f64 + 0.5;
+
+            while scan_start < edges.len() && edges[scan_start].y_max <= scan_y {
+                scan_start += 1;
+            }
+
+            // Collect x intersections with nonzero winding
+            let mut isects: Vec<(f64, i32)> = Vec::new();
+            for i in scan_start..edges.len() {
+                let e = &edges[i];
+                if e.y_min >= scan_y + 1.0 { break; }
+                if scan_y >= e.y_min && scan_y < e.y_max {
+                    isects.push((e.intersect_x(scan_y), e.dir));
+                }
+            }
+            if isects.is_empty() { continue; }
+
+            isects.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+            let mut winding = 0i32;
+            let mut i = 0;
+            while i < isects.len() {
+                winding += isects[i].1;
+                if winding != 0 {
+                    let x_enter = isects[i].0;
+                    let mut j = i + 1;
+                    while j < isects.len() {
+                        winding += isects[j].1;
+                        if winding == 0 { break; }
+                        j += 1;
+                    }
+                    let x_exit = if j < isects.len() { isects[j].0 } else { break };
+
+                    let px_start = (x_enter.ceil() as usize).min(out_w);
+                    let px_end = (x_exit.floor() as usize + 1).min(out_w);
+                    for px in px_start..px_end {
+                        let cx = px as f64 + 0.5;
+                        if cx >= x_enter && cx < x_exit {
+                            buffer[py * out_w + px] = fill_color;
+                        }
+                    }
+                    i = j + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    buffer
+}
+
 // --- Spline-bounded Gaussian diffusion rasterizer (Paper Section 3.5) ---
 //
 // Combines the smooth B-spline contour boundaries from the vectorization
@@ -866,8 +950,10 @@ pub fn rasterize_spline_diffusion(
     let out_w = width * scale;
     let out_h = height * scale;
 
-    // Step 1: Scanline-rasterize the B-spline paths to get smooth region boundaries
-    let region_buf = rasterize(paths, width, height, bg_color, scale);
+    // Step 1: Scanline-rasterize the B-spline paths to get hard region boundaries.
+    // NO anti-aliasing — blended intermediate colors break region matching.
+    // The Gaussian diffusion pass provides its own smooth anti-aliasing.
+    let region_buf = rasterize_noaa(paths, width, height, bg_color, scale);
 
     // Step 2: Gaussian diffusion within spline-bounded regions
     let inv_scale = 1.0 / scale as f64;

@@ -155,7 +155,7 @@ pub fn cmd_screenshot(
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str) {
+pub fn cmd_vectorize(input: &Path, out: &str, format: &str) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -183,9 +183,25 @@ pub fn cmd_vectorize(input: &Path, out: &str) {
         );
     } else {
         let scale = 4;
-        let (raster, out_w, out_h) = vectorize::vectorize_to_raster(&pixels, width, height, scale);
+        let raster_pixels = if format == "spline-diffusion" {
+            vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+            let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
+            vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
+            let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(
+                &paths, &pixels, width, height, bg_color, scale,
+            );
+            r
+        } else if format == "diffusion" {
+            let (r, _, _) = vectorize::rasterize::rasterize_diffusion(&pixels, width, height, scale);
+            r
+        } else {
+            let (r, _, _) = vectorize::vectorize_to_raster(&pixels, width, height, scale);
+            r
+        };
+        let out_w = width * scale;
+        let out_h = height * scale;
         let mut rgb = Vec::with_capacity(out_w * out_h * 3);
-        for pixel in &raster {
+        for pixel in &raster_pixels {
             rgb.push(((pixel >> 16) & 0xFF) as u8);
             rgb.push(((pixel >> 8) & 0xFF) as u8);
             rgb.push((pixel & 0xFF) as u8);
@@ -193,8 +209,8 @@ pub fn cmd_vectorize(input: &Path, out: &str) {
         image::save_buffer(out, &rgb, out_w as u32, out_h as u32, image::ColorType::Rgb8)
             .expect("Failed to write PNG");
         eprintln!(
-            "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x)",
-            width, height, out, out_w, out_h, scale
+            "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, format={})",
+            width, height, out, out_w, out_h, scale, format
         );
     }
 }

@@ -1,7 +1,12 @@
 #version 450
 
-// Scanline rasterizer variant that writes flat colors to a storage buffer
-// instead of a texture. Used as pass 1 of the spline-diffusion pipeline.
+// Scanline rasterizer variant that writes flat colors to a storage buffer.
+// Used as pass 1 of the spline-diffusion pipeline.
+//
+// NO anti-aliasing: single center-point sample per pixel, producing hard
+// region boundaries. The diffusion pass does its own 2x2 supersampling
+// for smooth output; blended intermediate colors here would break region
+// matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -31,7 +36,6 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint bg_color;
 };
 
-// Edge field accessors (32 bytes per edge = 8 floats)
 float edge_x0(uint i)       { return edge_data[i * 8u + 0u]; }
 float edge_y0(uint i)       { return edge_data[i * 8u + 1u]; }
 float edge_dx_per_dy(uint i){ return edge_data[i * 8u + 2u]; }
@@ -43,35 +47,22 @@ uint  edge_color(uint i)    { return floatBitsToUint(edge_data[i * 8u + 6u]); }
 uint row_start(uint r) { return row_data[r * 2u]; }
 uint row_count(uint r) { return row_data[r * 2u + 1u]; }
 
-uint unpack_channel(uint color, uint shift) {
-    return (color >> shift) & 0xFFu;
-}
-
-uint blend_over(uint bg, uint fg, uint fg_coverage, uint total) {
-    uint inv = total - fg_coverage;
-    uint r = (unpack_channel(bg, 16u) * inv + unpack_channel(fg, 16u) * fg_coverage) / total;
-    uint g = (unpack_channel(bg, 8u) * inv + unpack_channel(fg, 8u) * fg_coverage) / total;
-    uint b = (unpack_channel(bg, 0u) * inv + unpack_channel(fg, 0u) * fg_coverage) / total;
-    return 0xFF000000u | (r << 16u) | (g << 8u) | b;
-}
-
 void main() {
     uint px = gl_GlobalInvocationID.x;
     uint py = gl_GlobalInvocationID.y;
     if (px >= out_w || py >= out_h) return;
 
     uint color = bg_color;
-    float x_left = float(px);
-    float sy0 = float(py) + 0.25;
-    float sy1 = float(py) + 0.75;
-    float sx0 = x_left + 0.25;
-    float sx1 = x_left + 0.75;
+
+    // Single center-point sample: no AA blending, hard region boundaries
+    float sx = float(px) + 0.5;
+    float sy = float(py) + 0.5;
 
     uint r_start = row_start(py);
     uint r_count = row_count(py);
 
     uint prev_color = 0xFFFFFFFFu;
-    int w00 = 0, w10 = 0, w01 = 0, w11 = 0;
+    int winding = 0;
 
     for (uint ri = 0u; ri < r_count; ri++) {
         uint ei = edge_indices[r_start + ri];
@@ -84,46 +75,25 @@ void main() {
         int e_dir = edge_dir(ei);
         uint e_color = edge_color(ei);
 
+        // New path: apply previous path's winding
         if (e_color != prev_color && prev_color != 0xFFFFFFFFu) {
-            uint coverage = 0u;
-            if (w00 != 0) coverage++;
-            if (w10 != 0) coverage++;
-            if (w01 != 0) coverage++;
-            if (w11 != 0) coverage++;
-            if (coverage == 4u) {
+            if (winding != 0) {
                 color = prev_color;
-            } else if (coverage > 0u) {
-                color = blend_over(color, prev_color, coverage, 4u);
             }
-            w00 = 0; w10 = 0; w01 = 0; w11 = 0;
+            winding = 0;
         }
         prev_color = e_color;
 
-        if (sy0 >= e_ymin && sy0 < e_ymax) {
-            float ix = e_x0 + (sy0 - e_y0) * e_dx;
-            if (sx0 < ix) w00 += e_dir;
-            if (sx1 < ix) w10 += e_dir;
-        }
-        if (sy1 >= e_ymin && sy1 < e_ymax) {
-            float ix = e_x0 + (sy1 - e_y0) * e_dx;
-            if (sx0 < ix) w01 += e_dir;
-            if (sx1 < ix) w11 += e_dir;
+        if (sy >= e_ymin && sy < e_ymax) {
+            float ix = e_x0 + (sy - e_y0) * e_dx;
+            if (sx < ix) winding += e_dir;
         }
     }
 
-    if (prev_color != 0xFFFFFFFFu) {
-        uint coverage = 0u;
-        if (w00 != 0) coverage++;
-        if (w10 != 0) coverage++;
-        if (w01 != 0) coverage++;
-        if (w11 != 0) coverage++;
-        if (coverage == 4u) {
-            color = prev_color;
-        } else if (coverage > 0u) {
-            color = blend_over(color, prev_color, coverage, 4u);
-        }
+    // Final path
+    if (prev_color != 0xFFFFFFFFu && winding != 0) {
+        color = prev_color;
     }
 
-    // Write to buffer (not texture)
     out_colors[py * out_w + px] = color;
 }
