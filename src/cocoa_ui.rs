@@ -345,6 +345,7 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
         "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
         "vectorize-spline-diffusion" => scaling::ScaleFilter::VectorizeSplineDiffusion,
+        "vectorize-spline-diffusion-adaptive" => scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive,
         _ => scaling::ScaleFilter::Nearest,
     }
 }
@@ -1162,6 +1163,7 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
         ("Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
         ("Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
+        ("Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
     ]
 }
 
@@ -2747,7 +2749,8 @@ fn main() {
                         scaled = buf;
                         (&scaled, dw, dh)
                     }
-                    scaling::ScaleFilter::VectorizeSplineDiffusion => {
+                    scaling::ScaleFilter::VectorizeSplineDiffusion
+                    | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let scale = s.round().max(1.0) as usize;
                         let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(false));

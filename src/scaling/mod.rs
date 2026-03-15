@@ -161,6 +161,8 @@ pub enum ScaleFilter {
     VectorizeDiffusion,
     /// Paper's full rendering: B-spline contour boundaries + Gaussian diffusion.
     VectorizeSplineDiffusion,
+    /// Adaptive spline-diffusion: skips B-spline optimization on complex frames.
+    VectorizeSplineDiffusionAdaptive,
 }
 
 impl ScaleFilter {
@@ -174,7 +176,8 @@ impl ScaleFilter {
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
             | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion => 1,
+            | ScaleFilter::VectorizeSplineDiffusion
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -196,7 +199,8 @@ impl ScaleFilter {
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
             | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion)
+            | ScaleFilter::VectorizeSplineDiffusion
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -208,7 +212,8 @@ impl ScaleFilter {
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
             | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion)
+            | ScaleFilter::VectorizeSplineDiffusion
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive)
     }
 }
 
