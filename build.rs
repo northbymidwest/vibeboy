@@ -101,10 +101,9 @@ const SHADERS: &[ShaderInfo] = &[
         glsl_src: "diffusion_raster.comp",
         spv_name: "diffusion_raster_comp.spv",
         msl_name: "diffusion_raster_comp.metal",
-        // spirv-cross generates: buffer(0)=uniforms, buffer(1)=ownership, buffer(2)=regions, buffer(3)=pixels
-        // SDL3 MSL compute expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions, buffer(3)=ownership
-        // Swap ownership(1) ↔ pixels(3); uniforms(0) and regions(2) stay.
-        msl_buffer_remap: &[(1, 3), (3, 1)],
+        // spirv-cross generates: buffer(0)=diags, buffer(1)=uniforms, buffer(2)=regions, buffer(3)=pixels
+        // SDL3 MSL compute expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions, buffer(3)=diags
+        msl_buffer_remap: &[(0, 3), (1, 0), (3, 1)],
     },
 ];
 

@@ -726,7 +726,7 @@ fn main() {
                     };
                     let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                     let scale = scale_f.round().max(1.0) as usize;
-                    let (src_pixels, src_regions, ownership, out_w, out_h) =
+                    let (src_pixels, src_regions, diag_states, out_w, out_h) =
                         scaling::gpu::prepare_diffusion_data(raw_src, sw, sh, scale);
                     if out_w > 0 && out_h > 0 {
                         if out_w != gpu_tex_w || out_h != gpu_tex_h {
@@ -736,7 +736,7 @@ fn main() {
                         scaling::gpu::diffusion_and_blit(
                             &gpu_device, &window, &gpu_tex,
                             diffusion_compute.as_ref().unwrap(),
-                            &src_pixels, &src_regions, &ownership,
+                            &src_pixels, &src_regions, &diag_states,
                             sw as u32, sh as u32, out_w, out_h, scale as f32,
                         );
                     }

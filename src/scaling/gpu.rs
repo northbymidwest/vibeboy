@@ -962,21 +962,47 @@ pub fn init_diffusion_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comp
 }
 
 /// Prepare CPU-side buffers for the diffusion compute shader.
-/// Returns (src_pixels, src_regions, ownership, out_w, out_h).
+/// Returns (src_pixels, src_regions, packed_diags, out_w, out_h).
+///
+/// packed_diags: 1 uint per source pixel with 4 corner diagonal states
+/// packed into bits [1:0]=TL, [3:2]=TR, [5:4]=BR, [7:6]=BL.
+/// Each 2-bit value: 0=none, 1=backslash, 2=slash.
 pub fn prepare_diffusion_data(
     pixels: &[u32], width: usize, height: usize,
     scale: usize,
 ) -> (Vec<u32>, Vec<u32>, Vec<u32>, u32, u32) {
-    use crate::vectorize::rasterize::{build_graph_regions, build_voronoi_ownership};
+    use crate::vectorize::rasterize::build_graph_regions;
     use crate::vectorize::graph;
 
     let graph = graph::build(pixels, width, height);
     let regions = build_graph_regions(width, height, &graph);
-    let ownership = build_voronoi_ownership(width, height, &graph, scale);
+
+    // Pack diagonal states: 4 corners per pixel, 2 bits each
+    let mut diags = vec![0u32; width * height];
+    for py in 0..height {
+        for px in 0..width {
+            let tl = corner_diag_state(&graph, px, py) as u32;
+            let tr = corner_diag_state(&graph, px + 1, py) as u32;
+            let br = corner_diag_state(&graph, px + 1, py + 1) as u32;
+            let bl = corner_diag_state(&graph, px, py + 1) as u32;
+            diags[py * width + px] = tl | (tr << 2) | (br << 4) | (bl << 6);
+        }
+    }
+
     let out_w = (width * scale) as u32;
     let out_h = (height * scale) as u32;
 
-    (pixels.to_vec(), regions, ownership, out_w, out_h)
+    (pixels.to_vec(), regions, diags, out_w, out_h)
+}
+
+/// Get diagonal state at grid corner (cx, cy): 0=none, 1=backslash, 2=slash.
+fn corner_diag_state(graph: &crate::vectorize::graph::SimilarityGraph, cx: usize, cy: usize) -> u8 {
+    let w = graph.width;
+    let h = graph.height;
+    if cx == 0 || cy == 0 || cx >= w || cy >= h { return 0; }
+    if graph.edge(cx - 1, cy - 1).down_right { return 1; }
+    if graph.edge(cx, cy - 1).down_left { return 2; }
+    0
 }
 
 pub fn diffusion_and_blit(
@@ -986,7 +1012,7 @@ pub fn diffusion_and_blit(
     pipeline: &gpu::ComputePipeline,
     src_pixels: &[u32],
     src_regions: &[u32],
-    ownership: &[u32],
+    diag_states: &[u32],
     src_w: u32, src_h: u32,
     out_w: u32, out_h: u32,
     scale: f32,
@@ -1018,14 +1044,14 @@ pub fn diffusion_and_blit(
 
     let (px_xfer, px_buf) = upload_u32_buffer(device, src_pixels);
     let (reg_xfer, reg_buf) = upload_u32_buffer(device, src_regions);
-    let (own_xfer, own_buf) = upload_u32_buffer(device, ownership);
+    let (diag_xfer, diag_buf) = upload_u32_buffer(device, diag_states);
 
     {
         let copy_pass = device.begin_copy_pass(&cmd).expect("copy pass");
         for (xfer, buf, data) in [
             (&px_xfer, &px_buf, src_pixels),
             (&reg_xfer, &reg_buf, src_regions),
-            (&own_xfer, &own_buf, ownership),
+            (&diag_xfer, &diag_buf, diag_states),
         ] {
             copy_pass.upload_to_gpu_buffer(
                 gpu::TransferBufferLocation::new().with_transfer_buffer(xfer),
@@ -1043,7 +1069,7 @@ pub fn diffusion_and_blit(
             &[],
         ).expect("compute pass");
         compute_pass.bind_compute_pipeline(pipeline);
-        compute_pass.bind_compute_storage_buffers(0, &[px_buf, reg_buf, own_buf]);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf, reg_buf, diag_buf]);
 
         #[repr(C)]
         struct Uniforms {
