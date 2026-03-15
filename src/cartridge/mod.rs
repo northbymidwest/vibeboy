@@ -391,8 +391,9 @@ impl Cartridge for Mbc3 {
                 if reg == 4 && self.rtc_regs[4] & 0x40 != 0 && val & 0x40 == 0 {
                     self.rtc_base = Instant::now();
                 }
+                // Advance RTC before overwriting registers so accumulated time isn't lost
+                self.advance_rtc();
                 self.rtc_regs[reg] = val;
-                self.rtc_base = Instant::now();
             }
             _ => {}
         }

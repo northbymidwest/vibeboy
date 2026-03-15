@@ -850,19 +850,24 @@ impl Ppu {
                 // accessed_oam_row updates AFTER each 2T sleep in the OAM search loop.
                 // The search loop starts at dot 4 (DMG line-start offset), with 2T per entry.
                 // Entry N's row is set at dot (6 + N*2), right after the 2T sleep.
-                if !self.cgb_mode && self.dot >= 6 {
+                if self.dot >= 6 {
                     let oam_search_index = ((self.dot - 6) / 2) as i16;
-                    if oam_search_index >= 38 {
-                        self.accessed_oam_row = 0xFF;
-                    } else {
-                        self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
+
+                    if !self.cgb_mode {
+                        if oam_search_index >= 38 {
+                            self.accessed_oam_row = 0xFF;
+                        } else {
+                            self.accessed_oam_row = (oam_search_index & !1) * 4 + 8;
+                        }
                     }
 
-                    // At OAM search index 37 (~dot 80) on DMG:
-                    // VRAM reads blocked, VRAM writes still allowed
-                    // OAM writes unblocked (reads stay blocked)
+                    // At OAM search index 37 (~dot 80):
+                    // OAM writes unblocked (reads stay blocked) on both DMG and CGB.
+                    // VRAM reads blocked on DMG only (CGB keeps VRAM accessible until mode 3).
                     if oam_search_index >= 37 {
-                        self.vram_accessible = false;
+                        if !self.cgb_mode {
+                            self.vram_accessible = false;
+                        }
                         self.oam_write_accessible = true;
                     }
                 }
