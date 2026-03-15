@@ -1,0 +1,96 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// SDL3 SPIRV compute: set 0 = readonly storage buffers
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
+    // Source pixel colors as packed ARGB u32, row-major [src_h][src_w]
+    uint src_pixels[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer RegionBuf {
+    // Region ID per source pixel, row-major [src_h][src_w]
+    uint src_regions[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer OwnerBuf {
+    // Voronoi cell ownership per output pixel, row-major [out_h][out_w]
+    // Each entry is a source pixel index (py * src_w + px)
+    uint ownership[];
+};
+
+// SDL3 SPIRV compute: set 1 = readwrite storage textures
+layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
+
+// SDL3 SPIRV compute: set 2 = uniform buffers
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint out_w;
+    uint out_h;
+    uint src_w;
+    uint src_h;
+    float inv_scale;   // 1.0 / scale
+    float sigma_sq_2;  // 2 * sigma^2 (= 2.0 for sigma=1)
+    float radius;      // truncation radius in source pixels (= 2.0)
+    uint _pad;
+};
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    if (ox >= out_w || oy >= out_h) return;
+
+    // Output pixel center in source coordinates
+    float sx = (float(ox) + 0.5) * inv_scale;
+    float sy = (float(oy) + 0.5) * inv_scale;
+
+    // Region of this output pixel via Voronoi ownership
+    uint owner = ownership[oy * out_w + ox];
+    uint my_region = src_regions[owner];
+
+    // Search window in source pixels
+    float r_sq = radius * radius;
+    int min_px = max(int(floor(sx - radius)), 0);
+    int max_px = min(int(ceil(sx + radius)), int(src_w) - 1);
+    int min_py = max(int(floor(sy - radius)), 0);
+    int max_py = min(int(ceil(sy + radius)), int(src_h) - 1);
+
+    // Gaussian-weighted color accumulation
+    float tr = 0.0, tg = 0.0, tb = 0.0, tw = 0.0;
+
+    for (int py = min_py; py <= max_py; py++) {
+        for (int px = min_px; px <= max_px; px++) {
+            uint idx = uint(py) * src_w + uint(px);
+
+            // Contour blocks propagation: skip different regions
+            if (src_regions[idx] != my_region) continue;
+
+            // Distance from output point to centroid at (px+0.5, py+0.5)
+            float dx = sx - (float(px) + 0.5);
+            float dy = sy - (float(py) + 0.5);
+            float d_sq = dx * dx + dy * dy;
+            if (d_sq > r_sq) continue;
+
+            float w = exp(-d_sq / sigma_sq_2);
+            uint color = src_pixels[idx];
+            tr += w * float((color >> 16u) & 0xFFu);
+            tg += w * float((color >> 8u) & 0xFFu);
+            tb += w * float(color & 0xFFu);
+            tw += w;
+        }
+    }
+
+    vec4 rgba;
+    if (tw > 0.0) {
+        float inv_tw = 1.0 / tw;
+        rgba = vec4(
+            clamp(tr * inv_tw / 255.0, 0.0, 1.0),
+            clamp(tg * inv_tw / 255.0, 0.0, 1.0),
+            clamp(tb * inv_tw / 255.0, 0.0, 1.0),
+            1.0
+        );
+    } else {
+        rgba = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    imageStore(output_img, ivec2(ox, oy), rgba);
+}

@@ -97,6 +97,14 @@ const SHADERS: &[ShaderInfo] = &[
         //   buffer(0)=uniforms, buffer(1)=edges, buffer(2)=rows, buffer(3)=indices
         msl_buffer_remap: &[(0, 1), (1, 2), (2, 0)],
     },
+    ShaderInfo {
+        glsl_src: "diffusion_raster.comp",
+        spv_name: "diffusion_raster_comp.spv",
+        msl_name: "diffusion_raster_comp.metal",
+        // spirv-cross generates: buffer(0)=pixels, buffer(1)=regions, buffer(2)=uniforms, buffer(3)=ownership
+        // SDL3 MSL compute expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions, buffer(3)=ownership
+        msl_buffer_remap: &[(0, 1), (1, 2), (2, 0)],
+    },
 ];
 
 fn main() {

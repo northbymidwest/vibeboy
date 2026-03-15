@@ -584,7 +584,7 @@ pub fn rasterize_diffusion(
 /// Build region labels by flood-filling along resolved similarity graph edges.
 /// Two pixels are in the same region if connected (directly or transitively)
 /// through graph edges — i.e., no visible edge (contour line) separates them.
-fn build_graph_regions(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<u32> {
+pub fn build_graph_regions(w: usize, h: usize, graph: &SimilarityGraph) -> Vec<u32> {
     let mut regions = vec![u32::MAX; w * h];
     let mut region_id = 0u32;
 
@@ -730,7 +730,7 @@ fn cell_vertex_count(px: usize, py: usize, graph: &SimilarityGraph) -> usize {
 /// Build Voronoi ownership map at output resolution by scanline-filling
 /// each cell polygon. Each output pixel is assigned to the source pixel
 /// whose deformed Voronoi cell contains it.
-fn build_voronoi_ownership(
+pub fn build_voronoi_ownership(
     w: usize, h: usize, graph: &SimilarityGraph, scale: usize,
 ) -> Vec<u32> {
     let out_w = w * scale;
