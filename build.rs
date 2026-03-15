@@ -35,6 +35,24 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "scale3x.frag",
+        spv_name: "scale3x_frag.spv",
+        msl_name: "scale3x_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "eagle.frag",
+        spv_name: "eagle_frag.spv",
+        msl_name: "eagle_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "aa_nearest.frag",
+        spv_name: "aa_nearest_frag.spv",
+        msl_name: "aa_nearest_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "epx.frag",
         spv_name: "epx_frag.spv",
         msl_name: "epx_frag.metal",

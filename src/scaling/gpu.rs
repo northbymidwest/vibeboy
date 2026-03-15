@@ -347,6 +347,124 @@ pub fn render_hqx(
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 
+// ── Scale3x pipeline ────────────────────────────────────────────────────────
+
+pub fn init_scale3x_pipeline(
+    device: &gpu::Device, window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("Scale3x GPU: vs failed: {e}")).ok()?;
+    let fs = load_fragment_shader(device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("Scale3x GPU: fs failed: {e}")).ok()?;
+    create_fullscreen_pipeline(device, window, &vs, &fs)
+        .map_err(|e| eprintln!("Scale3x GPU: pipeline failed: {e}")).ok()
+}
+
+pub fn render_scale3x(
+    device: &gpu::Device, window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>, transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32], tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline, sampler: &gpu::Sampler,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(rp) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        rp.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&rp, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        rp.bind_fragment_samplers(0, &[gpu::TextureSamplerBinding::new().with_texture(gpu_tex).with_sampler(sampler)]);
+        #[repr(C)] struct U { src_size: [f32; 2], pad0: f32, pad1: f32 }
+        cmd.push_fragment_uniform_data(0, &U { src_size: [tex_w as f32, tex_h as f32], pad0: 0.0, pad1: 0.0 });
+        rp.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(rp);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
+// ── Eagle pipeline ──────────────────────────────────────────────────────────
+
+pub fn init_eagle_pipeline(
+    device: &gpu::Device, window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("Eagle GPU: vs failed: {e}")).ok()?;
+    let fs = load_fragment_shader(device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/eagle_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/eagle_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("Eagle GPU: fs failed: {e}")).ok()?;
+    create_fullscreen_pipeline(device, window, &vs, &fs)
+        .map_err(|e| eprintln!("Eagle GPU: pipeline failed: {e}")).ok()
+}
+
+pub fn render_eagle(
+    device: &gpu::Device, window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>, transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32], tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline, sampler: &gpu::Sampler,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(rp) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        rp.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&rp, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        rp.bind_fragment_samplers(0, &[gpu::TextureSamplerBinding::new().with_texture(gpu_tex).with_sampler(sampler)]);
+        #[repr(C)] struct U { src_size: [f32; 2], pad0: f32, pad1: f32 }
+        cmd.push_fragment_uniform_data(0, &U { src_size: [tex_w as f32, tex_h as f32], pad0: 0.0, pad1: 0.0 });
+        rp.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(rp);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
+// ── AA Nearest pipeline ─────────────────────────────────────────────────────
+
+pub fn init_aa_nearest_pipeline(
+    device: &gpu::Device, window: &sdl3::video::Window,
+) -> Option<gpu::GraphicsPipeline> {
+    let vs = load_vertex_shader(device).map_err(|e| eprintln!("AA Nearest GPU: vs failed: {e}")).ok()?;
+    let fs = load_fragment_shader(device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_frag.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_frag.metal")),
+        1, 0, 1,
+    ).map_err(|e| eprintln!("AA Nearest GPU: fs failed: {e}")).ok()?;
+    create_fullscreen_pipeline(device, window, &vs, &fs)
+        .map_err(|e| eprintln!("AA Nearest GPU: pipeline failed: {e}")).ok()
+}
+
+pub fn render_aa_nearest(
+    device: &gpu::Device, window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>, transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32], tex_w: u32, tex_h: u32,
+    pipeline: &gpu::GraphicsPipeline, sampler: &gpu::Sampler,
+    dst_w: u32, dst_h: u32,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if let Some(rp) = begin_swapchain_render_pass(&cmd, swapchain_raw) {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        rp.bind_graphics_pipeline(pipeline);
+        device.set_viewport(&rp, gpu::Viewport::new(vx, vy, vw, vh, 0.0, 1.0));
+        rp.bind_fragment_samplers(0, &[gpu::TextureSamplerBinding::new().with_texture(gpu_tex).with_sampler(sampler)]);
+        #[repr(C)] struct U { src_size: [f32; 2], dst_size: [f32; 2] }
+        cmd.push_fragment_uniform_data(0, &U {
+            src_size: [tex_w as f32, tex_h as f32],
+            dst_size: [dst_w as f32, dst_h as f32],
+        });
+        rp.draw_primitives(3, 1, 0, 0);
+        device.end_render_pass(rp);
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 // ── EPX / Scale2x / Scale4x pipeline ────────────────────────────────────────
 
 pub fn init_epx_pipeline(
