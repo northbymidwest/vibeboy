@@ -35,6 +35,12 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "epx.frag",
+        spv_name: "epx_frag.spv",
+        msl_name: "epx_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "xbr.frag",
         spv_name: "xbr_frag.spv",
         msl_name: "xbr_frag.metal",

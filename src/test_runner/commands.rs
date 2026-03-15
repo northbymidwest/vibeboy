@@ -65,7 +65,10 @@ pub fn cmd_screenshot(
                 scaling::ScaleFilter::Nearest
             }
         };
-        let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, 0, 0)
+        // For resolution-adaptive filters, default to 4x (or use scale arg)
+        let disp_w = 160 * scale;
+        let disp_h = 144 * scale;
+        let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, disp_w, disp_h)
             .unwrap_or_else(|| (raw_fb.to_vec(), 160, 144));
         scaled_buf = s;
         (scaled_buf.as_slice(), w as usize, h as usize)

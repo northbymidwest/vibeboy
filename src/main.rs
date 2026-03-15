@@ -353,7 +353,7 @@ fn main() {
     #[cfg(feature = "sdl3-gpu-shaders")]
     let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
          mut transfer_buf, mut transfer_buf_size,
-         omniscale_pipeline, omniscale_sampler, hqx_pipeline, xbr_pipeline, xbrz_pipeline, super_xbr_pipeline, vectorize_compute) = {
+         omniscale_pipeline, omniscale_sampler, hqx_pipeline, epx_pipeline, xbr_pipeline, xbrz_pipeline, super_xbr_pipeline, vectorize_compute) = {
         let all_formats = gpu::ShaderFormat::PRIVATE
             | gpu::ShaderFormat::SPIRV
             | gpu::ShaderFormat::MSL
@@ -383,11 +383,12 @@ fn main() {
                 .with_mag_filter(gpu::Filter::Nearest)
         ).expect("Failed to create sampler");
         let hqx = scaling::gpu::init_hqx_pipeline(&dev, &window);
+        let epx = scaling::gpu::init_epx_pipeline(&dev, &window);
         let xbr = scaling::gpu::init_xbr_pipeline(&dev, &window);
         let xbrz = scaling::gpu::init_xbrz_pipeline(&dev, &window);
         let sxbr = scaling::gpu::init_super_xbr_pipeline(&dev, &window);
         let vec_compute = scaling::gpu::init_vectorize_compute_pipeline(&dev);
-        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, xbr, xbrz, sxbr, vec_compute)
+        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, epx, xbr, xbrz, sxbr, vec_compute)
     };
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
@@ -655,6 +656,9 @@ fn main() {
             {
                 let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
                     && hqx_pipeline.is_some();
+                let gpu_epx = matches!(scale_filter,
+                    scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x | scaling::ScaleFilter::Scale4x)
+                    && epx_pipeline.is_some();
                 let gpu_xbr = matches!(scale_filter, scaling::ScaleFilter::Xbr(_))
                     && xbr_pipeline.is_some();
                 let gpu_xbrz = matches!(scale_filter, scaling::ScaleFilter::Xbrz(_))
@@ -665,7 +669,7 @@ fn main() {
                     scale_filter,
                     scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
                         | scaling::ScaleFilter::OmniScale
-                ) || gpu_hqx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
+                ) || gpu_hqx || gpu_epx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
                 let gpu_vectorize = matches!(
                     scale_filter,
                     scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
@@ -708,7 +712,17 @@ fn main() {
                             .with_size(needed).build().expect("transfer buf");
                         transfer_buf_size = needed;
                     }
-                    if gpu_hqx {
+                    if gpu_epx {
+                        let epx_scale = match scale_filter {
+                            scaling::ScaleFilter::Scale4x => 4.0,
+                            _ => 2.0,
+                        };
+                        scaling::gpu::render_epx(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            epx_pipeline.as_ref().unwrap(), &omniscale_sampler, epx_scale,
+                        );
+                    } else if gpu_hqx {
                         let hqx_scale = match scale_filter {
                             scaling::ScaleFilter::Hqx(h) => h.factor() as f32, _ => 2.0,
                         };
