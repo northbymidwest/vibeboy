@@ -1671,32 +1671,39 @@ fn curvature_energy(
     energy
 }
 
+/// Integrate |κ| ds over one quadratic B-spline span (Paper Equation 3).
+///
+/// For a quadratic Bezier with control points p0, p1, p2:
+///   d'(t)  = (t-1)*p0 + (1-2t)*p1 + t*p2      (first derivative)
+///   d''(t) = p0 - 2*p1 + p2                     (second derivative, constant)
+///   κ(t)   = (d' × d'') / |d'|³                 (signed curvature)
+///   ds     = |d'(t)| dt                          (arc length element)
+///
+/// So |κ| ds = |d' × d''| / |d'|² dt, which we integrate numerically.
 #[inline(always)]
 fn integrate_span_curvature(p0: Point, p1: Point, p2: Point) -> f64 {
-    // For quadratic Bezier, second derivative is constant:
     let ddx = p0.x - 2.0 * p1.x + p2.x;
     let ddy = p0.y - 2.0 * p1.y + p2.y;
-    let cross_sq_factor = ddx * ddx + ddy * ddy; // |d''|² is constant
-    if cross_sq_factor < 1e-20 { return 0.0; }
+    let dd_len_sq = ddx * ddx + ddy * ddy;
+    if dd_len_sq < 1e-20 { return 0.0; }
 
-    // First derivative at t: d'(t) = (t-1)*p0 + (1-2t)*p1 + t*p2
-    // Evaluate at endpoints and midpoint (Simpson's-like)
     let dt = 1.0 / CURVATURE_INTERVALS as f64;
-    let mut result = (curvature_sq_precomputed(p0, p1, p2, 0.0, ddx, ddy)
-        + curvature_sq_precomputed(p0, p1, p2, 1.0, ddx, ddy)) * 0.5;
+    let mut result = (abs_curvature_ds(p0, p1, p2, 0.0, ddx, ddy)
+        + abs_curvature_ds(p0, p1, p2, 1.0, ddx, ddy)) * 0.5;
     for i in 1..CURVATURE_INTERVALS {
-        result += curvature_sq_precomputed(p0, p1, p2, i as f64 * dt, ddx, ddy);
+        result += abs_curvature_ds(p0, p1, p2, i as f64 * dt, ddx, ddy);
     }
     result * dt
 }
 
+/// Compute |κ(t)| * |d'(t)| = |d'(t) × d''(t)| / |d'(t)|² for one sample.
+/// This is the integrand of ∫|κ| ds when parameterized by t.
 #[inline(always)]
-fn curvature_sq_precomputed(p0: Point, p1: Point, p2: Point, t: f64, ddx: f64, ddy: f64) -> f64 {
+fn abs_curvature_ds(p0: Point, p1: Point, p2: Point, t: f64, ddx: f64, ddy: f64) -> f64 {
     let dx = (t - 1.0) * p0.x + (1.0 - 2.0 * t) * p1.x + t * p2.x;
     let dy = (t - 1.0) * p0.y + (1.0 - 2.0 * t) * p1.y + t * p2.y;
 
-    let numer = dx * ddy - dy * ddx;
-    let denom_sq = dx * dx + dy * dy;
-    let denom = denom_sq * denom_sq.sqrt();
-    if denom < 1e-12 { 0.0 } else { (numer * numer) / (denom * denom) }
+    let cross = (dx * ddy - dy * ddx).abs();
+    let speed_sq = dx * dx + dy * dy;
+    if speed_sq < 1e-12 { 0.0 } else { cross / speed_sq }
 }
