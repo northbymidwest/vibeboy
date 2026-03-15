@@ -1454,7 +1454,7 @@ fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
 
 // --- Section 3.4: B-spline optimization ---
 
-const OPT_ITERATIONS: usize = 1;
+const OPT_ITERATIONS: usize = 8;
 const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
 const CURVATURE_INTERVALS: usize = 3;
