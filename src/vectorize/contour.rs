@@ -296,6 +296,17 @@ fn pack_edge(a: u32, b: u32) -> u64 {
     (a as u64) << 32 | b as u64
 }
 
+/// Check if two colors are dissimilar enough to form a visible edge.
+/// Uses the same YUV threshold as the similarity graph (Section 3.2):
+/// colors are dissimilar if Y, U, or V difference exceeds 48/255, 7/255, 6/255.
+/// VOID_COLOR edges (image border) are always visible.
+#[inline(always)]
+fn is_visible_edge(left: u32, right: u32) -> bool {
+    if left == right { return false; }
+    if left == VOID_COLOR || right == VOID_COLOR { return true; }
+    !super::graph::similar(left, right)
+}
+
 /// Threshold for adaptive pipeline: above this, skip B-spline and sort.
 const ADAPTIVE_EDGE_THRESHOLD: usize = 12000;
 
@@ -342,7 +353,7 @@ fn build_directed_boundary_edges(
 
     // Count boundary edges to decide adaptive vs full pipeline
     let boundary_count = edge_map.values()
-        .filter(|(left, right, _, _)| left != right)
+        .filter(|(left, right, _, _)| is_visible_edge(*left, *right))
         .count();
     let adaptive = adaptive && boundary_count > ADAPTIVE_EDGE_THRESHOLD;
 
@@ -351,7 +362,7 @@ fn build_directed_boundary_edges(
         // Adaptive path: skip visible edge construction and both sorts.
         // trace_all_boundary_loops builds its own HashMap, so input order is irrelevant.
         for (_, (left, right, key_a, key_b)) in &edge_map {
-            if left != right {
+            if is_visible_edge(*left, *right) {
                 directed.push((*key_a, *key_b, *right));
                 directed.push((*key_b, *key_a, *left));
             }
@@ -360,7 +371,7 @@ fn build_directed_boundary_edges(
     } else {
         let mut vis = Vec::with_capacity(boundary_count);
         for (_, (left, right, key_a, key_b)) in &edge_map {
-            if left != right {
+            if is_visible_edge(*left, *right) {
                 vis.push(CellEdge {
                     a: *key_a,
                     b: *key_b,

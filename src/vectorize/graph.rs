@@ -35,7 +35,7 @@ impl SimilarityGraph {
 /// Computed with fixed-point integer math (×1000) to avoid f64.
 /// Branchless: combines all conditions to avoid branch misprediction.
 #[inline(always)]
-fn similar(a: u32, b: u32) -> bool {
+pub fn similar(a: u32, b: u32) -> bool {
     if a == b {
         return true;
     }
