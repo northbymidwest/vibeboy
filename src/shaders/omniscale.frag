@@ -2,6 +2,8 @@
 
 // OmniScale — resolution-independent pixel-art upscaler (GPU fragment shader).
 //
+// Algorithm designed by Lior Halphon.
+//
 // Pattern-based edge interpolation for arbitrary output resolutions.
 // Classifies the 3×3 source neighborhood into an 8-bit edge descriptor,
 // then walks a prioritized rule set to produce anti-aliased output.

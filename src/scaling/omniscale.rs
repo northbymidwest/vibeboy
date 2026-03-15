@@ -1,5 +1,7 @@
 //! OmniScale — resolution-independent pixel-art upscaler.
 //!
+//! Algorithm designed by Lior Halphon.
+//!
 //! Pattern-based edge interpolation generalized from HQnx principles to
 //! arbitrary output resolutions. Each output pixel is mapped back to source
 //! coordinates; the 3×3 source neighborhood is classified into an 8-bit

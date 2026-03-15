@@ -1,4 +1,6 @@
-//! Diagonal-aware pixel-art upscaler with quantized fallback.
+//! OmniScale Legacy — diagonal-aware pixel-art upscaler with quantized fallback.
+//!
+//! Algorithm designed by Lior Halphon.
 //!
 //! Scales pixel art to arbitrary resolutions by detecting and preserving
 //! diagonal edges in 2×2 source quads. The approach:
