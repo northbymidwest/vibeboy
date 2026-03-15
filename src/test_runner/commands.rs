@@ -9,6 +9,24 @@ use crate::vectorize;
 use crate::test_runner::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
 use crate::test_runner::util::{make_emu, parse_keys};
 
+fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
+    if format == "svg" || out.ends_with(".svg") {
+        let svg = vectorize::vectorize_to_svg(pixels, w, h);
+        fs::write(out, &svg).expect("Failed to write SVG");
+        eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
+    } else {
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for &pixel in pixels {
+            rgb.push(((pixel >> 16) & 0xFF) as u8);
+            rgb.push(((pixel >> 8) & 0xFF) as u8);
+            rgb.push((pixel & 0xFF) as u8);
+        }
+        image::save_buffer(out, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
+            .expect("Failed to write PNG");
+        eprintln!("Wrote {} (frame {}, {}x{})", out, frames, w, h);
+    }
+}
+
 pub fn cmd_screenshot(
     path: &Path,
     force_model: Option<GbModel>,
@@ -20,6 +38,7 @@ pub fn cmd_screenshot(
     scale: usize,
     keys: &str,
     filter: Option<&str>,
+    use_gpu: bool,
 ) {
     let rom = fs::read(path).expect("Failed to read ROM");
     let model = force_model.unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
@@ -43,6 +62,7 @@ pub fn cmd_screenshot(
             "epx" => scaling::ScaleFilter::Epx,
             "scale2x" => scaling::ScaleFilter::Scale2x,
             "scale3x" => scaling::ScaleFilter::Scale3x,
+            "scale4x" => scaling::ScaleFilter::Scale4x,
             "eagle" => scaling::ScaleFilter::Eagle,
             "2xsai" => scaling::ScaleFilter::Sai2x,
             "super-2xsai" => scaling::ScaleFilter::Super2xSai,
@@ -60,12 +80,30 @@ pub fn cmd_screenshot(
             "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz6x),
             "super-xbr" => scaling::ScaleFilter::SuperXbr,
             "omniscale" => scaling::ScaleFilter::OmniScale,
+            "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
+            "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
+            "bicubic" => scaling::ScaleFilter::Bicubic,
             other => {
                 eprintln!("Unknown filter '{}', using nearest", other);
                 scaling::ScaleFilter::Nearest
             }
         };
-        // For resolution-adaptive filters, default to 4x (or use scale arg)
+
+        // Try GPU path if requested
+        #[cfg(feature = "sdl3-gpu-shaders")]
+        if use_gpu {
+            if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(raw_fb, 160, 144, sf) {
+                scaled_buf = s;
+                return save_pixels(&scaled_buf, w as usize, h as usize, out, format, frames);
+            }
+            eprintln!("GPU screenshot failed for filter '{}', falling back to CPU", f);
+        }
+        #[cfg(not(feature = "sdl3-gpu-shaders"))]
+        if use_gpu {
+            eprintln!("GPU support not compiled in (enable sdl3-gpu-shaders feature)");
+        }
+
+        // CPU path
         let disp_w = 160 * scale;
         let disp_h = 144 * scale;
         let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, disp_w, disp_h)
@@ -76,37 +114,11 @@ pub fn cmd_screenshot(
         (raw_fb, 160, 144)
     };
 
-    if format == "svg" || (format == "png" && out.ends_with(".svg")) {
-        let svg = vectorize::vectorize_to_svg(fb, 160, 144);
-        fs::write(out, &svg).expect("Failed to write SVG");
-        eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
-    } else if format == "raster" {
+    if format == "raster" {
         let (pixels, out_w, out_h) = vectorize::vectorize_to_raster(fb, 160, 144, scale);
-        let mut rgb = Vec::with_capacity(out_w * out_h * 3);
-        for pixel in &pixels {
-            rgb.push(((pixel >> 16) & 0xFF) as u8);
-            rgb.push(((pixel >> 8) & 0xFF) as u8);
-            rgb.push((pixel & 0xFF) as u8);
-        }
-        image::save_buffer(out, &rgb, out_w as u32, out_h as u32, image::ColorType::Rgb8)
-            .expect("Failed to write PNG");
-        eprintln!(
-            "Wrote {} (frame {}, {}x{} at {}x scale, vectorized+rasterized)",
-            out, frames, out_w, out_h, scale
-        );
+        save_pixels(&pixels, out_w, out_h, out, "png", frames);
     } else {
-        let mut rgb = Vec::with_capacity(fb_w * fb_h * 3);
-        for y in 0..fb_h {
-            for x in 0..fb_w {
-                let pixel = fb[y * fb_w + x];
-                rgb.push(((pixel >> 16) & 0xFF) as u8);
-                rgb.push(((pixel >> 8) & 0xFF) as u8);
-                rgb.push((pixel & 0xFF) as u8);
-            }
-        }
-        image::save_buffer(out, &rgb, fb_w as u32, fb_h as u32, image::ColorType::Rgb8)
-            .expect("Failed to write PNG");
-        eprintln!("Wrote {} (frame {}, {}x{})", out, frames, fb_w, fb_h);
+        save_pixels(fb, fb_w, fb_h, out, format, frames);
     }
 }
 

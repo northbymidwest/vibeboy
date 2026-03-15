@@ -99,6 +99,9 @@ enum Command {
         /// Scaling filter to apply (e.g. xbrz2x, xbr2x, super-xbr, hq2x, epx)
         #[arg(long)]
         filter: Option<String>,
+        /// Use GPU shader for the filter instead of CPU implementation
+        #[arg(long)]
+        gpu: bool,
     },
     /// Vectorize an input PNG image to SVG using Kopf-Lischinski
     Vectorize {
@@ -226,6 +229,7 @@ fn main() {
             boot,
             bootrom,
             filter,
+            gpu,
         } => {
             commands::cmd_screenshot(
                 &path,
@@ -238,6 +242,7 @@ fn main() {
                 scale,
                 &keys,
                 filter.as_deref(),
+                gpu,
             );
         }
         Command::Vectorize { path, out } => {
