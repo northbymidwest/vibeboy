@@ -298,7 +298,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "2xsai", "super-2xsai", "super-eagle",
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
-        "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
+        "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive",
     ];
@@ -306,7 +306,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -334,7 +334,6 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
         "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
         "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
         "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
-        "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
         "super-xbr" => scaling::ScaleFilter::SuperXbr,
         "nedi" => scaling::ScaleFilter::Nedi,
         "dcci" => scaling::ScaleFilter::Dcci,
@@ -1145,7 +1144,6 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("xBR 2x",           ScaleFilter::Xbr(XbrScale::Xbr2x)),
         ("xBR 3x",           ScaleFilter::Xbr(XbrScale::Xbr3x)),
         ("xBR 4x",           ScaleFilter::Xbr(XbrScale::Xbr4x)),
-        ("xBR Hybrid",       ScaleFilter::XbrHybrid),
         ("Super xBR",        ScaleFilter::SuperXbr),
         ("xBRZ 2x",          ScaleFilter::Xbrz(XbrzScale::Xbrz2x)),
         ("xBRZ 3x",          ScaleFilter::Xbrz(XbrzScale::Xbrz3x)),
@@ -1494,7 +1492,7 @@ unsafe fn create_menu_bar(app: id) {
             scaling::ScaleFilter::Hqx(_) => {
                 let _: () = msg_send![hqx_sub, addItem: item];
             }
-            scaling::ScaleFilter::Xbr(_) | scaling::ScaleFilter::XbrHybrid | scaling::ScaleFilter::SuperXbr => {
+            scaling::ScaleFilter::Xbr(_) | scaling::ScaleFilter::SuperXbr => {
                 let _: () = msg_send![xbr_sub, addItem: item];
             }
             scaling::ScaleFilter::Xbrz(_) => {
@@ -2702,10 +2700,6 @@ fn main() {
                         let f = mode.factor() as usize;
                         scaled = scaling::xbrz::scale(raw_src, src_w, src_h, mode);
                         (&scaled, src_w * f, src_h * f)
-                    }
-                    scaling::ScaleFilter::XbrHybrid => {
-                        scaled = scaling::xbr_hybrid::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
                     }
                     scaling::ScaleFilter::SuperXbr => {
                         scaled = scaling::super_xbr::scale(raw_src, src_w, src_h);

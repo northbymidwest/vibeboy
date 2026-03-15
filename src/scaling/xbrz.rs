@@ -1,163 +1,448 @@
 //! xBRZ — pixel-art scaling by Zenju (2x–6x).
 //!
-//! A refined variant of xBR with improved edge detection using "dominance
-//! counting" — each corner tests two competing diagonal hypotheses from the
-//! extended neighborhood, then applies steep/shallow line detection for more
-//! accurate sub-pixel blending.
+//! Two-phase algorithm:
+//!  1. preProcessCorners: for every 2x2 source block (F,G,J,K), compute
+//!     diagonal gradient sums and assign blend types to the four corners
+//!     of the four participating pixels.
+//!  2. scalePixel: for each source pixel, read the accumulated corner blend
+//!     info and apply anti-aliased blending patterns to the output block.
 
 use super::get;
-use super::color_dist;
 use super::blend_argb;
 
-/// xBRZ scaling factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XbrzScale {
-    Xbrz2x,
-    Xbrz3x,
-    Xbrz4x,
-    Xbrz5x,
-    Xbrz6x,
-}
+pub enum XbrzScale { Xbrz2x, Xbrz3x, Xbrz4x, Xbrz5x, Xbrz6x }
 
 impl XbrzScale {
     pub fn factor(self) -> u32 {
         match self {
-            XbrzScale::Xbrz2x => 2,
-            XbrzScale::Xbrz3x => 3,
-            XbrzScale::Xbrz4x => 4,
-            XbrzScale::Xbrz5x => 5,
+            XbrzScale::Xbrz2x => 2, XbrzScale::Xbrz3x => 3,
+            XbrzScale::Xbrz4x => 4, XbrzScale::Xbrz5x => 5,
             XbrzScale::Xbrz6x => 6,
         }
     }
 }
 
-// ── Color equality threshold ────────────────────────────────────────────────
+const DOMINANT_RATIO: f32 = 3.6;
+const LINE_DETECT_RATIO: f32 = 2.2;
+const EQ_TOLERANCE: f32 = 30.0;
 
-const DOMINANT_DIR_THRESHOLD: f32 = 3.6;
-const STEEP_DIR_THRESHOLD: f32 = 2.2;
-const EQ_THRESHOLD: f32 = 30.0;
+// ── Color distance (BT.2020 YCbCr) ─────────────────────────────────────────
 
+/// YCbCr color distance using ITU-R BT.2020 conversion.
 #[inline(always)]
-fn colors_equal(a: u32, b: u32) -> bool {
-    color_dist(a, b) < EQ_THRESHOLD
+fn dist(a: u32, b: u32) -> f32 {
+    if a == b { return 0.0; }
+    let dr = ((a >> 16) & 0xFF) as f32 - ((b >> 16) & 0xFF) as f32;
+    let dg = ((a >> 8) & 0xFF) as f32 - ((b >> 8) & 0xFF) as f32;
+    let db = (a & 0xFF) as f32 - (b & 0xFF) as f32;
+    const K_R: f32 = 0.2627;
+    const K_G: f32 = 0.6780;
+    const K_B: f32 = 0.0593;
+    const S_B: f32 = 0.5 / (1.0 - K_B);
+    const S_R: f32 = 0.5 / (1.0 - K_R);
+    let y = K_R * dr + K_G * dg + K_B * db;
+    let cb = S_B * (db - y);
+    let cr = S_R * (dr - y);
+    // luminanceWeight = 1.0
+    (y * y + cb * cb + cr * cr).sqrt()
 }
 
-// ── Rotated kernel access ──────────────────────────────────────────────────
+#[inline(always)]
+fn eq(a: u32, b: u32) -> bool { dist(a, b) < EQ_TOLERANCE }
 
-/// Sample a rotated 4x4 kernel for a given corner.
-/// rot: 0=BR, 1=BL (flip x), 2=TL (flip both), 3=TR (flip y)
-///
-/// Kernel layout (rot=0, BR orientation):
-/// ```text
-///   A(0)  B(1)  C(2)  D(3)
-///   E(4)  F(5)  G(6)  H(7)
-///   I(8)  J(9)  K(10) L(11)
-///   M(12) N(13) O(14) P(15)
-/// ```
-fn sample_kernel(src: &[u32], w: usize, h: usize, cx: isize, cy: isize, rot: u8) -> [u32; 16] {
-    let (dx, dy) = match rot {
-        0 => (1_isize, 1_isize),
-        1 => (-1_isize, 1_isize),
-        2 => (-1_isize, -1_isize),
-        3 => (1_isize, -1_isize),
-        _ => unreachable!(),
-    };
+// ── Blend info packed into a u8: 2 bits per corner ─────────────────────────
+// Matches C++ layout: TL=[1:0], TR=[3:2], BR=[5:4], BL=[7:6]
+const BL_NONE: u8 = 0;
+const BL_NORMAL: u8 = 1;
+const BL_DOMINANT: u8 = 2;
 
-    let mut p = [0u32; 16];
-    for j in 0..4_isize {
-        for i in 0..4_isize {
-            p[(j * 4 + i) as usize] = get(src, w, h, cx + (i - 1) * dx, cy + (j - 1) * dy);
+#[inline(always)] fn get_tl(b: u8) -> u8 { b & 3 }
+#[inline(always)] fn get_tr(b: u8) -> u8 { (b >> 2) & 3 }
+#[inline(always)] fn get_br(b: u8) -> u8 { (b >> 4) & 3 }
+#[inline(always)] fn get_bl(b: u8) -> u8 { (b >> 6) & 3 }
+#[inline(always)] fn set_tl(b: &mut u8, v: u8) { *b |= v & 3; }
+#[inline(always)] fn set_tr(b: &mut u8, v: u8) { *b |= (v & 3) << 2; }
+#[inline(always)] fn set_br(b: &mut u8, v: u8) { *b |= (v & 3) << 4; }
+#[inline(always)] fn set_bl(b: &mut u8, v: u8) { *b |= (v & 3) << 6; }
+
+// ── Phase 1: preProcessCorners ─────────────────────────────────────────────
+
+fn pre_process_corners(src: &[u32], w: usize, h: usize, blend: &mut [u8]) {
+    let iw = w as isize;
+    let ih = h as isize;
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            let f = get(src, w, h, x, y);
+            let g = get(src, w, h, x+1, y);
+            let j = get(src, w, h, x, y+1);
+            let k = get(src, w, h, x+1, y+1);
+
+            // Skip uniform blocks (exact pixel comparison)
+            if (f == g && j == k) || (f == j && g == k) { continue; }
+
+            let b = get(src, w, h, x, y-1);
+            let c = get(src, w, h, x+1, y-1);
+            let e = get(src, w, h, x-1, y);
+            let hp = get(src, w, h, x+2, y);
+            let i = get(src, w, h, x-1, y+1);
+            let l = get(src, w, h, x+2, y+1);
+            let n = get(src, w, h, x, y+2);
+            let o = get(src, w, h, x+1, y+2);
+
+            let jg = dist(i, f) + dist(f, c) + dist(n, k) + dist(k, hp) + 4.0 * dist(j, g);
+            let fk = dist(e, j) + dist(j, o) + dist(b, g) + dist(g, l) + 4.0 * dist(f, k);
+
+            if jg < fk {
+                let bt = if DOMINANT_RATIO * jg < fk { BL_DOMINANT } else { BL_NORMAL };
+                // Exact pixel comparison (not threshold-based eq)
+                if f != g && f != j {
+                    set_br(&mut blend[y as usize * w + x as usize], bt);
+                }
+                if k != j && k != g {
+                    let kx = (x + 1).min(iw - 1) as usize;
+                    let ky = (y + 1).min(ih - 1) as usize;
+                    set_tl(&mut blend[ky * w + kx], bt);
+                }
+            } else if fk < jg {
+                let bt = if DOMINANT_RATIO * fk < jg { BL_DOMINANT } else { BL_NORMAL };
+                if j != f && j != k {
+                    let jy = (y + 1).min(ih - 1) as usize;
+                    set_tr(&mut blend[jy * w + x as usize], bt);
+                }
+                if g != f && g != k {
+                    let gx = (x + 1).min(iw - 1) as usize;
+                    set_bl(&mut blend[y as usize * w + gx], bt);
+                }
+            }
         }
     }
-    p
 }
 
-// ── Edge classification ─────────────────────────────────────────────────────
+// ── Phase 2: scalePixel ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
-enum BlendType {
-    None,
-    Normal,
-    Dominant,
-}
-
-/// Classify corner blend type using the Zenju two-diagonal comparison.
-///
-/// Compares two competing diagonal hypotheses:
-///   jg: support for anti-diagonal (G↔J, i.e. `/` direction)
-///   fk: support for main diagonal (F↔K, i.e. `\` direction)
-///
-/// If jg < fk, the anti-diagonal dominates → blend the K corner.
-fn classify_corner(p: &[u32; 16]) -> (BlendType, bool, bool) {
-    let f = p[5];   // center
-    let g = p[6];   // right of center
-    let j = p[9];   // below center
-    let k = p[10];  // diagonal (bottom-right of center)
-
-    // Early exit: if center equals diagonal, no edge to smooth
-    if colors_equal(f, k) {
-        return (BlendType::None, false, false);
-    }
-
-    // Early exit: if horizontal edge (F→G) is at least as strong as
-    // the cross-diagonal edge (H→C), no diagonal blending needed
-    if color_dist(f, g) >= color_dist(p[7], p[2]) {
-        return (BlendType::None, false, false);
-    }
-
-    // Two-diagonal comparison (Zenju):
-    // jg measures support for the anti-diagonal (G↔J):
-    //   d(I,F) + d(K,H) + d(N,K) + d(L,G) + 4*d(G,J)
-    let jg = color_dist(p[8], p[5])
-        + color_dist(p[10], p[7])
-        + color_dist(p[13], p[10])
-        + color_dist(p[11], p[6])
-        + 4.0 * color_dist(p[6], p[9]);
-
-    // fk measures support for the main diagonal (F↔K):
-    //   d(E,J) + d(G,N) + d(J,O) + d(F,L) + 4*d(F,K)
-    let fk = color_dist(p[4], p[9])
-        + color_dist(p[6], p[13])
-        + color_dist(p[9], p[14])
-        + color_dist(p[5], p[11])
-        + 4.0 * color_dist(p[5], p[10]);
-
-    if jg >= fk {
-        return (BlendType::None, false, false);
-    }
-
-    let is_dominant = DOMINANT_DIR_THRESHOLD * jg < fk;
-
-    // Steep: edge runs more vertically (toward J direction)
-    let d_fj = color_dist(f, j);
-    let d_jk = color_dist(j, k);
-    let d_fg = color_dist(f, g);
-    let d_gk = color_dist(g, k);
-
-    let is_steep = d_fj + d_jk > STEEP_DIR_THRESHOLD * (d_fg + d_gk)
-        && !colors_equal(f, j)
-        && !colors_equal(p[8], j);
-
-    // Shallow: edge runs more horizontally (toward G direction)
-    let is_shallow = d_fg + d_gk > STEEP_DIR_THRESHOLD * (d_fj + d_jk)
-        && !colors_equal(f, g)
-        && !colors_equal(p[2], g);
-
-    let blend = if is_dominant { BlendType::Dominant } else { BlendType::Normal };
-    (blend, is_steep, is_shallow)
-}
-
-// ── Rotation helper ─────────────────────────────────────────────────────────
-
-/// Map (row, col) in an NxN block to the rotated position for a given corner.
 #[inline(always)]
-fn rotate_idx(row: usize, col: usize, n: usize, rot: u8) -> usize {
+fn rot_idx(row: usize, col: usize, n: usize, rot: u8) -> usize {
     match rot {
         0 => row * n + col,
         1 => row * n + (n - 1 - col),
         2 => (n - 1 - row) * n + (n - 1 - col),
         3 => (n - 1 - row) * n + col,
         _ => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn bset(block: &mut [u32], n: usize, rot: u8, r: usize, c: usize, color: u32, alpha: f32) {
+    let idx = rot_idx(r, c, n, rot);
+    if alpha >= 1.0 {
+        block[idx] = color;
+    } else {
+        block[idx] = blend_argb(block[idx], color, alpha);
+    }
+}
+
+/// Rotate blend info so that the current corner maps to BottomRight position.
+fn rotate_blend(bi: u8, rot: u8) -> u8 {
+    // Rotate the 4 corner fields clockwise by `rot` positions
+    match rot {
+        0 => bi,
+        1 => (get_tl(bi) << 6) | (get_bl(bi) << 4) | (get_tl(bi)) | (get_tr(bi) << 2),
+        _ => {
+            // General rotation: shift the 8-bit value
+            let r = (rot * 2) & 7;
+            (bi >> r) | (bi << (8 - r))
+        }
+    }
+}
+
+/// Check if line blending should be used for the bottom-right corner.
+fn do_line_blend(bi: u8, e: u32, g: u32, h: u32, i: u32, f: u32, c: u32) -> bool {
+    if get_br(bi) >= BL_DOMINANT { return true; }
+    if get_tr(bi) != BL_NONE && !eq(e, g) { return false; }
+    if get_bl(bi) != BL_NONE && !eq(e, c) { return false; }
+    if !eq(e, i) && eq(g, h) && eq(h, i) && eq(i, f) && eq(f, c) { return false; }
+    true
+}
+
+fn scale_pixel(
+    src: &[u32], w: usize, h: usize,
+    blend_info: &[u8], px: usize, py: usize,
+    n: usize, block: &mut [u32],
+) {
+    let e = src[py * w + px];
+    let bi = blend_info[py * w + px];
+    for p in block.iter_mut() { *p = e; }
+    if bi == 0 { return; }
+
+    let ix = px as isize;
+    let iy = py as isize;
+
+    for rot in 0..4u8 {
+        // Rotate blend info so current corner is at BottomRight
+        let rbi = rotate_blend(bi, rot);
+        if get_br(rbi) == BL_NONE { continue; }
+
+        let (dx, dy) = match rot {
+            0 => (1_isize, 1_isize),
+            1 => (-1, 1),
+            2 => (-1, -1),
+            3 => (1, -1),
+            _ => unreachable!(),
+        };
+
+        // 3x3 rotated kernel: a b c / d e f / g h i
+        let f_px = get(src, w, h, ix + dx, iy);
+        let h_px = get(src, w, h, ix, iy + dy);
+        let c_px = get(src, w, h, ix + dx, iy - dy);
+        let g_px = get(src, w, h, ix - dx, iy + dy);
+        let i_px = get(src, w, h, ix + dx, iy + dy);
+
+        // Blend target: more similar axis neighbor
+        let target = if dist(e, f_px) <= dist(e, h_px) { f_px } else { h_px };
+
+        let line = do_line_blend(rbi, e, g_px, h_px, i_px, f_px, c_px);
+
+        if !line {
+            blend_corner(block, n, rot, target);
+        } else {
+            let d_px = get(src, w, h, ix - dx, iy);
+            let b_px = get(src, w, h, ix, iy - dy);
+            let fg = dist(f_px, g_px);
+            let hc = dist(h_px, c_px);
+            let shallow = LINE_DETECT_RATIO * fg <= hc && !eq(e, g_px) && !eq(d_px, g_px);
+            let steep   = LINE_DETECT_RATIO * hc <= fg && !eq(e, c_px) && !eq(b_px, c_px);
+
+            match (steep, shallow) {
+                (true, true)   => blend_steep_and_shallow(block, n, rot, target),
+                (false, true)  => blend_shallow(block, n, rot, target),
+                (true, false)  => blend_steep(block, n, rot, target),
+                (false, false) => blend_diagonal(block, n, rot, target),
+            }
+        }
+    }
+}
+
+// ── Blending patterns ──────────────────────────────────────────────────────
+// All positions are (row, col) in the NxN output block, oriented so the
+// blended corner is at (n-1, n-1) (bottom-right). Rotation handles the
+// other three corners.
+
+fn blend_corner(block: &mut [u32], n: usize, rot: u8, t: u32) {
+    let m = n - 1;
+    match n {
+        2 => { bset(block, 2, rot, 1, 1, t, 0.21); }
+        3 => { bset(block, 3, rot, 2, 2, t, 0.45); }
+        4 => {
+            bset(block, 4, rot, 3, 3, t, 0.68);
+            bset(block, 4, rot, 3, 2, t, 0.09);
+            bset(block, 4, rot, 2, 3, t, 0.09);
+        }
+        5 => {
+            bset(block, 5, rot, 4, 4, t, 0.86);
+            bset(block, 5, rot, 4, 3, t, 0.23);
+            bset(block, 5, rot, 3, 4, t, 0.23);
+        }
+        _ => {
+            bset(block, n, rot, m, m, t, 0.97);
+            bset(block, n, rot, m-1, m, t, 0.42);
+            bset(block, n, rot, m, m-1, t, 0.42);
+            bset(block, n, rot, m, m-2, t, 0.06);
+            bset(block, n, rot, m-2, m, t, 0.06);
+        }
+    }
+}
+
+fn blend_shallow(block: &mut [u32], n: usize, rot: u8, t: u32) {
+    let m = n - 1;
+    match n {
+        2 => {
+            bset(block, 2, rot, 1, 0, t, 0.25);
+            bset(block, 2, rot, 1, 1, t, 0.75);
+        }
+        3 => {
+            bset(block, 3, rot, 2, 0, t, 0.25);
+            bset(block, 3, rot, 1, 2, t, 0.25);
+            bset(block, 3, rot, 2, 1, t, 0.75);
+            bset(block, 3, rot, 2, 2, t, 1.0);
+        }
+        4 => {
+            bset(block, 4, rot, 3, 0, t, 0.25);
+            bset(block, 4, rot, 2, 2, t, 0.25);
+            bset(block, 4, rot, 3, 1, t, 0.75);
+            bset(block, 4, rot, 2, 3, t, 0.75);
+            bset(block, 4, rot, 3, 2, t, 1.0);
+            bset(block, 4, rot, 3, 3, t, 1.0);
+        }
+        5 => {
+            bset(block, 5, rot, 4, 0, t, 0.25);
+            bset(block, 5, rot, 3, 2, t, 0.25);
+            bset(block, 5, rot, 2, 4, t, 0.25);
+            bset(block, 5, rot, 4, 1, t, 0.75);
+            bset(block, 5, rot, 3, 3, t, 0.75);
+            bset(block, 5, rot, 4, 2, t, 1.0);
+            bset(block, 5, rot, 4, 3, t, 1.0);
+            bset(block, 5, rot, 4, 4, t, 1.0);
+            bset(block, 5, rot, 3, 4, t, 1.0);
+        }
+        _ => { // 6x
+            bset(block, n, rot, m, 0, t, 0.25);
+            bset(block, n, rot, m-1, 2, t, 0.25);
+            bset(block, n, rot, m-2, 4, t, 0.25);
+            bset(block, n, rot, m, 1, t, 0.75);
+            bset(block, n, rot, m-1, 3, t, 0.75);
+            bset(block, n, rot, m-2, m, t, 0.75);
+            bset(block, n, rot, m, 2, t, 1.0);
+            bset(block, n, rot, m, 3, t, 1.0);
+            bset(block, n, rot, m, 4, t, 1.0);
+            bset(block, n, rot, m, m, t, 1.0);
+            bset(block, n, rot, m-1, m-1, t, 1.0);
+            bset(block, n, rot, m-1, m, t, 1.0);
+        }
+    }
+}
+
+fn blend_steep(block: &mut [u32], n: usize, rot: u8, t: u32) {
+    let m = n - 1;
+    match n {
+        2 => {
+            bset(block, 2, rot, 0, 1, t, 0.25);
+            bset(block, 2, rot, 1, 1, t, 0.75);
+        }
+        3 => {
+            bset(block, 3, rot, 0, 2, t, 0.25);
+            bset(block, 3, rot, 2, 1, t, 0.25);
+            bset(block, 3, rot, 1, 2, t, 0.75);
+            bset(block, 3, rot, 2, 2, t, 1.0);
+        }
+        4 => {
+            bset(block, 4, rot, 0, 3, t, 0.25);
+            bset(block, 4, rot, 2, 2, t, 0.25);
+            bset(block, 4, rot, 1, 3, t, 0.75);
+            bset(block, 4, rot, 3, 2, t, 0.75);
+            bset(block, 4, rot, 2, 3, t, 1.0);
+            bset(block, 4, rot, 3, 3, t, 1.0);
+        }
+        5 => {
+            bset(block, 5, rot, 0, 4, t, 0.25);
+            bset(block, 5, rot, 2, 3, t, 0.25);
+            bset(block, 5, rot, 4, 1, t, 0.25);
+            bset(block, 5, rot, 1, 4, t, 0.75);
+            bset(block, 5, rot, 3, 3, t, 0.75);
+            bset(block, 5, rot, 2, 4, t, 1.0);
+            bset(block, 5, rot, 3, 4, t, 1.0);
+            bset(block, 5, rot, 4, 4, t, 1.0);
+            bset(block, 5, rot, 4, 3, t, 1.0);
+        }
+        _ => { // 6x
+            bset(block, n, rot, 0, m, t, 0.25);
+            bset(block, n, rot, 2, m-1, t, 0.25);
+            bset(block, n, rot, 4, m-2, t, 0.25);
+            bset(block, n, rot, 1, m, t, 0.75);
+            bset(block, n, rot, 3, m-1, t, 0.75);
+            bset(block, n, rot, m, m-2, t, 0.75);
+            bset(block, n, rot, 2, m, t, 1.0);
+            bset(block, n, rot, 3, m, t, 1.0);
+            bset(block, n, rot, 4, m, t, 1.0);
+            bset(block, n, rot, m, m, t, 1.0);
+            bset(block, n, rot, m-1, m-1, t, 1.0);
+            bset(block, n, rot, m, m-1, t, 1.0);
+        }
+    }
+}
+
+fn blend_steep_and_shallow(block: &mut [u32], n: usize, rot: u8, t: u32) {
+    let m = n - 1;
+    match n {
+        2 => {
+            bset(block, 2, rot, 1, 0, t, 0.25);
+            bset(block, 2, rot, 0, 1, t, 0.25);
+            bset(block, 2, rot, 1, 1, t, 5.0/6.0);
+        }
+        3 => {
+            bset(block, 3, rot, 2, 0, t, 0.25);
+            bset(block, 3, rot, 0, 2, t, 0.25);
+            bset(block, 3, rot, 2, 1, t, 0.75);
+            bset(block, 3, rot, 1, 2, t, 0.75);
+            bset(block, 3, rot, 2, 2, t, 1.0);
+        }
+        4 => {
+            bset(block, 4, rot, 3, 1, t, 0.75);
+            bset(block, 4, rot, 1, 3, t, 0.75);
+            bset(block, 4, rot, 3, 0, t, 0.25);
+            bset(block, 4, rot, 0, 3, t, 0.25);
+            bset(block, 4, rot, 2, 2, t, 1.0/3.0);
+            bset(block, 4, rot, 3, 2, t, 1.0);
+            bset(block, 4, rot, 2, 3, t, 1.0);
+            bset(block, 4, rot, 3, 3, t, 1.0);
+        }
+        5 => {
+            bset(block, 5, rot, 0, 4, t, 0.25);
+            bset(block, 5, rot, 2, 3, t, 0.25);
+            bset(block, 5, rot, 1, 4, t, 0.75);
+            bset(block, 5, rot, 4, 0, t, 0.25);
+            bset(block, 5, rot, 3, 2, t, 0.25);
+            bset(block, 5, rot, 4, 1, t, 0.75);
+            bset(block, 5, rot, 3, 3, t, 2.0/3.0);
+            bset(block, 5, rot, 2, 4, t, 1.0);
+            bset(block, 5, rot, 3, 4, t, 1.0);
+            bset(block, 5, rot, 4, 4, t, 1.0);
+            bset(block, 5, rot, 4, 2, t, 1.0);
+            bset(block, 5, rot, 4, 3, t, 1.0);
+        }
+        _ => { // 6x
+            bset(block, n, rot, 0, m, t, 0.25);
+            bset(block, n, rot, 2, m-1, t, 0.25);
+            bset(block, n, rot, 1, m, t, 0.75);
+            bset(block, n, rot, 3, m-1, t, 0.75);
+            bset(block, n, rot, m, 0, t, 0.25);
+            bset(block, n, rot, m-1, 2, t, 0.25);
+            bset(block, n, rot, m, 1, t, 0.75);
+            bset(block, n, rot, m-1, 3, t, 0.75);
+            bset(block, n, rot, 2, m, t, 1.0);
+            bset(block, n, rot, 3, m, t, 1.0);
+            bset(block, n, rot, 4, m, t, 1.0);
+            bset(block, n, rot, m, m, t, 1.0);
+            bset(block, n, rot, m-1, m-1, t, 1.0);
+            bset(block, n, rot, m, m-1, t, 1.0);
+            bset(block, n, rot, m, 2, t, 1.0);
+            bset(block, n, rot, m, 3, t, 1.0);
+        }
+    }
+}
+
+fn blend_diagonal(block: &mut [u32], n: usize, rot: u8, t: u32) {
+    let m = n - 1;
+    match n {
+        2 => {
+            bset(block, 2, rot, 1, 1, t, 0.5);
+        }
+        3 => {
+            bset(block, 3, rot, 1, 2, t, 1.0/8.0);
+            bset(block, 3, rot, 2, 1, t, 1.0/8.0);
+            bset(block, 3, rot, 2, 2, t, 7.0/8.0);
+        }
+        4 => {
+            bset(block, 4, rot, m, m/2, t, 0.5);
+            bset(block, 4, rot, m-1, m/2+1, t, 0.5);
+            bset(block, 4, rot, m, m, t, 1.0);
+        }
+        5 => {
+            bset(block, 5, rot, m, m/2, t, 1.0/8.0);
+            bset(block, 5, rot, m-1, m/2+1, t, 1.0/8.0);
+            bset(block, 5, rot, m-2, m/2+2, t, 1.0/8.0);
+            bset(block, 5, rot, 4, 3, t, 7.0/8.0);
+            bset(block, 5, rot, 3, 4, t, 7.0/8.0);
+            bset(block, 5, rot, 4, 4, t, 1.0);
+        }
+        _ => { // 6x
+            bset(block, n, rot, m, m/2, t, 0.5);
+            bset(block, n, rot, m-1, m/2+1, t, 0.5);
+            bset(block, n, rot, m-2, m/2+2, t, 0.5);
+            bset(block, n, rot, m-1, m, t, 1.0);
+            bset(block, n, rot, m, m, t, 1.0);
+            bset(block, n, rot, m, m-1, t, 1.0);
+        }
     }
 }
 
@@ -169,36 +454,15 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, mode: XbrzScale) -> Vec<u3
     let dst_h = src_h * n;
     let mut dst = vec![0u32; dst_w * dst_h];
 
+    // Phase 1: preprocess all corners
+    let mut blend_info = vec![0u8; src_w * src_h];
+    pre_process_corners(src, src_w, src_h, &mut blend_info);
+
+    // Phase 2: scale each pixel
+    let mut block = vec![0u32; n * n];
     for y in 0..src_h {
         for x in 0..src_w {
-            let ix = x as isize;
-            let iy = y as isize;
-            let center = get(src, src_w, src_h, ix, iy);
-
-            let nn = n * n;
-            let mut block = vec![center; nn];
-
-            for rot in 0..4u8 {
-                let p = sample_kernel(src, src_w, src_h, ix, iy, rot);
-                let (blend_type, steep, shallow) = classify_corner(&p);
-
-                if blend_type != BlendType::None {
-                    let right = p[6];
-                    let down = p[9];
-
-                    let blend_color = if colors_equal(right, down) {
-                        right
-                    } else if color_dist(center, right) < color_dist(center, down) {
-                        right
-                    } else {
-                        down
-                    };
-
-                    let strong = blend_type == BlendType::Dominant;
-                    apply_rotated_blend(&mut block, n, rot, strong, steep, shallow, blend_color);
-                }
-            }
-
+            scale_pixel(src, src_w, src_h, &blend_info, x, y, n, &mut block);
             let dx = x * n;
             let dy = y * n;
             for r in 0..n {
@@ -209,96 +473,4 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, mode: XbrzScale) -> Vec<u3
         }
     }
     dst
-}
-
-/// Apply blending for a specific corner rotation directly into the block.
-fn apply_rotated_blend(
-    block: &mut [u32],
-    n: usize,
-    rot: u8,
-    strong: bool,
-    steep: bool,
-    shallow: bool,
-    blend_color: u32,
-) {
-    let (a1, a2, a3, a4) = if strong {
-        (0.5_f32, 0.375, 0.25, 0.125)
-    } else {
-        (0.375, 0.25, 0.125, 0.0625)
-    };
-
-    let last = n - 1;
-
-    // Corner pixel
-    let idx = rotate_idx(last, last, n, rot);
-    block[idx] = blend_argb(block[idx], blend_color, a1);
-
-    if n >= 3 {
-        let idx1 = rotate_idx(last, last - 1, n, rot);
-        let idx2 = rotate_idx(last - 1, last, n, rot);
-        block[idx1] = blend_argb(block[idx1], blend_color, a2);
-        block[idx2] = blend_argb(block[idx2], blend_color, a2);
-    }
-
-    if n >= 4 {
-        let idx1 = rotate_idx(last, last - 2, n, rot);
-        let idx2 = rotate_idx(last - 2, last, n, rot);
-        let idx3 = rotate_idx(last - 1, last - 1, n, rot);
-        block[idx1] = blend_argb(block[idx1], blend_color, a3);
-        block[idx2] = blend_argb(block[idx2], blend_color, a3);
-        block[idx3] = blend_argb(block[idx3], blend_color, a3);
-
-        if steep {
-            let idx = rotate_idx(last - 1, last - 2, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-        if shallow {
-            let idx = rotate_idx(last - 2, last - 1, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-    }
-
-    if n >= 5 {
-        let idx1 = rotate_idx(last, last - 3, n, rot);
-        let idx2 = rotate_idx(last - 3, last, n, rot);
-        let idx3 = rotate_idx(last - 1, last - 2, n, rot);
-        let idx4 = rotate_idx(last - 2, last - 1, n, rot);
-        block[idx1] = blend_argb(block[idx1], blend_color, a4);
-        block[idx2] = blend_argb(block[idx2], blend_color, a4);
-        block[idx3] = blend_argb(block[idx3], blend_color, a3);
-        block[idx4] = blend_argb(block[idx4], blend_color, a3);
-
-        if steep {
-            let idx = rotate_idx(last - 1, last - 3, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-        if shallow {
-            let idx = rotate_idx(last - 3, last - 1, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-    }
-
-    if n >= 6 {
-        let idx1 = rotate_idx(last, last - 4, n, rot);
-        let idx2 = rotate_idx(last - 4, last, n, rot);
-        block[idx1] = blend_argb(block[idx1], blend_color, a4);
-        block[idx2] = blend_argb(block[idx2], blend_color, a4);
-
-        let idx3 = rotate_idx(last - 1, last - 3, n, rot);
-        let idx4 = rotate_idx(last - 3, last - 1, n, rot);
-        block[idx3] = blend_argb(block[idx3], blend_color, a4);
-        block[idx4] = blend_argb(block[idx4], blend_color, a4);
-
-        let idx5 = rotate_idx(last - 2, last - 2, n, rot);
-        block[idx5] = blend_argb(block[idx5], blend_color, a3);
-
-        if steep {
-            let idx = rotate_idx(last - 3, last - 2, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-        if shallow {
-            let idx = rotate_idx(last - 2, last - 3, n, rot);
-            block[idx] = blend_argb(block[idx], blend_color, a4);
-        }
-    }
 }

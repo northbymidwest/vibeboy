@@ -15,7 +15,6 @@ pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
 pub mod xbr;
-pub mod xbr_hybrid;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod gpu;
@@ -103,7 +102,6 @@ pub enum ScaleFilter {
     SuperEagle,
     Xbr(XbrScale),
     Xbrz(XbrzScale),
-    XbrHybrid,
     SuperXbr,
     Nedi,
     Dcci,
@@ -138,7 +136,7 @@ impl ScaleFilter {
             ScaleFilter::Scale4x => 4,
             ScaleFilter::Xbr(x) => x.factor(),
             ScaleFilter::Xbrz(x) => x.factor(),
-            ScaleFilter::XbrHybrid | ScaleFilter::SuperXbr
+            ScaleFilter::SuperXbr
             | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
         }
     }
@@ -228,10 +226,6 @@ pub fn cpu_scale(
             let s = xbrz::scale(src, sw, sh, mode);
             let f = mode.factor() as u32;
             (s, sw as u32 * f, sh as u32 * f)
-        }
-        ScaleFilter::XbrHybrid => {
-            let s = xbr_hybrid::scale(src, sw, sh);
-            (s, sw as u32 * 2, sh as u32 * 2)
         }
         ScaleFilter::SuperXbr => {
             let s = super_xbr::scale(src, sw, sh);

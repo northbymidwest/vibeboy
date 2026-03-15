@@ -433,7 +433,6 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_xbr2x",      "xBR 2x",        ScaleFilter::Xbr(XbrScale::Xbr2x)),
         ("filter_xbr3x",      "xBR 3x",        ScaleFilter::Xbr(XbrScale::Xbr3x)),
         ("filter_xbr4x",      "xBR 4x",        ScaleFilter::Xbr(XbrScale::Xbr4x)),
-        ("filter_xbr_hybrid", "xBR Hybrid",    ScaleFilter::XbrHybrid),
         ("filter_super_xbr",  "Super xBR",     ScaleFilter::SuperXbr),
         ("filter_xbrz2x",     "xBRZ 2x",       ScaleFilter::Xbrz(XbrzScale::Xbrz2x)),
         ("filter_xbrz3x",     "xBRZ 3x",       ScaleFilter::Xbrz(XbrzScale::Xbrz3x)),
@@ -773,7 +772,6 @@ fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>) {
             match filter {
                 scaling::ScaleFilter::Hqx(_) => { hqx_sub.append(&item).unwrap(); }
                 scaling::ScaleFilter::Xbr(_)
-                | scaling::ScaleFilter::XbrHybrid
                 | scaling::ScaleFilter::SuperXbr => { xbr_sub.append(&item).unwrap(); }
                 scaling::ScaleFilter::Xbrz(_) => { xbrz_sub.append(&item).unwrap(); }
                 scaling::ScaleFilter::Nedi

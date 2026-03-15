@@ -1,8 +1,9 @@
 //! xBR (scale By Rules) — 2x, 3x, and 4x pixel-art scaling.
 //!
 //! Based on Hyllian's xBR algorithm. Uses weighted color distance to detect
-//! edges and applies directional interpolation rules to produce smooth,
-//! anti-aliased output while preserving pixel-art detail.
+//! edges and applies two-level directional interpolation: Level 1 detects
+//! diagonal edges via weighted neighborhood comparison, Level 2 refines
+//! steep/shallow line angles for smoother curves.
 
 use super::get;
 use super::color_dist;
@@ -32,19 +33,17 @@ fn eq(a: u32, b: u32) -> bool {
     a == b
 }
 
-// ── Edge detection helpers ─────────────────────────────────────────────────
+// ── Neighborhood sampling ─────────────────────────────────────────────────
 
-/// Sample the 5x5 neighborhood around (x, y):
+/// 5x5 neighborhood around a center pixel.
 ///
 /// ```text
-///  a0 a1 a2 a3 a4
-///  b0 b1 b2 b3 b4
-///  c0 c1  e c3 c4
-///  d0 d1 d2 d3 d4
-///  e0 e1 e2 e3 e4
+///   0  1  2  3  4
+///   5  6  7  8  9
+///  10 11 [12] 13 14
+///  15 16  17 18 19
+///  20 21  22 23 24
 /// ```
-///
-/// Returns [a0..e4] as a flat 25-element array, with e = index 12.
 struct Neighborhood {
     p: [u32; 25],
 }
@@ -61,62 +60,145 @@ impl Neighborhood {
     }
 }
 
-/// Hyllian xBR edge weight for a given corner direction.
-///
-/// 5x5 neighborhood layout:
-/// ```text
-///   0  1  2  3  4
-///   5  6  7  8  9
-///  10 11 [12] 13 14
-///  15 16  17 18 19
-///  20 21  22 23 24
-/// ```
-///
-/// Returns (wd1, wd2) where wd1 < wd2 indicates a diagonal edge
-/// toward the specified corner. E=12 is always the center pixel.
-///
-/// Formula (Hyllian):
-///   wd1 = d(E,C) + d(E,G) + d(I,F4) + d(I,H4) + 4*d(H,F)
-///   wd2 = d(H,D) + d(H,I4) + d(F,B) + d(F,I5) + 4*d(E,I)
-///
-/// Where for each corner:
-///   F = neighbor along axis 1, H = neighbor along axis 2
-///   I = diagonal corner, C = cross-diagonal from E
-///   G = opposite cross-diagonal from E
-///   F4, H4 = one beyond I in each axis direction
-///   I4, I5 = one beyond I in each axis direction (for wd2)
-#[inline(always)]
-fn edge_weight(p: &[u32; 25], corner: Corner) -> (f32, f32) {
-    let (c, f, g, h, i, f4, h4, d, i4, b, i5) = match corner {
-        // BR: F=right(13), H=below(17), I=BR(18)
-        Corner::Br => (8, 13, 16, 17, 18, 14, 22, 11, 23, 7, 19),
-        // BL: F=left(11), H=below(17), I=BL(16)
-        Corner::Bl => (6, 11, 18, 17, 16, 10, 22, 13, 21, 7, 15),
-        // TR: F=right(13), H=above(7), I=TR(8)
-        Corner::Tr => (18, 13, 6, 7, 8, 14, 2, 11, 3, 17, 9),
-        // TL: F=left(11), H=above(7), I=TL(6)
-        Corner::Tl => (16, 11, 8, 7, 6, 10, 2, 13, 1, 17, 5),
-    };
+// ── Corner parameters ─────────────────────────────────────────────────────
 
-    let wd1 = color_dist(p[12], p[c])
-        + color_dist(p[12], p[g])
-        + color_dist(p[i], p[f4])
-        + color_dist(p[i], p[h4])
-        + 4.0 * color_dist(p[h], p[f]);
-
-    let wd2 = color_dist(p[h], p[d])
-        + color_dist(p[h], p[i4])
-        + color_dist(p[f], p[b])
-        + color_dist(p[f], p[i5])
-        + 4.0 * color_dist(p[12], p[i]);
-
-    (wd1, wd2)
+/// Indices into the 5x5 neighborhood for one corner's edge analysis.
+///
+/// Using Hyllian's naming: E (center=12), F/H (axis neighbors toward corner),
+/// I (diagonal at corner), C/G (cross-diagonals), B/D (opposites of H/F),
+/// F4/H5 (beyond F/H), I4/I5 (beyond I along F/H directions).
+struct CornerParams {
+    f: usize,
+    h: usize,
+    i: usize,
+    c: usize,
+    g: usize,
+    b: usize,
+    d: usize,
+    f4: usize,
+    h5: usize,
+    i4: usize,
+    i5: usize,
 }
 
-#[derive(Clone, Copy)]
-enum Corner { Br, Bl, Tr, Tl }
+// BR: F=right(13), H=below(17), I=bottom-right(18)
+const CORNER_BR: CornerParams = CornerParams {
+    f: 13, h: 17, i: 18, c: 8, g: 16, b: 7, d: 11,
+    f4: 14, h5: 22, i4: 19, i5: 23,
+};
+// BL: F=left(11), H=below(17), I=bottom-left(16)
+const CORNER_BL: CornerParams = CornerParams {
+    f: 11, h: 17, i: 16, c: 6, g: 18, b: 7, d: 13,
+    f4: 10, h5: 22, i4: 15, i5: 21,
+};
+// TR: F=right(13), H=above(7), I=top-right(8)
+const CORNER_TR: CornerParams = CornerParams {
+    f: 13, h: 7, i: 8, c: 18, g: 6, b: 17, d: 11,
+    f4: 14, h5: 2, i4: 9, i5: 3,
+};
+// TL: F=left(11), H=above(7), I=top-left(6)
+const CORNER_TL: CornerParams = CornerParams {
+    f: 11, h: 7, i: 6, c: 16, g: 8, b: 17, d: 13,
+    f4: 10, h5: 2, i4: 5, i5: 1,
+};
 
-// ── xBR2x ──────────────────────────────────────────────────────────────────
+// ── Edge detection ────────────────────────────────────────────────────────
+
+/// Compute xBR edge weights for a corner.
+///
+///   e = d(E,C) + d(E,G) + d(I,H5) + d(I,F4) + 4*d(H,F)
+///   i = d(H,D) + d(H,I5) + d(F,I4) + d(F,B) + 4*d(E,I)
+///
+/// e < i indicates a diagonal edge toward the corner.
+#[inline(always)]
+fn edge_weights(p: &[u32; 25], cp: &CornerParams) -> (f32, f32) {
+    let ew = color_dist(p[12], p[cp.c])
+        + color_dist(p[12], p[cp.g])
+        + color_dist(p[cp.i], p[cp.h5])
+        + color_dist(p[cp.i], p[cp.f4])
+        + 4.0 * color_dist(p[cp.h], p[cp.f]);
+
+    let iw = color_dist(p[cp.h], p[cp.d])
+        + color_dist(p[cp.h], p[cp.i5])
+        + color_dist(p[cp.f], p[cp.i4])
+        + color_dist(p[cp.f], p[cp.b])
+        + 4.0 * color_dist(p[12], p[cp.i]);
+
+    (ew, iw)
+}
+
+/// Select interpolation color: the axis neighbor closer to E.
+#[inline(always)]
+fn pick_color(p: &[u32; 25], cp: &CornerParams) -> u32 {
+    if color_dist(p[12], p[cp.f]) <= color_dist(p[12], p[cp.h]) {
+        p[cp.f]
+    } else {
+        p[cp.h]
+    }
+}
+
+/// Compute steep/shallow line detection for Level 2 interpolation.
+///
+///   ke = d(F,G),  ki = d(H,C)
+///   left  = (2*ke <= ki) && E!=G && D!=G   (steep — edge along F direction)
+///   up    = (ke >= 2*ki) && E!=C && B!=C   (shallow — edge along H direction)
+#[inline(always)]
+fn detect_direction(p: &[u32; 25], cp: &CornerParams) -> (bool, bool) {
+    let ke = color_dist(p[cp.f], p[cp.g]);
+    let ki = color_dist(p[cp.h], p[cp.c]);
+    let left = ke * 2.0 <= ki && !eq(p[12], p[cp.g]) && !eq(p[cp.d], p[cp.g]);
+    let up = ke >= ki * 2.0 && !eq(p[12], p[cp.c]) && !eq(p[cp.b], p[cp.c]);
+    (left, up)
+}
+
+/// Sub-condition for Level 2 activation (used by 2x and 4x filters).
+///
+/// Requires that at least one of these patterns holds:
+/// - F differs from both B, and H differs from D (no flat continuation)
+/// - E matches I but F/H don't match far neighbors (diagonal continuity)
+/// - E matches G or C (cross-diagonal continuity)
+#[inline(always)]
+fn sub_condition_24(p: &[u32; 25], cp: &CornerParams) -> bool {
+    (!eq(p[cp.f], p[cp.b]) && !eq(p[cp.h], p[cp.d]))
+        || (eq(p[12], p[cp.i]) && !eq(p[cp.f], p[cp.i4]) && !eq(p[cp.h], p[cp.i5]))
+        || eq(p[12], p[cp.g])
+        || eq(p[12], p[cp.c])
+}
+
+/// Sub-condition for Level 2 activation (3x variant — more permissive).
+#[inline(always)]
+fn sub_condition_3(p: &[u32; 25], cp: &CornerParams) -> bool {
+    (!eq(p[cp.f], p[cp.b]) && !eq(p[cp.f], p[cp.c]))
+        || (!eq(p[cp.h], p[cp.d]) && !eq(p[cp.h], p[cp.g]))
+        || (eq(p[12], p[cp.i])
+            && ((!eq(p[cp.f], p[cp.f4]) && !eq(p[cp.f], p[cp.i4]))
+                || (!eq(p[cp.h], p[cp.h5]) && !eq(p[cp.h], p[cp.i5]))))
+        || eq(p[12], p[cp.g])
+        || eq(p[12], p[cp.c])
+}
+
+// ── Blend weight constants ────────────────────────────────────────────────
+
+const B32: f32 = 32.0 / 256.0;
+const B64: f32 = 64.0 / 256.0;
+const B128: f32 = 128.0 / 256.0;
+const B192: f32 = 192.0 / 256.0;
+const B224: f32 = 224.0 / 256.0;
+
+// ── xBR2x ─────────────────────────────────────────────────────────────────
+
+/// 2x output pixel indices per corner: (corner, left_side, up_side).
+///
+/// ```text
+///  [0] [1]
+///  [2] [3]
+/// ```
+const OUT2X: [(usize, usize, usize); 4] = [
+    (3, 2, 1), // BR
+    (2, 3, 0), // BL
+    (1, 0, 3), // TR
+    (0, 1, 2), // TL
+];
 
 pub fn scale2x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     let dst_w = src_w * 2;
@@ -125,16 +207,14 @@ pub fn scale2x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 
     for y in 0..src_h {
         for x in 0..src_w {
-            let ix = x as isize;
-            let iy = y as isize;
-            let n = Neighborhood::sample(src, src_w, src_h, ix, iy);
-            let e = n.p[12]; // center
-
-            // Start with all center
+            let n = Neighborhood::sample(src, src_w, src_h, x as isize, y as isize);
+            let e = n.p[12];
             let mut out = [e; 4];
 
-            // Process all 4 corners
-            xbr2x_corner(&n, &mut out);
+            let corners: [&CornerParams; 4] = [&CORNER_BR, &CORNER_BL, &CORNER_TR, &CORNER_TL];
+            for (cp, &(n3, n2, n1)) in corners.iter().zip(OUT2X.iter()) {
+                filt2x(&n.p, cp, &mut out, n3, n2, n1);
+            }
 
             let dx = x * 2;
             let dy = y * 2;
@@ -147,77 +227,63 @@ pub fn scale2x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     dst
 }
 
-/// Process all 4 corners of a 2x2 output block.
-fn xbr2x_corner(n: &Neighborhood, out: &mut [u32; 4]) {
-    let p = &n.p;
-    let e = p[12];
-
-    // Bottom-right corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Br);
-        if wd1 < wd2 && !eq(p[12], p[18]) {
-            let r = p[13];
-            let d = p[17];
-            if eq(r, d) {
-                out[3] = blend(e, r, 0.5);
-            } else if color_dist(e, r) < color_dist(e, d) {
-                out[3] = blend(e, r, 0.25);
-            } else {
-                out[3] = blend(e, d, 0.25);
-            }
-        }
+/// Process one corner for 2x scaling.
+///
+/// n3 = corner pixel, n2 = side toward H (steep/left), n1 = side toward F (shallow/up).
+#[inline(always)]
+fn filt2x(p: &[u32; 25], cp: &CornerParams, out: &mut [u32; 4], n3: usize, n2: usize, n1: usize) {
+    // Quick reject: center matches both axis neighbors — no edge possible
+    if eq(p[12], p[cp.h]) || eq(p[12], p[cp.f]) {
+        return;
     }
 
-    // Bottom-left corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Bl);
-        if wd1 < wd2 && !eq(p[12], p[16]) {
-            let l = p[11];
-            let d = p[17];
-            if eq(l, d) {
-                out[2] = blend(e, l, 0.5);
-            } else if color_dist(e, l) < color_dist(e, d) {
-                out[2] = blend(e, l, 0.25);
-            } else {
-                out[2] = blend(e, d, 0.25);
-            }
-        }
+    let (ew, iw) = edge_weights(p, cp);
+    if ew > iw {
+        return;
     }
 
-    // Top-right corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tr);
-        if wd1 < wd2 && !eq(p[12], p[8]) {
-            let r = p[13];
-            let u = p[7];
-            if eq(r, u) {
-                out[1] = blend(e, r, 0.5);
-            } else if color_dist(e, r) < color_dist(e, u) {
-                out[1] = blend(e, r, 0.25);
-            } else {
-                out[1] = blend(e, u, 0.25);
-            }
-        }
-    }
+    let px = pick_color(p, cp);
 
-    // Top-left corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tl);
-        if wd1 < wd2 && !eq(p[12], p[6]) {
-            let l = p[11];
-            let u = p[7];
-            if eq(l, u) {
-                out[0] = blend(e, l, 0.5);
-            } else if color_dist(e, l) < color_dist(e, u) {
-                out[0] = blend(e, l, 0.25);
-            } else {
-                out[0] = blend(e, u, 0.25);
-            }
+    if ew < iw && sub_condition_24(p, cp) {
+        // Level 2: directional blending
+        let (left, up) = detect_direction(p, cp);
+        if left && up {
+            out[n3] = blend(out[n3], px, B224);
+            let side = blend(out[n2], px, B64);
+            out[n2] = side;
+            out[n1] = side;
+        } else if left {
+            out[n3] = blend(out[n3], px, B192);
+            out[n2] = blend(out[n2], px, B64);
+        } else if up {
+            out[n3] = blend(out[n3], px, B192);
+            out[n1] = blend(out[n1], px, B64);
+        } else {
+            // Pure diagonal
+            out[n3] = blend(out[n3], px, B128);
         }
+    } else {
+        // Fallback: basic diagonal blend
+        out[n3] = blend(out[n3], px, B128);
     }
 }
 
-// ── xBR3x ──────────────────────────────────────────────────────────────────
+// ── xBR3x ─────────────────────────────────────────────────────────────────
+
+/// 3x output pixel indices per corner:
+/// (corner, adj_along_h, adj_along_f, ext_along_h, ext_along_f).
+///
+/// ```text
+///  [0] [1] [2]
+///  [3] [4] [5]
+///  [6] [7] [8]
+/// ```
+const OUT3X: [(usize, usize, usize, usize, usize); 4] = [
+    (8, 7, 5, 6, 2), // BR
+    (6, 7, 3, 8, 0), // BL
+    (2, 1, 5, 0, 8), // TR
+    (0, 1, 3, 2, 6), // TL
+];
 
 pub fn scale3x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     let dst_w = src_w * 3;
@@ -226,13 +292,14 @@ pub fn scale3x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 
     for y in 0..src_h {
         for x in 0..src_w {
-            let ix = x as isize;
-            let iy = y as isize;
-            let n = Neighborhood::sample(src, src_w, src_h, ix, iy);
+            let n = Neighborhood::sample(src, src_w, src_h, x as isize, y as isize);
             let e = n.p[12];
-
             let mut out = [e; 9];
-            xbr3x_corners(&n, &mut out);
+
+            let corners: [&CornerParams; 4] = [&CORNER_BR, &CORNER_BL, &CORNER_TR, &CORNER_TL];
+            for (cp, &(n8, n7, n5, n6, n2)) in corners.iter().zip(OUT3X.iter()) {
+                filt3x(&n.p, cp, &mut out, n8, n7, n5, n6, n2);
+            }
 
             let dx = x * 3;
             let dy = y * 3;
@@ -246,93 +313,94 @@ pub fn scale3x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     dst
 }
 
-/// Process all 4 corners of a 3x3 output block.
-fn xbr3x_corners(n: &Neighborhood, out: &mut [u32; 9]) {
-    let p = &n.p;
-    let e = p[12];
-
-    // Bottom-right corner: affects out[5], out[7], out[8]
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Br);
-        if wd1 < wd2 && !eq(p[12], p[18]) {
-            let r = p[13];
-            let d = p[17];
-            if eq(r, d) {
-                out[5] = blend(e, r, 0.25);
-                out[7] = blend(e, d, 0.25);
-                out[8] = blend(e, r, 0.5);
-            } else if color_dist(e, r) < color_dist(e, d) {
-                out[8] = blend(e, r, 0.375);
-                out[5] = blend(e, r, 0.125);
-            } else {
-                out[8] = blend(e, d, 0.375);
-                out[7] = blend(e, d, 0.125);
-            }
-        }
+/// Process one corner for 3x scaling.
+///
+/// n8 = corner, n7 = adjacent along H edge, n5 = adjacent along F edge,
+/// n6 = extended along H, n2 = extended along F.
+#[inline(always)]
+fn filt3x(
+    p: &[u32; 25],
+    cp: &CornerParams,
+    out: &mut [u32; 9],
+    n8: usize,
+    n7: usize,
+    n5: usize,
+    n6: usize,
+    n2: usize,
+) {
+    if eq(p[12], p[cp.h]) || eq(p[12], p[cp.f]) {
+        return;
     }
 
-    // Bottom-left corner: affects out[3], out[7], out[6]
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Bl);
-        if wd1 < wd2 && !eq(p[12], p[16]) {
-            let l = p[11];
-            let d = p[17];
-            if eq(l, d) {
-                out[3] = blend(e, l, 0.25);
-                out[7] = blend(out[7], d, 0.25);
-                out[6] = blend(e, l, 0.5);
-            } else if color_dist(e, l) < color_dist(e, d) {
-                out[6] = blend(e, l, 0.375);
-                out[3] = blend(e, l, 0.125);
-            } else {
-                out[6] = blend(e, d, 0.375);
-                out[7] = blend(out[7], d, 0.125);
-            }
-        }
+    let (ew, iw) = edge_weights(p, cp);
+    if ew > iw {
+        return;
     }
 
-    // Top-right corner: affects out[1], out[5], out[2]
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tr);
-        if wd1 < wd2 && !eq(p[12], p[8]) {
-            let r = p[13];
-            let u = p[7];
-            if eq(r, u) {
-                out[5] = blend(out[5], r, 0.25);
-                out[1] = blend(e, u, 0.25);
-                out[2] = blend(e, r, 0.5);
-            } else if color_dist(e, r) < color_dist(e, u) {
-                out[2] = blend(e, r, 0.375);
-                out[5] = blend(out[5], r, 0.125);
-            } else {
-                out[2] = blend(e, u, 0.375);
-                out[1] = blend(e, u, 0.125);
-            }
-        }
-    }
+    let px = pick_color(p, cp);
 
-    // Top-left corner: affects out[1], out[3], out[0]
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tl);
-        if wd1 < wd2 && !eq(p[12], p[6]) {
-            let l = p[11];
-            let u = p[7];
-            if eq(l, u) {
-                out[3] = blend(out[3], l, 0.25);
-                out[1] = blend(out[1], u, 0.25);
-                out[0] = blend(e, l, 0.5);
-            } else if color_dist(e, l) < color_dist(e, u) {
-                out[0] = blend(e, l, 0.375);
-                out[3] = blend(out[3], l, 0.125);
-            } else {
-                out[0] = blend(e, u, 0.375);
-                out[1] = blend(out[1], u, 0.125);
-            }
+    if ew < iw && sub_condition_3(p, cp) {
+        let (left, up) = detect_direction(p, cp);
+        if left && up {
+            let blended_n7 = blend(out[n7], px, B192);
+            let blended_n6 = blend(out[n6], px, B64);
+            out[n7] = blended_n7;
+            out[n6] = blended_n6;
+            out[n5] = blended_n7;
+            out[n2] = blended_n6;
+            out[n8] = px;
+        } else if left {
+            out[n7] = blend(out[n7], px, B192);
+            out[n5] = blend(out[n5], px, B64);
+            out[n6] = blend(out[n6], px, B64);
+            out[n8] = px;
+        } else if up {
+            out[n5] = blend(out[n5], px, B192);
+            out[n7] = blend(out[n7], px, B64);
+            out[n2] = blend(out[n2], px, B64);
+            out[n8] = px;
+        } else {
+            out[n8] = blend(out[n8], px, B224);
+            out[n5] = blend(out[n5], px, B32);
+            out[n7] = blend(out[n7], px, B32);
         }
+    } else {
+        out[n8] = blend(out[n8], px, B128);
     }
 }
 
-// ── xBR4x ──────────────────────────────────────────────────────────────────
+// ── xBR4x ─────────────────────────────────────────────────────────────────
+
+/// 4x output pixel indices per corner:
+/// (n15, n14, n13, n12, n11, n10, n7, n3) — using reference FILT4 naming.
+///
+/// ```text
+///  [ 0] [ 1] [ 2] [ 3]
+///  [ 4] [ 5] [ 6] [ 7]
+///  [ 8] [ 9] [10] [11]
+///  [12] [13] [14] [15]
+/// ```
+struct Out4x {
+    n15: usize,
+    n14: usize,
+    n13: usize,
+    n12: usize,
+    n11: usize,
+    n10: usize,
+    n7: usize,
+    n3: usize,
+}
+
+const OUT4X: [Out4x; 4] = [
+    // BR: default orientation
+    Out4x { n15: 15, n14: 14, n13: 13, n12: 12, n11: 11, n10: 10, n7: 7, n3: 3 },
+    // BL: horizontal mirror
+    Out4x { n15: 12, n14: 13, n13: 14, n12: 15, n11: 8, n10: 9, n7: 4, n3: 0 },
+    // TR: vertical mirror
+    Out4x { n15: 3, n14: 2, n13: 1, n12: 0, n11: 7, n10: 6, n7: 11, n3: 15 },
+    // TL: both mirrors
+    Out4x { n15: 0, n14: 1, n13: 2, n12: 3, n11: 4, n10: 5, n7: 8, n3: 12 },
+];
 
 pub fn scale4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     let dst_w = src_w * 4;
@@ -341,13 +409,14 @@ pub fn scale4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 
     for y in 0..src_h {
         for x in 0..src_w {
-            let ix = x as isize;
-            let iy = y as isize;
-            let n = Neighborhood::sample(src, src_w, src_h, ix, iy);
+            let n = Neighborhood::sample(src, src_w, src_h, x as isize, y as isize);
             let e = n.p[12];
-
             let mut out = [e; 16];
-            xbr4x_corners(&n, &mut out);
+
+            let corners: [&CornerParams; 4] = [&CORNER_BR, &CORNER_BL, &CORNER_TR, &CORNER_TL];
+            for (cp, o) in corners.iter().zip(OUT4X.iter()) {
+                filt4x(&n.p, cp, &mut out, o);
+            }
 
             let dx = x * 4;
             let dy = y * 4;
@@ -361,107 +430,58 @@ pub fn scale4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     dst
 }
 
-/// Process all 4 corners of a 4x4 output block.
-fn xbr4x_corners(n: &Neighborhood, out: &mut [u32; 16]) {
-    let p = &n.p;
-    let e = p[12];
-
-    // Bottom-right corner: affects out[7], out[11], out[13], out[14], out[15]
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Br);
-        if wd1 < wd2 && !eq(p[12], p[18]) {
-            let r = p[13];
-            let d = p[17];
-            if eq(r, d) {
-                out[15] = blend(e, r, 0.5);
-                out[14] = blend(e, d, 0.375);
-                out[11] = blend(e, r, 0.375);
-                out[13] = blend(e, d, 0.125);
-                out[7] = blend(e, r, 0.125);
-            } else if color_dist(e, r) < color_dist(e, d) {
-                out[15] = blend(e, r, 0.5);
-                out[11] = blend(e, r, 0.25);
-                out[7] = blend(e, r, 0.0625);
-            } else {
-                out[15] = blend(e, d, 0.5);
-                out[14] = blend(e, d, 0.25);
-                out[13] = blend(e, d, 0.0625);
-            }
-        }
+/// Process one corner for 4x scaling.
+#[inline(always)]
+fn filt4x(p: &[u32; 25], cp: &CornerParams, out: &mut [u32; 16], o: &Out4x) {
+    if eq(p[12], p[cp.h]) || eq(p[12], p[cp.f]) {
+        return;
     }
 
-    // Bottom-left corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Bl);
-        if wd1 < wd2 && !eq(p[12], p[16]) {
-            let l = p[11];
-            let d = p[17];
-            if eq(l, d) {
-                out[12] = blend(e, l, 0.5);
-                out[13] = blend(out[13], d, 0.375);
-                out[8] = blend(e, l, 0.375);
-                out[14] = blend(out[14], d, 0.125);
-                out[4] = blend(e, l, 0.125);
-            } else if color_dist(e, l) < color_dist(e, d) {
-                out[12] = blend(e, l, 0.5);
-                out[8] = blend(e, l, 0.25);
-                out[4] = blend(e, l, 0.0625);
-            } else {
-                out[12] = blend(e, d, 0.5);
-                out[13] = blend(out[13], d, 0.25);
-                out[14] = blend(out[14], d, 0.0625);
-            }
-        }
+    let (ew, iw) = edge_weights(p, cp);
+    if ew > iw {
+        return;
     }
 
-    // Top-right corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tr);
-        if wd1 < wd2 && !eq(p[12], p[8]) {
-            let r = p[13];
-            let u = p[7];
-            if eq(r, u) {
-                out[3] = blend(e, r, 0.5);
-                out[2] = blend(e, u, 0.375);
-                out[7] = blend(out[7], r, 0.375);
-                out[1] = blend(e, u, 0.125);
-                out[11] = blend(out[11], r, 0.125);
-            } else if color_dist(e, r) < color_dist(e, u) {
-                out[3] = blend(e, r, 0.5);
-                out[7] = blend(out[7], r, 0.25);
-                out[11] = blend(out[11], r, 0.0625);
-            } else {
-                out[3] = blend(e, u, 0.5);
-                out[2] = blend(e, u, 0.25);
-                out[1] = blend(e, u, 0.0625);
-            }
-        }
-    }
+    let px = pick_color(p, cp);
 
-    // Top-left corner
-    {
-        let (wd1, wd2) = edge_weight(p, Corner::Tl);
-        if wd1 < wd2 && !eq(p[12], p[6]) {
-            let l = p[11];
-            let u = p[7];
-            if eq(l, u) {
-                out[0] = blend(e, l, 0.5);
-                out[1] = blend(out[1], u, 0.375);
-                out[4] = blend(out[4], l, 0.375);
-                out[2] = blend(out[2], u, 0.125);
-                out[8] = blend(out[8], l, 0.125);
-            } else if color_dist(e, l) < color_dist(e, u) {
-                out[0] = blend(e, l, 0.5);
-                out[4] = blend(out[4], l, 0.25);
-                out[8] = blend(out[8], l, 0.0625);
-            } else {
-                out[0] = blend(e, u, 0.5);
-                out[1] = blend(out[1], u, 0.25);
-                out[2] = blend(out[2], u, 0.0625);
-            }
+    if ew < iw && sub_condition_24(p, cp) {
+        let (left, up) = detect_direction(p, cp);
+        if left && up {
+            let blended_n13 = blend(out[o.n13], px, B192);
+            let blended_n12 = blend(out[o.n12], px, B64);
+            out[o.n13] = blended_n13;
+            out[o.n12] = blended_n12;
+            out[o.n15] = px;
+            out[o.n14] = px;
+            out[o.n11] = px;
+            out[o.n10] = blended_n12;
+            out[o.n3] = blended_n12;
+            out[o.n7] = blended_n13;
+        } else if left {
+            out[o.n11] = blend(out[o.n11], px, B192);
+            out[o.n13] = blend(out[o.n13], px, B192);
+            out[o.n10] = blend(out[o.n10], px, B64);
+            out[o.n12] = blend(out[o.n12], px, B64);
+            out[o.n14] = px;
+            out[o.n15] = px;
+        } else if up {
+            out[o.n14] = blend(out[o.n14], px, B192);
+            out[o.n7] = blend(out[o.n7], px, B192);
+            out[o.n10] = blend(out[o.n10], px, B64);
+            out[o.n3] = blend(out[o.n3], px, B64);
+            out[o.n11] = px;
+            out[o.n15] = px;
+        } else {
+            out[o.n11] = blend(out[o.n11], px, B128);
+            out[o.n14] = blend(out[o.n14], px, B128);
+            out[o.n15] = px;
         }
+    } else {
+        out[o.n15] = blend(out[o.n15], px, B128);
     }
 }
+
+// ── Public entry point ────────────────────────────────────────────────────
 
 /// Apply the appropriate xBR scale to a source buffer.
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, mode: XbrScale) -> Vec<u32> {

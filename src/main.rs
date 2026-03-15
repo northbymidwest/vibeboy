@@ -106,7 +106,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "2xsai", "super-2xsai", "super-eagle",
         "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
-        "xbr-hybrid", "super-xbr", "nedi", "dcci", "edi",
+        "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive",
     ];
@@ -114,7 +114,7 @@ fn parse_filter(s: &str) -> Result<String, String> {
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, xbr-hybrid, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
     }
 }
 
@@ -279,7 +279,6 @@ fn main() {
         "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
         "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
         "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
-        "xbr-hybrid" => scaling::ScaleFilter::XbrHybrid,
         "super-xbr" => scaling::ScaleFilter::SuperXbr,
         "nedi" => scaling::ScaleFilter::Nedi,
         "dcci" => scaling::ScaleFilter::Dcci,

@@ -26,6 +26,8 @@ mod snapshot;
 mod snes;
 #[path = "../timer.rs"]
 mod timer;
+#[path = "../scaling/mod.rs"]
+mod scaling;
 #[path = "../vectorize/mod.rs"]
 mod vectorize;
 
@@ -94,6 +96,9 @@ enum Command {
         /// Path to boot ROM file (implies --boot)
         #[arg(long)]
         bootrom: Option<PathBuf>,
+        /// Scaling filter to apply (e.g. xbrz2x, xbr2x, super-xbr, hq2x, epx)
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// Vectorize an input PNG image to SVG using Kopf-Lischinski
     Vectorize {
@@ -220,6 +225,7 @@ fn main() {
             model,
             boot,
             bootrom,
+            filter,
         } => {
             commands::cmd_screenshot(
                 &path,
@@ -231,6 +237,7 @@ fn main() {
                 &format,
                 scale,
                 &keys,
+                filter.as_deref(),
             );
         }
         Command::Vectorize { path, out } => {

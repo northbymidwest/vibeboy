@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::emulator::Emulator;
 use crate::model::GbModel;
+use crate::scaling;
 use crate::vectorize;
 use crate::test_runner::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
 use crate::test_runner::util::{make_emu, parse_keys};
@@ -18,6 +19,7 @@ pub fn cmd_screenshot(
     format: &str,
     scale: usize,
     keys: &str,
+    filter: Option<&str>,
 ) {
     let rom = fs::read(path).expect("Failed to read ROM");
     let model = force_model.unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
@@ -32,7 +34,44 @@ pub fn cmd_screenshot(
         }
         emu.step_frame();
     }
-    let fb = emu.frame_buffer();
+    let raw_fb = emu.frame_buffer();
+
+    // Apply scaling filter if requested
+    let scaled_buf;
+    let (fb, fb_w, fb_h) = if let Some(f) = filter {
+        let sf = match f {
+            "epx" => scaling::ScaleFilter::Epx,
+            "scale2x" => scaling::ScaleFilter::Scale2x,
+            "scale3x" => scaling::ScaleFilter::Scale3x,
+            "eagle" => scaling::ScaleFilter::Eagle,
+            "2xsai" => scaling::ScaleFilter::Sai2x,
+            "super-2xsai" => scaling::ScaleFilter::Super2xSai,
+            "super-eagle" => scaling::ScaleFilter::SuperEagle,
+            "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
+            "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
+            "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
+            "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
+            "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
+            "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
+            "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz2x),
+            "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz3x),
+            "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz4x),
+            "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz5x),
+            "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz6x),
+            "super-xbr" => scaling::ScaleFilter::SuperXbr,
+            "omniscale" => scaling::ScaleFilter::OmniScale,
+            other => {
+                eprintln!("Unknown filter '{}', using nearest", other);
+                scaling::ScaleFilter::Nearest
+            }
+        };
+        let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, 0, 0)
+            .unwrap_or_else(|| (raw_fb.to_vec(), 160, 144));
+        scaled_buf = s;
+        (scaled_buf.as_slice(), w as usize, h as usize)
+    } else {
+        (raw_fb, 160, 144)
+    };
 
     if format == "svg" || (format == "png" && out.ends_with(".svg")) {
         let svg = vectorize::vectorize_to_svg(fb, 160, 144);
@@ -53,18 +92,18 @@ pub fn cmd_screenshot(
             out, frames, out_w, out_h, scale
         );
     } else {
-        let mut rgb = Vec::with_capacity(160 * 144 * 3);
-        for y in 0..144 {
-            for x in 0..160 {
-                let pixel = fb[y * 160 + x];
+        let mut rgb = Vec::with_capacity(fb_w * fb_h * 3);
+        for y in 0..fb_h {
+            for x in 0..fb_w {
+                let pixel = fb[y * fb_w + x];
                 rgb.push(((pixel >> 16) & 0xFF) as u8);
                 rgb.push(((pixel >> 8) & 0xFF) as u8);
                 rgb.push((pixel & 0xFF) as u8);
             }
         }
-        image::save_buffer(out, &rgb, 160, 144, image::ColorType::Rgb8)
+        image::save_buffer(out, &rgb, fb_w as u32, fb_h as u32, image::ColorType::Rgb8)
             .expect("Failed to write PNG");
-        eprintln!("Wrote {} (frame {})", out, frames);
+        eprintln!("Wrote {} (frame {}, {}x{})", out, frames, fb_w, fb_h);
     }
 }
 
