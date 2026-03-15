@@ -26,14 +26,15 @@ pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: us
     let sy = src_h as f64 / dst_h as f64;
 
     for oy in 0..dst_h {
-        let src_y = oy as f64 * sy;
+        // Half-pixel offset centers interpolation on pixel boundaries
+        let src_y = ((oy as f64 + 0.5) * sy - 0.5).max(0.0);
         let iy = src_y as isize;
-        let fy = (src_y - iy as f64) as f64;
+        let fy = src_y - iy as f64;
 
         for ox in 0..dst_w {
-            let src_x = ox as f64 * sx;
+            let src_x = ((ox as f64 + 0.5) * sx - 0.5).max(0.0);
             let ix = src_x as isize;
-            let fx = (src_x - ix as f64) as f64;
+            let fx = src_x - ix as f64;
 
             let p00 = get(src, src_w, src_h, ix, iy);
             let p10 = get(src, src_w, src_h, ix + 1, iy);
