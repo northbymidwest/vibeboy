@@ -141,6 +141,15 @@ pub fn cmd_screenshot(
     } else if format == "diffusion" {
         let (pixels, out_w, out_h) = vectorize::rasterize::rasterize_diffusion(fb, 160, 144, scale);
         save_pixels(&pixels, out_w, out_h, out, "png", frames);
+    } else if format == "spline-diffusion" {
+        // Paper's full pipeline: YUV visible edges + spline boundaries + Gaussian diffusion
+        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (paths, bg_color) = vectorize::vectorize_core(fb, 160, 144);
+        vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (pixels, out_w, out_h) = vectorize::rasterize::rasterize_spline_diffusion(
+            &paths, fb, 160, 144, bg_color, scale,
+        );
+        save_pixels(&pixels, out_w, out_h, out, "png", frames);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
     }

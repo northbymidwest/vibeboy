@@ -448,6 +448,7 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_vectorize",   "Vectorize",           ScaleFilter::Vectorize),
         ("filter_vec_adapt",   "Vectorize Adaptive",  ScaleFilter::VectorizeAdaptive),
         ("filter_vec_diff",    "Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
+        ("filter_vec_sdiff",   "Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
     ]
 }
 
@@ -1092,6 +1093,16 @@ impl App {
                 let s = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let sc = s.round().max(1.0) as usize;
                 let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(fb, sw, sh, sc);
+                scaled = buf;
+                (&scaled, dw, dh)
+            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusion) {
+                let s = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                let sc = s.round().max(1.0) as usize;
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(false));
+                let (paths, bg) = cache.get_paths(fb, sw, sh);
+                let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
+                    paths, fb, sw, sh, bg, sc,
+                );
                 scaled = buf;
                 (&scaled, dw, dh)
             } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {

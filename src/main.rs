@@ -119,12 +119,13 @@ fn parse_filter(s: &str) -> Result<String, String> {
         "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive", "vectorize-diffusion",
+        "vectorize-spline-diffusion",
     ];
     let lower = s.to_lowercase();
     if valid.contains(&lower.as_str()) {
         Ok(lower)
     } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive, vectorize-diffusion]", s))
+        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive, vectorize-diffusion, vectorize-spline-diffusion]", s))
     }
 }
 
@@ -190,7 +191,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if cli.yuv_edges {
+    if cli.yuv_edges || cli.filter == "vectorize-spline-diffusion" {
         vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -303,6 +304,7 @@ fn main() {
         "vectorize" => scaling::ScaleFilter::Vectorize,
         "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
         "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
+        "vectorize-spline-diffusion" => scaling::ScaleFilter::VectorizeSplineDiffusion,
         _ => unreachable!("filter validated by parse_filter"),
     };
 
@@ -334,7 +336,8 @@ fn main() {
     let is_resizable = scale_filter.is_resizable();
     let _scales_to_display = scale_filter.scales_to_display();
     let mut vec_cache = match scale_filter {
-        scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
+        scaling::ScaleFilter::Vectorize
+        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeCache::new(false)),
         scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
         _ => None,
     };
@@ -1076,6 +1079,17 @@ fn cpu_scale_frame(
         let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
         let scale = scale_f.round().max(1.0) as usize;
         let (raster, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
+        return (raster, w as u32, h as u32);
+    }
+    // Spline-diffusion: vectorize for paths, then Gaussian diffusion with spline boundaries
+    if matches!(filter, scaling::ScaleFilter::VectorizeSplineDiffusion) {
+        let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+        let scale = scale_f.round().max(1.0) as usize;
+        let cache = vec_cache.as_mut().unwrap();
+        let (paths, bg_color) = cache.get_paths(src, sw, sh);
+        let (raster, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
+            paths, src, sw, sh, bg_color, scale,
+        );
         return (raster, w as u32, h as u32);
     }
     // All other CPU filters use the shared dispatcher

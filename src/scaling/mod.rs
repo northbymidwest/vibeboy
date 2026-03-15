@@ -159,6 +159,8 @@ pub enum ScaleFilter {
     /// (Paper Section 3.5). Uses truncated Gaussians at cell centroids
     /// instead of scanline-filled vector paths.
     VectorizeDiffusion,
+    /// Paper's full rendering: B-spline contour boundaries + Gaussian diffusion.
+    VectorizeSplineDiffusion,
 }
 
 impl ScaleFilter {
@@ -171,7 +173,8 @@ impl ScaleFilter {
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeDiffusion => 1,
+            | ScaleFilter::VectorizeDiffusion
+            | ScaleFilter::VectorizeSplineDiffusion => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -192,7 +195,8 @@ impl ScaleFilter {
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeDiffusion)
+            | ScaleFilter::VectorizeDiffusion
+            | ScaleFilter::VectorizeSplineDiffusion)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -203,7 +207,8 @@ impl ScaleFilter {
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
             | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeDiffusion)
+            | ScaleFilter::VectorizeDiffusion
+            | ScaleFilter::VectorizeSplineDiffusion)
     }
 }
 

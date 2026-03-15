@@ -836,3 +836,103 @@ pub fn build_voronoi_ownership(
 
     ownership
 }
+
+// --- Spline-bounded Gaussian diffusion rasterizer (Paper Section 3.5) ---
+//
+// Combines the smooth B-spline contour boundaries from the vectorization
+// pipeline with Gaussian color diffusion from the paper's rendering method.
+//
+// 1. Scanline-rasterize the vector paths to a flat-color buffer (smooth spline boundaries)
+// 2. For each output pixel, Gaussian-blend nearby source pixel centroids that
+//    fall within the same spline-bounded region (same rasterized color)
+//
+// This gives smooth spline edges AND soft Gaussian anti-aliasing, matching
+// the paper's described rendering approach.
+
+/// Rasterize using Gaussian diffusion with B-spline contour boundaries.
+///
+/// First rasterizes the vectorized paths via the scanline rasterizer to establish
+/// smooth region boundaries. Then applies Gaussian blending (σ=1, r=2) within
+/// those spline-bounded regions. Each source pixel centroid contributes to output
+/// pixels that share its region (same rasterized color at the centroid's position).
+pub fn rasterize_spline_diffusion(
+    paths: &[ColorPath],
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+    scale: usize,
+) -> (Vec<u32>, usize, usize) {
+    let out_w = width * scale;
+    let out_h = height * scale;
+
+    // Step 1: Scanline-rasterize the B-spline paths to get smooth region boundaries
+    let region_buf = rasterize(paths, width, height, bg_color, scale);
+
+    // Step 2: Gaussian diffusion within spline-bounded regions
+    let inv_scale = 1.0 / scale as f64;
+    let sigma_sq_2 = 2.0; // 2 * σ² with σ = 1
+    let radius = 2.0f64;
+    let r_sq = radius * radius;
+
+    let mut buffer = vec![0u32; out_w * out_h];
+
+    for oy in 0..out_h {
+        let sy = (oy as f64 + 0.5) * inv_scale;
+        let min_py = ((sy - radius).floor() as i32).max(0) as usize;
+        let max_py = ((sy + radius).ceil() as i32).min(height as i32 - 1) as usize;
+
+        for ox in 0..out_w {
+            let sx = (ox as f64 + 0.5) * inv_scale;
+
+            // This output pixel's region = its rasterized color from the spline paths
+            let my_region_color = region_buf[oy * out_w + ox];
+
+            let min_px = ((sx - radius).floor() as i32).max(0) as usize;
+            let max_px = ((sx + radius).ceil() as i32).min(width as i32 - 1) as usize;
+
+            let mut tr = 0.0f64;
+            let mut tg = 0.0f64;
+            let mut tb = 0.0f64;
+            let mut tw = 0.0f64;
+
+            for py in min_py..=max_py {
+                for px in min_px..=max_px {
+                    // Check if this centroid is in the same spline-bounded region:
+                    // the rasterized color at the centroid's output position must match
+                    let cx_out = ((px as f64 + 0.5) * scale as f64) as usize;
+                    let cy_out = ((py as f64 + 0.5) * scale as f64) as usize;
+                    let cx_out = cx_out.min(out_w - 1);
+                    let cy_out = cy_out.min(out_h - 1);
+                    if region_buf[cy_out * out_w + cx_out] != my_region_color {
+                        continue;
+                    }
+
+                    let dx = sx - (px as f64 + 0.5);
+                    let dy = sy - (py as f64 + 0.5);
+                    let d_sq = dx * dx + dy * dy;
+                    if d_sq > r_sq { continue; }
+
+                    let w = (-d_sq / sigma_sq_2).exp();
+                    let color = pixels[py * width + px];
+                    tr += w * ((color >> 16) & 0xFF) as f64;
+                    tg += w * ((color >> 8) & 0xFF) as f64;
+                    tb += w * (color & 0xFF) as f64;
+                    tw += w;
+                }
+            }
+
+            if tw > 0.0 {
+                let inv_tw = 1.0 / tw;
+                let r = (tr * inv_tw).round().min(255.0) as u32;
+                let g = (tg * inv_tw).round().min(255.0) as u32;
+                let b = (tb * inv_tw).round().min(255.0) as u32;
+                buffer[oy * out_w + ox] = (r << 16) | (g << 8) | b;
+            } else {
+                buffer[oy * out_w + ox] = my_region_color;
+            }
+        }
+    }
+
+    (buffer, out_w, out_h)
+}
