@@ -730,90 +730,106 @@ fn cell_vertex_count(px: usize, py: usize, graph: &SimilarityGraph) -> usize {
 /// Build Voronoi ownership map at output resolution by scanline-filling
 /// each cell polygon. Each output pixel is assigned to the source pixel
 /// whose deformed Voronoi cell contains it.
+/// Check if point (px, py) is inside convex polygon with `nv` vertices.
+/// Uses cross-product winding test.
+#[inline]
+fn point_in_convex_poly(verts: &[(f64, f64); 8], nv: usize, px: f64, py: f64) -> bool {
+    if nv < 3 { return false; }
+    let mut sign = 0i32;
+    for i in 0..nv {
+        let (x0, y0) = verts[i];
+        let (x1, y1) = verts[(i + 1) % nv];
+        let cross = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0);
+        let s = if cross > 1e-10 { 1 } else if cross < -1e-10 { -1 } else { 0 };
+        if s != 0 {
+            if sign == 0 { sign = s; }
+            else if sign != s { return false; }
+        }
+    }
+    true
+}
+
+/// Count vertices for a cell (matches cell_vertices_f64 output length).
+#[inline]
+fn cell_nv(graph: &SimilarityGraph, px: usize, py: usize) -> usize {
+    let corners = [
+        (corner_diag(graph, px, py), true),       // TL: 2 verts if backslash
+        (corner_diag(graph, px + 1, py), false),   // TR: 2 verts if slash
+        (corner_diag(graph, px + 1, py + 1), true),// BR: 2 verts if backslash
+        (corner_diag(graph, px, py + 1), false),   // BL: 2 verts if slash
+    ];
+    corners.iter().map(|&(d, is_bs_double)| {
+        if d == 1 && is_bs_double { 2 }
+        else if d == 2 && !is_bs_double { 2 }
+        else { 1 }
+    }).sum()
+}
+
 pub fn build_voronoi_ownership(
     w: usize, h: usize, graph: &SimilarityGraph, scale: usize,
 ) -> Vec<u32> {
     let out_w = w * scale;
     let out_h = h * scale;
-    let sf = scale as f64;
-    let mut ownership = vec![u32::MAX; out_w * out_h];
+    let inv_scale = 1.0 / scale as f64;
+    let mut ownership = vec![0u32; out_w * out_h];
 
-    for py in 0..h {
-        for px in 0..w {
-            let owner_id = (py * w + px) as u32;
-            let raw_verts = cell_vertices_f64(px, py, graph);
+    for oy in 0..out_h {
+        let sy = (oy as f64 + 0.5) * inv_scale;
+        for ox in 0..out_w {
+            let sx = (ox as f64 + 0.5) * inv_scale;
 
-            // Count actual vertices (same corner logic)
-            let tl = corner_diag(graph, px, py);
-            let tr = corner_diag(graph, px + 1, py);
-            let br = corner_diag(graph, px + 1, py + 1);
-            let bl = corner_diag(graph, px, py + 1);
-            let nv = [tl, tr, br, bl].iter()
-                .zip(&[(px, py, true), (px+1, py, false), (px+1, py+1, true), (px, py+1, false)])
-                .map(|(&d, &(_, _, is_br_or_tl))| {
-                    // Corners that produce 2 vertices: TL with \, TR with /, BR with \, BL with /
-                    if d == 1 && is_br_or_tl { 2 }
-                    else if d == 2 && !is_br_or_tl { 2 }
-                    else { 1 }
-                })
-                .sum::<usize>();
+            // Home source pixel (default owner)
+            let home_x = (sx.floor() as usize).min(w - 1);
+            let home_y = (sy.floor() as usize).min(h - 1);
+            let home_id = (home_y * w + home_x) as u32;
 
-            // Scale vertices to output space
-            let mut verts: [(f64, f64); 8] = [(0.0, 0.0); 8];
-            for i in 0..nv {
-                verts[i] = (raw_verts[i].0 * sf, raw_verts[i].1 * sf);
+            // For most pixels (interior of cell), home is correct.
+            // Only pixels near diagonal corners need refinement.
+            // Check if any of the 4 corners of the home cell have diagonals.
+            let tl = corner_diag(graph, home_x, home_y);
+            let tr = corner_diag(graph, home_x + 1, home_y);
+            let br = corner_diag(graph, home_x + 1, home_y + 1);
+            let bl = corner_diag(graph, home_x, home_y + 1);
+
+            if tl == 0 && tr == 0 && br == 0 && bl == 0 {
+                // No diagonals — cell is a perfect square, home is correct
+                ownership[oy * out_w + ox] = home_id;
+                continue;
             }
 
-            // Find Y bounds
-            let mut y_min = f64::MAX;
-            let mut y_max = f64::MIN;
-            for i in 0..nv {
-                if verts[i].1 < y_min { y_min = verts[i].1; }
-                if verts[i].1 > y_max { y_max = verts[i].1; }
+            // Diagonal exists at some corner — test against home cell and neighbors
+            let home_verts = cell_vertices_f64(home_x, home_y, graph);
+            let home_nv = cell_nv(graph, home_x, home_y);
+
+            if point_in_convex_poly(&home_verts, home_nv, sx, sy) {
+                ownership[oy * out_w + ox] = home_id;
+                continue;
             }
 
-            let iy_min = (y_min.floor() as usize).min(out_h);
-            let iy_max = (y_max.ceil() as usize).min(out_h);
-
-            // Scanline fill the convex polygon
-            for iy in iy_min..iy_max {
-                let sy = iy as f64 + 0.5;
-                let mut x_min = f64::MAX;
-                let mut x_max = f64::MIN;
-
-                for i in 0..nv {
-                    let (x0, y0) = verts[i];
-                    let (x1, y1) = verts[(i + 1) % nv];
-
-                    if (y0 <= sy && y1 > sy) || (y1 <= sy && y0 > sy) {
-                        let t = (sy - y0) / (y1 - y0);
-                        let x = x0 + t * (x1 - x0);
-                        if x < x_min { x_min = x; }
-                        if x > x_max { x_max = x; }
+            // Point is outside home cell due to diagonal deformation.
+            // Check the 8 neighbors for the correct owner.
+            let mut found = false;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 { continue; }
+                    let nx = home_x as i32 + dx;
+                    let ny = home_y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+                    let (nx, ny) = (nx as usize, ny as usize);
+                    let verts = cell_vertices_f64(nx, ny, graph);
+                    let nv = cell_nv(graph, nx, ny);
+                    if point_in_convex_poly(&verts, nv, sx, sy) {
+                        ownership[oy * out_w + ox] = (ny * w + nx) as u32;
+                        found = true;
+                        break;
                     }
                 }
-
-                if x_min >= x_max { continue; }
-
-                let ix_min = (x_min.ceil() as usize).max(0).min(out_w);
-                let ix_max = (x_max.floor() as usize + 1).min(out_w);
-
-                for ix in ix_min..ix_max {
-                    ownership[iy * out_w + ix] = owner_id;
-                }
+                if found { break; }
             }
-        }
-    }
 
-    // Fallback for any unfilled pixels (floating point edge cases)
-    let inv_scale = 1.0 / sf;
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            if ownership[oy * out_w + ox] == u32::MAX {
-                let spx = ((ox as f64 + 0.5) * inv_scale).floor() as usize;
-                let spy = ((oy as f64 + 0.5) * inv_scale).floor() as usize;
-                ownership[oy * out_w + ox] =
-                    (spy.min(h - 1) * w + spx.min(w - 1)) as u32;
+            // Fallback (shouldn't happen with correct cells)
+            if !found {
+                ownership[oy * out_w + ox] = home_id;
             }
         }
     }

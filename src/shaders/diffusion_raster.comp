@@ -4,18 +4,14 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 // SDL3 SPIRV compute: set 0 = readonly storage buffers
 layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
-    // Source pixel colors as packed ARGB u32, row-major [src_h][src_w]
     uint src_pixels[];
 };
 
 layout(std430, set = 0, binding = 1) readonly buffer RegionBuf {
-    // Region ID per source pixel, row-major [src_h][src_w]
     uint src_regions[];
 };
 
 layout(std430, set = 0, binding = 2) readonly buffer OwnerBuf {
-    // Voronoi cell ownership per output pixel, row-major [out_h][out_w]
-    // Each entry is a source pixel index (py * src_w + px)
     uint ownership[];
 };
 
@@ -28,9 +24,9 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint out_h;
     uint src_w;
     uint src_h;
-    float inv_scale;   // 1.0 / scale
-    float sigma_sq_2;  // 2 * sigma^2 (= 2.0 for sigma=1)
-    float radius;      // truncation radius in source pixels (= 2.0)
+    float inv_scale;
+    float sigma_sq_2;
+    float radius;
     uint _pad;
 };
 
