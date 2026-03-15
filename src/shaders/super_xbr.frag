@@ -224,11 +224,11 @@ void main() {
     vec4 pre_polish = sample_full_buf(pos, out_size);
 
     // Polish pass: gentle refinement with simplified weights.
-    // Sample 4x4 neighborhood from the pre-polish buffer.
+    // Sample 4x4 neighborhood centered at pos, matching CPU offsets (-2,-2) to (+1,+1).
     vec4 p[16];
     for (int j = 0; j < 4; j++)
         for (int i = 0; i < 4; i++)
-            p[j*4+i] = sample_full_buf(pos + ivec2(i-1, j-1), out_size);
+            p[j*4+i] = sample_full_buf(pos + ivec2(i-2, j-2), out_size);
 
     frag_color = edge_interp(p, POLISH_WP);
 }

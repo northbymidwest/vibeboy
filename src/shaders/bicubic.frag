@@ -33,6 +33,8 @@ vec4 cubic_weight(float t) {
 }
 
 void main() {
+    // Half-pixel offset centers interpolation on pixel boundaries,
+    // producing correct results for non-integer scale factors.
     vec2 src_coord = v_uv * src_size - 0.5;
     ivec2 src_i = ivec2(floor(src_coord));
     vec2 f = src_coord - vec2(src_i);
