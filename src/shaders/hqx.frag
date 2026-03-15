@@ -218,23 +218,32 @@ void main() {
         frag_color = hq2x_corner(v);
 
     } else if (iscale == 3) {
-        // hq3x: center pixel unchanged, corners and edges via rotated views
+        // hq3x: center pixel unchanged, corners and edges via rotated views.
+        // Each rotation produces a (corner, edge) pair:
+        //   ROT[0] false → c00(0,0) + e01(1,0)   top-left corner + top edge
+        //   ROT[1] true  → c02(2,0) + e12(2,1)   top-right corner + right edge
+        //   ROT[2] true  → c20(0,2) + e10(0,1)   bottom-left corner + left edge
+        //   ROT[3] false → c22(2,2) + e21(1,2)   bottom-right corner + bottom edge
         if (sub.x == 1 && sub.y == 1) {
             frag_color = nb[4];
         } else {
             vec4 corner, edge;
             if (sub.y == 0 && sub.x <= 1) {
+                // (0,0)=corner, (1,0)=edge — ROT[0], false
                 hq3x_corner_and_edge(build_view(nb, pat, -1, false), corner, edge);
                 frag_color = (sub.x == 0) ? corner : edge;
             } else if (sub.x == 2 && sub.y <= 1) {
+                // (2,0)=corner, (2,1)=edge — ROT[1], true
                 hq3x_corner_and_edge(build_view(nb, pat, -10, true), corner, edge);
                 frag_color = (sub.y == 0) ? corner : edge;
-            } else if (sub.x <= 1 && sub.y == 2) {
-                hq3x_corner_and_edge(build_view(nb, pat, -28, false), corner, edge);
-                frag_color = (sub.x == 2) ? corner : edge;
-            } else {
+            } else if (sub.x == 0 && sub.y >= 1) {
+                // (0,2)=corner, (0,1)=edge — ROT[2], true
                 hq3x_corner_and_edge(build_view(nb, pat, -19, true), corner, edge);
                 frag_color = (sub.y == 2) ? corner : edge;
+            } else {
+                // (2,2)=corner, (1,2)=edge — ROT[3], false
+                hq3x_corner_and_edge(build_view(nb, pat, -28, false), corner, edge);
+                frag_color = (sub.x == 2) ? corner : edge;
             }
         }
 
