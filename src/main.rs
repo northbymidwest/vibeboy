@@ -354,6 +354,7 @@ fn main() {
     let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
          mut transfer_buf, mut transfer_buf_size,
          omniscale_pipeline, omniscale_sampler, hqx_pipeline,
+         bicubic_pipeline, omniscale_legacy_pipeline,
          scale3x_pipeline, eagle_pipeline, aa_nearest_pipeline,
          epx_pipeline, xbr_pipeline, xbrz_pipeline, super_xbr_pipeline, vectorize_compute) = {
         let all_formats = gpu::ShaderFormat::PRIVATE
@@ -385,6 +386,8 @@ fn main() {
                 .with_mag_filter(gpu::Filter::Nearest)
         ).expect("Failed to create sampler");
         let hqx = scaling::gpu::init_hqx_pipeline(&dev, &window);
+        let bicubic = scaling::gpu::init_bicubic_pipeline(&dev, &window);
+        let omni_legacy = scaling::gpu::init_omniscale_legacy_pipeline(&dev, &window);
         let s3x = scaling::gpu::init_scale3x_pipeline(&dev, &window);
         let eagle = scaling::gpu::init_eagle_pipeline(&dev, &window);
         let aa_nn = scaling::gpu::init_aa_nearest_pipeline(&dev, &window);
@@ -393,7 +396,7 @@ fn main() {
         let xbrz = scaling::gpu::init_xbrz_pipeline(&dev, &window);
         let sxbr = scaling::gpu::init_super_xbr_pipeline(&dev, &window);
         let vec_compute = scaling::gpu::init_vectorize_compute_pipeline(&dev);
-        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute)
+        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, bicubic, omni_legacy, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute)
     };
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
@@ -661,6 +664,10 @@ fn main() {
             {
                 let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
                     && hqx_pipeline.is_some();
+                let gpu_bicubic = scale_filter == scaling::ScaleFilter::Bicubic
+                    && bicubic_pipeline.is_some();
+                let gpu_omni_legacy = scale_filter == scaling::ScaleFilter::OmniScaleLegacy
+                    && omniscale_legacy_pipeline.is_some();
                 let gpu_scale3x = scale_filter == scaling::ScaleFilter::Scale3x
                     && scale3x_pipeline.is_some();
                 let gpu_eagle = scale_filter == scaling::ScaleFilter::Eagle
@@ -680,7 +687,8 @@ fn main() {
                     scale_filter,
                     scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
                         | scaling::ScaleFilter::OmniScale
-                ) || gpu_hqx || gpu_scale3x || gpu_eagle || gpu_aa_nearest
+                ) || gpu_hqx || gpu_bicubic || gpu_omni_legacy
+                  || gpu_scale3x || gpu_eagle || gpu_aa_nearest
                   || gpu_epx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
                 let gpu_vectorize = matches!(
                     scale_filter,
@@ -743,6 +751,20 @@ fn main() {
                             raw_src, src_w, src_h,
                             aa_nearest_pipeline.as_ref().unwrap(), &omniscale_sampler,
                             ww, wh,
+                        );
+                    } else if gpu_bicubic {
+                        let (ww, wh) = window.size();
+                        scaling::gpu::render_bicubic(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            bicubic_pipeline.as_ref().unwrap(), &omniscale_sampler,
+                            ww, wh,
+                        );
+                    } else if gpu_omni_legacy {
+                        scaling::gpu::render_omniscale_legacy(
+                            &gpu_device, &window, &gpu_tex, &transfer_buf,
+                            raw_src, src_w, src_h,
+                            omniscale_legacy_pipeline.as_ref().unwrap(), &omniscale_sampler,
                         );
                     } else if gpu_epx {
                         let epx_scale = match scale_filter {

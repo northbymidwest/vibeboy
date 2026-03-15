@@ -35,6 +35,18 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "bicubic.frag",
+        spv_name: "bicubic_frag.spv",
+        msl_name: "bicubic_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "omniscale_legacy.frag",
+        spv_name: "omniscale_legacy_frag.spv",
+        msl_name: "omniscale_legacy_frag.metal",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "scale3x.frag",
         spv_name: "scale3x_frag.spv",
         msl_name: "scale3x_frag.metal",
