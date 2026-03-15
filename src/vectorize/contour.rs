@@ -1191,7 +1191,10 @@ fn optimize_boundary_loops(
             .map(|nd| *positions.get(nd).unwrap())
             .collect();
         let orig: Vec<Point> = pts.clone();
-        let corners = detect_corners(&orig, true);
+        // Paper Section 3.4, Figure 7: detect corners via ×4 grid template matching.
+        // Corner nodes are NOT pinned — they can still move during optimization.
+        // Only the B-spline spans touching corners are excluded from curvature energy.
+        let corners = detect_corners_from_nodes(node_loop, true);
 
         let pinned: Vec<bool> = node_loop.iter()
             .map(|nd| junctions.contains(nd))
@@ -1200,7 +1203,7 @@ fn optimize_boundary_loops(
         let eps = GRADIENT_STEP;
         for _iter in 0..OPT_ITERATIONS {
             for i in 0..n {
-                if pinned[i] || corners[i] { continue; }
+                if pinned[i] { continue; }
 
                 let current = pts[i];
                 let e0 = local_energy(&pts, &orig, &corners, i, n, true);
@@ -1307,6 +1310,60 @@ const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
 const CURVATURE_INTERVALS: usize = 3;
 
+/// Detect corner patterns using Kopf-Lischinski template matching (Section 3.4, Figure 7).
+///
+/// On the ×4 quantized grid, sharp features take on a finite set of patterns
+/// (the paper's Figure 7, including all rotations and reflections). We detect
+/// these by checking if the turn angle at each node ≥ 60° using exact integer
+/// arithmetic on the ×4 coordinates. This is equivalent to the paper's pattern
+/// enumeration since all sharp patterns on the quantized grid have angles ≥ 60°.
+///
+/// Unlike the previous implementation which pinned corner nodes entirely,
+/// the paper only excludes B-spline spans near corners from the curvature
+/// integral — corner nodes can still move during optimization.
+fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Vec<bool> {
+    let n = nodes.len();
+    let mut is_corner = vec![false; n];
+
+    if !is_closed {
+        if n > 0 { is_corner[0] = true; }
+        if n > 1 { is_corner[n - 1] = true; }
+    }
+
+    let range_start = if is_closed { 0 } else { 1 };
+    let range_end = if is_closed { n } else { n - 1 };
+
+    for i in range_start..range_end {
+        let prev = if is_closed { nodes[(i + n - 1) % n] } else { nodes[i - 1] };
+        let curr = nodes[i];
+        let next = if is_closed { nodes[(i + 1) % n] } else { nodes[i + 1] };
+
+        // Edge vectors in ×4 integer coordinates
+        let d1x = (curr.x4 - prev.x4) as i64;
+        let d1y = (curr.y4 - prev.y4) as i64;
+        let d2x = (next.x4 - curr.x4) as i64;
+        let d2y = (next.y4 - curr.y4) as i64;
+
+        let dot = d1x * d2x + d1y * d2y;
+
+        if dot <= 0 {
+            // Turn angle ≥ 90° — always a corner
+            is_corner[i] = true;
+        } else {
+            // Check if turn angle ≥ 60° using integer arithmetic:
+            // cos(angle) ≤ 0.5  ↔  4 * dot² ≤ |d1|² * |d2|²
+            let len1_sq = d1x * d1x + d1y * d1y;
+            let len2_sq = d2x * d2x + d2y * d2y;
+            if 4 * dot * dot <= len1_sq * len2_sq {
+                is_corner[i] = true;
+            }
+        }
+    }
+
+    is_corner
+}
+
+/// Float-based corner detection for standalone chain optimization (legacy path).
 fn detect_corners(points: &[Point], is_closed: bool) -> Vec<bool> {
     let n = points.len();
     let mut is_corner = vec![false; n];
