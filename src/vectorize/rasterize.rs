@@ -921,6 +921,60 @@ fn rasterize_noaa(
     buffer
 }
 
+/// Flood-fill connected components on a color buffer at output resolution.
+/// Two 4-connected output pixels with the same color are in the same region.
+fn flood_fill_output_regions(colors: &[u32], w: usize, h: usize) -> Vec<u32> {
+    let mut ids = vec![u32::MAX; w * h];
+    let mut region_id = 0u32;
+
+    for start in 0..w * h {
+        if ids[start] != u32::MAX { continue; }
+        let color = colors[start];
+        ids[start] = region_id;
+        let mut stack = vec![start];
+
+        while let Some(idx) = stack.pop() {
+            let x = idx % w;
+            let y = idx / w;
+            for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+                let ni = ny as usize * w + nx as usize;
+                if ids[ni] != u32::MAX { continue; }
+                if colors[ni] == color {
+                    ids[ni] = region_id;
+                    stack.push(ni);
+                }
+            }
+        }
+
+        region_id += 1;
+    }
+
+    ids
+}
+
+/// Snap a color to the nearest palette color by RGB Euclidean distance.
+fn snap_to_nearest(palette: &[u32], color: u32) -> u32 {
+    let cr = ((color >> 16) & 0xFF) as i32;
+    let cg = ((color >> 8) & 0xFF) as i32;
+    let cb = (color & 0xFF) as i32;
+    let mut best = color;
+    let mut best_dist = i32::MAX;
+    for &p in palette {
+        let pr = ((p >> 16) & 0xFF) as i32;
+        let pg = ((p >> 8) & 0xFF) as i32;
+        let pb = (p & 0xFF) as i32;
+        let d = (cr - pr) * (cr - pr) + (cg - pg) * (cg - pg) + (cb - pb) * (cb - pb);
+        if d < best_dist {
+            best_dist = d;
+            best = p;
+        }
+    }
+    best
+}
+
 // --- Spline-bounded Gaussian diffusion rasterizer (Paper Section 3.5) ---
 //
 // Combines the smooth B-spline contour boundaries from the vectorization
@@ -950,14 +1004,35 @@ pub fn rasterize_spline_diffusion(
     let out_w = width * scale;
     let out_h = height * scale;
 
-    // Step 1: Scanline-rasterize the B-spline paths to get hard region boundaries.
-    // NO anti-aliasing — blended intermediate colors break region matching.
-    // The Gaussian diffusion pass provides its own smooth anti-aliasing.
-    let region_buf = rasterize_noaa(paths, width, height, bg_color, scale);
+    // Step 1: Scanline-rasterize the B-spline paths with AA, then snap each pixel
+    // to the nearest source color. The AA rasterizer gives accurate boundary
+    // placement; snapping removes intermediate blended colors that would break
+    // region flood fill.
+    let aa_buf = rasterize(paths, width, height, bg_color, scale);
+    let palette: Vec<u32> = paths.iter().map(|p| p.color).chain(std::iter::once(bg_color)).collect();
+    let color_buf: Vec<u32> = aa_buf.iter().map(|&c| snap_to_nearest(&palette, c)).collect();
 
-    // Step 2: Gaussian diffusion within spline-bounded regions
+    // Step 2: Flood-fill connected components on the snapped color buffer.
+    // Two adjacent output pixels with the same snapped color are in the same region.
+    // This correctly separates same-color areas divided by spline boundaries
+    // (e.g., white belly vs white background on opposite sides of an outline).
+    let region_ids = flood_fill_output_regions(&color_buf, out_w, out_h);
+
+    // Map each source pixel centroid to its output-space region ID
+    let mut src_region_ids = vec![0u32; width * height];
+    for py in 0..height {
+        for px in 0..width {
+            let cx_out = ((px as f64 + 0.5) * scale as f64) as usize;
+            let cy_out = ((py as f64 + 0.5) * scale as f64) as usize;
+            let cx_out = cx_out.min(out_w - 1);
+            let cy_out = cy_out.min(out_h - 1);
+            src_region_ids[py * width + px] = region_ids[cy_out * out_w + cx_out];
+        }
+    }
+
+    // Step 3: Gaussian diffusion within connected regions
     let inv_scale = 1.0 / scale as f64;
-    let sigma_sq_2 = 2.0; // 2 * σ² with σ = 1
+    let sigma_sq_2 = 2.0;
     let radius = 2.0f64;
     let r_sq = radius * radius;
 
@@ -971,8 +1046,7 @@ pub fn rasterize_spline_diffusion(
         for ox in 0..out_w {
             let sx = (ox as f64 + 0.5) * inv_scale;
 
-            // This output pixel's region = its rasterized color from the spline paths
-            let my_region_color = region_buf[oy * out_w + ox];
+            let my_region = region_ids[oy * out_w + ox];
 
             let min_px = ((sx - radius).floor() as i32).max(0) as usize;
             let max_px = ((sx + radius).ceil() as i32).min(width as i32 - 1) as usize;
@@ -984,13 +1058,7 @@ pub fn rasterize_spline_diffusion(
 
             for py in min_py..=max_py {
                 for px in min_px..=max_px {
-                    // Check if this centroid is in the same spline-bounded region:
-                    // the rasterized color at the centroid's output position must match
-                    let cx_out = ((px as f64 + 0.5) * scale as f64) as usize;
-                    let cy_out = ((py as f64 + 0.5) * scale as f64) as usize;
-                    let cx_out = cx_out.min(out_w - 1);
-                    let cy_out = cy_out.min(out_h - 1);
-                    if region_buf[cy_out * out_w + cx_out] != my_region_color {
+                    if src_region_ids[py * width + px] != my_region {
                         continue;
                     }
 
@@ -1015,7 +1083,7 @@ pub fn rasterize_spline_diffusion(
                 let b = (tb * inv_tw).round().min(255.0) as u32;
                 buffer[oy * out_w + ox] = (r << 16) | (g << 8) | b;
             } else {
-                buffer[oy * out_w + ox] = my_region_color;
+                buffer[oy * out_w + ox] = color_buf[oy * out_w + ox];
             }
         }
     }

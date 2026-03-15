@@ -78,26 +78,23 @@ void main() {
     uint oy = gl_GlobalInvocationID.y;
     if (ox >= out_w || oy >= out_h) return;
 
-    // 2x2 supersampling: 4 samples at subpixel offsets.
-    // Each sample checks its own region at that position in the flat color
-    // buffer, so boundary transitions get smooth coverage-based blending.
+    // Region determined from center pixel — all subsamples use the same region
+    // to prevent cross-region blending at boundaries (which washes out thin
+    // features like 1-pixel outlines).
+    uint my_region = region_colors[oy * out_w + ox];
+
+    // 2x2 supersampling: 4 Gaussian evaluations at subpixel offsets within
+    // the same region. Smooths the Gaussian evaluation without mixing regions.
     vec3 accum = vec3(0.0);
 
     for (int si = 0; si < 4; si++) {
-        // Sample offsets: (0.25,0.25), (0.75,0.25), (0.25,0.75), (0.75,0.75)
         float sub_x = float(ox) + ((si & 1) != 0 ? 0.75 : 0.25);
         float sub_y = float(oy) + ((si & 2) != 0 ? 0.75 : 0.25);
 
-        // Region at this subpixel position
-        uint rx = min(uint(sub_x), out_w - 1u);
-        uint ry = min(uint(sub_y), out_h - 1u);
-        uint sample_region = region_colors[ry * out_w + rx];
-
-        // Source coordinates
         float sx = sub_x * inv_scale;
         float sy = sub_y * inv_scale;
 
-        vec4 g = gaussian_sample(sx, sy, sample_region);
+        vec4 g = gaussian_sample(sx, sy, my_region);
 
         if (g.w > 0.0) {
             float inv_w = 1.0 / g.w;
@@ -107,7 +104,7 @@ void main() {
                 clamp(g.z * inv_w / 255.0, 0.0, 1.0)
             );
         } else {
-            accum += region_to_rgb(sample_region);
+            accum += region_to_rgb(my_region);
         }
     }
 
