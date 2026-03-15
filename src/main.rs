@@ -94,6 +94,10 @@ struct Cli {
     /// Scaling filter
     #[arg(long, default_value = "nearest", value_parser = parse_filter)]
     filter: String,
+
+    /// Force CPU-only scaling (disable GPU shader pipeline even if available)
+    #[arg(long)]
+    cpu_filter: bool,
 }
 
 fn parse_model(s: &str) -> Result<GbModel, String> {
@@ -671,7 +675,8 @@ fn main() {
                     }};
                 }
 
-                let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
+                let force_cpu = cli.cpu_filter;
+                let gpu_hqx = !force_cpu && matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
                     && ensure_pipeline!(hqx_pipeline, scaling::gpu::init_hqx_pipeline(&gpu_device, &window));
                 let gpu_bicubic = scale_filter == scaling::ScaleFilter::Bicubic
                     && ensure_pipeline!(bicubic_pipeline, scaling::gpu::init_bicubic_pipeline(&gpu_device, &window));
@@ -692,14 +697,14 @@ fn main() {
                     && ensure_pipeline!(xbrz_pipeline, scaling::gpu::init_xbrz_pipeline(&gpu_device, &window));
                 let gpu_super_xbr = scale_filter == scaling::ScaleFilter::SuperXbr
                     && ensure_pipeline!(super_xbr_pipeline, scaling::gpu::init_super_xbr_pipeline(&gpu_device, &window));
-                let gpu_native = matches!(
+                let gpu_native = !force_cpu && matches!(
                     scale_filter,
                     scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
                         | scaling::ScaleFilter::OmniScale
                 ) || gpu_hqx || gpu_bicubic || gpu_omni_legacy
                   || gpu_scale3x || gpu_eagle || gpu_aa_nearest
                   || gpu_epx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
-                let gpu_vectorize = matches!(
+                let gpu_vectorize = !force_cpu && matches!(
                     scale_filter,
                     scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
                 ) && ensure_pipeline!(vectorize_compute, scaling::gpu::init_vectorize_compute_pipeline(&gpu_device));
