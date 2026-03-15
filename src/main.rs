@@ -353,10 +353,10 @@ fn main() {
     #[cfg(feature = "sdl3-gpu-shaders")]
     let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
          mut transfer_buf, mut transfer_buf_size,
-         omniscale_pipeline, omniscale_sampler, hqx_pipeline,
-         bicubic_pipeline, omniscale_legacy_pipeline,
-         scale3x_pipeline, eagle_pipeline, aa_nearest_pipeline,
-         epx_pipeline, xbr_pipeline, xbrz_pipeline, super_xbr_pipeline, vectorize_compute) = {
+         mut omniscale_pipeline, omniscale_sampler, mut hqx_pipeline,
+         mut bicubic_pipeline, mut omniscale_legacy_pipeline,
+         mut scale3x_pipeline, mut eagle_pipeline, mut aa_nearest_pipeline,
+         mut epx_pipeline, mut xbr_pipeline, mut xbrz_pipeline, mut super_xbr_pipeline, mut vectorize_compute) = {
         let all_formats = gpu::ShaderFormat::PRIVATE
             | gpu::ShaderFormat::SPIRV
             | gpu::ShaderFormat::MSL
@@ -379,23 +379,24 @@ fn main() {
             .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
             .with_size(max_xfer)
             .build().expect("Failed to create transfer buffer");
-        let omniscale = scaling::gpu::init_omniscale_pipeline(&dev, &window);
         let sampler = dev.create_sampler(
             gpu::SamplerCreateInfo::new()
                 .with_min_filter(gpu::Filter::Nearest)
                 .with_mag_filter(gpu::Filter::Nearest)
         ).expect("Failed to create sampler");
-        let hqx = scaling::gpu::init_hqx_pipeline(&dev, &window);
-        let bicubic = scaling::gpu::init_bicubic_pipeline(&dev, &window);
-        let omni_legacy = scaling::gpu::init_omniscale_legacy_pipeline(&dev, &window);
-        let s3x = scaling::gpu::init_scale3x_pipeline(&dev, &window);
-        let eagle = scaling::gpu::init_eagle_pipeline(&dev, &window);
-        let aa_nn = scaling::gpu::init_aa_nearest_pipeline(&dev, &window);
-        let epx = scaling::gpu::init_epx_pipeline(&dev, &window);
-        let xbr = scaling::gpu::init_xbr_pipeline(&dev, &window);
-        let xbrz = scaling::gpu::init_xbrz_pipeline(&dev, &window);
-        let sxbr = scaling::gpu::init_super_xbr_pipeline(&dev, &window);
-        let vec_compute = scaling::gpu::init_vectorize_compute_pipeline(&dev);
+        // Shader pipelines are initialized lazily — only when first needed.
+        let omniscale: Option<gpu::GraphicsPipeline> = None;
+        let hqx: Option<gpu::GraphicsPipeline> = None;
+        let bicubic: Option<gpu::GraphicsPipeline> = None;
+        let omni_legacy: Option<gpu::GraphicsPipeline> = None;
+        let s3x: Option<gpu::GraphicsPipeline> = None;
+        let eagle: Option<gpu::GraphicsPipeline> = None;
+        let aa_nn: Option<gpu::GraphicsPipeline> = None;
+        let epx: Option<gpu::GraphicsPipeline> = None;
+        let xbr: Option<gpu::GraphicsPipeline> = None;
+        let xbrz: Option<gpu::GraphicsPipeline> = None;
+        let sxbr: Option<gpu::GraphicsPipeline> = None;
+        let vec_compute: Option<gpu::ComputePipeline> = None;
         (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, bicubic, omni_legacy, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute)
     };
 
@@ -662,27 +663,35 @@ fn main() {
 
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
+                // Lazy-init the GPU pipeline for the current filter (first frame only).
+                macro_rules! ensure_pipeline {
+                    ($pipe:expr, $init:expr) => {{
+                        if $pipe.is_none() { $pipe = $init; }
+                        $pipe.is_some()
+                    }};
+                }
+
                 let gpu_hqx = matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
-                    && hqx_pipeline.is_some();
+                    && ensure_pipeline!(hqx_pipeline, scaling::gpu::init_hqx_pipeline(&gpu_device, &window));
                 let gpu_bicubic = scale_filter == scaling::ScaleFilter::Bicubic
-                    && bicubic_pipeline.is_some();
+                    && ensure_pipeline!(bicubic_pipeline, scaling::gpu::init_bicubic_pipeline(&gpu_device, &window));
                 let gpu_omni_legacy = scale_filter == scaling::ScaleFilter::OmniScaleLegacy
-                    && omniscale_legacy_pipeline.is_some();
+                    && ensure_pipeline!(omniscale_legacy_pipeline, scaling::gpu::init_omniscale_legacy_pipeline(&gpu_device, &window));
                 let gpu_scale3x = scale_filter == scaling::ScaleFilter::Scale3x
-                    && scale3x_pipeline.is_some();
+                    && ensure_pipeline!(scale3x_pipeline, scaling::gpu::init_scale3x_pipeline(&gpu_device, &window));
                 let gpu_eagle = scale_filter == scaling::ScaleFilter::Eagle
-                    && eagle_pipeline.is_some();
+                    && ensure_pipeline!(eagle_pipeline, scaling::gpu::init_eagle_pipeline(&gpu_device, &window));
                 let gpu_aa_nearest = scale_filter == scaling::ScaleFilter::AaNearestNeighbor
-                    && aa_nearest_pipeline.is_some();
+                    && ensure_pipeline!(aa_nearest_pipeline, scaling::gpu::init_aa_nearest_pipeline(&gpu_device, &window));
                 let gpu_epx = matches!(scale_filter,
                     scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x | scaling::ScaleFilter::Scale4x)
-                    && epx_pipeline.is_some();
+                    && ensure_pipeline!(epx_pipeline, scaling::gpu::init_epx_pipeline(&gpu_device, &window));
                 let gpu_xbr = matches!(scale_filter, scaling::ScaleFilter::Xbr(_))
-                    && xbr_pipeline.is_some();
+                    && ensure_pipeline!(xbr_pipeline, scaling::gpu::init_xbr_pipeline(&gpu_device, &window));
                 let gpu_xbrz = matches!(scale_filter, scaling::ScaleFilter::Xbrz(_))
-                    && xbrz_pipeline.is_some();
+                    && ensure_pipeline!(xbrz_pipeline, scaling::gpu::init_xbrz_pipeline(&gpu_device, &window));
                 let gpu_super_xbr = scale_filter == scaling::ScaleFilter::SuperXbr
-                    && super_xbr_pipeline.is_some();
+                    && ensure_pipeline!(super_xbr_pipeline, scaling::gpu::init_super_xbr_pipeline(&gpu_device, &window));
                 let gpu_native = matches!(
                     scale_filter,
                     scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
@@ -693,7 +702,7 @@ fn main() {
                 let gpu_vectorize = matches!(
                     scale_filter,
                     scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
-                ) && vectorize_compute.is_some();
+                ) && ensure_pipeline!(vectorize_compute, scaling::gpu::init_vectorize_compute_pipeline(&gpu_device));
 
                 if gpu_vectorize {
                     let (ww, wh) = window.size();
@@ -810,6 +819,7 @@ fn main() {
                             super_xbr_pipeline.as_ref().unwrap(), &omniscale_sampler,
                         );
                     } else if scale_filter == scaling::ScaleFilter::OmniScale {
+                        ensure_pipeline!(omniscale_pipeline, scaling::gpu::init_omniscale_pipeline(&gpu_device, &window));
                         if let Some(ref pipeline) = omniscale_pipeline {
                             scaling::gpu::render_omniscale(
                                 &gpu_device, &window, &gpu_tex, &transfer_buf,
