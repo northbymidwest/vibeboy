@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 default-run = "vibeboy"
 
-[workspace]
-exclude = ["test-roms/mooneye-gb"]
-
 [[bin]]
 name = "vibeboy"
 path = "src/main.rs"
