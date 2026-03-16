@@ -1171,10 +1171,13 @@ fn boundary_loop_to_line_segments(nodes: &[NodeId]) -> Vec<PathSegment> {
 }
 
 /// Split B-splines at junction nodes (valence >= 3 in visible edge graph).
+/// At T-junctions with corrected positions, the endpoint is adjusted so the
+/// ending curve meets the continuing curve smoothly.
 fn boundary_loop_to_segments(
     nodes: &[NodeId],
     optimized: &FxHashMap<NodeId, Point>,
     junctions: &HashSet<NodeId>,
+    tjunc_corrected: &FxHashMap<NodeId, Point>,
 ) -> Vec<PathSegment> {
     let n = nodes.len();
     let points: Vec<Point> = nodes
@@ -1198,11 +1201,23 @@ fn boundary_loop_to_segments(
         return bspline_closed(&points);
     }
 
+    // Helper: get the corrected position for a junction endpoint, or the
+    // original position if no T-junction correction is available.
+    let endpoint_pos = |idx: usize| -> Point {
+        tjunc_corrected.get(&nodes[idx]).copied().unwrap_or(points[idx])
+    };
+
     if corner_indices.len() == 1 {
         let c = corner_indices[0];
         let mut span_points = Vec::with_capacity(n + 1);
         for i in 0..=n {
-            span_points.push(points[(c + i) % n]);
+            let pt_idx = (c + i) % n;
+            // Use corrected position at junction endpoints (first and last)
+            if i == 0 || i == n {
+                span_points.push(endpoint_pos(pt_idx));
+            } else {
+                span_points.push(points[pt_idx]);
+            }
         }
         return bspline_open(&span_points);
     }
@@ -1217,7 +1232,12 @@ fn boundary_loop_to_segments(
         let mut span_points = Vec::new();
         let mut idx = start;
         loop {
-            span_points.push(points[idx]);
+            // Use corrected position at junction endpoints
+            if idx == start || idx == end {
+                span_points.push(endpoint_pos(idx));
+            } else {
+                span_points.push(points[idx]);
+            }
             if idx == end { break; }
             idx = (idx + 1) % n;
         }
@@ -1266,7 +1286,8 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
 
         let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
         for (node_loop, color) in &all_loops {
-            let segs = boundary_loop_to_segments(node_loop, &optimized, &junctions);
+            let no_tjunc: FxHashMap<NodeId, Point> = fx_hashmap();
+            let segs = boundary_loop_to_segments(node_loop, &optimized, &junctions, &no_tjunc);
             if !segs.is_empty() {
                 color_loops.entry(*color).or_default().push(segs);
             }
@@ -1284,19 +1305,86 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         return result;
     }
 
-    // Build junction set: endpoints of open chains (valence >= 3 nodes)
-    let junctions = {
+    // Build junction set and T-junction corrected positions.
+    // At each T-junction (exactly 3 chains meeting), the two merged (contour)
+    // chains define the continuing curve direction. The corrected position
+    // is the B-spline evaluation at t=0.5 along that continuing curve:
+    //   corrected = 0.125*prev_contour + 0.75*junction + 0.125*next_contour
+    let (junctions, tjunc_corrected) = {
         let mut chains = chain_visible_edges(&visible_edges);
         merge_t_junctions(&mut chains);
         let mut j: HashSet<NodeId> = HashSet::new();
+        let mut corrected: FxHashMap<NodeId, Point> = fx_hashmap();
         for (chain, _) in &chains {
             let is_closed = chain.len() > 2 && chain.first() == chain.last();
             if !is_closed && chain.len() >= 2 {
-                j.insert(chain[0]);
-                j.insert(chain[chain.len() - 1]);
+                // Start endpoint: junction with next node as contour direction
+                let jn = chain[0];
+                j.insert(jn);
+                if chain.len() >= 3 {
+                    // The merged chain continues through this junction.
+                    // chain[1] is the next node in the contour direction.
+                    // We need the node from the OTHER side — but we only have
+                    // this chain's direction. Store it; if another chain also
+                    // ends here, we'll combine both directions.
+                    let jp = jn.to_point();
+                    let np = chain[1].to_point();
+                    corrected.entry(jn).and_modify(|existing| {
+                        // Second contour direction found — compute correction
+                        // existing holds the first direction's neighbor point
+                        let first_neighbor = *existing;
+                        *existing = Point::new(
+                            0.125 * first_neighbor.x + 0.75 * jp.x + 0.125 * np.x,
+                            0.125 * first_neighbor.y + 0.75 * jp.y + 0.125 * np.y,
+                        );
+                    }).or_insert(np); // Store first direction's neighbor
+                }
+
+                // End endpoint
+                let jn = chain[chain.len() - 1];
+                j.insert(jn);
+                if chain.len() >= 3 {
+                    let jp = jn.to_point();
+                    let np = chain[chain.len() - 2].to_point();
+                    corrected.entry(jn).and_modify(|existing| {
+                        let first_neighbor = *existing;
+                        *existing = Point::new(
+                            0.125 * first_neighbor.x + 0.75 * jp.x + 0.125 * np.x,
+                            0.125 * first_neighbor.y + 0.75 * jp.y + 0.125 * np.y,
+                        );
+                    }).or_insert(np);
+                }
             }
         }
-        j
+        // Filter out entries that only got one direction (stored raw neighbor, not corrected)
+        // A properly corrected junction has both directions and the formula applied
+        // We can detect this: if exactly 2 chains contributed, the entry was modified
+        // via and_modify. If only 1 chain contributed, it's just a raw neighbor point.
+        // Keep only entries where the correction was actually computed (2+ chains).
+        // Unfortunately we can't distinguish. Let's use a separate counter.
+        // Simpler approach: recompute. Collect all chain endpoints per junction,
+        // then compute correction for junctions with exactly 2 chain endpoints.
+        let mut junc_neighbors: FxHashMap<NodeId, Vec<Point>> = fx_hashmap();
+        for (chain, _) in &chains {
+            let is_closed = chain.len() > 2 && chain.first() == chain.last();
+            if !is_closed && chain.len() >= 3 {
+                let start = chain[0];
+                junc_neighbors.entry(start).or_default().push(chain[1].to_point());
+                let end = chain[chain.len() - 1];
+                junc_neighbors.entry(end).or_default().push(chain[chain.len() - 2].to_point());
+            }
+        }
+        let mut final_corrected: FxHashMap<NodeId, Point> = fx_hashmap();
+        for (node, neighbors) in &junc_neighbors {
+            if neighbors.len() == 2 {
+                let jp = node.to_point();
+                final_corrected.insert(*node, Point::new(
+                    0.125 * neighbors[0].x + 0.75 * jp.x + 0.125 * neighbors[1].x,
+                    0.125 * neighbors[0].y + 0.75 * jp.y + 0.125 * neighbors[1].y,
+                ));
+            }
+        }
+        (j, final_corrected)
     };
     let t3 = std::time::Instant::now();
 
@@ -1317,7 +1405,7 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
     // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
     for (node_loop, color) in &all_loops {
-        let segs = boundary_loop_to_segments(node_loop, &node_positions, &junctions);
+        let segs = boundary_loop_to_segments(node_loop, &node_positions, &junctions, &tjunc_corrected);
         if !segs.is_empty() {
             color_loops.entry(*color).or_default().push(segs);
         }
