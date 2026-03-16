@@ -188,9 +188,10 @@ fn resolve_crossings(_pixels: &[u32], w: usize, h: usize, edges: &mut [PixelEdge
             // Anti wins → remove main
             edges[y * w + x].down_right = false;
         } else {
-            // Tie: remove both
-            edges[y * w + x].down_right = false;
-            edges[y * w + (x + 1)].down_left = false;
+            // Tie: keep both diagonals. The paper says to remove both, but
+            // the reference implementation (Depixelizing Pixel Art on GPUs)
+            // keeps both, which better preserves connectivity of thin features
+            // like the Space Invaders sprites.
         }
     }
 }
