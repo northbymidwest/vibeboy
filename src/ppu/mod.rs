@@ -925,6 +925,16 @@ impl Ppu {
                         // CGB double-speed: defer STAT bits, accessibility,
                         // and IRQ by 1T
                         self.mode0_stat_dot = self.dot + 1;
+                    } else if self.cgb_mode {
+                        // CGB normal speed: STAT mode bits and accessibility
+                        // change immediately; STAT interrupt fires 1T later.
+                        self.stat = self.stat & !0x03;
+                        self.oam_accessible = true;
+                        self.oam_write_accessible = true;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.hblank_entered = true;
+                        self.mode0_stat_dot = self.dot + 1;
                     } else {
                         // DMG and CGB normal speed: STAT mode bits and
                         // accessibility change immediately; only the STAT
@@ -963,12 +973,10 @@ impl Ppu {
                     // Fire the mode 0 STAT interrupt
                     self.update_stat_irq();
                 }
-                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 78.
+                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 79.
                 // Hardware: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
-                // In our model (no 1T sleep offset): transition at dot 78 so CPU sees
-                // mode 3 at dot 80 (after the batch 77-80). mode3_start_delay=5 ensures
-                // actual pixel rendering starts at dot 84.
-                if self.lcd_first_line && self.dot >= 78 {
+                // mode3_start_delay=5 ensures actual pixel rendering starts at dot 84.
+                if self.lcd_first_line && self.dot >= 79 {
                     self.lcd_first_line = false;
                     self.lcd_first_line_short = true;
                     self.oam_scan(); // collect sprites
