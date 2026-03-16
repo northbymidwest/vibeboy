@@ -1669,12 +1669,22 @@ fn local_energy(
         + positional_energy(points, orig, idx)
 }
 
+/// Positional energy: (2.5 × ‖Δ‖)⁴ = 2.5⁴ × ‖Δ‖⁴ ≈ 39.06 × ‖Δ‖⁴.
+///
+/// The 2.5 scaling factor matches the reference implementation
+/// (Depixelizing Pixel Art on GPUs, OptimizeEnergy.vert line 84).
+/// The paper specifies ‖Δ‖⁴ without the scaling, but the reference
+/// uses 2.5× which keeps nodes much closer to their original positions,
+/// preventing over-smoothing of intentional pixel-art features.
+const POSITIONAL_SCALE: f64 = 2.5;
+
 #[inline(always)]
 fn positional_energy(points: &[Point], orig: &[Point], idx: usize) -> f64 {
     let dx = points[idx].x - orig[idx].x;
     let dy = points[idx].y - orig[idx].y;
     let dist_sq = dx * dx + dy * dy;
-    dist_sq * dist_sq
+    let scaled_dist_sq = POSITIONAL_SCALE * POSITIONAL_SCALE * dist_sq;
+    scaled_dist_sq * scaled_dist_sq
 }
 
 #[inline(always)]
