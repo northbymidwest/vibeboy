@@ -740,19 +740,24 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
 
 /// Check if a color pair represents a "shading edge" — the two colors are
 /// somewhat different (enough to be a visible edge) but not strongly dissimilar.
-/// Paper Section 3.3: shading edge if YUV distance ≤ 100/255.
-/// We use luminance (Y channel): |ΔY| ≤ 100 in 0-255 scale.
+/// Uses Euclidean distance in YUV space ≤ 100/255, matching the reference
+/// implementation (FullCellGraphConstruction.geom isContour).
 #[inline]
 fn is_shading_cpair(cpair: (u32, u32)) -> bool {
     let (a, b) = cpair;
     if a == b { return true; }
     if a == VOID_COLOR || b == VOID_COLOR { return false; }
-    let dr = ((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32;
-    let dg = ((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32;
-    let db = (a & 0xFF) as i32 - (b & 0xFF) as i32;
-    // Y = 0.299R + 0.587G + 0.114B scaled by 1000
-    let dy1000 = 299 * dr + 587 * dg + 114 * db;
-    dy1000.abs() <= 100_000
+    let dr = ((a >> 16) & 0xFF) as f64 - ((b >> 16) & 0xFF) as f64;
+    let dg = ((a >> 8) & 0xFF) as f64 - ((b >> 8) & 0xFF) as f64;
+    let db = (a & 0xFF) as f64 - (b & 0xFF) as f64;
+    // YUV conversion (same coefficients as similarity graph)
+    let dy = (0.299 * dr + 0.587 * dg + 0.114 * db) / 255.0;
+    let du = (0.493 * (db / 255.0 - dy)) ;
+    let dv = (0.877 * (dr / 255.0 - dy)) ;
+    // Euclidean distance in YUV space ≤ 100/255
+    let dist_sq = dy * dy + du * du + dv * dv;
+    let threshold = 100.0 / 255.0;
+    dist_sq <= threshold * threshold
 }
 
 /// At junction nodes (valence >= 3 in visible edge graph), merge chain pairs.

@@ -28,7 +28,7 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint src_w;
     uint src_h;
     float inv_scale;
-    float sigma_sq_2;
+    float gauss_k;
     float radius;
     uint _pad;
 };
@@ -175,7 +175,7 @@ void main() {
             float d_sq = dx * dx + dy * dy;
             if (d_sq > r_sq) continue;
 
-            float w = exp(-d_sq / sigma_sq_2);
+            float w = exp(-d_sq * gauss_k);
             uint color = src_pixels[idx];
             tr += w * float((color >> 16u) & 0xFFu);
             tg += w * float((color >> 8u) & 0xFFu);

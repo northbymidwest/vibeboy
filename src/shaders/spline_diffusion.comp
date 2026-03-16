@@ -23,7 +23,7 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint src_w;
     uint src_h;
     float inv_scale;
-    float sigma_sq_2;
+    float gauss_k;
     float radius;
     uint scale_int;
 };
@@ -52,7 +52,7 @@ vec4 gaussian_sample(float sx, float sy, uint sample_region) {
             float d_sq = dx * dx + dy * dy;
             if (d_sq > r_sq) continue;
 
-            float w = exp(-d_sq / sigma_sq_2);
+            float w = exp(-d_sq * gauss_k);
             uint color = src_pixels[uint(py) * src_w + uint(px)];
             tr += w * float((color >> 16u) & 0xFFu);
             tg += w * float((color >> 8u) & 0xFFu);

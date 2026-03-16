@@ -524,7 +524,7 @@ pub fn rasterize_diffusion(
     let ownership = build_voronoi_ownership(width, height, &graph, scale);
 
     let inv_scale = 1.0 / scale as f64;
-    let sigma_sq_2 = 2.0; // 2 * σ² with σ = 1
+    let gauss_k = 2.5; // Gaussian multiplier (reference: GaussRasterizer.frag)
     let radius = 2.0f64;
     let r_sq = radius * radius;
 
@@ -559,7 +559,7 @@ pub fn rasterize_diffusion(
                     let d_sq = dx * dx + dy * dy;
                     if d_sq > r_sq { continue; }
 
-                    let w = (-d_sq / sigma_sq_2).exp();
+                    let w = (-d_sq * gauss_k).exp();
                     let color = pixels[py * width + px];
                     tr += w * ((color >> 16) & 0xFF) as f64;
                     tg += w * ((color >> 8) & 0xFF) as f64;
@@ -1282,7 +1282,7 @@ pub fn rasterize_spline_diffusion(
 
     // Step 3: Gaussian diffusion within connected regions.
     let inv_scale = 1.0 / scale as f64;
-    let sigma_sq_2 = 2.0;
+    let gauss_k = 2.5; // match reference impl
     let radius = 2.0f64;
     let r_sq = radius * radius;
 
@@ -1316,7 +1316,7 @@ pub fn rasterize_spline_diffusion(
                     let d_sq = dx * dx + dy * dy;
                     if d_sq > r_sq { continue; }
 
-                    let w = (-d_sq / sigma_sq_2).exp();
+                    let w = (-d_sq * gauss_k).exp();
                     let color = pixels[py * width + px];
                     tr += w * ((color >> 16) & 0xFF) as f64;
                     tg += w * ((color >> 8) & 0xFF) as f64;

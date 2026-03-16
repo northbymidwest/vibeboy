@@ -1074,12 +1074,12 @@ pub fn diffusion_and_blit(
         #[repr(C)]
         struct Uniforms {
             out_w: u32, out_h: u32, src_w: u32, src_h: u32,
-            inv_scale: f32, sigma_sq_2: f32, radius: f32, _pad: u32,
+            inv_scale: f32, gauss_k: f32, radius: f32, _pad: u32,
         }
         cmd.push_compute_uniform_data(0, &Uniforms {
             out_w, out_h, src_w, src_h,
             inv_scale: 1.0 / scale,
-            sigma_sq_2: 2.0,
+            gauss_k: 2.5,
             radius: 2.0,
             _pad: 0,
         });
@@ -1272,12 +1272,12 @@ pub fn spline_diffusion_and_blit(
         #[repr(C)]
         struct Pass2Uniforms {
             out_w: u32, out_h: u32, src_w: u32, src_h: u32,
-            inv_scale: f32, sigma_sq_2: f32, radius: f32, scale_int: u32,
+            inv_scale: f32, gauss_k: f32, radius: f32, scale_int: u32,
         }
         cmd.push_compute_uniform_data(0, &Pass2Uniforms {
             out_w, out_h, src_w, src_h,
             inv_scale: 1.0 / scale as f32,
-            sigma_sq_2: 2.0,
+            gauss_k: 2.5,
             radius: 2.0,
             scale_int: scale,
         });
@@ -1694,7 +1694,7 @@ pub fn gpu_spline_diffusion_screenshot(
       cp.bind_compute_storage_buffers(0, &[pb, region_buf]);
       #[repr(C)] struct U2 { ow:u32, oh:u32, sw:u32, sh:u32, is:f32, s2:f32, r:f32, si:u32 }
       cmd.push_compute_uniform_data(0, &U2{ow:out_w,oh:out_h,sw:src_w as u32,sh:src_h as u32,
-          is:1.0/scale as f32,s2:2.0,r:2.0,si:scale as u32});
+          is:1.0/scale as f32,s2:2.5,r:2.0,si:scale as u32});
       cp.dispatch((out_w+15)/16,(out_h+15)/16,1);
       device.end_compute_pass(cp);
     }
