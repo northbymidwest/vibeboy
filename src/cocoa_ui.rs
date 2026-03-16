@@ -293,61 +293,11 @@ struct Cli {
 }
 
 fn parse_filter(s: &str) -> Result<String, String> {
-    let valid = [
-        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
-        "2xsai", "super-2xsai", "super-eagle",
-        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
-        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
-        "super-xbr", "nedi", "dcci", "edi",
-        "omniscale", "omniscale-legacy",
-        "aa-nearest", "vectorize", "vectorize-adaptive",
-    ];
-    let lower = s.to_lowercase();
-    if valid.contains(&lower.as_str()) {
-        Ok(lower)
-    } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive]", s))
-    }
+    scaling::ScaleFilter::validate_name(s)
 }
 
 fn string_to_filter(s: &str) -> scaling::ScaleFilter {
-    match s {
-        "nearest" | "none" => scaling::ScaleFilter::Nearest,
-        "bilinear" => scaling::ScaleFilter::Bilinear,
-        "bicubic" => scaling::ScaleFilter::Bicubic,
-        "epx" => scaling::ScaleFilter::Epx,
-        "scale2x" => scaling::ScaleFilter::Scale2x,
-        "scale3x" => scaling::ScaleFilter::Scale3x,
-        "scale4x" => scaling::ScaleFilter::Scale4x,
-        "eagle" => scaling::ScaleFilter::Eagle,
-        "2xsai" => scaling::ScaleFilter::Sai2x,
-        "super-2xsai" => scaling::ScaleFilter::Super2xSai,
-        "super-eagle" => scaling::ScaleFilter::SuperEagle,
-        "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
-        "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
-        "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
-        "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
-        "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
-        "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
-        "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz2x),
-        "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz3x),
-        "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
-        "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
-        "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
-        "super-xbr" => scaling::ScaleFilter::SuperXbr,
-        "nedi" => scaling::ScaleFilter::Nedi,
-        "dcci" => scaling::ScaleFilter::Dcci,
-        "edi" => scaling::ScaleFilter::Edi,
-        "omniscale" => scaling::ScaleFilter::OmniScale,
-        "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
-        "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
-        "vectorize" => scaling::ScaleFilter::Vectorize,
-        "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
-        "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
-        "vectorize-spline-diffusion" => scaling::ScaleFilter::VectorizeSplineDiffusion,
-        "vectorize-spline-diffusion-adaptive" => scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive,
-        _ => scaling::ScaleFilter::Nearest,
-    }
+    scaling::ScaleFilter::from_name(s).unwrap_or(scaling::ScaleFilter::Nearest)
 }
 
 // ── CoreAudio FFI ────────────────────────────────────────────────────────────
@@ -2651,106 +2601,28 @@ fn main() {
                 };
 
                 // Apply scaling filter
-                let scaled;
-                let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) = match scale_filter {
-                    scaling::ScaleFilter::Nearest => {
+                let mut vec_scaled: Vec<u32>;
+                let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
+                    if scale_filter == scaling::ScaleFilter::Nearest {
                         (raw_src, src_w, src_h)
-                    }
-                    scaling::ScaleFilter::Bilinear => {
-                        scaled = scaling::bilinear::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
-                        (&scaled, disp_w, disp_h)
-                    }
-                    scaling::ScaleFilter::Bicubic => {
-                        scaled = scaling::bicubic::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
-                        (&scaled, disp_w, disp_h)
-                    }
-                    scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x => {
-                        scaled = scaling::epx::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Scale3x => {
-                        scaled = scaling::scale3x::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 3, src_h * 3)
-                    }
-                    scaling::ScaleFilter::Scale4x => {
-                        scaled = scaling::epx::scale4x(raw_src, src_w, src_h);
-                        (&scaled, src_w * 4, src_h * 4)
-                    }
-                    scaling::ScaleFilter::Eagle => {
-                        scaled = scaling::eagle::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Sai2x => {
-                        scaled = scaling::sai::scale_2xsai(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Super2xSai => {
-                        scaled = scaling::sai::scale_super2xsai(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::SuperEagle => {
-                        scaled = scaling::sai::scale_super_eagle(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Hqx(mode) => {
-                        let f = mode.factor() as usize;
-                        scaled = scaling::hqx::scale(raw_src, src_w, src_h, mode);
-                        (&scaled, src_w * f, src_h * f)
-                    }
-                    scaling::ScaleFilter::Xbr(mode) => {
-                        let f = mode.factor() as usize;
-                        scaled = scaling::xbr::scale(raw_src, src_w, src_h, mode);
-                        (&scaled, src_w * f, src_h * f)
-                    }
-                    scaling::ScaleFilter::Xbrz(mode) => {
-                        let f = mode.factor() as usize;
-                        scaled = scaling::xbrz::scale(raw_src, src_w, src_h, mode);
-                        (&scaled, src_w * f, src_h * f)
-                    }
-                    scaling::ScaleFilter::SuperXbr => {
-                        scaled = scaling::super_xbr::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Nedi => {
-                        scaled = scaling::nedi::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Dcci => {
-                        scaled = scaling::dcci::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::Edi => {
-                        scaled = scaling::edi::scale(raw_src, src_w, src_h);
-                        (&scaled, src_w * 2, src_h * 2)
-                    }
-                    scaling::ScaleFilter::OmniScale => {
-                        scaled = scaling::omniscale::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
-                        (&scaled, disp_w, disp_h)
-                    }
-                    scaling::ScaleFilter::OmniScaleLegacy => {
-                        scaled = scaling::omniscale_legacy::scale_to(raw_src, src_w, src_h, disp_w, disp_h);
-                        (&scaled, disp_w, disp_h)
-                    }
-                    scaling::ScaleFilter::AaNearestNeighbor => {
-                        scaled = scaling::aa_nearest::scale(raw_src, src_w, src_h, disp_w, disp_h);
-                        (&scaled, disp_w, disp_h)
-                    }
-                    scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive => {
+                    } else if matches!(scale_filter,
+                        scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+                    {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
                         let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
                         let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
                         (raster, vw, vh)
-                    }
-                    scaling::ScaleFilter::VectorizeDiffusion => {
+                    } else if scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let scale = s.round().max(1.0) as usize;
                         let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(raw_src, src_w, src_h, scale);
-                        scaled = buf;
-                        (&scaled, dw, dh)
-                    }
-                    scaling::ScaleFilter::VectorizeSplineDiffusion
-                    | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => {
+                        vec_scaled = buf;
+                        (&vec_scaled, dw, dh)
+                    } else if matches!(scale_filter,
+                        scaling::ScaleFilter::VectorizeSplineDiffusion
+                        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive)
+                    {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let scale = s.round().max(1.0) as usize;
                         let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(false));
@@ -2758,10 +2630,16 @@ fn main() {
                         let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
                             paths, raw_src, src_w, src_h, bg, scale,
                         );
-                        scaled = buf;
-                        (&scaled, dw, dh)
-                    }
-                };
+                        vec_scaled = buf;
+                        (&vec_scaled, dw, dh)
+                    } else if let Some((s, w, h)) = scaling::cpu_scale(
+                        scale_filter, raw_src, src_w, src_h, disp_w, disp_h,
+                    ) {
+                        vec_scaled = s;
+                        (&vec_scaled, w as usize, h as usize)
+                    } else {
+                        (raw_src, src_w, src_h)
+                    };
 
                 // Resize texture if dimensions changed
                 if frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h {

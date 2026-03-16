@@ -126,37 +126,10 @@ pub fn cmd_screenshot(
     // Apply scaling filter if requested
     let scaled_buf;
     let (fb, fb_w, fb_h) = if let Some(f) = filter {
-        let sf = match f {
-            "epx" => scaling::ScaleFilter::Epx,
-            "scale2x" => scaling::ScaleFilter::Scale2x,
-            "scale3x" => scaling::ScaleFilter::Scale3x,
-            "scale4x" => scaling::ScaleFilter::Scale4x,
-            "eagle" => scaling::ScaleFilter::Eagle,
-            "2xsai" => scaling::ScaleFilter::Sai2x,
-            "super-2xsai" => scaling::ScaleFilter::Super2xSai,
-            "super-eagle" => scaling::ScaleFilter::SuperEagle,
-            "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
-            "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
-            "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
-            "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
-            "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
-            "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
-            "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz2x),
-            "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz3x),
-            "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz4x),
-            "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz5x),
-            "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::xbrz::XbrzScale::Xbrz6x),
-            "super-xbr" => scaling::ScaleFilter::SuperXbr,
-            "omniscale" => scaling::ScaleFilter::OmniScale,
-            "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
-            "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
-            "bicubic" => scaling::ScaleFilter::Bicubic,
-            "vectorize" | "vectorize-adaptive" => scaling::ScaleFilter::Vectorize,
-            other => {
-                eprintln!("Unknown filter '{}', using nearest", other);
-                scaling::ScaleFilter::Nearest
-            }
-        };
+        let sf = scaling::ScaleFilter::from_name(f).unwrap_or_else(|| {
+            eprintln!("Unknown filter '{}', using nearest", f);
+            scaling::ScaleFilter::Nearest
+        });
         let is_vectorize = f == "vectorize" || f == "vectorize-adaptive";
         let is_adaptive = f == "vectorize-adaptive";
 
