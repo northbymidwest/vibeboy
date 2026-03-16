@@ -127,7 +127,7 @@ cat > "$HTML" << 'HEADER'
   .grid { display: flex; flex-direction: column; gap: 2rem; }
   .card { background: #16213e; border-radius: 12px; overflow: hidden; border: 1px solid #2a2a4a; }
   .card-header { padding: 0.8rem 1.2rem; background: #0f3460; font-weight: 600; font-size: 1rem; }
-  .card-body { display: grid; grid-template-columns: auto repeat(5, 1fr); gap: 1px; background: #2a2a4a; }
+  .card-body { display: grid; grid-template-columns: auto repeat(6, 1fr); gap: 1px; background: #2a2a4a; }
   .card-body > div { background: #16213e; display: flex; align-items: center; justify-content: center; padding: 0.4rem; }
   .card-body .label { font-size: 0.7rem; color: #888; writing-mode: vertical-rl; text-orientation: mixed; padding: 0.2rem 0.4rem; min-width: 1.5rem; }
   .card-body img { display: block; max-width: 100%; height: auto; image-rendering: auto; }
@@ -154,6 +154,10 @@ for name in "${NAMES[@]}"; do
 
     [ ! -f "$OUT_DIR/$input" ] && continue
 
+    # Read input PNG dimensions from IHDR chunk (bytes 16-23) for nearest-neighbor sizing
+    nn_w=$((16#$(xxd -p -l 4 -s 16 "$OUT_DIR/$input") * SCALE))
+    nn_h=$((16#$(xxd -p -l 4 -s 20 "$OUT_DIR/$input") * SCALE))
+
     display_name=$(echo "$name" | tr '_' ' ')
 
     cat >> "$HTML" << CARD
@@ -161,6 +165,7 @@ for name in "${NAMES[@]}"; do
   <div class="card-header">$display_name</div>
   <div class="card-body">
     <div class="col-header"></div>
+    <div class="col-header">Nearest</div>
     <div class="col-header">Paper</div>
     <div class="col-header">Scanline CPU</div>
     <div class="col-header">Scanline GPU</div>
@@ -169,6 +174,7 @@ for name in "${NAMES[@]}"; do
     <div class="label">Input</div>
     <div style="grid-column: 2 / -1;"><img class="input" src="$input"></div>
     <div class="label">8×</div>
+    <div><img class="input" src="$input" width="${nn_w}" height="${nn_h}"></div>
     <div><img src="$paper"></div>
     <div><img src="$sl_cpu"></div>
     <div><img src="$sl_gpu"></div>
