@@ -436,80 +436,87 @@ const ADAPTIVE_EDGE_THRESHOLD: usize = 12000;
 fn build_directed_boundary_edges(
     pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell], adaptive: bool,
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
-    // Hash-based deduplication: O(n) instead of O(n log n) sort-merge.
-    // Each edge maps to (left_color, right_color).
+    // Sort-merge approach: collect all half-edges, sort by canonical key, merge
+    // adjacent pairs. Cache-friendlier than HashMap for large images.
     let stride = (4 * w + 4) as u32;
-    let mut edge_map: FxHashMap<u64, (u32, u32, NodeId, NodeId)> =
-        fx_hashmap_cap(w * h * 2);
+
+    // Each pixel has 4-8 cell edges. Collect as (canonical_key, node_a, node_b, color, is_forward).
+    let mut half_edges: Vec<(u64, NodeId, NodeId, u32, bool)> = Vec::with_capacity(w * h * 5);
 
     for y in 0..h {
+        let row = y * w;
         for x in 0..w {
-            let color = pixels[y * w + x];
-            let cell = all_cells[y * w + x].as_slice();
-            let n = cell.len();
+            let color = pixels[row + x];
+            let cell = &all_cells[row + x];
+            let n = cell.len as usize;
             if n < 3 { continue; }
 
             for i in 0..n {
-                let pa = cell[i];
-                let pb = cell[(i + 1) % n];
+                let pa = cell.nodes[i];
+                let pb = cell.nodes[if i + 1 < n { i + 1 } else { 0 }];
 
-                let (key, is_forward, node_a, node_b) = if pa <= pb {
-                    let ka = pack_node(pa, stride);
-                    let kb = pack_node(pb, stride);
-                    (pack_edge(ka, kb), true, pa, pb)
+                let (key, is_forward) = if pa <= pb {
+                    (pack_edge(pack_node(pa, stride), pack_node(pb, stride)), true)
                 } else {
-                    let ka = pack_node(pb, stride);
-                    let kb = pack_node(pa, stride);
-                    (pack_edge(ka, kb), false, pb, pa)
+                    (pack_edge(pack_node(pb, stride), pack_node(pa, stride)), false)
                 };
-
-                let entry = edge_map.entry(key)
-                    .or_insert((VOID_COLOR, VOID_COLOR, node_a, node_b));
-                if is_forward {
-                    entry.1 = color; // right
-                } else {
-                    entry.0 = color; // left
-                }
+                let (na, nb) = if pa <= pb { (pa, pb) } else { (pb, pa) };
+                half_edges.push((key, na, nb, color, is_forward));
             }
         }
     }
 
-    // Count boundary edges to decide adaptive vs full pipeline
-    let boundary_count = edge_map.values()
-        .filter(|(left, right, _, _)| is_visible_edge(*left, *right))
-        .count();
-    let adaptive = adaptive && boundary_count > ADAPTIVE_EDGE_THRESHOLD;
+    // Sort by canonical key — groups matching half-edges adjacent
+    half_edges.sort_unstable_by_key(|e| e.0);
 
+    // Merge adjacent pairs and emit boundary edges
+    let mut boundary_count = 0usize;
+    let mut i = 0;
+    let len = half_edges.len();
+
+    // First pass: count boundaries
+    while i < len {
+        let key = half_edges[i].0;
+        let mut left = VOID_COLOR;
+        let mut right = VOID_COLOR;
+        let j = i;
+        while i < len && half_edges[i].0 == key {
+            if half_edges[i].4 { right = half_edges[i].3; }
+            else { left = half_edges[i].3; }
+            i += 1;
+        }
+        if is_visible_edge(left, right) { boundary_count += 1; }
+    }
+
+    let adaptive = adaptive && boundary_count > ADAPTIVE_EDGE_THRESHOLD;
     let mut directed = Vec::with_capacity(boundary_count * 2);
-    let visible = if adaptive {
-        // Adaptive path: skip visible edge construction and both sorts.
-        // trace_all_boundary_loops builds its own HashMap, so input order is irrelevant.
-        for (_, (left, right, key_a, key_b)) in &edge_map {
-            if is_visible_edge(*left, *right) {
-                directed.push((*key_a, *key_b, *right));
-                directed.push((*key_b, *key_a, *left));
-            }
+    let mut visible = if adaptive { Vec::new() } else { Vec::with_capacity(boundary_count) };
+
+    // Second pass: emit edges
+    i = 0;
+    while i < len {
+        let key = half_edges[i].0;
+        let na = half_edges[i].1;
+        let nb = half_edges[i].2;
+        let mut left = VOID_COLOR;
+        let mut right = VOID_COLOR;
+        while i < len && half_edges[i].0 == key {
+            if half_edges[i].4 { right = half_edges[i].3; }
+            else { left = half_edges[i].3; }
+            i += 1;
         }
-        Vec::new()
-    } else {
-        let mut vis = Vec::with_capacity(boundary_count);
-        for (_, (left, right, key_a, key_b)) in &edge_map {
-            if is_visible_edge(*left, *right) {
-                vis.push(CellEdge {
-                    a: *key_a,
-                    b: *key_b,
-                    left_color: *left,
-                    right_color: *right,
-                });
-                directed.push((*key_a, *key_b, *right));
-                directed.push((*key_b, *key_a, *left));
-            }
+        if !is_visible_edge(left, right) { continue; }
+        directed.push((na, nb, right));
+        directed.push((nb, na, left));
+        if !adaptive {
+            visible.push(CellEdge { a: na, b: nb, left_color: left, right_color: right });
         }
-        // Sort for deterministic output and better cache locality in downstream steps.
-        vis.sort_unstable_by(|a, b| (a.a, a.b).cmp(&(b.a, b.b)));
+    }
+
+    if !adaptive {
+        // Already sorted by key from the sort above
         directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        vis
-    };
+    }
 
     (visible, directed)
 }
@@ -631,15 +638,12 @@ fn extract_cell_edges(pixels: &[u32], graph: &SimilarityGraph) -> Vec<CellEdge> 
 
 /// Chain visible edges through valence-2 nodes into paths.
 /// Returns each chain with its canonical color pair (cpair).
-/// Precomputes per-(node, cpair) valence for O(1) lookup instead of
-/// O(degree) scan on every step.
+/// Computes cpair valence inline from adjacency list (avoids separate HashMap).
 fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
-    // Build adjacency as (neighbor_node, cpair, edge_index).
+    // Build adjacency: node → list of (neighbor, cpair, edge_index).
+    // Use a single HashMap; compute cpair valence by counting inline.
     let mut adj: FxHashMap<NodeId, Vec<(NodeId, (u32, u32), usize)>> =
         fx_hashmap_cap(edges.len());
-
-    // Precompute cpair valence: how many edges connect this node with this cpair.
-    let mut cpair_val: FxHashMap<(NodeId, (u32, u32)), u8> = fx_hashmap_cap(edges.len() * 2);
 
     for (ei, e) in edges.iter().enumerate() {
         let cpair = if e.left_color <= e.right_color {
@@ -649,8 +653,16 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
         };
         adj.entry(e.a).or_default().push((e.b, cpair, ei));
         adj.entry(e.b).or_default().push((e.a, cpair, ei));
-        *cpair_val.entry((e.a, cpair)).or_insert(0) += 1;
-        *cpair_val.entry((e.b, cpair)).or_insert(0) += 1;
+    }
+
+    // Inline cpair valence: count how many edges of a given cpair connect to a node.
+    #[inline]
+    fn cpair_valence(neighbors: &[(NodeId, (u32, u32), usize)], cpair: (u32, u32)) -> u8 {
+        let mut v = 0u8;
+        for &(_, cp, _) in neighbors {
+            if cp == cpair { v += 1; }
+        }
+        v
     }
 
     let mut visited = vec![false; edges.len()];
@@ -658,12 +670,12 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
 
     let all_nodes: Vec<NodeId> = adj.keys().copied().collect();
 
-    // Start chains from endpoints (valence != 2)
+    // Start chains from endpoints (cpair valence != 2)
     for start_node in &all_nodes {
         if let Some(neighbors) = adj.get(start_node) {
             for &(next, cpair, ei) in neighbors {
                 if visited[ei] { continue; }
-                if cpair_val[&(*start_node, cpair)] == 2 { continue; }
+                if cpair_valence(neighbors, cpair) == 2 { continue; }
 
                 let mut chain = vec![*start_node];
                 let mut next_node = next;
@@ -674,11 +686,11 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
                     visited[cur_ei] = true;
                     chain.push(next_node);
 
-                    if cpair_val[&(next_node, cpair)] != 2 { break; }
+                    let nbrs = adj.get(&next_node).unwrap();
+                    if cpair_valence(nbrs, cpair) != 2 { break; }
 
-                    let neighbors_of_next = adj.get(&next_node).unwrap();
                     let mut found_next = false;
-                    for &(nn, cp, nei) in neighbors_of_next {
+                    for &(nn, cp, nei) in nbrs {
                         if cp != cpair { continue; }
                         if !visited[nei] {
                             next_node = nn;
@@ -712,9 +724,9 @@ fn chain_visible_edges(edges: &[CellEdge]) -> Vec<(Vec<NodeId>, (u32, u32))> {
                     visited[cur_ei] = true;
                     chain.push(next_node);
 
-                    let neighbors_of_next = adj.get(&next_node).unwrap();
+                    let nbrs = adj.get(&next_node).unwrap();
                     let mut found_next = false;
-                    for &(nn, cp, nei) in neighbors_of_next {
+                    for &(nn, cp, nei) in nbrs {
                         if cp != cpair { continue; }
                         if !visited[nei] {
                             next_node = nn;
