@@ -19,10 +19,12 @@ use std::sync::atomic::AtomicBool;
 /// When false, any color difference creates a visible edge (default, more robust).
 pub static YUV_VISIBLE_EDGES: AtomicBool = AtomicBool::new(false);
 
-/// Sentinel color for the void outside the image. No real pixel has this value
-/// (PPU format is 0x00RRGGBB). Border edges use this instead of collapsing,
-/// so contours close properly while the void path gets filtered from output.
-const VOID_COLOR: u32 = 0xFFFFFFFF;
+/// Sentinel color for the void outside the image. Must not collide with any
+/// real pixel value. The PPU uses 0x00RRGGBB and the test_runner PNG loader
+/// uses 0xFFRRGGBB, so 0x01000000 (alpha=1, RGB=0) is safe for both.
+/// Previous value 0xFFFFFFFF collided with white (0xFFFFFFFF) in the
+/// test_runner's 0xFFRRGGBB format.
+const VOID_COLOR: u32 = 0x01000000;
 
 // --- FxHash: fast non-cryptographic hasher for integer keys ---
 // Replaces SipHash (default) which is ~3x slower for small integer keys.
