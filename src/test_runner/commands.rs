@@ -9,22 +9,90 @@ use crate::vectorize;
 use crate::test_runner::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
 use crate::test_runner::util::{make_emu, parse_keys};
 
+fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for &pixel in pixels {
+        rgb.push(((pixel >> 16) & 0xFF) as u8);
+        rgb.push(((pixel >> 8) & 0xFF) as u8);
+        rgb.push((pixel & 0xFF) as u8);
+    }
+    image::save_buffer(out, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
+        .expect("Failed to write PNG");
+}
+
 fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
     if format == "svg" || out.ends_with(".svg") {
         let svg = vectorize::vectorize_to_svg(pixels, w, h);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
     } else {
-        let mut rgb = Vec::with_capacity(w * h * 3);
-        for &pixel in pixels {
-            rgb.push(((pixel >> 16) & 0xFF) as u8);
-            rgb.push(((pixel >> 8) & 0xFF) as u8);
-            rgb.push((pixel & 0xFF) as u8);
-        }
-        image::save_buffer(out, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
-            .expect("Failed to write PNG");
+        save_pixels_png(pixels, w, h, out);
         eprintln!("Wrote {} (frame {}, {}x{})", out, frames, w, h);
     }
+}
+
+/// Rasterize pixels using the specified vectorize format and save to a file.
+/// Handles raster, diffusion, and spline-diffusion formats with optional GPU.
+/// Returns true if the format was handled, false if it was not a vectorize format.
+fn vectorize_and_save(
+    pixels: &[u32], width: usize, height: usize,
+    out: &str, format: &str, scale: usize, use_gpu: bool,
+) {
+    if out.ends_with(".svg") {
+        let svg = vectorize::vectorize_to_svg(pixels, width, height);
+        fs::write(out, &svg).expect("Failed to write SVG");
+        eprintln!(
+            "Vectorized {}x{} image -> {} ({} bytes)",
+            width, height, out, svg.len()
+        );
+        return;
+    }
+
+    let raster_pixels = match format {
+        "spline-diffusion" => {
+            cpu_spline_diffusion(pixels, width, height, scale, use_gpu)
+        }
+        "diffusion" => {
+            let (r, _, _) = vectorize::rasterize::rasterize_diffusion(pixels, width, height, scale);
+            r
+        }
+        _ => {
+            // "raster" or default
+            let (r, _, _) = vectorize::vectorize_to_raster(pixels, width, height, scale);
+            r
+        }
+    };
+    let out_w = width * scale;
+    let out_h = height * scale;
+    save_pixels_png(&raster_pixels, out_w, out_h, out);
+    eprintln!(
+        "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, format={})",
+        width, height, out, out_w, out_h, scale, format
+    );
+}
+
+/// CPU spline-diffusion rasterization with optional GPU acceleration.
+fn cpu_spline_diffusion(
+    pixels: &[u32], width: usize, height: usize, scale: usize, use_gpu: bool,
+) -> Vec<u32> {
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    if use_gpu {
+        if let Some((px, _, _)) = scaling::gpu::gpu_spline_diffusion_screenshot(pixels, width, height, scale) {
+            return px;
+        }
+        eprintln!("GPU spline-diffusion failed, falling back to CPU");
+    }
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    if use_gpu {
+        eprintln!("GPU shaders not enabled, using CPU");
+    }
+    vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (paths, bg_color) = vectorize::vectorize_core(pixels, width, height);
+    vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(
+        &paths, pixels, width, height, bg_color, scale,
+    );
+    r
 }
 
 pub fn cmd_screenshot(
@@ -135,21 +203,8 @@ pub fn cmd_screenshot(
         (raw_fb, 160, 144)
     };
 
-    if format == "raster" {
-        let (pixels, out_w, out_h) = vectorize::vectorize_to_raster(fb, 160, 144, scale);
-        save_pixels(&pixels, out_w, out_h, out, "png", frames);
-    } else if format == "diffusion" {
-        let (pixels, out_w, out_h) = vectorize::rasterize::rasterize_diffusion(fb, 160, 144, scale);
-        save_pixels(&pixels, out_w, out_h, out, "png", frames);
-    } else if format == "spline-diffusion" {
-        // Paper's full pipeline: YUV visible edges + spline boundaries + Gaussian diffusion
-        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-        let (paths, bg_color) = vectorize::vectorize_core(fb, 160, 144);
-        vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
-        let (pixels, out_w, out_h) = vectorize::rasterize::rasterize_spline_diffusion(
-            &paths, fb, 160, 144, bg_color, scale,
-        );
-        save_pixels(&pixels, out_w, out_h, out, "png", frames);
+    if matches!(format, "raster" | "diffusion" | "spline-diffusion") {
+        vectorize_and_save(fb, 160, 144, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
     }
@@ -173,69 +228,7 @@ pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize, gpu: b
         })
         .collect();
 
-    if out.ends_with(".svg") {
-        let svg = vectorize::vectorize_to_svg(&pixels, width, height);
-        fs::write(out, &svg).expect("Failed to write SVG");
-        eprintln!(
-            "Vectorized {}x{} image -> {} ({} bytes)",
-            width, height, out,
-            svg.len()
-        );
-    } else {
-        let raster_pixels = if gpu && format == "spline-diffusion" {
-            #[cfg(feature = "sdl3-gpu-shaders")]
-            {
-                match scaling::gpu::gpu_spline_diffusion_screenshot(&pixels, width, height, scale) {
-                    Some((px, _, _)) => px,
-                    None => {
-                        eprintln!("GPU spline-diffusion failed, falling back to CPU");
-                        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
-                        vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
-                        let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(&paths, &pixels, width, height, bg_color, scale);
-                        r
-                    }
-                }
-            }
-            #[cfg(not(feature = "sdl3-gpu-shaders"))]
-            {
-                eprintln!("GPU shaders not enabled, using CPU");
-                vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-                let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
-                vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
-                let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(&paths, &pixels, width, height, bg_color, scale);
-                r
-            }
-        } else if format == "spline-diffusion" {
-            vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-            let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
-            vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
-            let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(
-                &paths, &pixels, width, height, bg_color, scale,
-            );
-            r
-        } else if format == "diffusion" {
-            let (r, _, _) = vectorize::rasterize::rasterize_diffusion(&pixels, width, height, scale);
-            r
-        } else {
-            let (r, _, _) = vectorize::vectorize_to_raster(&pixels, width, height, scale);
-            r
-        };
-        let out_w = width * scale;
-        let out_h = height * scale;
-        let mut rgb = Vec::with_capacity(out_w * out_h * 3);
-        for pixel in &raster_pixels {
-            rgb.push(((pixel >> 16) & 0xFF) as u8);
-            rgb.push(((pixel >> 8) & 0xFF) as u8);
-            rgb.push((pixel & 0xFF) as u8);
-        }
-        image::save_buffer(out, &rgb, out_w as u32, out_h as u32, image::ColorType::Rgb8)
-            .expect("Failed to write PNG");
-        eprintln!(
-            "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, format={})",
-            width, height, out, out_w, out_h, scale, format
-        );
-    }
+    vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
 }
 
 pub fn cmd_analyze(
