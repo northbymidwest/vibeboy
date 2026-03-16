@@ -1702,13 +1702,19 @@ fn curvature_energy(
 
 /// Integrate κ² over one quadratic B-spline span.
 ///
+/// NOTE: The paper (Equation 3) defines smoothness energy as ∫|κ(s)| ds
+/// (absolute curvature integrated over arc length). We use ∫κ² instead
+/// because it penalizes curvature more aggressively per iteration,
+/// producing visually smooth results with just 1 optimization pass.
+/// The paper's |κ| requires many stochastic iterations to converge
+/// (~0.6s per their timing table), which is too slow for real-time use.
+/// With GB's discrete palette colors, the difference in output quality
+/// between κ² × 1 iteration and |κ| × many iterations is negligible.
+///
 /// For a quadratic Bezier with control points p0, p1, p2:
 ///   d'(t)  = (t-1)*p0 + (1-2t)*p1 + t*p2      (first derivative)
 ///   d''(t) = p0 - 2*p1 + p2                     (second derivative, constant)
 ///   κ(t)   = (d' × d'') / |d'|³                 (signed curvature)
-///
-/// κ² is more aggressive per iteration than |κ|, producing visually smooth
-/// results with just 1 optimization pass on GB's discrete palette colors.
 #[inline(always)]
 fn integrate_span_curvature(p0: Point, p1: Point, p2: Point) -> f64 {
     let ddx = p0.x - 2.0 * p1.x + p2.x;
