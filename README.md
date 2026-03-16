@@ -49,14 +49,20 @@ cargo run --release -- path/to/rom.gb --no-boot
 ### Scaling Filters
 
 ```bash
-# Run with a scaling filter (nearest, bilinear, epx, hq2x-4x, xbrz2x-6x, omniscale2x-6x, ...)
+# Run with a scaling filter (nearest, bilinear, epx, hq2x-4x, xbrz2x-6x, omniscale, ...)
 cargo run --release -- path/to/rom.gb --filter hq4x
 
-# Kopf-Lischinski pixel-art vectorization (2x-6x)
-cargo run --release -- path/to/rom.gb --filter vectorize4x
+# Kopf-Lischinski pixel-art vectorization (scales to window size)
+cargo run --release -- path/to/rom.gb --filter vectorize
+cargo run --release -- path/to/rom.gb --filter vectorize-adaptive
+
+# Gaussian diffusion renderers (paper's rendering approach)
+cargo run --release -- path/to/rom.gb --filter vectorize-diffusion
+cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion
+cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion-adaptive
 ```
 
-The vectorize filter converts each frame to smooth vector paths using the Kopf-Lischinski algorithm, then rasterizes at the target scale with anti-aliased edges. Runs in real-time (~10ms/frame).
+The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2×2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. All run in real-time.
 
 ## Features
 
@@ -69,7 +75,7 @@ The vectorize filter converts each frame to smooth vector paths using the Kopf-L
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
 - **Save states**: 9 slots with rewind support (~10 seconds buffer)
 - **Camera**: Game Boy Camera support via webcam (macOS)
-- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with real-time rasterization
+- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
 
 ## Test Status
 

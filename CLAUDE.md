@@ -17,6 +17,15 @@ cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.
 
 # With vectorized scaling filter
 cargo run --release -- path/to/rom.gbc --filter vectorize
+
+# Vectorize variants
+cargo run --release -- path/to/rom.gbc --filter vectorize-adaptive
+cargo run --release -- path/to/rom.gbc --filter vectorize-diffusion
+cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion
+cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion-adaptive
+
+# With YUV visible edge threshold (paper's approach, can cause artifacts)
+cargo run --release -- path/to/rom.gbc --filter vectorize --yuv-edges
 ```
 
 ## Testing
@@ -47,6 +56,15 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 
 # Vectorize and rasterize at 4x scale
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png --format raster --scale 4
+
+# Spline-diffusion rasterizer (paper's rendering)
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png --format spline-diffusion --scale 4
+
+# Vectorize a standalone PNG image
+cargo run --release --bin test_runner -- vectorize input.png --out output.svg
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --format raster --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8 --gpu
 
 # Force a specific model
 cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
@@ -91,16 +109,35 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
 
 ### Vectorization subsystem (`src/vectorize/`)
-Kopf-Lischinski pixel-art vectorization pipeline. Converts frame buffers into smooth vector paths, then rasterizes at any scale with anti-aliased edges.
+Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)). Converts frame buffers into smooth vector paths, then rasterizes at any scale with anti-aliased edges. Implementation aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs).
 
-Pipeline: `pixels → quantize → graph::build → contour::extract_cells_smooth → rasterize`
+Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasterize`
 
-- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), color quantization (±2/channel), upscale detection/collapse, background color detection
-- `graph.rs`: Similarity graph — connects adjacent pixels with similar colors, resolves diagonal crossings with Kopf-Lischinski heuristics (curves, islands, sparse)
-- `voronoi.rs`: Voronoi cell computation — deforms grid nodes at diagonal crossings, collapses valence-2 nodes for smoother boundaries
-- `contour.rs`: Extracts boundary contours between different-color Voronoi cells, fits quadratic B-splines. Uses VOID_COLOR sentinel (0xFFFFFFFF) for image border edges. Outputs `Vec<ColorPath>` (each path = all boundary loops of one color region)
+- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` for frame caching, upscale detection/collapse, background color detection. No color quantization (removed — the paper doesn't use it).
+- `graph.rs`: Similarity graph — YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
+- `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (±0.25 pixel offsets)
+- `contour.rs`: Core pipeline stages:
+  - 81-entry compile-time Voronoi cell template table (3^4 corner states)
+  - Sort-merge boundary edge deduplication (cache-friendly, ~1.9× faster than HashMap)
+  - Chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance ≤ 100/255)
+  - T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
+  - Planar face algorithm for boundary loop tracing (flat sorted adjacency)
+  - Gradient descent optimizer with κ² smoothness energy, (2.5×distance)⁴ positional energy
+  - ×4 grid corner detection (angle ≥ 60°), corners excluded from curvature energy
+  - VOID_COLOR sentinel (0x01000000) for image border edges
+  - `VectorizeState` for split-phase optimization (CPU or GPU)
 - `svg.rs`: Serializes paths to SVG document string
-- `rasterize.rs`: Scanline rasterizer with 2x2 supersampling, nonzero winding rule. Skips background-colored paths (buffer pre-filled with bg_color). ~10ms/frame for complex scenes
+- `rasterize.rs`: Three rasterizers:
+  - **Scanline** (`rasterize`/`rasterize_scaled`): 2×2 supersampling, nonzero winding. Default for `--filter vectorize`.
+  - **Voronoi diffusion** (`rasterize_diffusion`): Gaussian blending (σ≈0.63) with graph-based region connectivity. For `--filter vectorize-diffusion`.
+  - **Spline diffusion** (`rasterize_spline_diffusion`): B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
+
+### GPU vectorize shaders (`src/shaders/`)
+- `vectorize_raster.comp`: Scanline rasterizer (existing, for `--filter vectorize` GPU path)
+- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer (pass 1 of spline-diffusion)
+- `spline_diffusion.comp`: Gaussian diffusion with 2×2 supersampling (pass 2 of spline-diffusion)
+- `diffusion_raster.comp`: Voronoi diffusion with diagonal state ownership computation
+- `optimize_energy.comp`: Double-buffered spline optimizer with ping-pong (on `gpu-optimizer` branch)
 
 ## Tools & Scripts
 
@@ -180,6 +217,16 @@ Generates the VibeBoy macOS app icon (a stylized Game Boy Color) at all required
 ```bash
 pip install Pillow  # if not already installed
 python3 scripts/generate_icon.py
+```
+
+#### `scripts/vectorize_comparison.sh` — Vectorize Comparison Test Suite
+
+Downloads all 54 input sprites and the paper's 8× results from the Kopf-Lischinski supplementary page, then runs our scanline and spline-diffusion rasterizers (CPU and GPU) on each for side-by-side comparison. Generates an HTML page.
+
+```bash
+./scripts/vectorize_comparison.sh          # skip existing outputs
+./scripts/vectorize_comparison.sh --force  # re-render all
+open vectorize-tests/comparison.html
 ```
 
 ### Binaries

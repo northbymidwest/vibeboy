@@ -57,15 +57,37 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 # Vectorize and rasterize at 4x scale
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format raster --scale 4
 
+# Spline-diffusion rasterizer (paper's full rendering: B-spline boundaries + Gaussian blending)
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format spline-diffusion --scale 4
+
+# Voronoi diffusion rasterizer
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format diffusion --scale 4
+
 # Simulate button presses (frame:button pairs)
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 --keys "100:start,200:a"
+```
+
+### Vectorize Command
+
+Vectorize a standalone PNG image using the Kopf-Lischinski algorithm.
+
+```bash
+# Vectorize to SVG
+cargo run --release --bin test_runner -- vectorize input.png --out output.svg
+
+# Vectorize and rasterize at 8x scale (default 4x)
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8
+
+# Different rasterizer formats: raster (default), diffusion, spline-diffusion
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8
+
+# Use GPU rasterizer (spline-diffusion only)
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8 --gpu
 ```
 
 ### Other Commands
 
 ```bash
-# Vectorize an existing PNG image to SVG
-cargo run --release --bin test_runner -- vectorize input.png --out output.svg
 
 # Analyze frame buffer (debug)
 cargo run --release --bin test_runner -- analyze path/to/rom.gb --frames 300
