@@ -1043,31 +1043,45 @@ fn angle_cmp(adx: i32, ady: i32, bdx: i32, bdy: i32) -> std::cmp::Ordering {
 fn trace_all_boundary_loops(
     directed_edges: &[(NodeId, NodeId, u32)],
 ) -> Vec<(Vec<NodeId>, u32)> {
-    // Build outgoing edges sorted by angle at each node.
-    // Store (dest, dx, dy, edge_index) to avoid a separate edge_to_idx HashMap.
-    let mut outgoing: FxHashMap<NodeId, Vec<(NodeId, i32, i32, u32)>> =
-        fx_hashmap_cap(directed_edges.len());
+    let n_edges = directed_edges.len();
+    if n_edges == 0 { return Vec::new(); }
+
+    // Build outgoing adjacency as a flat array, avoiding HashMap.
+    // Step 1: collect (source_node, dest, dx, dy, edge_index) and sort by
+    // (source, angle) so all outgoing edges from each node are contiguous.
+    let mut out_edges: Vec<(NodeId, NodeId, i32, i32, u32)> = Vec::with_capacity(n_edges);
     for (i, &(a, b, _)) in directed_edges.iter().enumerate() {
-        outgoing.entry(a).or_default().push((b, b.x4 - a.x4, b.y4 - a.y4, i as u32));
+        out_edges.push((a, b, b.x4 - a.x4, b.y4 - a.y4, i as u32));
     }
-    for (_, edges) in outgoing.iter_mut() {
-        edges.sort_unstable_by(|a, b| angle_cmp(a.1, a.2, b.1, b.2));
+    out_edges.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| angle_cmp(a.2, a.3, b.2, b.3))
+    });
+
+    // Step 2: build a range index: for each node, [start..end) into out_edges.
+    // Since out_edges is sorted by source node, we find group boundaries.
+    let mut node_ranges: FxHashMap<NodeId, (u32, u32)> = fx_hashmap_cap(n_edges / 2);
+    let mut i = 0;
+    while i < out_edges.len() {
+        let node = out_edges[i].0;
+        let start = i;
+        while i < out_edges.len() && out_edges[i].0 == node { i += 1; }
+        node_ranges.insert(node, (start as u32, i as u32));
     }
 
-    // Build next-edge index array using planar face algorithm.
-    let n_edges = directed_edges.len();
+    // Step 3: build next-edge index array using planar face algorithm.
     let mut next_idx: Vec<u32> = vec![u32::MAX; n_edges];
 
     for (i, &(p, c, _)) in directed_edges.iter().enumerate() {
         let rdx = p.x4 - c.x4;
         let rdy = p.y4 - c.y4;
 
-        if let Some(edges) = outgoing.get(&c) {
-            let pos = edges.partition_point(|e|
-                angle_cmp(e.1, e.2, rdx, rdy) == std::cmp::Ordering::Less
+        if let Some(&(start, end)) = node_ranges.get(&c) {
+            let slice = &out_edges[start as usize..end as usize];
+            let pos = slice.partition_point(|e|
+                angle_cmp(e.2, e.3, rdx, rdy) == std::cmp::Ordering::Less
             );
-            let prev_idx = if pos == 0 { edges.len() - 1 } else { pos - 1 };
-            next_idx[i] = edges[prev_idx].3;
+            let prev_idx = if pos == 0 { slice.len() - 1 } else { pos - 1 };
+            next_idx[i] = slice[prev_idx].4;
         }
     }
 
