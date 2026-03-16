@@ -155,7 +155,7 @@ pub fn cmd_screenshot(
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize) {
+pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize, gpu: bool) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -182,7 +182,31 @@ pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize) {
             svg.len()
         );
     } else {
-        let raster_pixels = if format == "spline-diffusion" {
+        let raster_pixels = if gpu && format == "spline-diffusion" {
+            #[cfg(feature = "sdl3-gpu-shaders")]
+            {
+                match scaling::gpu::gpu_spline_diffusion_screenshot(&pixels, width, height, scale) {
+                    Some((px, _, _)) => px,
+                    None => {
+                        eprintln!("GPU spline-diffusion failed, falling back to CPU");
+                        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
+                        vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
+                        let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(&paths, &pixels, width, height, bg_color, scale);
+                        r
+                    }
+                }
+            }
+            #[cfg(not(feature = "sdl3-gpu-shaders"))]
+            {
+                eprintln!("GPU shaders not enabled, using CPU");
+                vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
+                let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
+                vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
+                let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(&paths, &pixels, width, height, bg_color, scale);
+                r
+            }
+        } else if format == "spline-diffusion" {
             vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
             let (paths, bg_color) = vectorize::vectorize_core(&pixels, width, height);
             vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);

@@ -1147,7 +1147,7 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
         .with_code(gpu::ShaderFormat::SPIRV, pass2_spirv)
         .with_entrypoint(c"main")
         .with_uniform_buffers(1)
-        .with_readonly_storage_buffers(2)        // src_pixels, region_colors
+        .with_readonly_storage_buffers(3)        // src_pixels, region_colors, src_regions
         .with_readwrite_storage_textures(1)      // output texture
         .with_thread_count(16, 16, 1)
         .build()
@@ -1155,7 +1155,7 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
             .with_code(gpu::ShaderFormat::MSL, pass2_msl)
             .with_entrypoint(c"main0")
             .with_uniform_buffers(1)
-            .with_readonly_storage_buffers(2)
+            .with_readonly_storage_buffers(3)
             .with_readwrite_storage_textures(1)
             .with_thread_count(16, 16, 1)
             .build());
@@ -1214,6 +1214,11 @@ pub fn spline_diffusion_and_blit(
     // Upload source pixels (readonly)
     let (px_xfer, px_buf) = upload_buf(device, as_bytes(src_pixels), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
 
+    // Compute and upload source-pixel graph regions (small: src_w * src_h u32s)
+    let graph = crate::vectorize::graph::build(src_pixels, src_w as usize, src_h as usize);
+    let src_regions = crate::vectorize::rasterize::build_graph_regions(src_w as usize, src_h as usize, &graph);
+    let (sr_xfer, sr_buf) = upload_buf(device, as_bytes(&src_regions), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+
     // Intermediate buffer: flat colors from scanline rasterization (GPU-resident, readwrite then readonly)
     let region_buf_size = (out_w * out_h * 4).max(4);
     let region_buf = device.create_buffer()
@@ -1229,6 +1234,7 @@ pub fn spline_diffusion_and_blit(
             (&row_xfer, &row_buf, as_bytes(row_ranges).len()),
             (&idx_xfer, &idx_buf, as_bytes(edge_indices).len()),
             (&px_xfer, &px_buf, as_bytes(src_pixels).len()),
+            (&sr_xfer, &sr_buf, as_bytes(&src_regions).len()),
         ] {
             copy_pass.upload_to_gpu_buffer(
                 gpu::TransferBufferLocation::new().with_transfer_buffer(xfer),
@@ -1266,7 +1272,7 @@ pub fn spline_diffusion_and_blit(
             &[],
         ).expect("compute pass 2");
         compute_pass.bind_compute_pipeline(pass2);
-        compute_pass.bind_compute_storage_buffers(0, &[px_buf, region_buf]);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf, region_buf, sr_buf]);
 
         #[repr(C)]
         struct Pass2Uniforms {
@@ -1617,4 +1623,111 @@ pub fn gpu_vectorize_screenshot(
     drop(map);
 
     Some((pixels, out_w, out_h))
+}
+
+/// GPU-accelerated spline-diffusion screenshot.
+pub fn gpu_spline_diffusion_screenshot(
+    src: &[u32], src_w: usize, src_h: usize, scale: usize,
+) -> Option<(Vec<u32>, u32, u32)> {
+    crate::vectorize::contour::YUV_VISIBLE_EDGES
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut cache = crate::vectorize::VectorizeCache::new(false);
+    let (paths, bg_color) = cache.get_paths(src, src_w, src_h);
+    crate::vectorize::contour::YUV_VISIBLE_EDGES
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+        crate::vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, src_w, src_h);
+    if out_w == 0 || out_h == 0 || gpu_edges.is_empty() { return None; }
+
+    let sdl = sdl3::init().ok()?;
+    let video = sdl.video().ok()?;
+    let window = video.window("gpu_sdiff", 1, 1).hidden().build().ok()?;
+    let all_formats = gpu::ShaderFormat::PRIVATE
+        | gpu::ShaderFormat::SPIRV | gpu::ShaderFormat::MSL
+        | gpu::ShaderFormat::DXBC | gpu::ShaderFormat::DXIL;
+    let device = gpu::Device::new(all_formats, false).ok()?.with_window(&window).ok()?;
+    let (p1, p2) = init_spline_diffusion_pipelines(&device)?;
+
+    let out_tex = device.create_texture(
+        gpu::TextureCreateInfo::new()
+            .with_type(gpu::TextureType::_2D)
+            .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
+            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
+            .with_width(out_w).with_height(out_h)
+            .with_layer_count_or_depth(1).with_num_levels(1)
+    ).ok()?;
+
+    let cmd = device.acquire_command_buffer().ok()?;
+    fn b<T>(s: &[T]) -> &[u8] { unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * std::mem::size_of::<T>()) } }
+    fn u(d: &gpu::Device, data: &[u8], usage: gpu::BufferUsageFlags) -> Option<(gpu::TransferBuffer, gpu::Buffer)> {
+        let sz = data.len().max(4) as u32;
+        let x = d.create_transfer_buffer().with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD).with_size(sz).build().ok()?;
+        { let mut m = x.map::<u8>(d, true); m.mem_mut()[..data.len()].copy_from_slice(data); m.unmap(); }
+        let buf = d.create_buffer().with_usage(usage).with_size(sz).build().ok()?;
+        Some((x, buf))
+    }
+    let rd = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
+    let (ex,eb) = u(&device, b(&gpu_edges), rd)?;
+    let (rx,rb) = u(&device, b(&row_ranges), rd)?;
+    let (ix,ib) = u(&device, b(&edge_indices), rd)?;
+    let (px,pb) = u(&device, b(src), rd)?;
+    let graph_ss = crate::vectorize::graph::build(src, src_w, src_h);
+    let src_regions_ss = crate::vectorize::rasterize::build_graph_regions(src_w, src_h, &graph_ss);
+    let (sx,sb) = u(&device, b(&src_regions_ss), rd)?;
+    let region_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
+        .with_size((out_w * out_h * 4).max(4)).build().ok()?;
+
+    { let cp = device.begin_copy_pass(&cmd).ok()?;
+      for (xf,bf,sz) in [(&ex,&eb,b(&gpu_edges).len()),(&rx,&rb,b(&row_ranges).len()),
+                          (&ix,&ib,b(&edge_indices).len()),(&px,&pb,b(src).len()),(&sx,&sb,b(&src_regions_ss).len())] {
+        cp.upload_to_gpu_buffer(gpu::TransferBufferLocation::new().with_transfer_buffer(xf),
+            gpu::BufferRegion::new().with_buffer(bf).with_size(sz.max(4) as u32), false);
+      }
+      device.end_copy_pass(cp);
+    }
+    { let cp = device.begin_compute_pass(&cmd, &[],
+          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&region_buf).with_cycle(false)]).ok()?;
+      cp.bind_compute_pipeline(&p1);
+      cp.bind_compute_storage_buffers(0, &[eb, rb, ib]);
+      #[repr(C)] struct U1 { ow:u32, oh:u32, ne:u32, bg:u32 }
+      cmd.push_compute_uniform_data(0, &U1{ow:out_w,oh:out_h,ne:gpu_edges.len() as u32,bg:bg_color});
+      cp.dispatch((out_w+15)/16,(out_h+15)/16,1);
+      device.end_compute_pass(cp);
+    }
+    { let cp = device.begin_compute_pass(&cmd,
+          &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)], &[]).ok()?;
+      cp.bind_compute_pipeline(&p2);
+      cp.bind_compute_storage_buffers(0, &[pb, region_buf, sb]);
+      #[repr(C)] struct U2 { ow:u32, oh:u32, sw:u32, sh:u32, is:f32, s2:f32, r:f32, si:u32 }
+      cmd.push_compute_uniform_data(0, &U2{ow:out_w,oh:out_h,sw:src_w as u32,sh:src_h as u32,
+          is:1.0/scale as f32,s2:2.0,r:2.0,si:scale as u32});
+      cp.dispatch((out_w+15)/16,(out_h+15)/16,1);
+      device.end_compute_pass(cp);
+    }
+    let dl = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
+        .with_size(out_w*out_h*4).build().ok()?;
+    { let cp = device.begin_copy_pass(&cmd).ok()?;
+      unsafe {
+        let mut tr = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+        tr.texture = out_tex.raw(); tr.w = out_w; tr.h = out_h; tr.d = 1;
+        let mut di = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+        di.transfer_buffer = dl.raw();
+        sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &tr, &di);
+      }
+      device.end_copy_pass(cp);
+    }
+    let fence = cmd.submit_and_acquire_fence(&device).ok()?;
+    device.wait_fences(true, &[fence]).ok()?;
+    let map = dl.map::<u8>(&device, false);
+    let byt = map.mem();
+    let mut out_px = vec![0u32; (out_w*out_h) as usize];
+    for i in 0..out_px.len() {
+        let o = i*4;
+        out_px[i] = 0xFF000000|((byt[o+2] as u32)<<16)|((byt[o+1] as u32)<<8)|byt[o] as u32;
+    }
+    drop(map);
+    Some((out_px, out_w, out_h))
 }

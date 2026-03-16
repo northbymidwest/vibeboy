@@ -7,10 +7,14 @@ layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
     uint src_pixels[];
 };
 
-layout(std430, set = 0, binding = 1) readonly buffer RegionBuf {
-    // Flat color buffer from scanline rasterization pass (GPU-resident).
-    // [out_h][out_w] packed ARGB u32.
+layout(std430, set = 0, binding = 1) readonly buffer RegionColorBuf {
+    // Flat color buffer from scanline rasterization pass (GPU-resident, no AA).
     uint region_colors[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer SrcRegionBuf {
+    // Per-source-pixel region IDs from graph flood fill (unused, reserved).
+    uint src_regions[];
 };
 
 // SDL3 SPIRV compute: set 1 = readwrite storage textures
@@ -28,9 +32,7 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint scale_int;
 };
 
-// Gaussian-blend nearby source pixel centroids within the same spline-bounded
-// region as the sample point. Returns (r, g, b, total_weight) in 0-255 scale.
-vec4 gaussian_sample(float sx, float sy, uint sample_region) {
+vec4 gaussian_sample(float sx, float sy, uint my_color) {
     float r_sq = radius * radius;
     int min_px = max(int(floor(sx - radius)), 0);
     int max_px = min(int(ceil(sx + radius)), int(src_w) - 1);
@@ -42,10 +44,10 @@ vec4 gaussian_sample(float sx, float sy, uint sample_region) {
 
     for (int py = min_py; py <= max_py; py++) {
         for (int px = min_px; px <= max_px; px++) {
-            // Check if this centroid's output position has the same region color
+            // Region check: centroid's output position must have same color
             uint cx_out = min(uint(px) * scale_int + half_scale, out_w - 1u);
             uint cy_out = min(uint(py) * scale_int + half_scale, out_h - 1u);
-            if (region_colors[cy_out * out_w + cx_out] != sample_region) continue;
+            if (region_colors[cy_out * out_w + cx_out] != my_color) continue;
 
             float dx = sx - (float(px) + 0.5);
             float dy = sy - (float(py) + 0.5);
@@ -64,8 +66,7 @@ vec4 gaussian_sample(float sx, float sy, uint sample_region) {
     return vec4(tr, tg, tb, tw);
 }
 
-// Convert a region color u32 to an RGB vec3 in [0,1].
-vec3 region_to_rgb(uint c) {
+vec3 color_to_rgb(uint c) {
     return vec3(
         float((c >> 16u) & 0xFFu) / 255.0,
         float((c >> 8u) & 0xFFu) / 255.0,
@@ -78,23 +79,18 @@ void main() {
     uint oy = gl_GlobalInvocationID.y;
     if (ox >= out_w || oy >= out_h) return;
 
-    // Region determined from center pixel — all subsamples use the same region
-    // to prevent cross-region blending at boundaries (which washes out thin
-    // features like 1-pixel outlines).
-    uint my_region = region_colors[oy * out_w + ox];
+    uint my_color = region_colors[oy * out_w + ox];
 
-    // 2x2 supersampling: 4 Gaussian evaluations at subpixel offsets within
-    // the same region. Smooths the Gaussian evaluation without mixing regions.
+    // 2x2 supersampling with consistent region
     vec3 accum = vec3(0.0);
 
     for (int si = 0; si < 4; si++) {
         float sub_x = float(ox) + ((si & 1) != 0 ? 0.75 : 0.25);
         float sub_y = float(oy) + ((si & 2) != 0 ? 0.75 : 0.25);
-
         float sx = sub_x * inv_scale;
         float sy = sub_y * inv_scale;
 
-        vec4 g = gaussian_sample(sx, sy, my_region);
+        vec4 g = gaussian_sample(sx, sy, my_color);
 
         if (g.w > 0.0) {
             float inv_w = 1.0 / g.w;
@@ -104,7 +100,7 @@ void main() {
                 clamp(g.z * inv_w / 255.0, 0.0, 1.0)
             );
         } else {
-            accum += region_to_rgb(my_region);
+            accum += color_to_rgb(my_color);
         }
     }
 

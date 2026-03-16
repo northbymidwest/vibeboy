@@ -116,6 +116,9 @@ enum Command {
         /// Scale factor for raster output (default 4)
         #[arg(long, default_value = "4")]
         scale: usize,
+        /// Use GPU shader for rasterization
+        #[arg(long)]
+        gpu: bool,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -251,8 +254,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, format, scale } => {
-            commands::cmd_vectorize(&path, &out, &format, scale);
+        Command::Vectorize { path, out, format, scale, gpu } => {
+            commands::cmd_vectorize(&path, &out, &format, scale, gpu);
         }
         Command::Analyze {
             path,
