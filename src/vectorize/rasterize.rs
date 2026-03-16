@@ -1093,6 +1093,100 @@ fn segments_intersect(
     t > 0.01 && t < 0.99 && u > 0.01 && u < 0.99
 }
 
+/// Build per-source-pixel region IDs by rasterizing splines at 1x scale,
+/// snapping to palette, and flood-filling connected components.
+/// This gives small region IDs (src_w × src_h) that respect spline boundaries.
+pub fn build_src_spline_regions(
+    paths: &[ColorPath],
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+) -> Vec<u32> {
+    let aa_buf = rasterize(paths, width, height, bg_color, 1);
+    let palette: Vec<u32> = paths.iter().map(|p| p.color)
+        .chain(std::iter::once(bg_color)).collect();
+    let snapped: Vec<u32> = aa_buf.iter()
+        .map(|&c| snap_to_nearest(&palette, c)).collect();
+    flood_fill_output_regions(&snapped, width, height)
+}
+
+/// Build output-resolution region IDs: AA rasterize → snap → flood fill.
+pub fn build_spline_region_ids(
+    paths: &[ColorPath], width: usize, height: usize,
+    bg_color: u32, scale: usize,
+) -> Vec<u32> {
+    let out_w = width * scale;
+    let out_h = height * scale;
+    let aa_buf = rasterize(paths, width, height, bg_color, scale);
+    let palette: Vec<u32> = paths.iter().map(|p| p.color)
+        .chain(std::iter::once(bg_color)).collect();
+    let snapped: Vec<u32> = aa_buf.iter()
+        .map(|&c| snap_to_nearest(&palette, c)).collect();
+    flood_fill_output_regions(&snapped, out_w, out_h)
+}
+
+/// Flood-fill source pixels by YUV similarity (4-connected) — for GPU shader.
+pub fn build_color_regions_yuv(pixels: &[u32], w: usize, h: usize) -> Vec<u32> {
+    let mut ids = vec![u32::MAX; w * h];
+    let mut region_id = 0u32;
+    for start in 0..w * h {
+        if ids[start] != u32::MAX { continue; }
+        ids[start] = region_id;
+        let mut stack = vec![start];
+        while let Some(idx) = stack.pop() {
+            let cur_color = pixels[idx];
+            let x = idx % w;
+            let y = idx / w;
+            for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+                let ni = ny as usize * w + nx as usize;
+                if ids[ni] != u32::MAX { continue; }
+                if super::graph::similar(cur_color, pixels[ni]) {
+                    ids[ni] = region_id;
+                    stack.push(ni);
+                }
+            }
+        }
+        region_id += 1;
+    }
+    ids
+}
+
+/// Flood-fill source pixels by YUV similarity (4-connected).
+/// Adjacent pixels that are YUV-similar (same threshold as the graph) are
+/// in the same region. Same-color areas separated by dissimilar pixels
+/// (e.g. outline) get different IDs. Small: w * h u32s.
+pub fn build_color_regions(pixels: &[u32], w: usize, h: usize) -> Vec<u32> {
+    let mut ids = vec![u32::MAX; w * h];
+    let mut region_id = 0u32;
+    for start in 0..w * h {
+        if ids[start] != u32::MAX { continue; }
+        ids[start] = region_id;
+        let mut stack = vec![start];
+        while let Some(idx) = stack.pop() {
+            let cur_color = pixels[idx];
+            let x = idx % w;
+            let y = idx / w;
+            for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+                let ni = ny as usize * w + nx as usize;
+                if ids[ni] != u32::MAX { continue; }
+                if super::graph::similar(cur_color, pixels[ni]) {
+                    ids[ni] = region_id;
+                    stack.push(ni);
+                }
+            }
+        }
+        region_id += 1;
+    }
+    ids
+}
+
 /// Snap a color to the nearest palette color by RGB Euclidean distance.
 fn snap_to_nearest(palette: &[u32], color: u32) -> u32 {
     let cr = ((color >> 16) & 0xFF) as i32;

@@ -117,10 +117,9 @@ const SHADERS: &[ShaderInfo] = &[
         glsl_src: "spline_diffusion.comp",
         spv_name: "spline_diffusion_comp.spv",
         msl_name: "spline_diffusion_comp.metal",
-        // spirv-cross: buffer(0)=uniforms, buffer(1)=region_colors, buffer(2)=pixels, buffer(3)=src_regions
-        // SDL3 expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors, buffer(3)=src_regions
+        // spirv-cross: buffer(0)=uniforms, buffer(1)=region_colors, buffer(2)=pixels
+        // SDL3 expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors
         msl_buffer_remap: &[(1, 2), (2, 1)],
-        // Note: buffer(3) = src_regions stays in place
     },
 ];
 

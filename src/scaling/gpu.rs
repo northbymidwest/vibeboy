@@ -1147,7 +1147,7 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
         .with_code(gpu::ShaderFormat::SPIRV, pass2_spirv)
         .with_entrypoint(c"main")
         .with_uniform_buffers(1)
-        .with_readonly_storage_buffers(3)        // src_pixels, region_colors, src_regions
+        .with_readonly_storage_buffers(2)        // src_pixels, region_colors
         .with_readwrite_storage_textures(1)      // output texture
         .with_thread_count(16, 16, 1)
         .build()
@@ -1155,7 +1155,7 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
             .with_code(gpu::ShaderFormat::MSL, pass2_msl)
             .with_entrypoint(c"main0")
             .with_uniform_buffers(1)
-            .with_readonly_storage_buffers(3)
+            .with_readonly_storage_buffers(2)
             .with_readwrite_storage_textures(1)
             .with_thread_count(16, 16, 1)
             .build());
@@ -1214,10 +1214,6 @@ pub fn spline_diffusion_and_blit(
     // Upload source pixels (readonly)
     let (px_xfer, px_buf) = upload_buf(device, as_bytes(src_pixels), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
 
-    // Compute and upload source-pixel graph regions (small: src_w * src_h u32s)
-    let graph = crate::vectorize::graph::build(src_pixels, src_w as usize, src_h as usize);
-    let src_regions = crate::vectorize::rasterize::build_graph_regions(src_w as usize, src_h as usize, &graph);
-    let (sr_xfer, sr_buf) = upload_buf(device, as_bytes(&src_regions), gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
 
     // Intermediate buffer: flat colors from scanline rasterization (GPU-resident, readwrite then readonly)
     let region_buf_size = (out_w * out_h * 4).max(4);
@@ -1234,7 +1230,6 @@ pub fn spline_diffusion_and_blit(
             (&row_xfer, &row_buf, as_bytes(row_ranges).len()),
             (&idx_xfer, &idx_buf, as_bytes(edge_indices).len()),
             (&px_xfer, &px_buf, as_bytes(src_pixels).len()),
-            (&sr_xfer, &sr_buf, as_bytes(&src_regions).len()),
         ] {
             copy_pass.upload_to_gpu_buffer(
                 gpu::TransferBufferLocation::new().with_transfer_buffer(xfer),
@@ -1272,7 +1267,7 @@ pub fn spline_diffusion_and_blit(
             &[],
         ).expect("compute pass 2");
         compute_pass.bind_compute_pipeline(pass2);
-        compute_pass.bind_compute_storage_buffers(0, &[px_buf, region_buf, sr_buf]);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf, region_buf]);
 
         #[repr(C)]
         struct Pass2Uniforms {
@@ -1672,16 +1667,13 @@ pub fn gpu_spline_diffusion_screenshot(
     let (rx,rb) = u(&device, b(&row_ranges), rd)?;
     let (ix,ib) = u(&device, b(&edge_indices), rd)?;
     let (px,pb) = u(&device, b(src), rd)?;
-    let graph_ss = crate::vectorize::graph::build(src, src_w, src_h);
-    let src_regions_ss = crate::vectorize::rasterize::build_graph_regions(src_w, src_h, &graph_ss);
-    let (sx,sb) = u(&device, b(&src_regions_ss), rd)?;
     let region_buf = device.create_buffer()
         .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
         .with_size((out_w * out_h * 4).max(4)).build().ok()?;
 
     { let cp = device.begin_copy_pass(&cmd).ok()?;
       for (xf,bf,sz) in [(&ex,&eb,b(&gpu_edges).len()),(&rx,&rb,b(&row_ranges).len()),
-                          (&ix,&ib,b(&edge_indices).len()),(&px,&pb,b(src).len()),(&sx,&sb,b(&src_regions_ss).len())] {
+                          (&ix,&ib,b(&edge_indices).len()),(&px,&pb,b(src).len())] {
         cp.upload_to_gpu_buffer(gpu::TransferBufferLocation::new().with_transfer_buffer(xf),
             gpu::BufferRegion::new().with_buffer(bf).with_size(sz.max(4) as u32), false);
       }
@@ -1699,7 +1691,7 @@ pub fn gpu_spline_diffusion_screenshot(
     { let cp = device.begin_compute_pass(&cmd,
           &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)], &[]).ok()?;
       cp.bind_compute_pipeline(&p2);
-      cp.bind_compute_storage_buffers(0, &[pb, region_buf, sb]);
+      cp.bind_compute_storage_buffers(0, &[pb, region_buf]);
       #[repr(C)] struct U2 { ow:u32, oh:u32, sw:u32, sh:u32, is:f32, s2:f32, r:f32, si:u32 }
       cmd.push_compute_uniform_data(0, &U2{ow:out_w,oh:out_h,sw:src_w as u32,sh:src_h as u32,
           is:1.0/scale as f32,s2:2.0,r:2.0,si:scale as u32});
