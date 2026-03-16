@@ -2455,7 +2455,12 @@ impl Ppu {
                         // DMG STAT write bug: writing STAT during Mode 0 or 1
                         // briefly drives the STAT IRQ line high, firing a
                         // spurious interrupt if the line was previously low.
+                        // After LCD enable, mode_for_interrupt is -1 (no mode
+                        // signal feeding the IRQ line), so the write bug does
+                        // NOT fire during the initial blank period before the
+                        // first Mode 3 transition.
                         if (self.mode == 0 || self.mode == 1)
+                            && self.mode_for_interrupt != -1
                             && !self.stat_irq_line
                         {
                             self.if_flags |= 0x02;
