@@ -1224,65 +1224,12 @@ fn boundary_loop_to_segments(
         return segs;
     }
 
-    let corner_indices: Vec<usize> = (0..n)
-        .filter(|&i| junctions.contains(&nodes[i]))
-        .collect();
-
-    if corner_indices.is_empty() {
-        return bspline_closed(&points);
-    }
-
-    // Helper: get the corrected position for a junction endpoint, or the
-    // original position if no T-junction correction is available.
-    let endpoint_pos = |idx: usize| -> Point {
-        tjunc_corrected.get(&nodes[idx]).copied().unwrap_or(points[idx])
-    };
-
-    if corner_indices.len() == 1 {
-        let c = corner_indices[0];
-        let mut span_points = Vec::with_capacity(n + 1);
-        for i in 0..=n {
-            let pt_idx = (c + i) % n;
-            // Use corrected position at junction endpoints (first and last)
-            if i == 0 || i == n {
-                span_points.push(endpoint_pos(pt_idx));
-            } else {
-                span_points.push(points[pt_idx]);
-            }
-        }
-        return bspline_open(&span_points);
-    }
-
-    let mut segments = Vec::new();
-    let num_corners = corner_indices.len();
-
-    for ci in 0..num_corners {
-        let start = corner_indices[ci];
-        let end = corner_indices[(ci + 1) % num_corners];
-
-        let mut span_points = Vec::new();
-        let mut idx = start;
-        loop {
-            // Use corrected position at junction endpoints
-            if idx == start || idx == end {
-                span_points.push(endpoint_pos(idx));
-            } else {
-                span_points.push(points[idx]);
-            }
-            if idx == end { break; }
-            idx = (idx + 1) % n;
-        }
-
-        if span_points.len() < 2 { continue; }
-
-        if span_points.len() == 2 {
-            segments.push(PathSegment::Line(span_points[0], span_points[1]));
-        } else {
-            segments.extend(bspline_open(&span_points));
-        }
-    }
-
-    segments
+    // Always use bspline_closed for the full loop rather than splitting
+    // at junction nodes. Splitting creates very short spans (2-3 control
+    // points) around small features that can only produce straight lines.
+    // The reference implementation fits B-splines to complete loops,
+    // allowing small features to render as smooth curves.
+    return bspline_closed(&points);
 }
 
 // --- Main entry point ---
