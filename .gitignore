@@ -13,3 +13,4 @@ profile.json.gz
 *.png
 *.svg
 .claude/worktrees/
+vectorize-tests/
