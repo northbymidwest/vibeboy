@@ -1480,24 +1480,32 @@ fn optimize_boundary_loops(
     positions: &mut FxHashMap<NodeId, Point>,
     junctions: &HashSet<NodeId>,
 ) {
-    // Build a contiguous points array per loop for fast energy evaluation.
-    // Map loop nodes to indices in the array; junction nodes are pinned.
+    // Reusable buffers — cleared and resized each loop to avoid per-loop allocation.
+    let mut pts: Vec<Point> = Vec::new();
+    let mut orig: Vec<Point> = Vec::new();
+    let mut corners: Vec<bool> = Vec::new();
+    let mut pinned: Vec<bool> = Vec::new();
+
     for (node_loop, _) in all_loops {
         let n = node_loop.len();
         if n < 4 { continue; }
 
-        let mut pts: Vec<Point> = node_loop.iter()
-            .map(|nd| *positions.get(nd).unwrap())
-            .collect();
-        let orig: Vec<Point> = pts.clone();
-        // Paper Section 3.4, Figure 7: detect corners via ×4 grid template matching.
-        // Corner nodes are NOT pinned — they can still move during optimization.
-        // Only the B-spline spans touching corners are excluded from curvature energy.
-        let corners = detect_corners_from_nodes(node_loop, true);
+        // Resize buffers to loop length, reusing capacity from previous loops
+        pts.resize(n, Point::new(0.0, 0.0));
+        for (i, nd) in node_loop.iter().enumerate() {
+            pts[i] = *positions.get(nd).unwrap();
+        }
+        orig.resize(n, Point::new(0.0, 0.0));
+        orig[..n].copy_from_slice(&pts[..n]);
 
-        let pinned: Vec<bool> = node_loop.iter()
-            .map(|nd| junctions.contains(nd))
-            .collect();
+        corners.clear();
+        corners.resize(n, false);
+        detect_corners_into(node_loop, &mut corners);
+
+        pinned.resize(n, false);
+        for (i, nd) in node_loop.iter().enumerate() {
+            pinned[i] = junctions.contains(nd);
+        }
 
         let eps = GRADIENT_STEP;
         for _iter in 0..OPT_ITERATIONS {
@@ -1609,20 +1617,30 @@ const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
 const CURVATURE_INTERVALS: usize = 3;
 
+/// Detect corners into a pre-allocated buffer (closed loop, for optimizer).
+#[inline]
+fn detect_corners_into(nodes: &[NodeId], is_corner: &mut [bool]) {
+    detect_corners_core(nodes, true, is_corner);
+}
+
 /// Detect corner patterns using Kopf-Lischinski template matching (Section 3.4, Figure 7).
 ///
 /// On the ×4 quantized grid, sharp features take on a finite set of patterns
 /// (the paper's Figure 7, including all rotations and reflections). We detect
 /// these by checking if the turn angle at each node ≥ 60° using exact integer
-/// arithmetic on the ×4 coordinates. This is equivalent to the paper's pattern
-/// enumeration since all sharp patterns on the quantized grid have angles ≥ 60°.
+/// arithmetic on the ×4 coordinates.
 ///
-/// Unlike the previous implementation which pinned corner nodes entirely,
-/// the paper only excludes B-spline spans near corners from the curvature
-/// integral — corner nodes can still move during optimization.
+/// Corner nodes can still move during optimization — only the B-spline
+/// spans touching corners are excluded from curvature energy.
 fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Vec<bool> {
     let n = nodes.len();
     let mut is_corner = vec![false; n];
+    detect_corners_core(nodes, is_closed, &mut is_corner);
+    is_corner
+}
+
+fn detect_corners_core(nodes: &[NodeId], is_closed: bool, is_corner: &mut [bool]) {
+    let n = nodes.len();
 
     if !is_closed {
         if n > 0 { is_corner[0] = true; }
@@ -1658,8 +1676,6 @@ fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Vec<bool> {
             }
         }
     }
-
-    is_corner
 }
 
 /// Float-based corner detection for standalone chain optimization (legacy path).
