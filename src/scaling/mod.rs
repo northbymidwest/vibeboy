@@ -18,6 +18,8 @@ pub mod xbr;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod gpu;
+#[cfg(feature = "sdl3-gpu-shaders")]
+pub mod gpu_pipelines;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]
@@ -166,6 +168,74 @@ pub enum ScaleFilter {
 }
 
 impl ScaleFilter {
+    /// All valid filter name strings for CLI validation.
+    pub const ALL_NAMES: &[&str] = &[
+        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
+        "2xsai", "super-2xsai", "super-eagle",
+        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
+        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
+        "super-xbr", "nedi", "dcci", "edi",
+        "omniscale", "omniscale-legacy",
+        "aa-nearest", "vectorize", "vectorize-adaptive", "vectorize-diffusion",
+        "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
+    ];
+
+    /// Parse a filter name string into a ScaleFilter enum variant.
+    /// Returns None for unrecognized names.
+    pub fn from_name(s: &str) -> Option<ScaleFilter> {
+        Some(match s {
+            "nearest" | "none" => ScaleFilter::Nearest,
+            "bilinear" => ScaleFilter::Bilinear,
+            "bicubic" => ScaleFilter::Bicubic,
+            "epx" => ScaleFilter::Epx,
+            "scale2x" => ScaleFilter::Scale2x,
+            "scale3x" => ScaleFilter::Scale3x,
+            "scale4x" => ScaleFilter::Scale4x,
+            "eagle" => ScaleFilter::Eagle,
+            "2xsai" => ScaleFilter::Sai2x,
+            "super-2xsai" => ScaleFilter::Super2xSai,
+            "super-eagle" => ScaleFilter::SuperEagle,
+            "hq2x" => ScaleFilter::Hqx(HqxScale::Hq2x),
+            "hq3x" => ScaleFilter::Hqx(HqxScale::Hq3x),
+            "hq4x" => ScaleFilter::Hqx(HqxScale::Hq4x),
+            "xbr2x" => ScaleFilter::Xbr(XbrScale::Xbr2x),
+            "xbr3x" => ScaleFilter::Xbr(XbrScale::Xbr3x),
+            "xbr4x" => ScaleFilter::Xbr(XbrScale::Xbr4x),
+            "xbrz2x" => ScaleFilter::Xbrz(XbrzScale::Xbrz2x),
+            "xbrz3x" => ScaleFilter::Xbrz(XbrzScale::Xbrz3x),
+            "xbrz4x" => ScaleFilter::Xbrz(XbrzScale::Xbrz4x),
+            "xbrz5x" => ScaleFilter::Xbrz(XbrzScale::Xbrz5x),
+            "xbrz6x" => ScaleFilter::Xbrz(XbrzScale::Xbrz6x),
+            "super-xbr" => ScaleFilter::SuperXbr,
+            "nedi" => ScaleFilter::Nedi,
+            "dcci" => ScaleFilter::Dcci,
+            "edi" => ScaleFilter::Edi,
+            "omniscale" => ScaleFilter::OmniScale,
+            "omniscale-legacy" => ScaleFilter::OmniScaleLegacy,
+            "aa-nearest" => ScaleFilter::AaNearestNeighbor,
+            "vectorize" => ScaleFilter::Vectorize,
+            "vectorize-adaptive" => ScaleFilter::VectorizeAdaptive,
+            "vectorize-diffusion" => ScaleFilter::VectorizeDiffusion,
+            "vectorize-spline-diffusion" => ScaleFilter::VectorizeSplineDiffusion,
+            "vectorize-spline-diffusion-adaptive" => ScaleFilter::VectorizeSplineDiffusionAdaptive,
+            _ => return None,
+        })
+    }
+
+    /// Validate a filter name string for CLI parsing.
+    pub fn validate_name(s: &str) -> Result<String, String> {
+        let lower = s.to_lowercase();
+        if Self::ALL_NAMES.contains(&lower.as_str()) {
+            Ok(lower)
+        } else {
+            Err(format!(
+                "unknown filter '{}'\n  [possible values: {}]",
+                s,
+                Self::ALL_NAMES.join(", ")
+            ))
+        }
+    }
+
     /// Returns the fixed scale factor for fixed-factor filters,
     /// or 1 for resolution-adaptive filters (which scale to window size).
     pub fn factor(self) -> u32 {
