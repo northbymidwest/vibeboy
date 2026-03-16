@@ -1171,6 +1171,8 @@ fn boundary_loop_to_line_segments(nodes: &[NodeId]) -> Vec<PathSegment> {
 }
 
 /// Split B-splines at junction nodes (valence >= 3 in visible edge graph).
+/// Junction endpoints are corrected so the ending curve meets the continuing
+/// curve smoothly (T-junction adjustment from the reference implementation).
 fn boundary_loop_to_segments(
     nodes: &[NodeId],
     optimized: &FxHashMap<NodeId, Point>,
@@ -1198,11 +1200,28 @@ fn boundary_loop_to_segments(
         return bspline_closed(&points);
     }
 
+    // T-junction position correction (reference: FullCellGraphConstruction.geom).
+    // At each junction, adjust the position so the endpoint of the ending
+    // curve lies ON the continuing B-spline curve. The correction evaluates
+    // the uniform quadratic B-spline at t=0.5: 0.125*prev + 0.75*node + 0.125*next.
+    let mut corrected = points.clone();
+    for &ci in &corner_indices {
+        let prev = points[(ci + n - 1) % n];
+        let curr = points[ci];
+        let next = points[(ci + 1) % n];
+        corrected[ci] = Point::new(
+            0.125 * prev.x + 0.75 * curr.x + 0.125 * next.x,
+            0.125 * prev.y + 0.75 * curr.y + 0.125 * next.y,
+        );
+    }
+
     if corner_indices.len() == 1 {
         let c = corner_indices[0];
         let mut span_points = Vec::with_capacity(n + 1);
         for i in 0..=n {
-            span_points.push(points[(c + i) % n]);
+            let idx = (c + i) % n;
+            // Use corrected position at junction endpoints, original elsewhere
+            span_points.push(if i == 0 || i == n { corrected[idx] } else { points[idx] });
         }
         return bspline_open(&span_points);
     }
@@ -1210,14 +1229,19 @@ fn boundary_loop_to_segments(
     let mut segments = Vec::new();
     let num_corners = corner_indices.len();
 
-    for ci in 0..num_corners {
-        let start = corner_indices[ci];
-        let end = corner_indices[(ci + 1) % num_corners];
+    for ci_idx in 0..num_corners {
+        let start = corner_indices[ci_idx];
+        let end = corner_indices[(ci_idx + 1) % num_corners];
 
         let mut span_points = Vec::new();
         let mut idx = start;
         loop {
-            span_points.push(points[idx]);
+            // Use corrected position at junction endpoints
+            if idx == start || idx == end {
+                span_points.push(corrected[idx]);
+            } else {
+                span_points.push(points[idx]);
+            }
             if idx == end { break; }
             idx = (idx + 1) % n;
         }
