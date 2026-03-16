@@ -1578,17 +1578,21 @@ const GRADIENT_STEP: f64 = 0.01;
 const MAX_MOVE: f64 = 0.25;
 const CURVATURE_INTERVALS: usize = 3;
 
-/// Detect corner patterns using Kopf-Lischinski template matching (Section 3.4, Figure 7).
+/// Detect corner patterns matching the reference implementation's exact
+/// dot product values (FullCellGraphConstruction.geom checkForCorner).
 ///
-/// On the ×4 quantized grid, sharp features take on a finite set of patterns
-/// (the paper's Figure 7, including all rotations and reflections). We detect
-/// these by checking if the turn angle at each node ≥ 60° using exact integer
-/// arithmetic on the ×4 coordinates. This is equivalent to the paper's pattern
-/// enumeration since all sharp patterns on the quantized grid have angles ≥ 60°.
+/// On the ×4 quantized grid, direction vectors between adjacent Voronoi
+/// nodes can only produce a finite set of dot products. The reference
+/// detects corners at three specific values:
+///   dp ≈ -0.7071 → 135° (right-angle pixel corners)
+///   dp ≈ -0.3162 → 108.4° (mixed cardinal/diagonal edges)
+///   dp ≈  0.0    → 90° (perpendicular edges)
 ///
-/// Unlike the previous implementation which pinned corner nodes entirely,
-/// the paper only excludes B-spline spans near corners from the curvature
-/// integral — corner nodes can still move during optimization.
+/// Uses exact integer arithmetic: dp = dot / (|d1| × |d2|), and checks
+/// if dp² matches one of the known squared values within tolerance.
+///
+/// Corner nodes can still move during optimization — only the B-spline
+/// spans touching corners are excluded from curvature energy.
 fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Vec<bool> {
     let n = nodes.len();
     let mut is_corner = vec![false; n];
@@ -1606,25 +1610,26 @@ fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Vec<bool> {
         let curr = nodes[i];
         let next = if is_closed { nodes[(i + 1) % n] } else { nodes[i + 1] };
 
-        // Edge vectors in ×4 integer coordinates
-        let d1x = (curr.x4 - prev.x4) as i64;
-        let d1y = (curr.y4 - prev.y4) as i64;
-        let d2x = (next.x4 - curr.x4) as i64;
-        let d2y = (next.y4 - curr.y4) as i64;
+        let d1x = (curr.x4 - prev.x4) as f64;
+        let d1y = (curr.y4 - prev.y4) as f64;
+        let d2x = (next.x4 - curr.x4) as f64;
+        let d2y = (next.y4 - curr.y4) as f64;
 
-        let dot = d1x * d2x + d1y * d2y;
+        let len1 = (d1x * d1x + d1y * d1y).sqrt();
+        let len2 = (d2x * d2x + d2y * d2y).sqrt();
+        if len1 < 1e-12 || len2 < 1e-12 { continue; }
 
-        if dot <= 0 {
-            // Turn angle ≥ 90° — always a corner
+        let dp = (d1x * d2x + d1y * d2y) / (len1 * len2);
+
+        // Reference: checkForCorner checks three exact dot product ranges
+        // dp ≈ -0.7071 (cos 135°)
+        // dp ≈ -0.3162 (cos 108.4°)
+        // dp ≈  0.0    (cos 90°)
+        if (dp > -0.7072 && dp < -0.7070)
+            || (dp > -0.3163 && dp < -0.3161)
+            || (dp > -0.0001 && dp < 0.0001)
+        {
             is_corner[i] = true;
-        } else {
-            // Check if turn angle ≥ 60° using integer arithmetic:
-            // cos(angle) ≤ 0.5  ↔  4 * dot² ≤ |d1|² * |d2|²
-            let len1_sq = d1x * d1x + d1y * d1y;
-            let len2_sq = d2x * d2x + d2y * d2y;
-            if 4 * dot * dot <= len1_sq * len2_sq {
-                is_corner[i] = true;
-            }
         }
     }
 
