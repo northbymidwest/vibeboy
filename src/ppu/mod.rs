@@ -772,26 +772,18 @@ impl Ppu {
             return 0;
         }
 
-        // Deferred window activation: process at the M-cycle boundary (start of
-        // step) so the check sees CPU writes that happened between steps. This is
-        // the closest approximation to per-T-cycle CPU-PPU interleaving in our
-        // batched model: both the CPU write and the deferred check happen at the
-        // same M-cycle boundary.
+        // Deferred window activation from WX write handler: process at the
+        // M-cycle boundary so the activation sees the new WX value.
         if self.window_trigger_pending && self.mode == 3 {
             self.window_trigger_pending = false;
             if self.window_trigger_from_wx_write {
-                // Pending from WX write handler: skip position re-check since
-                // we already validated it at write time (off-by-1 tolerance)
                 self.window_trigger_from_wx_write = false;
                 if !self.window_active && self.lcdc & 0x20 != 0 && self.wy_triggered {
                     self.activate_window();
                 }
-            } else {
-                // Pending from tick_mode3: re-check all conditions including WX
-                if self.check_window_trigger() {
-                    self.activate_window();
-                }
             }
+            // Note: non-WX-write triggers are now handled immediately in
+            // render_pixel_if_possible, so no re-check needed here.
         }
 
         self.step_inner(cycles, true)
@@ -1537,13 +1529,13 @@ impl Ppu {
             }
         }
 
-        // Window trigger check (only in visible pixel zone)
+        // Window trigger check (only in visible pixel zone).
+        // Activate immediately — on hardware, the window trigger takes
+        // effect within the same T-cycle. The previous deferred activation
+        // (first_tick_of_step guard) caused variable dead ticks that made
+        // mode 3 duration depend on batch alignment rather than pixel position.
         if self.position_in_line >= 0 && self.check_window_trigger() {
-            if self.first_tick_of_step {
-                self.activate_window();
-                return;
-            }
-            self.window_trigger_pending = true;
+            self.activate_window();
             return;
         }
 
