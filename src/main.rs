@@ -23,8 +23,6 @@ use model::GbModel;
 use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::dialog::{self, DialogFileFilter};
 use sdl3::event::Event;
-#[cfg(feature = "sdl3-gpu-shaders")]
-use sdl3::gpu;
 use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::sys::camera::{
     SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
@@ -111,22 +109,7 @@ fn parse_model(s: &str) -> Result<GbModel, String> {
 }
 
 fn parse_filter(s: &str) -> Result<String, String> {
-    let valid = [
-        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
-        "2xsai", "super-2xsai", "super-eagle",
-        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
-        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
-        "super-xbr", "nedi", "dcci", "edi",
-        "omniscale", "omniscale-legacy",
-        "aa-nearest", "vectorize", "vectorize-adaptive", "vectorize-diffusion",
-        "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
-    ];
-    let lower = s.to_lowercase();
-    if valid.contains(&lower.as_str()) {
-        Ok(lower)
-    } else {
-        Err(format!("unknown filter '{}'\n  [possible values: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x, eagle, 2xsai, super-2xsai, super-eagle, hq2x-4x, xbr2x-4x, xbrz2x-6x, super-xbr, nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, vectorize, vectorize-adaptive, vectorize-diffusion, vectorize-spline-diffusion, vectorize-spline-diffusion-adaptive]", s))
-    }
+    scaling::ScaleFilter::validate_name(s)
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -269,45 +252,9 @@ fn main() {
         eprintln!("SNES program ROM loaded — SGB LLE mode active.");
     }
 
-    // Parse scaling filter
-    // Filter string is already validated and lowercased by parse_filter
-    let scale_filter: scaling::ScaleFilter = match cli.filter.as_str() {
-        "nearest" | "none" => scaling::ScaleFilter::Nearest,
-        "bilinear" => scaling::ScaleFilter::Bilinear,
-        "bicubic" => scaling::ScaleFilter::Bicubic,
-        "epx" => scaling::ScaleFilter::Epx,
-        "scale2x" => scaling::ScaleFilter::Scale2x,
-        "scale3x" => scaling::ScaleFilter::Scale3x,
-        "scale4x" => scaling::ScaleFilter::Scale4x,
-        "eagle" => scaling::ScaleFilter::Eagle,
-        "2xsai" => scaling::ScaleFilter::Sai2x,
-        "super-2xsai" => scaling::ScaleFilter::Super2xSai,
-        "super-eagle" => scaling::ScaleFilter::SuperEagle,
-        "hq2x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq2x),
-        "hq3x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq3x),
-        "hq4x" => scaling::ScaleFilter::Hqx(scaling::HqxScale::Hq4x),
-        "xbr2x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr2x),
-        "xbr3x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr3x),
-        "xbr4x" => scaling::ScaleFilter::Xbr(scaling::XbrScale::Xbr4x),
-        "xbrz2x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz2x),
-        "xbrz3x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz3x),
-        "xbrz4x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz4x),
-        "xbrz5x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz5x),
-        "xbrz6x" => scaling::ScaleFilter::Xbrz(scaling::XbrzScale::Xbrz6x),
-        "super-xbr" => scaling::ScaleFilter::SuperXbr,
-        "nedi" => scaling::ScaleFilter::Nedi,
-        "dcci" => scaling::ScaleFilter::Dcci,
-        "edi" => scaling::ScaleFilter::Edi,
-        "omniscale" => scaling::ScaleFilter::OmniScale,
-        "omniscale-legacy" => scaling::ScaleFilter::OmniScaleLegacy,
-        "aa-nearest" => scaling::ScaleFilter::AaNearestNeighbor,
-        "vectorize" => scaling::ScaleFilter::Vectorize,
-        "vectorize-adaptive" => scaling::ScaleFilter::VectorizeAdaptive,
-        "vectorize-diffusion" => scaling::ScaleFilter::VectorizeDiffusion,
-        "vectorize-spline-diffusion" => scaling::ScaleFilter::VectorizeSplineDiffusion,
-        "vectorize-spline-diffusion-adaptive" => scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive,
-        _ => unreachable!("filter validated by parse_filter"),
-    };
+    // Parse scaling filter (name already validated and lowercased by parse_filter)
+    let scale_filter = scaling::ScaleFilter::from_name(&cli.filter)
+        .expect("filter validated by parse_filter");
 
     eprintln!("\nControls:");
     eprintln!("  Arrow keys  — D-pad         Gamepad D-pad / Left stick");
@@ -371,56 +318,7 @@ fn main() {
     // Without: use SDL 2D canvas renderer with CPU-only scaling.
 
     #[cfg(feature = "sdl3-gpu-shaders")]
-    let (gpu_device, mut gpu_tex, mut gpu_tex_w, mut gpu_tex_h,
-         mut transfer_buf, mut transfer_buf_size,
-         mut omniscale_pipeline, omniscale_sampler, mut hqx_pipeline,
-         mut bicubic_pipeline, mut omniscale_legacy_pipeline,
-         mut scale3x_pipeline, mut eagle_pipeline, mut aa_nearest_pipeline,
-         mut epx_pipeline, mut xbr_pipeline, mut xbrz_pipeline, mut super_xbr_pipeline, mut vectorize_compute, mut diffusion_compute, mut spline_diff_pipelines) = {
-        let all_formats = gpu::ShaderFormat::PRIVATE
-            | gpu::ShaderFormat::SPIRV
-            | gpu::ShaderFormat::MSL
-            | gpu::ShaderFormat::DXBC
-            | gpu::ShaderFormat::DXIL;
-        let dev = gpu::Device::new(all_formats, false)
-            .expect("Failed to create GPU device")
-            .with_window(&window)
-            .expect("Failed to claim window for GPU device");
-        if dev.set_swapchain_parameters(
-            &window, gpu::PresentMode::Mailbox, gpu::SwapchainComposition::Sdr,
-        ).is_err() {
-            let _ = dev.set_swapchain_parameters(
-                &window, gpu::PresentMode::Immediate, gpu::SwapchainComposition::Sdr,
-            );
-        }
-        let tex = scaling::gpu::create_texture(&dev, src_w, src_h);
-        let max_xfer = src_w * src_h * 4;
-        let xfer = dev.create_transfer_buffer()
-            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-            .with_size(max_xfer)
-            .build().expect("Failed to create transfer buffer");
-        let sampler = dev.create_sampler(
-            gpu::SamplerCreateInfo::new()
-                .with_min_filter(gpu::Filter::Nearest)
-                .with_mag_filter(gpu::Filter::Nearest)
-        ).expect("Failed to create sampler");
-        // Shader pipelines are initialized lazily — only when first needed.
-        let omniscale: Option<gpu::GraphicsPipeline> = None;
-        let hqx: Option<gpu::GraphicsPipeline> = None;
-        let bicubic: Option<gpu::GraphicsPipeline> = None;
-        let omni_legacy: Option<gpu::GraphicsPipeline> = None;
-        let s3x: Option<gpu::GraphicsPipeline> = None;
-        let eagle: Option<gpu::GraphicsPipeline> = None;
-        let aa_nn: Option<gpu::GraphicsPipeline> = None;
-        let epx: Option<gpu::GraphicsPipeline> = None;
-        let xbr: Option<gpu::GraphicsPipeline> = None;
-        let xbrz: Option<gpu::GraphicsPipeline> = None;
-        let sxbr: Option<gpu::GraphicsPipeline> = None;
-        let vec_compute: Option<gpu::ComputePipeline> = None;
-        let diff_compute: Option<gpu::ComputePipeline> = None;
-        let sdiff_pipes: Option<(gpu::ComputePipeline, gpu::ComputePipeline)> = None;
-        (dev, tex, src_w, src_h, xfer, max_xfer, omniscale, sampler, hqx, bicubic, omni_legacy, s3x, eagle, aa_nn, epx, xbr, xbrz, sxbr, vec_compute, diff_compute, sdiff_pipes)
-    };
+    let mut gpu = scaling::gpu_pipelines::GpuPipelines::new(&window, src_w, src_h);
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
     let mut canvas = window.into_canvas();
@@ -685,271 +583,59 @@ fn main() {
 
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
-                // Lazy-init the GPU pipeline for the current filter (first frame only).
-                macro_rules! ensure_pipeline {
-                    ($pipe:expr, $init:expr) => {{
-                        if $pipe.is_none() { $pipe = $init; }
-                        $pipe.is_some()
-                    }};
-                }
+                use scaling::gpu_pipelines::GpuRenderMode;
+                let mode = gpu.ensure_pipeline(scale_filter, &window, cli.cpu_filter);
 
-                let force_cpu = cli.cpu_filter;
-                let gpu_hqx = !force_cpu && matches!(scale_filter, scaling::ScaleFilter::Hqx(_))
-                    && ensure_pipeline!(hqx_pipeline, scaling::gpu::init_hqx_pipeline(&gpu_device, &window));
-                let gpu_bicubic = scale_filter == scaling::ScaleFilter::Bicubic
-                    && ensure_pipeline!(bicubic_pipeline, scaling::gpu::init_bicubic_pipeline(&gpu_device, &window));
-                let gpu_omni_legacy = scale_filter == scaling::ScaleFilter::OmniScaleLegacy
-                    && ensure_pipeline!(omniscale_legacy_pipeline, scaling::gpu::init_omniscale_legacy_pipeline(&gpu_device, &window));
-                let gpu_scale3x = scale_filter == scaling::ScaleFilter::Scale3x
-                    && ensure_pipeline!(scale3x_pipeline, scaling::gpu::init_scale3x_pipeline(&gpu_device, &window));
-                let gpu_eagle = scale_filter == scaling::ScaleFilter::Eagle
-                    && ensure_pipeline!(eagle_pipeline, scaling::gpu::init_eagle_pipeline(&gpu_device, &window));
-                let gpu_aa_nearest = scale_filter == scaling::ScaleFilter::AaNearestNeighbor
-                    && ensure_pipeline!(aa_nearest_pipeline, scaling::gpu::init_aa_nearest_pipeline(&gpu_device, &window));
-                let gpu_epx = matches!(scale_filter,
-                    scaling::ScaleFilter::Epx | scaling::ScaleFilter::Scale2x | scaling::ScaleFilter::Scale4x)
-                    && ensure_pipeline!(epx_pipeline, scaling::gpu::init_epx_pipeline(&gpu_device, &window));
-                let gpu_xbr = matches!(scale_filter, scaling::ScaleFilter::Xbr(_))
-                    && ensure_pipeline!(xbr_pipeline, scaling::gpu::init_xbr_pipeline(&gpu_device, &window));
-                let gpu_xbrz = matches!(scale_filter, scaling::ScaleFilter::Xbrz(_))
-                    && ensure_pipeline!(xbrz_pipeline, scaling::gpu::init_xbrz_pipeline(&gpu_device, &window));
-                let gpu_super_xbr = scale_filter == scaling::ScaleFilter::SuperXbr
-                    && ensure_pipeline!(super_xbr_pipeline, scaling::gpu::init_super_xbr_pipeline(&gpu_device, &window));
-                let gpu_native = !force_cpu && matches!(
-                    scale_filter,
-                    scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
-                        | scaling::ScaleFilter::OmniScale
-                ) || gpu_hqx || gpu_bicubic || gpu_omni_legacy
-                  || gpu_scale3x || gpu_eagle || gpu_aa_nearest
-                  || gpu_epx || gpu_xbr || gpu_xbrz || gpu_super_xbr;
-                let gpu_vectorize = !force_cpu && matches!(
-                    scale_filter,
-                    scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
-                ) && ensure_pipeline!(vectorize_compute, scaling::gpu::init_vectorize_compute_pipeline(&gpu_device));
-                let gpu_diffusion = !force_cpu && matches!(
-                    scale_filter,
-                    scaling::ScaleFilter::VectorizeDiffusion
-                ) && ensure_pipeline!(diffusion_compute, scaling::gpu::init_diffusion_compute_pipeline(&gpu_device));
-                let gpu_spline_diff = !force_cpu && matches!(
-                    scale_filter,
-                    scaling::ScaleFilter::VectorizeSplineDiffusion
-                    | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
-                ) && ensure_pipeline!(spline_diff_pipelines, scaling::gpu::init_spline_diffusion_pipelines(&gpu_device));
-
-                if gpu_spline_diff {
-                    let (ww, wh) = window.size();
-                    let src_aspect = src_w as f64 / src_h as f64;
-                    let win_aspect = ww as f64 / wh as f64;
-                    let (disp_w, disp_h) = if win_aspect > src_aspect {
-                        ((wh as f64 * src_aspect) as usize, wh as usize)
-                    } else {
-                        (ww as usize, (ww as f64 / src_aspect) as usize)
-                    };
-                    let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                    let scale = scale_f.round().max(1.0) as usize;
-                    let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
-                    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
-                        vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
-                    if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
-                        if out_w != gpu_tex_w || out_h != gpu_tex_h {
-                            gpu_tex_w = out_w; gpu_tex_h = out_h;
-                            gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
-                        }
-                        let (p1, p2) = spline_diff_pipelines.as_ref().unwrap();
-                        scaling::gpu::spline_diffusion_and_blit(
-                            &gpu_device, &window, &gpu_tex, p1, p2,
-                            &gpu_edges, &row_ranges, &edge_indices,
-                            raw_src, out_w, out_h, sw as u32, sh as u32,
-                            bg_color, scale as u32,
-                        );
-                    }
-                } else if gpu_diffusion {
-                    let (ww, wh) = window.size();
-                    let src_aspect = src_w as f64 / src_h as f64;
-                    let win_aspect = ww as f64 / wh as f64;
-                    let (disp_w, disp_h) = if win_aspect > src_aspect {
-                        ((wh as f64 * src_aspect) as usize, wh as usize)
-                    } else {
-                        (ww as usize, (ww as f64 / src_aspect) as usize)
-                    };
-                    let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                    let scale = scale_f.round().max(1.0) as usize;
-                    let (src_pixels, src_regions, diag_states, out_w, out_h) =
-                        scaling::gpu::prepare_diffusion_data(raw_src, sw, sh, scale);
-                    if out_w > 0 && out_h > 0 {
-                        if out_w != gpu_tex_w || out_h != gpu_tex_h {
-                            gpu_tex_w = out_w; gpu_tex_h = out_h;
-                            gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
-                        }
-                        scaling::gpu::diffusion_and_blit(
-                            &gpu_device, &window, &gpu_tex,
-                            diffusion_compute.as_ref().unwrap(),
-                            &src_pixels, &src_regions, &diag_states,
-                            sw as u32, sh as u32, out_w, out_h, scale as f32,
-                        );
-                    }
-                } else if gpu_vectorize {
-                    let (ww, wh) = window.size();
-                    let src_aspect = src_w as f64 / src_h as f64;
-                    let win_aspect = ww as f64 / wh as f64;
-                    let (disp_w, disp_h) = if win_aspect > src_aspect {
-                        ((wh as f64 * src_aspect) as usize, wh as usize)
-                    } else {
-                        (ww as usize, (ww as f64 / src_aspect) as usize)
-                    };
-                    let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                    let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
-                    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
-                        vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
-                    if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
-                        if out_w != gpu_tex_w || out_h != gpu_tex_h {
-                            gpu_tex_w = out_w; gpu_tex_h = out_h;
-                            gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
-                        }
-                        scaling::gpu::vectorize_and_blit(
-                            &gpu_device, &window, &gpu_tex,
-                            vectorize_compute.as_ref().unwrap(),
-                            &gpu_edges, &row_ranges, &edge_indices,
-                            out_w, out_h, bg_color,
-                        );
-                    }
-                } else if gpu_native {
-                    if src_w != gpu_tex_w || src_h != gpu_tex_h {
-                        gpu_tex_w = src_w; gpu_tex_h = src_h;
-                        gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
-                    }
-                    let needed = src_w * src_h * 4;
-                    if needed > transfer_buf_size {
-                        transfer_buf = gpu_device.create_transfer_buffer()
-                            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-                            .with_size(needed).build().expect("transfer buf");
-                        transfer_buf_size = needed;
-                    }
-                    if gpu_scale3x {
-                        scaling::gpu::render_scale3x(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            scale3x_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                        );
-                    } else if gpu_eagle {
-                        scaling::gpu::render_eagle(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            eagle_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                        );
-                    } else if gpu_aa_nearest {
-                        let (ww, wh) = window.size();
-                        scaling::gpu::render_aa_nearest(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            aa_nearest_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                            ww, wh,
-                        );
-                    } else if gpu_bicubic {
-                        let (ww, wh) = window.size();
-                        scaling::gpu::render_bicubic(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            bicubic_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                            ww, wh,
-                        );
-                    } else if gpu_omni_legacy {
-                        scaling::gpu::render_omniscale_legacy(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            omniscale_legacy_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                        );
-                    } else if gpu_epx {
-                        let epx_scale = match scale_filter {
-                            scaling::ScaleFilter::Scale4x => 4.0,
-                            _ => 2.0,
-                        };
-                        scaling::gpu::render_epx(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            epx_pipeline.as_ref().unwrap(), &omniscale_sampler, epx_scale,
-                        );
-                    } else if gpu_hqx {
-                        let hqx_scale = match scale_filter {
-                            scaling::ScaleFilter::Hqx(h) => h.factor() as f32, _ => 2.0,
-                        };
-                        scaling::gpu::render_hqx(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            hqx_pipeline.as_ref().unwrap(), &omniscale_sampler, hqx_scale,
-                        );
-                    } else if gpu_xbr {
-                        let xbr_scale = match scale_filter {
-                            scaling::ScaleFilter::Xbr(x) => x.factor() as f32, _ => 2.0,
-                        };
-                        scaling::gpu::render_xbr(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            xbr_pipeline.as_ref().unwrap(), &omniscale_sampler, xbr_scale,
-                        );
-                    } else if gpu_xbrz {
-                        let xbrz_scale = match scale_filter {
-                            scaling::ScaleFilter::Xbrz(x) => x.factor() as f32, _ => 2.0,
-                        };
-                        scaling::gpu::render_xbrz(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            xbrz_pipeline.as_ref().unwrap(), &omniscale_sampler, xbrz_scale,
-                        );
-                    } else if gpu_super_xbr {
-                        scaling::gpu::render_super_xbr(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h,
-                            super_xbr_pipeline.as_ref().unwrap(), &omniscale_sampler,
-                        );
-                    } else if scale_filter == scaling::ScaleFilter::OmniScale {
-                        ensure_pipeline!(omniscale_pipeline, scaling::gpu::init_omniscale_pipeline(&gpu_device, &window));
-                        if let Some(ref pipeline) = omniscale_pipeline {
-                            scaling::gpu::render_omniscale(
-                                &gpu_device, &window, &gpu_tex, &transfer_buf,
-                                raw_src, src_w, src_h, pipeline, &omniscale_sampler,
-                            );
-                        } else {
-                            scaling::gpu::upload_and_blit(
-                                &gpu_device, &window, &gpu_tex, &transfer_buf,
-                                raw_src, src_w, src_h, gpu::Filter::Nearest,
+                match mode {
+                    GpuRenderMode::SplineDiffusion => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
+                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
+                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
+                            gpu.render_spline_diffusion_to_window(
+                                &window, &gpu_edges, &row_ranges, &edge_indices,
+                                raw_src, out_w, out_h, sw as u32, sh as u32,
+                                bg_color, scale as u32,
                             );
                         }
-                    } else {
-                        let f = if scale_filter == scaling::ScaleFilter::Bilinear {
-                            gpu::Filter::Linear } else { gpu::Filter::Nearest };
-                        scaling::gpu::upload_and_blit(
-                            &gpu_device, &window, &gpu_tex, &transfer_buf,
-                            raw_src, src_w, src_h, f,
+                    }
+                    GpuRenderMode::Diffusion => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
+                        let (src_pixels, src_regions, diag_states, out_w, out_h) =
+                            scaling::gpu::prepare_diffusion_data(raw_src, sw, sh, scale);
+                        if out_w > 0 && out_h > 0 {
+                            gpu.render_diffusion_to_window(
+                                &window, &src_pixels, &src_regions, &diag_states,
+                                sw as u32, sh as u32, out_w, out_h, scale as f32,
+                            );
+                        }
+                    }
+                    GpuRenderMode::Vectorize => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
+                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
+                            gpu.render_vectorize_to_window(
+                                &window, &gpu_edges, &row_ranges, &edge_indices,
+                                out_w, out_h, bg_color,
+                            );
+                        }
+                    }
+                    GpuRenderMode::Native => {
+                        gpu.render_native(scale_filter, raw_src, src_w, src_h, &window);
+                    }
+                    GpuRenderMode::Cpu => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let (scaled, fw, fh) = cpu_scale_frame(
+                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
                         );
+                        gpu.upload_and_blit(&scaled, fw, fh, &window);
                     }
-                } else {
-                    let (ww, wh) = window.size();
-                    let src_aspect = src_w as f64 / src_h as f64;
-                    let win_aspect = ww as f64 / wh as f64;
-                    let (disp_w, disp_h) = if win_aspect > src_aspect {
-                        ((wh as f64 * src_aspect) as usize, wh as usize)
-                    } else {
-                        (ww as usize, (ww as f64 / src_aspect) as usize)
-                    };
-                    let (scaled, fw, fh) = cpu_scale_frame(
-                        &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
-                    );
-                    if fw != gpu_tex_w || fh != gpu_tex_h {
-                        gpu_tex_w = fw; gpu_tex_h = fh;
-                        gpu_tex = scaling::gpu::create_texture(&gpu_device, gpu_tex_w, gpu_tex_h);
-                    }
-                    let needed = fw * fh * 4;
-                    if needed > transfer_buf_size {
-                        transfer_buf = gpu_device.create_transfer_buffer()
-                            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-                            .with_size(needed).build().expect("transfer buf");
-                        transfer_buf_size = needed;
-                    }
-                    scaling::gpu::upload_and_blit(
-                        &gpu_device, &window, &gpu_tex, &transfer_buf,
-                        &scaled, fw, fh, gpu::Filter::Nearest,
-                    );
                 }
             }
 
@@ -1091,6 +777,26 @@ fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState, gp: Opti
             emu.set_button(*btn, ks.is_scancode_pressed(*sc));
         }
     }
+}
+
+// ── Display geometry helpers ─────────────────────────────────────────────────
+
+/// Compute aspect-correct display dimensions for the current window.
+fn display_size(window: &sdl3::video::Window, src_w: u32, src_h: u32) -> (usize, usize) {
+    let (ww, wh) = window.size();
+    let src_aspect = src_w as f64 / src_h as f64;
+    let win_aspect = ww as f64 / wh as f64;
+    if win_aspect > src_aspect {
+        ((wh as f64 * src_aspect) as usize, wh as usize)
+    } else {
+        (ww as usize, (ww as f64 / src_aspect) as usize)
+    }
+}
+
+/// Compute rounded integer scale factor from display size and source size.
+fn compute_integer_scale(disp_w: usize, disp_h: usize, sw: usize, sh: usize) -> usize {
+    let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+    scale_f.round().max(1.0) as usize
 }
 
 // ── CPU scaling helper ───────────────────────────────────────────────────────

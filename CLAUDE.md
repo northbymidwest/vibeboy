@@ -132,8 +132,13 @@ Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasteri
   - **Voronoi diffusion** (`rasterize_diffusion`): Gaussian blending (σ≈0.63) with graph-based region connectivity. For `--filter vectorize-diffusion`.
   - **Spline diffusion** (`rasterize_spline_diffusion`): B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
 
-### GPU vectorize shaders (`src/shaders/`)
-- `vectorize_raster.comp`: Scanline rasterizer (existing, for `--filter vectorize` GPU path)
+### Scaling filter infrastructure (`src/scaling/`)
+- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters.
+- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, 11 graphics pipelines, 3 compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` → `GpuRenderMode` enum. Used by main.rs to replace the previous 20-variable tuple.
+- `gpu.rs`: Low-level GPU pipeline init functions, buffer upload, compute dispatch, headless screenshot support.
+
+### GPU compute shaders (`src/shaders/`)
+- `vectorize_raster.comp`: Scanline rasterizer (for `--filter vectorize` GPU path)
 - `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer (pass 1 of spline-diffusion)
 - `spline_diffusion.comp`: Gaussian diffusion with 2×2 supersampling (pass 2 of spline-diffusion)
 - `diffusion_raster.comp`: Voronoi diffusion with diagonal state ownership computation
