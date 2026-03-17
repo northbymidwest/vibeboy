@@ -975,14 +975,12 @@ impl Ppu {
                     self.transition_to_mode3();
                     return;
                 }
-                // Mode 0 → end of scanline at dot 456 (or dot 449 for first line after LCD enable)
-                // First line is 7T shorter: Mode 0 is shortened by 8T due to phantom
-                // cycles_for_line adjustment, plus 1T initial DMG sleep.
+                // Mode 0 → end of scanline at dot 456 (or shorter for first line after LCD enable).
+                // First line HBlank is shortened by 8T phantom cycles_for_line augment.
+                // DMG: +1T initial sleep → 456 - 8 + 1 = 449T.
+                // CGB: no initial sleep → 456 - 8 = 448T.
                 let line_end = if self.lcd_first_line_short {
-                    // CGB: 450T breaks M-cycle alignment so that LY and mode
-                    // changes fall in different step(4) batches.
-                    // DMG: 449T (1T initial sleep + 8T phantom augment)
-                    if self.cgb_mode { 450 } else { 449 }
+                    if self.cgb_mode { 448 } else { 449 }
                 } else {
                     456
                 };
