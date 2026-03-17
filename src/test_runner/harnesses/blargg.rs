@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::test_runner::harness::{TestHarness, TestResult};
 use crate::test_runner::test_model::detect_model_with_rom;
+use crate::test_runner::util::make_emu;
 
 pub struct BlarggHarness {
     pub force_model: Option<GbModel>,
@@ -22,10 +22,7 @@ impl TestHarness for BlarggHarness {
         let model = self
             .force_model
             .unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
-        let br: Option<Vec<u8>> = None;
-        let mut emu = Emulator::new(rom, br, None, model, None);
-        emu.headless = true;
-        emu.bus.apu.headless = true;
+        let mut emu = make_emu(rom, None, model);
         let output = emu.run_until_serial_result(6000);
         if verbose && !output.is_empty() {
             for line in output.lines() {

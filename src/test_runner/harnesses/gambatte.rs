@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::test_runner::harness::{TestHarness, TestResult};
+use crate::test_runner::util::{make_emu, GB_FB_WIDTH};
 
 // Gambatte hex digit tile patterns (8x8 pixels each, bit 7=leftmost pixel)
 // 1 = black (0x000000), 0 = white (0xF8F8F8)
@@ -40,7 +40,7 @@ fn gambatte_tile_matches(fb: &[u32], tile_x: usize, digit: usize) -> bool {
     let pattern = &GAMBATTE_DIGITS[digit];
     for y in 0..8 {
         for x in 0..8 {
-            let pixel = fb[y * 160 + tile_x * 8 + x];
+            let pixel = fb[y * GB_FB_WIDTH + tile_x * 8 + x];
             let masked = pixel & 0xF8F8F8;
             let expected_black = (pattern[y] >> (7 - x)) & 1 == 1;
             let is_black = masked == 0;
@@ -120,9 +120,7 @@ impl TestHarness for GambatteHarness {
             GbModel::Cgb
         };
 
-        let mut emu = Emulator::new(rom, None, None, model, None);
-        emu.headless = true;
-        emu.bus.apu.headless = true;
+        let mut emu = make_emu(rom, None, model);
 
         // Run for 15 frames
         for _ in 0..15 {

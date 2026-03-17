@@ -4,6 +4,11 @@ use crate::model::GbModel;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Game Boy frame buffer width in pixels.
+pub const GB_FB_WIDTH: usize = 160;
+/// Game Boy frame buffer height in pixels.
+pub const GB_FB_HEIGHT: usize = 144;
+
 pub fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emulator {
     let mut emu = Emulator::new(rom, boot_rom, None, model, None);
     emu.headless = true;

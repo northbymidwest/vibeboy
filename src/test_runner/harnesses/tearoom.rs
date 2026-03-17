@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::test_runner::harness::{TestHarness, TestResult};
+use crate::test_runner::util::{make_emu, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 pub struct TearoomHarness {
     pub force_model: Option<GbModel>,
@@ -72,9 +72,7 @@ impl TestHarness for TearoomHarness {
             return TestResult::Skip;
         };
 
-        let mut emu = Emulator::new(rom, None, None, model, None);
-        emu.headless = true;
-        emu.bus.apu.headless = true;
+        let mut emu = make_emu(rom, None, model);
         let hit = emu.run_until_breakpoint(300);
         if hit.is_none() {
             return TestResult::Timeout;
@@ -88,7 +86,7 @@ impl TestHarness for TearoomHarness {
             return TestResult::Err;
         };
 
-        if ref_img.width() != 160 || ref_img.height() != 144 {
+        if ref_img.width() != GB_FB_WIDTH as u32 || ref_img.height() != GB_FB_HEIGHT as u32 {
             if verbose {
                 eprintln!(
                     "  reference image wrong size: {}x{}",
@@ -103,9 +101,9 @@ impl TestHarness for TearoomHarness {
 
         // Compare pixel by pixel
         let mut mismatches = 0u32;
-        for y in 0..144usize {
-            for x in 0..160usize {
-                let pixel = fb[y * 160 + x];
+        for y in 0..GB_FB_HEIGHT {
+            for x in 0..GB_FB_WIDTH {
+                let pixel = fb[y * GB_FB_WIDTH + x];
                 let ref_pixel = ref_img.get_pixel(x as u32, y as u32);
 
                 // Convert our pixel to standard shade RGB for comparison

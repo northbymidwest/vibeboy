@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::test_runner::harness::{TestHarness, TestResult};
+use crate::test_runner::util::make_emu;
 
 pub struct GbMicrotestHarness {
     pub force_model: Option<GbModel>,
@@ -27,9 +27,7 @@ impl TestHarness for GbMicrotestHarness {
 
         let model = self.force_model.unwrap_or(GbModel::Dmg);
         let rom_copy = rom.clone();
-        let mut emu = Emulator::new(rom, None, None, model, None);
-        emu.headless = true;
-        emu.bus.apu.headless = true;
+        let mut emu = make_emu(rom, None, model);
         for _ in 0..frames {
             emu.step_frame();
         }

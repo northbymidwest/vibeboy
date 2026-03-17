@@ -36,6 +36,7 @@ mod ui_util;
 #[path = "."]
 mod test_runner {
     pub mod commands;
+    pub mod debug_commands;
     pub mod harness;
     pub mod harnesses;
     #[path = "model.rs"]
@@ -264,7 +265,7 @@ fn main() {
             boot,
             bootrom,
         } => {
-            commands::cmd_analyze(&path, model, boot, bootrom.as_deref(), frames);
+            test_runner::debug_commands::cmd_analyze(&path, model, boot, bootrom.as_deref(), frames);
         }
         Command::TraceTimer {
             path,
@@ -272,10 +273,10 @@ fn main() {
             boot,
             bootrom,
         } => {
-            commands::cmd_trace_timer(&path, model, boot, bootrom.as_deref());
+            test_runner::debug_commands::cmd_trace_timer(&path, model, boot, bootrom.as_deref());
         }
         Command::Calibrate { path } => {
-            commands::cmd_calibrate(&path);
+            test_runner::debug_commands::cmd_calibrate(&path);
         }
     }
 }

@@ -1,13 +1,11 @@
-use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::scaling;
 use crate::vectorize;
-use crate::test_runner::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
-use crate::test_runner::util::{make_emu, parse_keys};
+use crate::test_runner::test_model::{detect_model_with_rom, resolve_boot_rom};
+use crate::test_runner::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
     let mut rgb = Vec::with_capacity(w * h * 3);
@@ -31,9 +29,43 @@ fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, fram
     }
 }
 
+/// Try a GPU rasterization function, falling back to a CPU function on failure.
+/// Returns the rasterized result as (pixels, width, height).
+///
+/// `filter_name` is included in diagnostic messages for clarity.
+/// `gpu_fn` should return `Some((pixels, width, height))` on success, `None` on failure.
+/// `cpu_fn` provides the CPU fallback and is called when GPU is unavailable or fails.
+fn gpu_with_cpu_fallback(
+    filter_name: &str,
+    use_gpu: bool,
+    gpu_fn: impl FnOnce() -> Option<(Vec<u32>, u32, u32)>,
+    cpu_fn: impl FnOnce() -> (Vec<u32>, usize, usize),
+) -> (Vec<u32>, usize, usize) {
+    if use_gpu {
+        #[cfg(feature = "sdl3-gpu-shaders")]
+        {
+            if let Some((pixels, w, h)) = gpu_fn() {
+                return (pixels, w as usize, h as usize);
+            }
+            eprintln!(
+                "GPU '{}' failed, falling back to CPU rasterization",
+                filter_name
+            );
+        }
+        #[cfg(not(feature = "sdl3-gpu-shaders"))]
+        {
+            let _ = gpu_fn; // suppress unused variable warning
+            eprintln!(
+                "GPU shaders not enabled for '{}', using CPU rasterization",
+                filter_name
+            );
+        }
+    }
+    cpu_fn()
+}
+
 /// Rasterize pixels using the specified vectorize format and save to a file.
 /// Handles raster, diffusion, and spline-diffusion formats with optional GPU.
-/// Returns true if the format was handled, false if it was not a vectorize format.
 fn vectorize_and_save(
     pixels: &[u32], width: usize, height: usize,
     out: &str, format: &str, scale: usize, use_gpu: bool,
@@ -50,33 +82,30 @@ fn vectorize_and_save(
 
     let (raster_pixels, out_w, out_h) = match format {
         "spline-diffusion" => {
-            let r = cpu_spline_diffusion(pixels, width, height, scale, use_gpu);
+            let r = spline_diffusion_with_fallback(pixels, width, height, scale, use_gpu);
             (r, width * scale, height * scale)
         }
         "diffusion" => {
             vectorize::rasterize::rasterize_diffusion(pixels, width, height, scale)
         }
         "edge" => {
-            if use_gpu {
-                #[cfg(feature = "sdl3-gpu-shaders")]
-                {
-                    if let Some(result) = crate::scaling::gpu::gpu_vectorize_shared_screenshot(
-                        pixels, width, height, scale,
-                    ) {
-                        (result.0, result.1 as usize, result.2 as usize)
-                    } else {
-                        eprintln!("GPU vectorize failed, falling back to CPU");
-                        vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
+            gpu_with_cpu_fallback(
+                "edge",
+                use_gpu,
+                || {
+                    #[cfg(feature = "sdl3-gpu-shaders")]
+                    {
+                        crate::scaling::gpu::gpu_vectorize_shared_screenshot(
+                            pixels, width, height, scale,
+                        )
                     }
-                }
-                #[cfg(not(feature = "sdl3-gpu-shaders"))]
-                {
-                    eprintln!("GPU shaders not enabled, using CPU");
-                    vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
-                }
-            } else {
-                vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
-            }
+                    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+                    {
+                        None
+                    }
+                },
+                || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
+            )
         }
         "cpu-dump" => {
             // Dump CPU control points for visualization
@@ -84,22 +113,23 @@ fn vectorize_and_save(
             return;
         }
         "gpu-full" => {
-            #[cfg(feature = "sdl3-gpu-shaders")]
-            {
-                if let Some(result) = crate::scaling::gpu::gpu_full_pipeline_screenshot(
-                    pixels, width, height, scale,
-                ) {
-                    (result.0, result.1 as usize, result.2 as usize)
-                } else {
-                    eprintln!("GPU full pipeline failed, falling back to CPU");
-                    vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
-                }
-            }
-            #[cfg(not(feature = "sdl3-gpu-shaders"))]
-            {
-                eprintln!("GPU shaders not enabled");
-                vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
-            }
+            gpu_with_cpu_fallback(
+                "gpu-full",
+                use_gpu,
+                || {
+                    #[cfg(feature = "sdl3-gpu-shaders")]
+                    {
+                        crate::scaling::gpu::gpu_full_pipeline_screenshot(
+                            pixels, width, height, scale,
+                        )
+                    }
+                    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+                    {
+                        None
+                    }
+                },
+                || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
+            )
         }
         _ => {
             // "raster" or default
@@ -113,8 +143,8 @@ fn vectorize_and_save(
     );
 }
 
-/// CPU spline-diffusion rasterization with optional GPU acceleration.
-fn cpu_spline_diffusion(
+/// Spline-diffusion rasterization with optional GPU acceleration and CPU fallback.
+fn spline_diffusion_with_fallback(
     pixels: &[u32], width: usize, height: usize, scale: usize, use_gpu: bool,
 ) -> Vec<u32> {
     #[cfg(feature = "sdl3-gpu-shaders")]
@@ -122,11 +152,11 @@ fn cpu_spline_diffusion(
         if let Some((px, _, _)) = scaling::gpu::gpu_spline_diffusion_screenshot(pixels, width, height, scale) {
             return px;
         }
-        eprintln!("GPU spline-diffusion failed, falling back to CPU");
+        eprintln!("GPU 'spline-diffusion' failed, falling back to CPU rasterization");
     }
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
     if use_gpu {
-        eprintln!("GPU shaders not enabled, using CPU");
+        eprintln!("GPU shaders not enabled for 'spline-diffusion', using CPU rasterization");
     }
     vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
     let (paths, bg_color) = vectorize::vectorize_core(pixels, width, height);
@@ -135,6 +165,51 @@ fn cpu_spline_diffusion(
         &paths, pixels, width, height, bg_color, scale,
     );
     r
+}
+
+/// Apply a scaling filter via GPU, returning the scaled pixels on success.
+/// Returns `None` if GPU is not available or the operation fails.
+fn try_gpu_filter(
+    raw_fb: &[u32],
+    filter_name: &str,
+    sf: scaling::ScaleFilter,
+    scale: usize,
+    is_vectorize: bool,
+    is_adaptive: bool,
+) -> Option<(Vec<u32>, usize, usize)> {
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    {
+        if is_vectorize {
+            let s = scale as f64;
+            if let Some((pix, w, h)) = scaling::gpu::gpu_vectorize_screenshot(
+                raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s, is_adaptive,
+            ) {
+                return Some((pix, w as usize, h as usize));
+            }
+            eprintln!(
+                "GPU vectorize screenshot failed for filter '{}', falling back to CPU",
+                filter_name
+            );
+        } else if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(
+            raw_fb, GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32, sf,
+        ) {
+            return Some((s, w as usize, h as usize));
+        } else {
+            eprintln!(
+                "GPU screenshot failed for filter '{}', falling back to CPU",
+                filter_name
+            );
+        }
+    }
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    {
+        let _ = (sf, scale, is_vectorize, is_adaptive);
+        eprintln!(
+            "GPU support not compiled in for filter '{}' (enable sdl3-gpu-shaders feature)",
+            filter_name
+        );
+    }
+    None
 }
 
 pub fn cmd_screenshot(
@@ -176,50 +251,36 @@ pub fn cmd_screenshot(
         let is_adaptive = f == "vectorize-legacy-adaptive";
 
         // Try GPU path if requested
-        #[cfg(feature = "sdl3-gpu-shaders")]
         if use_gpu {
-            if is_vectorize {
-                let s = scale as f64;
-                if let Some((pix, w, h)) = scaling::gpu::gpu_vectorize_screenshot(
-                    raw_fb, 160, 144, s, is_adaptive,
-                ) {
-                    scaled_buf = pix;
-                    return save_pixels(&scaled_buf, w as usize, h as usize, out, format, frames);
-                }
-                eprintln!("GPU vectorize screenshot failed, falling back to CPU");
-            } else if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(raw_fb, 160, 144, sf) {
-                scaled_buf = s;
-                return save_pixels(&scaled_buf, w as usize, h as usize, out, format, frames);
-            } else {
-                eprintln!("GPU screenshot failed for filter '{}', falling back to CPU", f);
+            if let Some((pixels, w, h)) =
+                try_gpu_filter(raw_fb, f, sf, scale, is_vectorize, is_adaptive)
+            {
+                scaled_buf = pixels;
+                return save_pixels(&scaled_buf, w, h, out, format, frames);
             }
-        }
-        #[cfg(not(feature = "sdl3-gpu-shaders"))]
-        if use_gpu {
-            eprintln!("GPU support not compiled in (enable sdl3-gpu-shaders feature)");
         }
 
         // CPU path
         if is_vectorize {
             let s = scale as f64;
             let mut cache = crate::vectorize::VectorizeCache::new_legacy(is_adaptive);
-            let (raster, rw, rh) = cache.rasterize(raw_fb, 160, 144, s);
+            let (raster, rw, rh) = cache.rasterize(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s);
             scaled_buf = raster.to_vec();
             (scaled_buf.as_slice(), rw, rh)
         } else {
-            let disp_w = 160 * scale;
-            let disp_h = 144 * scale;
-            let (s, w, h) = scaling::cpu_scale(sf, raw_fb, 160, 144, disp_w, disp_h)
-                .unwrap_or_else(|| (raw_fb.to_vec(), 160, 144));
+            let disp_w = GB_FB_WIDTH * scale;
+            let disp_h = GB_FB_HEIGHT * scale;
+            let (s, w, h) = scaling::cpu_scale(sf, raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, disp_w, disp_h)
+                .unwrap_or_else(|| (raw_fb.to_vec(), GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32));
             scaled_buf = s;
             (scaled_buf.as_slice(), w as usize, h as usize)
         }
     } else {
-        (raw_fb, 160, 144)
+        (raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
     };
 
     if matches!(format, "raster" | "diffusion" | "spline-diffusion" | "edge" | "gpu-full" | "cpu-dump") {
-        vectorize_and_save(fb, 160, 144, out, format, scale, use_gpu);
+        vectorize_and_save(fb, GB_FB_WIDTH, GB_FB_HEIGHT, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
     }
@@ -244,178 +305,4 @@ pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize, gpu: b
         .collect();
 
     vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
-}
-
-pub fn cmd_analyze(
-    path: &Path,
-    force_model: Option<GbModel>,
-    boot: bool,
-    bootrom: Option<&Path>,
-    frames: u32,
-) {
-    let rom = fs::read(path).expect("Failed to read ROM");
-    let model = force_model.unwrap_or(GbModel::Cgb);
-    let br = resolve_boot_rom(boot, bootrom, model);
-    let mut emu = make_emu(rom, br, model);
-
-    for _ in 0..frames {
-        emu.step_frame();
-    }
-
-    let fb = emu.frame_buffer();
-    eprintln!("Frame {} analysis (right edge, columns 155-159):", frames);
-    let mut yellow_count = 0;
-    for y in 0..144 {
-        let mut right_colors = Vec::new();
-        for x in 155..160 {
-            let pixel = fb[y * 160 + x];
-            right_colors.push(pixel);
-            let r = (pixel >> 16) & 0xFF;
-            let g = (pixel >> 8) & 0xFF;
-            let b = pixel & 0xFF;
-            if r > 200 && g > 150 && b < 100 {
-                yellow_count += 1;
-            }
-        }
-        if right_colors.iter().any(|&p| {
-            let r = (p >> 16) & 0xFF;
-            let g = (p >> 8) & 0xFF;
-            let b = p & 0xFF;
-            r > 200 && g > 150 && b < 100
-        }) {
-            eprintln!(
-                "  LY={:3}: {:08X} {:08X} {:08X} {:08X} {:08X}  SCX={}",
-                y, right_colors[0], right_colors[1], right_colors[2], right_colors[3],
-                right_colors[4], emu.bus.ppu.scx
-            );
-        }
-    }
-    eprintln!("\nLeft edge sample (LY=72):");
-    for x in 0..8 {
-        let pixel = fb[72 * 160 + x];
-        eprint!("{:08X} ", pixel);
-    }
-    eprintln!("\nRight edge sample (LY=72):");
-    for x in 152..160 {
-        let pixel = fb[72 * 160 + x];
-        eprint!("{:08X} ", pixel);
-    }
-    eprintln!(
-        "\nTotal yellow pixels on right edge (cols 155-159): {}",
-        yellow_count
-    );
-}
-
-pub fn cmd_trace_timer(
-    path: &Path,
-    force_model: Option<GbModel>,
-    boot: bool,
-    bootrom: Option<&Path>,
-) {
-    let rom = fs::read(path).expect("Failed to read ROM");
-    let model = force_model.unwrap_or_else(|| detect_model_with_rom(path, Some(&rom)));
-    let br = resolve_boot_rom(boot, bootrom, model);
-    let mut emu = Emulator::new(rom, br, None, model, None);
-    emu.headless = true;
-    emu.bus.apu.headless = true;
-    if boot || bootrom.is_some() {
-        let mut history: VecDeque<(u16, u8, u16, u16)> = VecDeque::new();
-        loop {
-            let pc = emu.cpu.regs.pc;
-            let opcode = emu.bus.read_byte(pc);
-            let tc_before = emu.bus.timer.counter();
-            if pc == 0x0100 && !emu.bus.boot_rom_active {
-                break;
-            }
-            emu.cpu.step(&mut emu.bus);
-            let tc_after = emu.bus.timer.counter();
-            history.push_back((pc, opcode, tc_before, tc_after));
-            if history.len() > 30 {
-                history.pop_front();
-            }
-        }
-        eprintln!("Last {} instructions of boot ROM:", history.len());
-        for (pc, opcode, tc_before, tc_after) in &history {
-            let delta = tc_after.wrapping_sub(*tc_before);
-            eprintln!(
-                "  PC={:#06X} op={:#04X} timer: {:#06X} -> {:#06X} (+{}) DIV: {:02X} -> {:02X}",
-                pc,
-                opcode,
-                tc_before,
-                tc_after,
-                delta,
-                tc_before >> 8,
-                tc_after >> 8
-            );
-        }
-    }
-    eprintln!(
-        "At PC=$0100: timer_counter={:#06X} DIV={:02X}",
-        emu.bus.timer.counter(),
-        emu.bus.timer.counter() >> 8
-    );
-    for i in 0..20 {
-        let pc = emu.cpu.regs.pc;
-        let opcode = emu.bus.read_byte(pc);
-        let tc_before = emu.bus.timer.counter();
-        emu.cpu.step(&mut emu.bus);
-        let tc_after = emu.bus.timer.counter();
-        eprintln!(
-            "  step {}: PC={:#06X} op={:#04X} timer: {:#06X} -> {:#06X} (DIV: {:02X} -> {:02X})",
-            i,
-            pc,
-            opcode,
-            tc_before,
-            tc_after,
-            tc_before >> 8,
-            tc_after >> 8
-        );
-    }
-}
-
-pub fn cmd_calibrate(path: &Path) {
-    let rom = fs::read(path).expect("Failed to read ROM");
-    let models = [
-        GbModel::Dmg0,
-        GbModel::Dmg,
-        GbModel::Mgb,
-        GbModel::Sgb,
-        GbModel::Sgb2,
-        GbModel::Cgb,
-        GbModel::Agb,
-    ];
-    for model in &models {
-        if let Some(br) = load_boot_rom(*model) {
-            let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
-            emu.headless = true;
-            emu.bus.apu.headless = true;
-            for _ in 0..100_000_000u64 {
-                if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
-                    let div_val = emu.bus.read_byte(0xFF04);
-                    eprintln!(
-                        "{:?}: LY={} dot={} mode={} total_ticks={} DIV={:02X} timer_counter={:#06X} regs=A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X}",
-                        model,
-                        emu.bus.ppu.ly,
-                        emu.bus.ppu.dot,
-                        emu.bus.ppu.stat & 0x03,
-                        emu.bus.ppu.total_ticks,
-                        div_val,
-                        emu.bus.timer.counter(),
-                        emu.cpu.regs.a,
-                        emu.cpu.regs.f,
-                        emu.cpu.regs.b,
-                        emu.cpu.regs.c,
-                        emu.cpu.regs.d,
-                        emu.cpu.regs.e,
-                        emu.cpu.regs.h,
-                        emu.cpu.regs.l
-                    );
-                    break;
-                }
-                emu.cpu.step(&mut emu.bus);
-            }
-        } else {
-            eprintln!("{:?}: no boot ROM available", model);
-        }
-    }
 }

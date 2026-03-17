@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::test_runner::harness::{TestHarness, TestResult};
 use crate::test_runner::test_model::detect_model_with_rom;
+use crate::test_runner::util::make_emu;
 
 pub struct MooneyeHarness {
     pub force_model: Option<GbModel>,
@@ -41,9 +41,7 @@ impl TestHarness for MooneyeHarness {
         } else {
             None
         };
-        let mut emu = Emulator::new(rom, br, None, model, None);
-        emu.headless = true;
-        emu.bus.apu.headless = true;
+        let mut emu = make_emu(rom, br, model);
         match emu.run_until_breakpoint(300) {
             Some(regs) => {
                 if mooneye_passed(regs) {
