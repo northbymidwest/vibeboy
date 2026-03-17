@@ -1523,7 +1523,7 @@ fn bspline_open(ctrl: &[Point]) -> Vec<PathSegment> {
         (ctrl[0].x + ctrl[1].x) * 0.5,
         (ctrl[0].y + ctrl[1].y) * 0.5,
     );
-    segments.push(PathSegment::Line(ctrl[0], mid01));
+    segments.push(PathSegment::QuadBezier(ctrl[0], ctrl[0], mid01));
 
     for i in 0..n - 2 {
         let p0 = ctrl[i];
@@ -1538,7 +1538,7 @@ fn bspline_open(ctrl: &[Point]) -> Vec<PathSegment> {
         (ctrl[n - 2].x + ctrl[n - 1].x) * 0.5,
         (ctrl[n - 2].y + ctrl[n - 1].y) * 0.5,
     );
-    segments.push(PathSegment::Line(mid_last, ctrl[n - 1]));
+    segments.push(PathSegment::QuadBezier(mid_last, ctrl[n - 1], ctrl[n - 1]));
 
     segments
 }
