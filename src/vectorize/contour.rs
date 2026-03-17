@@ -89,6 +89,17 @@ pub struct ColorPath {
     pub segments: Vec<PathSegment>,
 }
 
+/// A boundary span: a curve segment between two colored regions.
+/// Each span is shared by exactly two regions, so there are no gaps.
+/// left/right are determined by the cross product of the segment direction:
+/// positive cross = left side, negative cross = right side.
+#[derive(Clone, Debug)]
+pub struct BoundarySpan {
+    pub segment: PathSegment,
+    pub left_color: u32,
+    pub right_color: u32,
+}
+
 // --- Section 3.2: Reshaped cell graph (Voronoi diagram) ---
 
 /// Which pixel is this relative to a grid corner?
@@ -436,12 +447,17 @@ const ADAPTIVE_EDGE_THRESHOLD: usize = 12000;
 fn build_directed_boundary_edges(
     pixels: &[u32], w: usize, h: usize, all_cells: &[InlineCell], adaptive: bool,
 ) -> (Vec<CellEdge>, Vec<(NodeId, NodeId, u32)>) {
-    // Sort-merge approach: collect all half-edges, sort by canonical key, merge
-    // adjacent pairs. Cache-friendlier than HashMap for large images.
-    let stride = (4 * w + 4) as u32;
+    // Hash-merge approach: for each cell edge, look up or insert into a HashMap
+    // keyed by canonical (na, nb). This is O(n) expected vs O(n log n) for sort.
+    //
+    // Each entry stores (left_color, right_color). When we see a half-edge:
+    //   - is_forward (pa <= pb): the pixel's color goes to right_color
+    //   - !is_forward (pa > pb): the pixel's color goes to left_color
 
-    // Each pixel has 4-8 cell edges. Collect as (canonical_key, node_a, node_b, color, is_forward).
-    let mut half_edges: Vec<(u64, NodeId, NodeId, u32, bool)> = Vec::with_capacity(w * h * 5);
+    // Value: (left_color, right_color, na, nb)
+    let estimated = w * h * 3;
+    let mut edge_map: FxHashMap<u64, (u32, u32, NodeId, NodeId)> = fx_hashmap_cap(estimated);
+    let stride = (4 * w + 4) as u32;
 
     for y in 0..h {
         let row = y * w;
@@ -461,30 +477,20 @@ fn build_directed_boundary_edges(
                     (pack_edge(pack_node(pb, stride), pack_node(pa, stride)), false)
                 };
                 let (na, nb) = if pa <= pb { (pa, pb) } else { (pb, pa) };
-                half_edges.push((key, na, nb, color, is_forward));
+
+                let entry = edge_map.entry(key).or_insert((VOID_COLOR, VOID_COLOR, na, nb));
+                if is_forward {
+                    entry.1 = color; // right_color
+                } else {
+                    entry.0 = color; // left_color
+                }
             }
         }
     }
 
-    // Sort by canonical key — groups matching half-edges adjacent
-    half_edges.sort_unstable_by_key(|e| e.0);
-
-    // Merge adjacent pairs and emit boundary edges
+    // Emit boundary edges from the map
     let mut boundary_count = 0usize;
-    let mut i = 0;
-    let len = half_edges.len();
-
-    // First pass: count boundaries
-    while i < len {
-        let key = half_edges[i].0;
-        let mut left = VOID_COLOR;
-        let mut right = VOID_COLOR;
-        let j = i;
-        while i < len && half_edges[i].0 == key {
-            if half_edges[i].4 { right = half_edges[i].3; }
-            else { left = half_edges[i].3; }
-            i += 1;
-        }
+    for &(left, right, _, _) in edge_map.values() {
         if is_visible_edge(left, right) { boundary_count += 1; }
     }
 
@@ -492,19 +498,7 @@ fn build_directed_boundary_edges(
     let mut directed = Vec::with_capacity(boundary_count * 2);
     let mut visible = if adaptive { Vec::new() } else { Vec::with_capacity(boundary_count) };
 
-    // Second pass: emit edges
-    i = 0;
-    while i < len {
-        let key = half_edges[i].0;
-        let na = half_edges[i].1;
-        let nb = half_edges[i].2;
-        let mut left = VOID_COLOR;
-        let mut right = VOID_COLOR;
-        while i < len && half_edges[i].0 == key {
-            if half_edges[i].4 { right = half_edges[i].3; }
-            else { left = half_edges[i].3; }
-            i += 1;
-        }
+    for &(left, right, na, nb) in edge_map.values() {
         if !is_visible_edge(left, right) { continue; }
         directed.push((na, nb, right));
         directed.push((nb, na, left));
@@ -513,10 +507,8 @@ fn build_directed_boundary_edges(
         }
     }
 
-    if !adaptive {
-        // Already sorted by key from the sort above
-        directed.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-    }
+    // Note: directed edges are NOT pre-sorted. trace_all_boundary_loops
+    // does its own sort internally, so pre-sorting here was redundant.
 
     (visible, directed)
 }
@@ -1415,6 +1407,356 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
 
     result
 }
+
+/// Extract boundary spans for edge-based rendering.
+/// Each span is a B-spline segment shared by exactly two color regions,
+/// eliminating gaps that occur with per-region path rendering.
+///
+/// Pipeline: cells → boundary edges → chains → optimize → B-spline fit.
+///
+/// Unlike the scanline renderer's extract_cells_smooth, this deliberately
+/// does NOT merge T-junctions. T-junction merging creates long chains that
+/// cross color boundaries, producing non-adjacent control points and
+/// B-spline curves that overshoot into wrong regions. By using pre-merge
+/// chains, every consecutive node pair is a real CellEdge, every edge
+/// lookup succeeds, and B-splines stay close to actual boundaries.
+///
+/// The trade-off is that chains are shorter (split at every junction),
+/// so B-splines at junction endpoints are slightly less smooth. But
+/// correctness is more important than smoothness.
+pub fn extract_boundary_spans(
+    pixels: &[u32], graph: &SimilarityGraph,
+) -> (Vec<BoundarySpan>, u32) {
+    let w = graph.width;
+    let h = graph.height;
+
+    let all_cells = precompute_cells(w, h, graph);
+    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, false);
+
+    // Build chains WITHOUT T-junction merging.
+    let chains = chain_visible_edges(&visible_edges);
+
+    // Build junction set (chain endpoints) for optimization
+    let mut junctions: HashSet<NodeId> = HashSet::new();
+    for (chain, _) in &chains {
+        let is_closed = chain.len() > 2 && chain.first() == chain.last();
+        if !is_closed && chain.len() >= 2 {
+            junctions.insert(chain[0]);
+            junctions.insert(chain[chain.len() - 1]);
+        }
+    }
+
+    // Trace boundary loops and optimize node positions via gradient descent.
+    let all_loops = trace_all_boundary_loops(&directed_edges);
+    let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
+    for (node_loop, _) in &all_loops {
+        for nd in node_loop {
+            node_positions.entry(*nd).or_insert_with(|| nd.to_point());
+        }
+    }
+    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+
+    // Build directed edge lookup from original CellEdges.
+    let mut edge_colors: FxHashMap<(NodeId, NodeId), (u32, u32)> = fx_hashmap_cap(visible_edges.len() * 2);
+    for e in &visible_edges {
+        edge_colors.insert((e.a, e.b), (e.left_color, e.right_color));
+        edge_colors.insert((e.b, e.a), (e.right_color, e.left_color));
+    }
+
+    // Fit B-splines to each chain and emit spans.
+    // Since chains are pre-merge, every edge lookup succeeds — no fallbacks needed.
+    let mut spans = Vec::new();
+    for (chain, _cpair) in &chains {
+        let n = chain.len();
+        if n < 2 { continue; }
+
+        let points: Vec<Point> = chain.iter()
+            .map(|nd| node_positions.get(nd).copied().unwrap_or_else(|| nd.to_point()))
+            .collect();
+
+        let is_closed = n > 2 && chain.first() == chain.last();
+        let segments = if is_closed {
+            bspline_closed(&points[..n - 1])
+        } else {
+            bspline_open(&points)
+        };
+
+        // Look up left/right for each segment from the edge it corresponds to.
+        let loop_len = if is_closed { n - 1 } else { n - 1 };
+        for (si, seg) in segments.iter().enumerate() {
+            let (ei, ei_next) = if is_closed {
+                (si % loop_len, (si + 1) % loop_len)
+            } else {
+                let ei = si.min(loop_len - 1);
+                (ei, ei + 1)
+            };
+            // This lookup always succeeds for pre-merge chains.
+            let (left, right) = edge_colors
+                .get(&(chain[ei], chain[ei_next]))
+                .copied()
+                .unwrap_or((0, 0));
+            if left != VOID_COLOR && right != VOID_COLOR {
+                spans.push(BoundarySpan {
+                    segment: seg.clone(),
+                    left_color: left,
+                    right_color: right,
+                });
+            }
+        }
+    }
+
+    let bg_color = detect_bg(pixels, w, h);
+    (spans, bg_color)
+}
+
+/// Extract per-region ColorPaths using shared chain B-splines with winding fill.
+///
+/// Each boundary chain is shared between two regions. B-splines are fitted once
+/// per chain, then each region's boundary loop is assembled from those shared
+/// segments. Since both regions reference the same curve, boundaries are gap-free.
+/// The scanline winding-number rasterizer then correctly fills each region.
+pub fn extract_shared_edge_paths(
+    pixels: &[u32], graph: &SimilarityGraph,
+) -> (Vec<ColorPath>, u32) {
+    extract_shared_edge_paths_inner(pixels, graph, false)
+}
+
+/// Inner implementation with adaptive flag.
+/// When adaptive=true and boundary count exceeds threshold, skips
+/// chain building and optimization for faster (but less smooth) output.
+pub fn extract_shared_edge_paths_inner(
+    pixels: &[u32], graph: &SimilarityGraph, adaptive: bool,
+) -> (Vec<ColorPath>, u32) {
+    let w = graph.width;
+    let h = graph.height;
+
+    let all_cells = precompute_cells(w, h, graph);
+    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, adaptive);
+
+    // Adaptive: when visible_edges is empty, boundary count exceeded threshold.
+    // Skip chain building and optimization for faster output.
+    let adaptive = adaptive && visible_edges.is_empty();
+
+    if adaptive {
+        let all_loops = trace_all_boundary_loops(&directed_edges);
+        let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
+        for (node_loop, color) in &all_loops {
+            let points: Vec<Point> = node_loop.iter()
+                .map(|nd| nd.to_point())
+                .collect();
+            if points.len() < 3 { continue; }
+            let segs = bspline_closed(&points);
+            if !segs.is_empty() {
+                color_loops.entry(*color).or_default().push(segs);
+            }
+        }
+
+        let mut result: Vec<ColorPath> = Vec::new();
+        for (color, loop_segments) in color_loops {
+            if color == VOID_COLOR { continue; }
+            let mut all_segments = Vec::new();
+            for segs in loop_segments {
+                all_segments.extend(segs);
+            }
+            result.push(ColorPath { color, segments: all_segments });
+        }
+        let bg_color = detect_bg(pixels, w, h);
+        return (result, bg_color);
+    }
+
+    // Build chains without T-junction merging.
+    let chains = chain_visible_edges(&visible_edges);
+
+    // Build junction set for optimization
+    let mut junctions: HashSet<NodeId> = HashSet::new();
+    for (chain, _) in &chains {
+        let is_closed = chain.len() > 2 && chain.first() == chain.last();
+        if !is_closed && chain.len() >= 2 {
+            junctions.insert(chain[0]);
+            junctions.insert(chain[chain.len() - 1]);
+        }
+    }
+
+    // Optimize node positions
+    let all_loops = trace_all_boundary_loops(&directed_edges);
+    let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
+    for (node_loop, _) in &all_loops {
+        for nd in node_loop {
+            node_positions.entry(*nd).or_insert_with(|| nd.to_point());
+        }
+    }
+    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+
+    // Fit B-splines to each chain
+    let chain_segments: Vec<Vec<PathSegment>> = chains.iter().map(|(chain, _)| {
+        let n = chain.len();
+        if n < 2 { return Vec::new(); }
+        let points: Vec<Point> = chain.iter()
+            .map(|nd| node_positions.get(nd).copied().unwrap_or_else(|| nd.to_point()))
+            .collect();
+        let is_closed = n > 2 && chain.first() == chain.last();
+        if is_closed {
+            bspline_closed(&points[..n - 1])
+        } else {
+            bspline_open(&points)
+        }
+    }).collect();
+
+    // Build edge→chain lookup: for each directed edge (a,b), store (chain_index, position_in_chain).
+    // Position is the index of node `a` in the chain (so the edge is chain[pos]→chain[pos+1]).
+    let mut edge_to_chain: FxHashMap<(NodeId, NodeId), (usize, usize, bool)> = fx_hashmap_cap(visible_edges.len() * 2);
+    for (ci, (chain, _)) in chains.iter().enumerate() {
+        let n = chain.len();
+        for i in 0..n.saturating_sub(1) {
+            // Forward: chain[i]→chain[i+1], position i
+            edge_to_chain.entry((chain[i], chain[i + 1]))
+                .or_insert((ci, i, true));
+            // Reversed: chain[i+1]→chain[i], position i, reversed
+            edge_to_chain.entry((chain[i + 1], chain[i]))
+                .or_insert((ci, i, false));
+        }
+    }
+
+    // Build a chain lookup by first node pair: given the first edge of a chain
+    // traversal, find the chain and direction.
+    // Key: (first_node, second_node) of the chain traversal
+    // Value: (chain_index, forward: bool)
+    let mut chain_by_entry: FxHashMap<(NodeId, NodeId), (usize, bool)> = fx_hashmap_cap(chains.len() * 2);
+    for (ci, (chain, _)) in chains.iter().enumerate() {
+        let n = chain.len();
+        if n < 2 { continue; }
+        let is_closed = n > 2 && chain.first() == chain.last();
+        if is_closed { continue; } // closed chains aren't split at junctions
+        // Forward entry: first two nodes
+        chain_by_entry.insert((chain[0], chain[1]), (ci, true));
+        // Reverse entry: last two nodes reversed
+        chain_by_entry.insert((chain[n - 1], chain[n - 2]), (ci, false));
+    }
+
+    // For each boundary loop, assemble a ColorPath from shared chain segments.
+    //
+    // Strategy: walk the loop node by node. At each junction node, look up
+    // the chain that starts with (junction, next_node). Emit that chain's
+    // entire B-spline (forward or reversed). Skip ahead past all the chain's
+    // interior nodes to the next junction.
+    let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
+
+    for (node_loop, color) in &all_loops {
+        let n = node_loop.len();
+        if n < 3 { continue; }
+
+        // Rotate the loop to start at a junction node so we always enter
+        // chains at their endpoints (where chain_by_entry can match).
+        let rotation = node_loop.iter().position(|nd| junctions.contains(nd)).unwrap_or(0);
+        let rotated: Vec<NodeId> = node_loop[rotation..].iter()
+            .chain(node_loop[..rotation].iter())
+            .copied().collect();
+        let node_loop = &rotated;
+
+        let mut segs = Vec::new();
+        let mut i = 0;
+
+        while i < n {
+            let a = node_loop[i];
+            let b = node_loop[(i + 1) % n];
+
+            if let Some(&(ci, forward)) = chain_by_entry.get(&(a, b)) {
+                let chain = &chains[ci].0;
+                let c_segs = &chain_segments[ci];
+                let chain_edges = chain.len() - 1; // number of edges in chain
+
+                if forward {
+                    // Emit all segments forward
+                    for seg in c_segs.iter() {
+                        segs.push(seg.clone());
+                    }
+                } else {
+                    // Emit all segments reversed
+                    for seg in c_segs.iter().rev() {
+                        segs.push(reverse_segment(seg));
+                    }
+                }
+                // Skip past the chain's edges in the loop
+                i += chain_edges;
+            } else {
+                // This edge isn't the start of any chain — it might be a
+                // single-edge chain (2 nodes) or a closed chain.
+                // Look it up in the general edge→chain map.
+                if let Some(&(ci, _pos, forward)) = edge_to_chain.get(&(a, b)) {
+                    let c_segs = &chain_segments[ci];
+                    let chain = &chains[ci].0;
+                    let is_closed = chain.len() > 2 && chain.first() == chain.last();
+
+                    if is_closed {
+                        // Closed chain: the entire loop IS this chain
+                        if forward {
+                            for seg in c_segs.iter() {
+                                segs.push(seg.clone());
+                            }
+                        } else {
+                            for seg in c_segs.iter().rev() {
+                                segs.push(reverse_segment(seg));
+                            }
+                        }
+                        i += chain.len() - 1;
+                    } else {
+                        // Single edge or mid-chain entry — emit just this one
+                        // segment as a fallback line
+                        let pa = node_positions.get(&a).copied().unwrap_or_else(|| a.to_point());
+                        let pb = node_positions.get(&b).copied().unwrap_or_else(|| b.to_point());
+                        segs.push(PathSegment::Line(pa, pb));
+                        i += 1;
+                    }
+                } else {
+                    // Edge not in any chain — straight line fallback
+                    let pa = node_positions.get(&a).copied().unwrap_or_else(|| a.to_point());
+                    let pb = node_positions.get(&b).copied().unwrap_or_else(|| b.to_point());
+                    segs.push(PathSegment::Line(pa, pb));
+                    i += 1;
+                }
+            }
+        }
+
+        if !segs.is_empty() {
+            color_loops.entry(*color).or_default().push(segs);
+        }
+    }
+
+    let mut result: Vec<ColorPath> = Vec::new();
+    for (color, loop_segments) in color_loops {
+        if color == VOID_COLOR { continue; }
+        let mut all_segments = Vec::new();
+        for segs in loop_segments {
+            all_segments.extend(segs);
+        }
+        result.push(ColorPath { color, segments: all_segments });
+    }
+
+    let bg_color = detect_bg(pixels, w, h);
+    (result, bg_color)
+}
+
+fn reverse_segment(seg: &PathSegment) -> PathSegment {
+    match seg {
+        PathSegment::Line(a, b) => PathSegment::Line(*b, *a),
+        PathSegment::QuadBezier(a, c, b) => PathSegment::QuadBezier(*b, *c, *a),
+    }
+}
+
+/// Simple background color detection (most common edge color).
+fn detect_bg(pixels: &[u32], w: usize, h: usize) -> u32 {
+    let mut counts: FxHashMap<u32, u32> = fx_hashmap();
+    for x in 0..w {
+        *counts.entry(pixels[x]).or_insert(0) += 1;
+        *counts.entry(pixels[(h - 1) * w + x]).or_insert(0) += 1;
+    }
+    for y in 1..h - 1 {
+        *counts.entry(pixels[y * w]).or_insert(0) += 1;
+        *counts.entry(pixels[y * w + w - 1]).or_insert(0) += 1;
+    }
+    counts.into_iter().max_by_key(|&(_, c)| c).map(|(color, _)| color).unwrap_or(0)
+}
+
 
 // --- Loop optimization (Paper Section 3.4) ---
 

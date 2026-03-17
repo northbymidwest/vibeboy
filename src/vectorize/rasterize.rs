@@ -1,7 +1,8 @@
 //! Rasterize vector paths (ColorPath) to a pixel buffer using scanline rendering
 //! with 2x2 supersampling for anti-aliased edges.
 
-use super::contour::{ColorPath, PathSegment};
+use super::contour::{BoundarySpan, ColorPath, PathSegment};
+use super::voronoi::Point;
 
 /// A line segment in output pixel space with precomputed fields.
 struct Edge {
@@ -1338,4 +1339,348 @@ pub fn rasterize_spline_diffusion(
     }
 
     (buffer, out_w, out_h)
+}
+
+// ==========================================================================
+// Edge-based rasterizer
+// ==========================================================================
+//
+// Each boundary span is a curve segment shared by exactly two color regions.
+// For each output pixel, find the nearest span and determine which side of
+// the curve we're on to pick the color. This eliminates gaps by construction:
+// the boundary curve is the single source of truth for both regions.
+
+/// A flattened line segment from a boundary span, stored in output pixel space.
+/// Carries the colors of both adjacent regions.
+struct EdgeSeg {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    left_color: u32,
+    right_color: u32,
+}
+
+/// Flatten a BoundarySpan's curve into EdgeSeg line segments.
+fn flatten_span(span: &BoundarySpan, sx: f64, sy: f64, tol_sq: f64, out: &mut Vec<EdgeSeg>) {
+    match &span.segment {
+        PathSegment::Line(a, b) => {
+            out.push(EdgeSeg {
+                x0: a.x * sx, y0: a.y * sy,
+                x1: b.x * sx, y1: b.y * sy,
+                left_color: span.left_color,
+                right_color: span.right_color,
+            });
+        }
+        PathSegment::QuadBezier(a, c, b) => {
+            flatten_quad_span(
+                a.x * sx, a.y * sy,
+                c.x * sx, c.y * sy,
+                b.x * sx, b.y * sy,
+                tol_sq, span.left_color, span.right_color, out,
+            );
+        }
+    }
+}
+
+fn flatten_quad_span(
+    x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64,
+    tol_sq: f64, left: u32, right: u32, out: &mut Vec<EdgeSeg>,
+) {
+    let mx = (x0 + x1) * 0.5;
+    let my = (y0 + y1) * 0.5;
+    let dx = cx - mx;
+    let dy = cy - my;
+    if dx * dx + dy * dy <= tol_sq {
+        out.push(EdgeSeg { x0, y0, x1, y1, left_color: left, right_color: right });
+        return;
+    }
+    let ax = (x0 + cx) * 0.5;
+    let ay = (y0 + cy) * 0.5;
+    let bx = (cx + x1) * 0.5;
+    let by = (cy + y1) * 0.5;
+    let mx2 = (ax + bx) * 0.5;
+    let my2 = (ay + by) * 0.5;
+    flatten_quad_span(x0, y0, ax, ay, mx2, my2, tol_sq, left, right, out);
+    flatten_quad_span(mx2, my2, bx, by, x1, y1, tol_sq, left, right, out);
+}
+
+/// Squared distance from point (px, py) to the closest point on segment (x0,y0)-(x1,y1).
+/// Also returns the cross product sign for side determination.
+#[inline(always)]
+fn point_seg_dist_sq_and_side(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> (f64, f64) {
+    let ex = x1 - x0;
+    let ey = y1 - y0;
+    let len_sq = ex * ex + ey * ey;
+    if len_sq < 1e-20 {
+        let dx = px - x0;
+        let dy = py - y0;
+        return (dx * dx + dy * dy, 0.0);
+    }
+    let t = ((px - x0) * ex + (py - y0) * ey) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let cx = x0 + t * ex;
+    let cy = y0 + t * ey;
+    let dx = px - cx;
+    let dy = py - cy;
+    // Cross product of edge direction with point offset = side determination
+    let cross = ex * (py - y0) - ey * (px - x0);
+    (dx * dx + dy * dy, cross)
+}
+
+/// Edge-based rasterizer: renders boundary spans with nearest-span coloring.
+/// Each pixel finds its nearest boundary span and uses the cross product
+/// to determine which side (left or right color) to paint.
+///
+/// Uses a spatial grid for O(1) average-case nearest-span lookup.
+pub fn rasterize_edge(
+    spans: &[BoundarySpan],
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+    scale: f64,
+) -> (Vec<u32>, usize, usize) {
+    let out_w = (width as f64 * scale).round() as usize;
+    let out_h = (height as f64 * scale).round() as usize;
+    if out_w == 0 || out_h == 0 {
+        return (Vec::new(), 0, 0);
+    }
+
+    let sx = scale;
+    let sy = scale;
+    let tol_sq = 0.25; // flatten tolerance
+
+    // Flatten all spans to line segments
+    let mut edges = Vec::new();
+    for span in spans {
+        flatten_span(span, sx, sy, tol_sq, &mut edges);
+    }
+
+    if edges.is_empty() {
+        return (vec![bg_color; out_w * out_h], out_w, out_h);
+    }
+
+    // Build spatial grid for fast nearest-segment lookup.
+    // Grid cell size slightly larger than the override radius to ensure
+    // each edge only needs to be in its own cell (no margin needed).
+    let override_radius = scale * 0.5;
+    let override_dist_sq = override_radius * override_radius;
+    let grid_cell = (override_radius + 1.0).max(4.0);
+    let grid_w = ((out_w as f64 / grid_cell).ceil() as usize).max(1);
+    let grid_h = ((out_h as f64 / grid_cell).ceil() as usize).max(1);
+
+    // Flat grid: each cell stores a (start, len) into a packed edge index array.
+    // Two-pass: count per cell, then fill. Avoids Vec<Vec<>> allocation overhead.
+    let n_cells = grid_w * grid_h;
+    let mut cell_count: Vec<u32> = vec![0; n_cells];
+
+    for e in edges.iter() {
+        let min_x = e.x0.min(e.x1);
+        let max_x = e.x0.max(e.x1);
+        let min_y = e.y0.min(e.y1);
+        let max_y = e.y0.max(e.y1);
+        // Expand by override_radius so pixels near the boundary can find segments
+        let gx0 = (((min_x - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gy0 = (((min_y - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gx1 = (((max_x + override_radius) / grid_cell).floor() as usize).min(grid_w - 1);
+        let gy1 = (((max_y + override_radius) / grid_cell).floor() as usize).min(grid_h - 1);
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                cell_count[gy * grid_w + gx] += 1;
+            }
+        }
+    }
+
+    // Prefix sum to compute offsets
+    let mut cell_offset: Vec<u32> = vec![0; n_cells + 1];
+    for i in 0..n_cells {
+        cell_offset[i + 1] = cell_offset[i] + cell_count[i];
+    }
+    let total_entries = cell_offset[n_cells] as usize;
+    let mut grid_data: Vec<u32> = vec![0; total_entries];
+    cell_count.fill(0);
+
+    for (ei, e) in edges.iter().enumerate() {
+        let min_x = e.x0.min(e.x1);
+        let max_x = e.x0.max(e.x1);
+        let min_y = e.y0.min(e.y1);
+        let max_y = e.y0.max(e.y1);
+        let gx0 = (((min_x - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gy0 = (((min_y - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gx1 = (((max_x + override_radius) / grid_cell).floor() as usize).min(grid_w - 1);
+        let gy1 = (((max_y + override_radius) / grid_cell).floor() as usize).min(grid_h - 1);
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                let ci = gy * grid_w + gx;
+                let idx = cell_offset[ci] + cell_count[ci];
+                grid_data[idx as usize] = ei as u32;
+                cell_count[ci] += 1;
+            }
+        }
+    }
+
+    // Initialize buffer with nearest-neighbor colors from the source pixel grid.
+    // This ensures pixels far from any boundary get their correct region color.
+    // The edge renderer then overrides pixels near boundaries with the precise
+    // side determination from the nearest boundary span.
+    let mut buffer = vec![bg_color; out_w * out_h];
+    let inv_scale = 1.0 / scale;
+    for py in 0..out_h {
+        let src_y = ((py as f64 + 0.5) * inv_scale).floor() as usize;
+        let src_y = src_y.min(height - 1);
+        for px in 0..out_w {
+            let src_x = ((px as f64 + 0.5) * inv_scale).floor() as usize;
+            let src_x = src_x.min(width - 1);
+            buffer[py * out_w + px] = pixels[src_y * width + src_x];
+        }
+    }
+
+    // Override pixels near boundaries: find nearest edge segment and pick color by side.
+    // Only pixels within override_radius of a boundary are affected — the NN base layer
+    // is already correct for interior pixels, so skipping them is both correct and fast.
+    for py in 0..out_h {
+        let cy = py as f64 + 0.5;
+        let gy = ((cy / grid_cell) as usize).min(grid_h - 1);
+
+        for px in 0..out_w {
+            let cx = px as f64 + 0.5;
+            let gx = ((cx / grid_cell) as usize).min(grid_w - 1);
+
+            let ci = gy * grid_w + gx;
+            let start = cell_offset[ci] as usize;
+            let end = cell_offset[ci + 1] as usize;
+            if start == end { continue; } // empty cell — skip
+
+            let nn_color = buffer[py * out_w + px];
+
+            let mut best_dist = override_dist_sq;
+            let mut best_cross = 0.0f64;
+            let mut best_left = bg_color;
+            let mut best_right = bg_color;
+            let mut found = false;
+
+            for idx in start..end {
+                let e = &edges[grid_data[idx] as usize];
+                // NN-color constraint: skip spans that don't involve this pixel's color
+                if e.left_color != nn_color && e.right_color != nn_color {
+                    continue;
+                }
+                let (dist_sq, cross) = point_seg_dist_sq_and_side(cx, cy, e.x0, e.y0, e.x1, e.y1);
+                if dist_sq < best_dist {
+                    best_dist = dist_sq;
+                    best_cross = cross;
+                    best_left = e.left_color;
+                    best_right = e.right_color;
+                    found = true;
+                }
+            }
+
+            if found {
+                // In y-down screen coords: positive cross product = pixel is on the
+                // same side as CellEdge's right_color (the CW cell interior).
+                buffer[py * out_w + px] = if best_cross >= 0.0 {
+                    best_right
+                } else {
+                    best_left
+                };
+            }
+        }
+    }
+
+    (buffer, out_w, out_h)
+}
+
+// ==========================================================================
+// GPU edge rasterizer data preparation
+// ==========================================================================
+
+/// GPU edge segment: 32 bytes per edge, matching edge_raster.comp layout.
+#[repr(C)]
+pub struct GpuEdgeSeg {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub left_color: u32,
+    pub right_color: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+/// Prepare edge renderer data for GPU dispatch.
+pub fn prepare_edge_gpu_data(
+    spans: &[BoundarySpan],
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    bg_color: u32,
+    scale: f64,
+) -> (Vec<GpuEdgeSeg>, Vec<u32>, Vec<u32>, Vec<u32>, u32, u32, f32, u32, u32, f32) {
+    let out_w = (width as f64 * scale).round() as usize;
+    let out_h = (height as f64 * scale).round() as usize;
+    let tol_sq = 0.25;
+
+    let mut cpu_edges = Vec::new();
+    for span in spans {
+        flatten_span(span, scale, scale, tol_sq, &mut cpu_edges);
+    }
+
+    let gpu_edges: Vec<GpuEdgeSeg> = cpu_edges.iter().map(|e| GpuEdgeSeg {
+        x0: e.x0 as f32, y0: e.y0 as f32,
+        x1: e.x1 as f32, y1: e.y1 as f32,
+        left_color: e.left_color, right_color: e.right_color,
+        _pad0: 0, _pad1: 0,
+    }).collect();
+
+    let override_radius = scale * 0.5;
+    let override_dist_sq = (override_radius * override_radius) as f32;
+    let grid_cell = (override_radius + 1.0).max(4.0);
+    let grid_w = ((out_w as f64 / grid_cell).ceil() as usize).max(1);
+    let grid_h = ((out_h as f64 / grid_cell).ceil() as usize).max(1);
+    let n_cells = grid_w * grid_h;
+
+    let mut cell_count: Vec<u32> = vec![0; n_cells];
+    for e in cpu_edges.iter() {
+        let (min_x, max_x) = (e.x0.min(e.x1), e.x0.max(e.x1));
+        let (min_y, max_y) = (e.y0.min(e.y1), e.y0.max(e.y1));
+        let gx0 = (((min_x - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gy0 = (((min_y - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gx1 = (((max_x + override_radius) / grid_cell).floor() as usize).min(grid_w - 1);
+        let gy1 = (((max_y + override_radius) / grid_cell).floor() as usize).min(grid_h - 1);
+        for gy in gy0..=gy1 { for gx in gx0..=gx1 { cell_count[gy * grid_w + gx] += 1; } }
+    }
+
+    let mut grid_offsets: Vec<u32> = vec![0; n_cells + 1];
+    for i in 0..n_cells { grid_offsets[i + 1] = grid_offsets[i] + cell_count[i]; }
+    let total = grid_offsets[n_cells] as usize;
+    let mut grid_data: Vec<u32> = vec![0; total.max(1)];
+    cell_count.fill(0);
+
+    for (ei, e) in cpu_edges.iter().enumerate() {
+        let (min_x, max_x) = (e.x0.min(e.x1), e.x0.max(e.x1));
+        let (min_y, max_y) = (e.y0.min(e.y1), e.y0.max(e.y1));
+        let gx0 = (((min_x - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gy0 = (((min_y - override_radius) / grid_cell).floor().max(0.0)) as usize;
+        let gx1 = (((max_x + override_radius) / grid_cell).floor() as usize).min(grid_w - 1);
+        let gy1 = (((max_y + override_radius) / grid_cell).floor() as usize).min(grid_h - 1);
+        for gy in gy0..=gy1 { for gx in gx0..=gx1 {
+            let ci = gy * grid_w + gx;
+            grid_data[(grid_offsets[ci] + cell_count[ci]) as usize] = ei as u32;
+            cell_count[ci] += 1;
+        } }
+    }
+
+    let inv_scale = 1.0 / scale;
+    let mut nn_buf: Vec<u32> = vec![bg_color; out_w * out_h];
+    for py in 0..out_h {
+        let src_y = ((py as f64 + 0.5) * inv_scale).floor().min((height - 1) as f64) as usize;
+        for px in 0..out_w {
+            let src_x = ((px as f64 + 0.5) * inv_scale).floor().min((width - 1) as f64) as usize;
+            nn_buf[py * out_w + px] = pixels[src_y * width + src_x];
+        }
+    }
+
+    (gpu_edges, grid_data, grid_offsets, nn_buf,
+     out_w as u32, out_h as u32, grid_cell as f32, grid_w as u32, grid_h as u32, override_dist_sq)
 }

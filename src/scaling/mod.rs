@@ -152,11 +152,11 @@ pub enum ScaleFilter {
     OmniScaleLegacy,
     /// Anti-aliased nearest neighbor (scales to display size).
     AaNearestNeighbor,
-    /// Kopf-Lischinski vectorization with full B-spline optimization.
-    Vectorize,
-    /// Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
+    /// Kopf-Lischinski vectorization with full B-spline optimization (legacy scanline rasterizer).
+    VectorizeLegacy,
+    /// Legacy Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
     /// optimization, uses straight line segments at boundary junctions).
-    VectorizeAdaptive,
+    VectorizeLegacyAdaptive,
     /// Kopf-Lischinski vectorization with Gaussian diffusion rendering
     /// (Paper Section 3.5). Uses truncated Gaussians at cell centroids
     /// instead of scanline-filled vector paths.
@@ -165,6 +165,10 @@ pub enum ScaleFilter {
     VectorizeSplineDiffusion,
     /// Adaptive spline-diffusion: skips B-spline optimization on complex frames.
     VectorizeSplineDiffusionAdaptive,
+    /// Shared-chain vectorization: gap-free rendering using shared boundary spans.
+    Vectorize,
+    /// Adaptive shared-chain: skips optimization on complex frames.
+    VectorizeAdaptive,
 }
 
 impl ScaleFilter {
@@ -176,7 +180,8 @@ impl ScaleFilter {
         "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
         "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
-        "aa-nearest", "vectorize", "vectorize-adaptive", "vectorize-diffusion",
+        "aa-nearest", "vectorize", "vectorize-adaptive",
+        "vectorize-legacy", "vectorize-legacy-adaptive", "vectorize-diffusion",
         "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
     ];
 
@@ -215,6 +220,8 @@ impl ScaleFilter {
             "aa-nearest" => ScaleFilter::AaNearestNeighbor,
             "vectorize" => ScaleFilter::Vectorize,
             "vectorize-adaptive" => ScaleFilter::VectorizeAdaptive,
+            "vectorize-legacy" => ScaleFilter::VectorizeLegacy,
+            "vectorize-legacy-adaptive" => ScaleFilter::VectorizeLegacyAdaptive,
             "vectorize-diffusion" => ScaleFilter::VectorizeDiffusion,
             "vectorize-spline-diffusion" => ScaleFilter::VectorizeSplineDiffusion,
             "vectorize-spline-diffusion-adaptive" => ScaleFilter::VectorizeSplineDiffusionAdaptive,
@@ -244,10 +251,12 @@ impl ScaleFilter {
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
             | ScaleFilter::VectorizeDiffusion
             | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive => 1,
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive
+            | ScaleFilter::Vectorize
+            | ScaleFilter::VectorizeAdaptive => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -267,10 +276,12 @@ impl ScaleFilter {
             | ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
             | ScaleFilter::VectorizeDiffusion
             | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive)
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive
+            | ScaleFilter::Vectorize
+            | ScaleFilter::VectorizeAdaptive)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -280,10 +291,12 @@ impl ScaleFilter {
             ScaleFilter::Bilinear | ScaleFilter::Bicubic
             | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
             | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
             | ScaleFilter::VectorizeDiffusion
             | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive)
+            | ScaleFilter::VectorizeSplineDiffusionAdaptive
+            | ScaleFilter::Vectorize
+            | ScaleFilter::VectorizeAdaptive)
     }
 }
 

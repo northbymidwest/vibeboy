@@ -121,6 +121,16 @@ const SHADERS: &[ShaderInfo] = &[
         // SDL3 expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors
         msl_buffer_remap: &[(1, 2), (2, 1)],
     },
+    ShaderInfo {
+        glsl_src: "edge_raster.comp",
+        spv_name: "edge_raster_comp.spv",
+        msl_name: "edge_raster_comp.metal",
+        // spirv-cross: buffer(0)=edges, buffer(1)=uniforms, buffer(2)=nn_colors,
+        //              buffer(3)=grid_offsets, buffer(4)=grid_data
+        // SDL3 MSL compute: buffer(0)=uniforms, buffer(1)=edges, buffer(2)=grid_data,
+        //                    buffer(3)=grid_offsets, buffer(4)=nn_colors
+        msl_buffer_remap: &[(0, 1), (1, 0), (2, 4), (4, 2)],
+    },
 ];
 
 fn main() {

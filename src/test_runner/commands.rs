@@ -48,22 +48,41 @@ fn vectorize_and_save(
         return;
     }
 
-    let raster_pixels = match format {
+    let (raster_pixels, out_w, out_h) = match format {
         "spline-diffusion" => {
-            cpu_spline_diffusion(pixels, width, height, scale, use_gpu)
+            let r = cpu_spline_diffusion(pixels, width, height, scale, use_gpu);
+            (r, width * scale, height * scale)
         }
         "diffusion" => {
-            let (r, _, _) = vectorize::rasterize::rasterize_diffusion(pixels, width, height, scale);
-            r
+            vectorize::rasterize::rasterize_diffusion(pixels, width, height, scale)
+        }
+        "edge" => {
+            if use_gpu {
+                #[cfg(feature = "sdl3-gpu-shaders")]
+                {
+                    if let Some(result) = crate::scaling::gpu::gpu_edge_screenshot(
+                        pixels, width, height, scale,
+                    ) {
+                        (result.0, result.1 as usize, result.2 as usize)
+                    } else {
+                        eprintln!("GPU edge rasterizer failed, falling back to CPU");
+                        vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                    }
+                }
+                #[cfg(not(feature = "sdl3-gpu-shaders"))]
+                {
+                    eprintln!("GPU shaders not enabled, using CPU");
+                    vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                }
+            } else {
+                vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+            }
         }
         _ => {
             // "raster" or default
-            let (r, _, _) = vectorize::vectorize_to_raster(pixels, width, height, scale);
-            r
+            vectorize::vectorize_to_raster(pixels, width, height, scale)
         }
     };
-    let out_w = width * scale;
-    let out_h = height * scale;
     save_pixels_png(&raster_pixels, out_w, out_h, out);
     eprintln!(
         "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, format={})",
@@ -130,8 +149,8 @@ pub fn cmd_screenshot(
             eprintln!("Unknown filter '{}', using nearest", f);
             scaling::ScaleFilter::Nearest
         });
-        let is_vectorize = f == "vectorize" || f == "vectorize-adaptive";
-        let is_adaptive = f == "vectorize-adaptive";
+        let is_vectorize = f == "vectorize-legacy" || f == "vectorize-legacy-adaptive";
+        let is_adaptive = f == "vectorize-legacy-adaptive";
 
         // Try GPU path if requested
         #[cfg(feature = "sdl3-gpu-shaders")]
@@ -160,7 +179,7 @@ pub fn cmd_screenshot(
         // CPU path
         if is_vectorize {
             let s = scale as f64;
-            let mut cache = crate::vectorize::VectorizeCache::new(is_adaptive);
+            let mut cache = crate::vectorize::VectorizeLegacyCache::new(is_adaptive);
             let (raster, rw, rh) = cache.rasterize(raw_fb, 160, 144, s);
             scaled_buf = raster.to_vec();
             (scaled_buf.as_slice(), rw, rh)
@@ -176,7 +195,7 @@ pub fn cmd_screenshot(
         (raw_fb, 160, 144)
     };
 
-    if matches!(format, "raster" | "diffusion" | "spline-diffusion") {
+    if matches!(format, "raster" | "diffusion" | "spline-diffusion" | "edge") {
         vectorize_and_save(fb, 160, 144, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);

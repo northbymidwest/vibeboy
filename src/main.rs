@@ -283,11 +283,16 @@ fn main() {
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
     let _scales_to_display = scale_filter.scales_to_display();
+    let mut legacy_cache = match scale_filter {
+        scaling::ScaleFilter::VectorizeLegacy
+        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeLegacyCache::new(false)),
+        scaling::ScaleFilter::VectorizeLegacyAdaptive
+        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => Some(crate::vectorize::VectorizeLegacyCache::new(true)),
+        _ => None,
+    };
     let mut vec_cache = match scale_filter {
-        scaling::ScaleFilter::Vectorize
-        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeCache::new(false)),
-        scaling::ScaleFilter::VectorizeAdaptive
-        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
+        scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
+        scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
         _ => None,
     };
     let filter_factor = scale_filter.factor();
@@ -590,7 +595,7 @@ fn main() {
                     GpuRenderMode::SplineDiffusion => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
-                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (paths, bg_color) = legacy_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
                         let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
                             vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
                         if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
@@ -616,7 +621,22 @@ fn main() {
                     GpuRenderMode::Vectorize => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (paths, bg_color) = legacy_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
+                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
+                            gpu.render_vectorize_to_window(
+                                &window, &gpu_edges, &row_ranges, &edge_indices,
+                                out_w, out_h, bg_color,
+                            );
+                        }
+                    }
+                    GpuRenderMode::EdgeRasterize => {
+                        // Shared-chain winding fill with frame caching.
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                        let cache = vec_cache.as_mut().unwrap();
+                        let (paths, bg_color) = cache.get_paths(raw_src, sw, sh);
                         let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
                             vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
                         if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
@@ -632,7 +652,7 @@ fn main() {
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let (scaled, fw, fh) = cpu_scale_frame(
-                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut legacy_cache, &mut vec_cache,
                         );
                         gpu.upload_and_blit(&scaled, fw, fh, &window);
                     }
@@ -654,7 +674,7 @@ fn main() {
                 } else { (0, 0) };
 
                 let (scaled, fw, fh) = cpu_scale_frame(
-                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut legacy_cache, &mut vec_cache,
                 );
                 let (fw, fh) = (fw as usize, fh as usize);
                 let final_src = if fw == sw && fh == sh { raw_src } else { &scaled };
@@ -806,12 +826,13 @@ fn cpu_scale_frame(
     filter: &scaling::ScaleFilter,
     src: &[u32], sw: usize, sh: usize,
     disp_w: usize, disp_h: usize,
+    legacy_cache: &mut Option<crate::vectorize::VectorizeLegacyCache>,
     vec_cache: &mut Option<crate::vectorize::VectorizeCache>,
 ) -> (Vec<u32>, u32, u32) {
-    // Vectorize uses its own cache-based path
-    if matches!(filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
+    // Legacy vectorize uses its own cache-based path
+    if matches!(filter, scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive) {
         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let cache = vec_cache.as_mut().unwrap();
+        let cache = legacy_cache.as_mut().unwrap();
         let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
         return (raster.to_vec(), w as u32, h as u32);
     }
@@ -822,11 +843,18 @@ fn cpu_scale_frame(
         let (raster, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
         return (raster, w as u32, h as u32);
     }
+    // Shared-chain vectorization: gap-free rendering using shared boundary chains
+    if matches!(filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
+        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+        let cache = vec_cache.as_mut().unwrap();
+        let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
+        return (raster.to_vec(), w as u32, h as u32);
+    }
     // Spline-diffusion: vectorize for paths, then Gaussian diffusion with spline boundaries
     if matches!(filter, scaling::ScaleFilter::VectorizeSplineDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive) {
         let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
         let scale = scale_f.round().max(1.0) as usize;
-        let cache = vec_cache.as_mut().unwrap();
+        let cache = legacy_cache.as_mut().unwrap();
         let (paths, bg_color) = cache.get_paths(src, sw, sh);
         let (raster, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
             paths, src, sw, sh, bg_color, scale,

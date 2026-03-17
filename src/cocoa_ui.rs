@@ -1109,8 +1109,8 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("OmniScale",        ScaleFilter::OmniScale),
         ("OmniScale Legacy", ScaleFilter::OmniScaleLegacy),
         ("AA Nearest",       ScaleFilter::AaNearestNeighbor),
-        ("Vectorize",        ScaleFilter::Vectorize),
-        ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
+        ("Vectorize Legacy",  ScaleFilter::VectorizeLegacy),
+        ("Vectorize Legacy Adaptive", ScaleFilter::VectorizeLegacyAdaptive),
         ("Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
         ("Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
         ("Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
@@ -2225,9 +2225,9 @@ fn main() {
 
         // Scaling filter
         let mut scale_filter = string_to_filter(&cli.filter);
-        let mut vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
-            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
-            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+        let mut vec_cache: Option<vectorize::VectorizeLegacyCache> = match scale_filter {
+            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeLegacyCache::new(false)),
+            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeLegacyCache::new(true)),
             _ => None,
         };
         if scale_filter != scaling::ScaleFilter::Nearest {
@@ -2461,8 +2461,8 @@ fn main() {
                     if let Some(new_filter) = filter_tag_to_filter(tag) {
                         scale_filter = new_filter;
                         vec_cache = match scale_filter {
-                            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
-                            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeLegacyCache::new(false)),
+                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeLegacyCache::new(true)),
                             _ => None,
                         };
                         update_filter_checkmarks(app, tag);
@@ -2606,11 +2606,11 @@ fn main() {
                     if scale_filter == scaling::ScaleFilter::Nearest {
                         (raw_src, src_w, src_h)
                     } else if matches!(scale_filter,
-                        scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+                        scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
                     {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
+                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(adaptive));
                         let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
                         (raster, vw, vh)
                     } else if scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
@@ -2625,7 +2625,7 @@ fn main() {
                     {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let scale = s.round().max(1.0) as usize;
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(false));
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(false));
                         let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
                         let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
                             paths, raw_src, src_w, src_h, bg, scale,

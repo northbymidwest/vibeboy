@@ -35,6 +35,7 @@ pub struct GpuPipelines {
     vectorize_compute: Option<gpu::ComputePipeline>,
     diffusion_compute: Option<gpu::ComputePipeline>,
     spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
+    edge_compute: Option<gpu::ComputePipeline>,
 }
 
 impl GpuPipelines {
@@ -101,6 +102,7 @@ impl GpuPipelines {
             vectorize_compute: None,
             diffusion_compute: None,
             spline_diff: None,
+            edge_compute: None,
         }
     }
 
@@ -258,7 +260,7 @@ impl GpuPipelines {
                     GpuRenderMode::Cpu
                 }
             }
-            ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
+            ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
                         super::gpu::init_vectorize_compute_pipeline(&self.device);
@@ -288,6 +290,19 @@ impl GpuPipelines {
                 }
                 if self.spline_diff.is_some() {
                     GpuRenderMode::SplineDiffusion
+                } else {
+                    GpuRenderMode::Cpu
+                }
+            }
+            ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
+                // Reuses the vectorize compute pipeline — same winding-number
+                // fill shader, just different input data (shared-chain paths).
+                if self.vectorize_compute.is_none() {
+                    self.vectorize_compute =
+                        super::gpu::init_vectorize_compute_pipeline(&self.device);
+                }
+                if self.vectorize_compute.is_some() {
+                    GpuRenderMode::EdgeRasterize
                 } else {
                     GpuRenderMode::Cpu
                 }
@@ -448,6 +463,29 @@ impl GpuPipelines {
         );
     }
 
+    /// Edge-based rasterize render path.
+    pub fn render_edge_to_window(
+        &mut self,
+        window: &sdl3::video::Window,
+        edges: &[crate::vectorize::rasterize::GpuEdgeSeg],
+        grid_data: &[u32],
+        grid_offsets: &[u32],
+        nn_colors: &[u32],
+        out_w: u32, out_h: u32,
+        grid_cell_size: f32,
+        grid_w: u32,
+        grid_h: u32,
+        override_dist_sq: f32,
+    ) {
+        self.resize_texture(out_w, out_h);
+        super::gpu::edge_rasterize_and_blit(
+            &self.device, window, &self.tex,
+            self.edge_compute.as_ref().unwrap(),
+            edges, grid_data, grid_offsets, nn_colors,
+            out_w, out_h, grid_cell_size, grid_w, grid_h, override_dist_sq,
+        );
+    }
+
     /// Full diffusion render path.
     pub fn render_diffusion_to_window(
         &mut self,
@@ -549,6 +587,8 @@ pub enum GpuRenderMode {
     Diffusion,
     /// Use GPU compute spline-diffusion pipeline.
     SplineDiffusion,
+    /// Use GPU compute edge rasterizer pipeline.
+    EdgeRasterize,
     /// No GPU pipeline available; use CPU scaling + upload_and_blit.
     Cpu,
 }

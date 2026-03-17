@@ -932,6 +932,149 @@ pub fn vectorize_and_blit(
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 
+// ── Edge rasterizer compute pipeline ────────────────────────────────────────
+
+pub fn init_edge_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
+    let comp_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/edge_raster_comp.spv"));
+    let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/edge_raster_comp.metal"));
+
+    let pipeline = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(4) // edges, grid_data, grid_offsets, nn_colors
+        .with_readwrite_storage_textures(1)
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, comp_msl)
+            .with_entrypoint(c"main0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(4)
+            .with_readwrite_storage_textures(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    match pipeline {
+        Ok(p) => { eprintln!("Edge rasterizer GPU compute pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("Edge GPU compute: pipeline creation failed: {e}"); None }
+    }
+}
+
+pub fn edge_rasterize_and_blit(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    pipeline: &gpu::ComputePipeline,
+    edges: &[crate::vectorize::rasterize::GpuEdgeSeg],
+    grid_data: &[u32],
+    grid_offsets: &[u32],
+    nn_colors: &[u32],
+    out_w: u32, out_h: u32,
+    grid_cell_size: f32,
+    grid_w: u32,
+    grid_h: u32,
+    override_dist_sq: f32,
+) {
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+
+    fn upload_buffer(
+        device: &gpu::Device, data: &[u8], usage: gpu::BufferUsageFlags,
+    ) -> (gpu::TransferBuffer, gpu::Buffer) {
+        let size = data.len().max(4) as u32;
+        let transfer = device.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(size).build().expect("transfer buf");
+        { let mut map = transfer.map::<u8>(device, true);
+          map.mem_mut()[..data.len()].copy_from_slice(data); map.unmap(); }
+        let buf = device.create_buffer()
+            .with_usage(usage).with_size(size).build().expect("storage buf");
+        (transfer, buf)
+    }
+
+    let edge_bytes = unsafe { std::slice::from_raw_parts(
+        edges.as_ptr() as *const u8,
+        edges.len() * std::mem::size_of::<crate::vectorize::rasterize::GpuEdgeSeg>(),
+    )};
+    let grid_d_bytes = unsafe { std::slice::from_raw_parts(
+        grid_data.as_ptr() as *const u8, grid_data.len() * 4,
+    )};
+    let grid_o_bytes = unsafe { std::slice::from_raw_parts(
+        grid_offsets.as_ptr() as *const u8, grid_offsets.len() * 4,
+    )};
+    let nn_bytes = unsafe { std::slice::from_raw_parts(
+        nn_colors.as_ptr() as *const u8, nn_colors.len() * 4,
+    )};
+
+    let (e_xfer, e_buf) = upload_buffer(device, edge_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    let (gd_xfer, gd_buf) = upload_buffer(device, grid_d_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    let (go_xfer, go_buf) = upload_buffer(device, grid_o_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+    let (nn_xfer, nn_buf) = upload_buffer(device, nn_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ);
+
+    {
+        let copy_pass = device.begin_copy_pass(&cmd).expect("copy pass");
+        for (xfer, buf, bytes) in [(&e_xfer, &e_buf, edge_bytes), (&gd_xfer, &gd_buf, grid_d_bytes),
+                                    (&go_xfer, &go_buf, grid_o_bytes), (&nn_xfer, &nn_buf, nn_bytes)] {
+            copy_pass.upload_to_gpu_buffer(
+                gpu::TransferBufferLocation::new().with_transfer_buffer(xfer),
+                gpu::BufferRegion::new().with_buffer(buf).with_size(bytes.len().max(4) as u32),
+                false,
+            );
+        }
+        device.end_copy_pass(copy_pass);
+    }
+
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
+            &[],
+        ).expect("compute pass");
+        compute_pass.bind_compute_pipeline(pipeline);
+        compute_pass.bind_compute_storage_buffers(0, &[e_buf, gd_buf, go_buf, nn_buf]);
+
+        #[repr(C)]
+        struct Uniforms {
+            out_w: u32, out_h: u32,
+            grid_cell_size: f32, grid_w: u32,
+            override_dist_sq: f32,
+            _pad0: u32, _pad1: u32, _pad2: u32,
+        }
+        cmd.push_compute_uniform_data(0, &Uniforms {
+            out_w, out_h, grid_cell_size, grid_w, override_dist_sq,
+            _pad0: 0, _pad1: 0, _pad2: 0,
+        });
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let src_aspect = out_w as f32 / out_h as f32;
+        let dst_aspect = sw_w as f32 / sw_h as f32;
+        let (dx, dy, dw, dh) = if dst_aspect > src_aspect {
+            let dh = sw_h; let dw = (sw_h as f32 * src_aspect) as u32;
+            ((sw_w - dw) / 2, 0, dw, dh)
+        } else {
+            let dw = sw_w; let dh = (sw_w as f32 / src_aspect) as u32;
+            (0, (sw_h - dh) / 2, dw, dh)
+        };
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = out_w;
+        blit_info.source.h = out_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = dx;
+        blit_info.destination.y = dy;
+        blit_info.destination.w = dw;
+        blit_info.destination.h = dh;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Nearest as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 // ── Diffusion compute pipeline ──────────────────────────────────────────────
 
 pub fn init_diffusion_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
@@ -1469,7 +1612,7 @@ pub fn gpu_screenshot(
 pub fn gpu_vectorize_screenshot(
     src: &[u32], src_w: usize, src_h: usize, scale: f64, adaptive: bool,
 ) -> Option<(Vec<u32>, u32, u32)> {
-    let mut cache = crate::vectorize::VectorizeCache::new(adaptive);
+    let mut cache = crate::vectorize::VectorizeLegacyCache::new(adaptive);
     let (paths, bg_color) = cache.get_paths(src, src_w, src_h);
     let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
         crate::vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, src_w, src_h);
@@ -1620,13 +1763,155 @@ pub fn gpu_vectorize_screenshot(
     Some((pixels, out_w, out_h))
 }
 
+/// GPU-accelerated shared-chain edge rasterizer screenshot (headless).
+/// Uses the same winding-number fill pipeline as gpu_vectorize_screenshot
+/// but with shared boundary chains for gap-free rendering.
+pub fn gpu_edge_screenshot(
+    src: &[u32], src_w: usize, src_h: usize, scale: usize,
+) -> Option<(Vec<u32>, u32, u32)> {
+    let graph = crate::vectorize::graph::build(src, src_w, src_h);
+    let (paths, bg_color) = crate::vectorize::contour::extract_shared_edge_paths(src, &graph);
+    gpu_vectorize_screenshot_with_paths(&paths, bg_color, scale as f64, src_w, src_h)
+}
+
+/// Shared implementation for GPU vectorize screenshots given pre-built paths.
+fn gpu_vectorize_screenshot_with_paths(
+    paths: &[crate::vectorize::contour::ColorPath],
+    bg_color: u32, scale: f64, src_w: usize, src_h: usize,
+) -> Option<(Vec<u32>, u32, u32)> {
+    let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
+        crate::vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, src_w, src_h);
+
+    if out_w == 0 || out_h == 0 || gpu_edges.is_empty() {
+        return None;
+    }
+
+    let sdl = sdl3::init().ok()?;
+    let video = sdl.video().ok()?;
+    let window = video.window("gpu_vectorize", 1, 1).hidden().build().ok()?;
+
+    let all_formats = gpu::ShaderFormat::PRIVATE
+        | gpu::ShaderFormat::SPIRV | gpu::ShaderFormat::MSL
+        | gpu::ShaderFormat::DXBC | gpu::ShaderFormat::DXIL;
+    let device = gpu::Device::new(all_formats, false).ok()?.with_window(&window).ok()?;
+
+    let compute_pipeline = init_vectorize_compute_pipeline(&device)?;
+
+    let out_tex = device.create_texture(
+        gpu::TextureCreateInfo::new()
+            .with_type(gpu::TextureType::_2D)
+            .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
+            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
+            .with_width(out_w)
+            .with_height(out_h)
+            .with_layer_count_or_depth(1)
+            .with_num_levels(1)
+    ).ok()?;
+
+    let cmd = device.acquire_command_buffer().ok()?;
+
+    fn upload_buf(
+        device: &gpu::Device, data: &[u8], usage: gpu::BufferUsageFlags,
+    ) -> Option<(gpu::TransferBuffer, gpu::Buffer)> {
+        let size = data.len().max(4) as u32;
+        let xfer = device.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(size).build().ok()?;
+        { let mut map = xfer.map::<u8>(device, true);
+          map.mem_mut()[..data.len()].copy_from_slice(data); map.unmap(); }
+        let buf = device.create_buffer().with_usage(usage).with_size(size).build().ok()?;
+        Some((xfer, buf))
+    }
+
+    let edge_bytes = unsafe { std::slice::from_raw_parts(
+        gpu_edges.as_ptr() as *const u8,
+        gpu_edges.len() * std::mem::size_of::<crate::vectorize::rasterize::GpuEdgeV2>(),
+    )};
+    let row_bytes = unsafe { std::slice::from_raw_parts(
+        row_ranges.as_ptr() as *const u8,
+        row_ranges.len() * std::mem::size_of::<crate::vectorize::rasterize::GpuRowRange>(),
+    )};
+    let idx_bytes = unsafe { std::slice::from_raw_parts(
+        edge_indices.as_ptr() as *const u8, edge_indices.len() * 4,
+    )};
+
+    let (edge_xfer, edge_buf) = upload_buf(&device, edge_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+    let (row_xfer, row_buf) = upload_buf(&device, row_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+    let (idx_xfer, idx_buf) = upload_buf(&device, idx_bytes, gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)?;
+
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&edge_xfer),
+            gpu::BufferRegion::new().with_buffer(&edge_buf).with_size(edge_bytes.len().max(4) as u32), false);
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&row_xfer),
+            gpu::BufferRegion::new().with_buffer(&row_buf).with_size(row_bytes.len().max(4) as u32), false);
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&idx_xfer),
+            gpu::BufferRegion::new().with_buffer(&idx_buf).with_size(idx_bytes.len().max(4) as u32), false);
+        device.end_copy_pass(cp);
+    }
+
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
+            &[],
+        ).ok()?;
+        compute_pass.bind_compute_pipeline(&compute_pipeline);
+        compute_pass.bind_compute_storage_buffers(0, &[edge_buf, row_buf, idx_buf]);
+
+        #[repr(C)]
+        struct Uniforms { out_w: u32, out_h: u32, num_edges: u32, bg_color: u32 }
+        cmd.push_compute_uniform_data(0, &Uniforms {
+            out_w, out_h, num_edges: gpu_edges.len() as u32, bg_color,
+        });
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    let dl_buf = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
+        .with_size(out_w * out_h * 4).build().ok()?;
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        unsafe {
+            let mut src_region = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+            src_region.texture = out_tex.raw();
+            src_region.w = out_w; src_region.h = out_h; src_region.d = 1;
+            let mut dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+            dst_info.transfer_buffer = dl_buf.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_region, &dst_info);
+        }
+        device.end_copy_pass(cp);
+    }
+
+    let fence = cmd.submit_and_acquire_fence(&device).ok()?;
+    device.wait_fences(true, &[fence]).ok()?;
+
+    let map = dl_buf.map::<u8>(&device, false);
+    let bytes = map.mem();
+    let mut pixels = vec![0u32; (out_w * out_h) as usize];
+    for i in 0..pixels.len() {
+        let off = i * 4;
+        let b = bytes[off] as u32;
+        let g = bytes[off + 1] as u32;
+        let r = bytes[off + 2] as u32;
+        pixels[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+    drop(map);
+
+    Some((pixels, out_w, out_h))
+}
+
 /// GPU-accelerated spline-diffusion screenshot.
 pub fn gpu_spline_diffusion_screenshot(
     src: &[u32], src_w: usize, src_h: usize, scale: usize,
 ) -> Option<(Vec<u32>, u32, u32)> {
     crate::vectorize::contour::YUV_VISIBLE_EDGES
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut cache = crate::vectorize::VectorizeCache::new(false);
+    let mut cache = crate::vectorize::VectorizeLegacyCache::new(false);
     let (paths, bg_color) = cache.get_paths(src, src_w, src_h);
     crate::vectorize::contour::YUV_VISIBLE_EDGES
         .store(false, std::sync::atomic::Ordering::Relaxed);

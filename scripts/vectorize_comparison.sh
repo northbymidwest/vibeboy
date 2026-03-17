@@ -13,6 +13,8 @@
 #   {name}_scanline_gpu_8x.png  — our GPU scanline vectorizer at 8x
 #   {name}_sdiff_cpu_8x.png     — our CPU spline-diffusion at 8x
 #   {name}_sdiff_gpu_8x.png     — our GPU spline-diffusion at 8x
+#   {name}_edge_cpu_8x.png      — our CPU edge-based (gap-free) at 8x
+#   {name}_edge_gpu_8x.png      — our GPU edge-based (gap-free) at 8x
 #   comparison.html              — side-by-side comparison page
 
 set -e
@@ -107,6 +109,22 @@ for name in "${NAMES[@]}"; do
         cargo run --release --bin test_runner -- vectorize "$input" \
             --out "$out" --format spline-diffusion --scale "$SCALE" --gpu 2>/dev/null
     fi
+
+    # CPU edge-based (gap-free)
+    out="$OUT_DIR/${name}_edge_cpu_8x.png"
+    if should_render "$out"; then
+        echo "  $name — edge CPU..."
+        cargo run --release --bin test_runner -- vectorize "$input" \
+            --out "$out" --format edge --scale "$SCALE" 2>/dev/null
+    fi
+
+    # GPU edge-based (gap-free)
+    out="$OUT_DIR/${name}_edge_gpu_8x.png"
+    if should_render "$out"; then
+        echo "  $name — edge GPU..."
+        cargo run --release --bin test_runner -- vectorize "$input" \
+            --out "$out" --format edge --scale "$SCALE" --gpu 2>/dev/null
+    fi
 done
 
 echo ""
@@ -127,15 +145,12 @@ cat > "$HTML" << 'HEADER'
   .grid { display: flex; flex-direction: column; gap: 2rem; }
   .card { background: #16213e; border-radius: 12px; overflow: hidden; border: 1px solid #2a2a4a; }
   .card-header { padding: 0.8rem 1.2rem; background: #0f3460; font-weight: 600; font-size: 1rem; }
-  .card-body { display: grid; grid-template-columns: auto repeat(6, 1fr); gap: 1px; background: #2a2a4a; }
+  .card-body { display: grid; grid-template-columns: auto repeat(4, 1fr); gap: 1px; background: #2a2a4a; }
   .card-body > div { background: #16213e; display: flex; align-items: center; justify-content: center; padding: 0.4rem; }
-  .card-body .label { font-size: 0.7rem; color: #888; writing-mode: vertical-rl; text-orientation: mixed; padding: 0.2rem 0.4rem; min-width: 1.5rem; }
+  .card-body .label { font-size: 0.75rem; color: #888; padding: 0.3rem 0.6rem; min-width: 2.5rem; white-space: nowrap; }
   .card-body img { display: block; max-width: 100%; height: auto; image-rendering: auto; }
   .card-body img.input { image-rendering: pixelated; }
-  .col-header { font-size: 0.65rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.3rem !important; text-align: center; font-weight: 600; }
-  @media (max-width: 900px) {
-    .card-body { grid-template-columns: auto repeat(5, 1fr); font-size: 0.6rem; }
-  }
+  .col-header { font-size: 0.7rem; color: #aaa; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.3rem !important; text-align: center; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -151,6 +166,8 @@ for name in "${NAMES[@]}"; do
     sl_gpu="${name}_scanline_gpu_8x.png"
     sd_cpu="${name}_sdiff_cpu_8x.png"
     sd_gpu="${name}_sdiff_gpu_8x.png"
+    edge_cpu="${name}_edge_cpu_8x.png"
+    edge_gpu="${name}_edge_gpu_8x.png"
 
     [ ! -f "$OUT_DIR/$input" ] && continue
 
@@ -165,21 +182,20 @@ for name in "${NAMES[@]}"; do
   <div class="card-header">$display_name</div>
   <div class="card-body">
     <div class="col-header"></div>
-    <div class="col-header">Nearest</div>
-    <div class="col-header">Paper</div>
-    <div class="col-header">Scanline CPU</div>
-    <div class="col-header">Scanline GPU</div>
-    <div class="col-header">Spline Diff CPU</div>
-    <div class="col-header">Spline Diff GPU</div>
-    <div class="label">Input</div>
-    <div style="grid-column: 2 / -1;"><img class="input" src="$input"></div>
-    <div class="label">8×</div>
+    <div class="col-header">Reference</div>
+    <div class="col-header">Scanline</div>
+    <div class="col-header">Spline Diffusion</div>
+    <div class="col-header">Vectorize (gap-free)</div>
+    <div class="label">CPU</div>
     <div><img class="input" src="$input" width="${nn_w}" height="${nn_h}"></div>
-    <div><img src="$paper"></div>
     <div><img src="$sl_cpu"></div>
-    <div><img src="$sl_gpu"></div>
     <div><img src="$sd_cpu"></div>
+    <div><img src="$edge_cpu"></div>
+    <div class="label">GPU</div>
+    <div><img src="$paper"></div>
+    <div><img src="$sl_gpu"></div>
     <div><img src="$sd_gpu"></div>
+    <div><img src="$edge_gpu"></div>
   </div>
 </div>
 CARD

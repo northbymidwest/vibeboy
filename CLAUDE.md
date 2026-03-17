@@ -15,7 +15,7 @@ cargo run --release -- path/to/rom.gbc
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.bin
 
-# With vectorized scaling filter
+# With vectorized scaling filter (shared-chain gap-free rendering)
 cargo run --release -- path/to/rom.gbc --filter vectorize
 
 # Vectorize variants
@@ -24,8 +24,12 @@ cargo run --release -- path/to/rom.gbc --filter vectorize-diffusion
 cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion
 cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion-adaptive
 
+# Legacy vectorize (original scanline rasterizer)
+cargo run --release -- path/to/rom.gbc --filter vectorize-legacy
+cargo run --release -- path/to/rom.gbc --filter vectorize-legacy-adaptive
+
 # With YUV visible edge threshold (paper's approach, can cause artifacts)
-cargo run --release -- path/to/rom.gbc --filter vectorize --yuv-edges
+cargo run --release -- path/to/rom.gbc --filter vectorize-legacy --yuv-edges
 ```
 
 ## Testing
@@ -113,7 +117,7 @@ Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.d
 
 Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasterize`
 
-- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` for frame caching, upscale detection/collapse, background color detection. No color quantization (removed — the paper doesn't use it).
+- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` (shared-chain) and `VectorizeLegacyCache` (original scanline) for frame caching, upscale detection/collapse, background color detection. No color quantization (removed — the paper doesn't use it).
 - `graph.rs`: Similarity graph — YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
 - `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (±0.25 pixel offsets)
 - `contour.rs`: Core pipeline stages:

@@ -21,7 +21,7 @@ pub mod voronoi;
 /// Caches vectorized paths and rasterized output between frames to skip
 /// re-vectorization and re-rasterization when the source pixel buffer
 /// and scale haven't changed.
-pub struct VectorizeCache {
+pub struct VectorizeLegacyCache {
     adaptive: bool,
     prev_pixels: Vec<u32>,
     cached_paths: Vec<contour::ColorPath>,
@@ -32,7 +32,7 @@ pub struct VectorizeCache {
     cached_scale: f64,
 }
 
-impl VectorizeCache {
+impl VectorizeLegacyCache {
     pub fn new(adaptive: bool) -> Self {
         Self {
             adaptive,
@@ -66,6 +66,73 @@ impl VectorizeCache {
 
     /// Vectorize and rasterize in one call, caching both stages.
     /// Returns (pixels, width, height).
+    pub fn rasterize(&mut self, pixels: &[u32], width: usize, height: usize, scale: f64)
+        -> (&[u32], usize, usize)
+    {
+        let (_paths, _bg_color) = self.get_paths(pixels, width, height);
+        if scale == self.cached_scale && !self.cached_raster.is_empty() {
+            return (&self.cached_raster, self.cached_raster_w, self.cached_raster_h);
+        }
+        let bg = self.cached_bg_color;
+        let (buf, w, h) = rasterize::rasterize_scaled(
+            &self.cached_paths, width, height, bg, scale,
+        );
+        self.cached_raster = buf;
+        self.cached_raster_w = w;
+        self.cached_raster_h = h;
+        self.cached_scale = scale;
+        (&self.cached_raster, w, h)
+    }
+}
+
+/// Cache for the shared-chain vectorization pipeline.
+/// Caches paths and rasterized output between frames.
+pub struct VectorizeCache {
+    adaptive: bool,
+    prev_pixels: Vec<u32>,
+    cached_paths: Vec<contour::ColorPath>,
+    cached_bg_color: u32,
+    cached_raster: Vec<u32>,
+    cached_raster_w: usize,
+    cached_raster_h: usize,
+    cached_scale: f64,
+}
+
+impl VectorizeCache {
+    pub fn new(adaptive: bool) -> Self {
+        Self {
+            adaptive,
+            prev_pixels: Vec::new(),
+            cached_paths: Vec::new(),
+            cached_bg_color: 0,
+            cached_raster: Vec::new(),
+            cached_raster_w: 0,
+            cached_raster_h: 0,
+            cached_scale: 0.0,
+        }
+    }
+
+    /// Returns cached (paths, bg_color) if pixels unchanged, otherwise
+    /// runs shared-edge vectorization and updates cache.
+    pub fn get_paths(&mut self, pixels: &[u32], width: usize, height: usize)
+        -> (&[contour::ColorPath], u32)
+    {
+        if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
+            return (&self.cached_paths, self.cached_bg_color);
+        }
+        let graph = graph::build(pixels, width, height);
+        let (paths, bg_color) = contour::extract_shared_edge_paths_inner(
+            pixels, &graph, self.adaptive,
+        );
+        self.prev_pixels.clear();
+        self.prev_pixels.extend_from_slice(pixels);
+        self.cached_paths = paths;
+        self.cached_bg_color = bg_color;
+        self.cached_scale = 0.0;
+        (&self.cached_paths, self.cached_bg_color)
+    }
+
+    /// Vectorize and rasterize in one call, caching both stages.
     pub fn rasterize(&mut self, pixels: &[u32], width: usize, height: usize, scale: f64)
         -> (&[u32], usize, usize)
     {
@@ -129,6 +196,23 @@ pub fn vectorize_to_raster_scaled(
     };
     let (paths, bg_color) = vectorize_core(px, w, h);
     rasterize::rasterize_scaled(&paths, w, h, bg_color, scale)
+}
+
+/// Vectorize and rasterize using edge-based rendering (gap-free).
+/// Each boundary span is shared between two regions, eliminating gaps.
+/// Returns (pixels, output_width, output_height).
+pub fn vectorize_to_raster_edge(
+    pixels: &[u32], width: usize, height: usize, scale: usize,
+) -> (Vec<u32>, usize, usize) {
+    let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
+    let (px, w, h) = if !native_pixels.is_empty() {
+        (native_pixels.as_slice(), nw, nh)
+    } else {
+        (pixels, width, height)
+    };
+    let graph = graph::build(px, w, h);
+    let (paths, bg_color) = contour::extract_shared_edge_paths(px, &graph);
+    rasterize::rasterize_scaled(&paths, w, h, bg_color, scale as f64)
 }
 
 /// Core vectorization: graph → contour → paths. No upscale collapse.

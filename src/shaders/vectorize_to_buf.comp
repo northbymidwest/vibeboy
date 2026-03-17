@@ -61,7 +61,7 @@ void main() {
     uint r_start = row_start(py);
     uint r_count = row_count(py);
 
-    uint prev_color = 0xFFFFFFFFu;
+    uint prev_color = 0x01000000u;
     int winding = 0;
 
     for (uint ri = 0u; ri < r_count; ri++) {
@@ -76,7 +76,7 @@ void main() {
         uint e_color = edge_color(ei);
 
         // New path: apply previous path's winding
-        if (e_color != prev_color && prev_color != 0xFFFFFFFFu) {
+        if (e_color != prev_color && prev_color != 0x01000000u) {
             if (winding != 0) {
                 color = prev_color;
             }
@@ -91,7 +91,7 @@ void main() {
     }
 
     // Final path
-    if (prev_color != 0xFFFFFFFFu && winding != 0) {
+    if (prev_color != 0x01000000u && winding != 0) {
         color = prev_color;
     }
 

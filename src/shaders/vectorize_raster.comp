@@ -74,7 +74,7 @@ void main() {
     uint r_start = row_start(py);
     uint r_count = row_count(py);
 
-    uint prev_color = 0xFFFFFFFFu;
+    uint prev_color = 0x01000000u; // sentinel: no previous color (alpha=1, can't match 0x00RRGGBB or 0xFFRRGGBB)
     int w00 = 0, w10 = 0, w01 = 0, w11 = 0;
 
     for (uint ri = 0u; ri < r_count; ri++) {
@@ -89,7 +89,7 @@ void main() {
         uint e_color = edge_color(ei);
 
         // When we hit a new path (color), composite the previous one
-        if (e_color != prev_color && prev_color != 0xFFFFFFFFu) {
+        if (e_color != prev_color && prev_color != 0x01000000u) {
             uint coverage = 0u;
             if (w00 != 0) coverage++;
             if (w10 != 0) coverage++;
@@ -120,7 +120,7 @@ void main() {
     }
 
     // Composite final path
-    if (prev_color != 0xFFFFFFFFu) {
+    if (prev_color != 0x01000000u) {
         uint coverage = 0u;
         if (w00 != 0) coverage++;
         if (w10 != 0) coverage++;
