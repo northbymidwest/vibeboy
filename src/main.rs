@@ -97,6 +97,10 @@ struct Cli {
     #[arg(long)]
     cpu_filter: bool,
 
+    /// Disable GPU compute for B-spline optimization (use CPU gradient descent)
+    #[arg(long)]
+    cpu_optimizer: bool,
+
     /// Use YUV similarity threshold for visible edges in vectorize filters
     /// (Paper Section 3.2). Merges near-similar colors into the same region.
     /// Off by default; can produce artifacts in games with dithering/gradients.
@@ -632,11 +636,14 @@ fn main() {
                         }
                     }
                     GpuRenderMode::EdgeRasterize => {
-                        // Shared-chain winding fill with frame caching.
+                        // Shared-chain winding fill with GPU optimizer + caching.
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                        // Get optimizer refs (unless --cpu-optimizer), build paths
+                        let opt_refs = if cli.cpu_optimizer { None } else { gpu.gpu_optimizer() };
                         let cache = vec_cache.as_mut().unwrap();
-                        let (paths, bg_color) = cache.get_paths(raw_src, sw, sh);
+                        let (paths, bg_color) = cache.get_paths_gpu(
+                            raw_src, sw, sh, opt_refs.as_ref());
                         let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
                             vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
                         if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
@@ -645,6 +652,16 @@ fn main() {
                                 out_w, out_h, bg_color,
                             );
                         }
+                    }
+                    GpuRenderMode::FullGpuVectorize => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
+                        let out_w = (sw as f64 * scale).round() as u32;
+                        let out_h = (sh as f64 * scale).round() as u32;
+                        gpu.render_full_vectorize_to_window(
+                            &window, raw_src, sw as u32, sh as u32,
+                            out_w, out_h, scale as f32,
+                        );
                     }
                     GpuRenderMode::Native => {
                         gpu.render_native(scale_filter, raw_src, src_w, src_h, &window);

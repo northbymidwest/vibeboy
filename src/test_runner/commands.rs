@@ -78,6 +78,29 @@ fn vectorize_and_save(
                 vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
             }
         }
+        "cpu-dump" => {
+            // Dump CPU control points for visualization
+            vectorize::contour::dump_cpu_control_points(pixels, width, height);
+            return;
+        }
+        "gpu-full" => {
+            #[cfg(feature = "sdl3-gpu-shaders")]
+            {
+                if let Some(result) = crate::scaling::gpu::gpu_full_pipeline_screenshot(
+                    pixels, width, height, scale,
+                ) {
+                    (result.0, result.1 as usize, result.2 as usize)
+                } else {
+                    eprintln!("GPU full pipeline failed, falling back to CPU");
+                    vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                }
+            }
+            #[cfg(not(feature = "sdl3-gpu-shaders"))]
+            {
+                eprintln!("GPU shaders not enabled");
+                vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+            }
+        }
         _ => {
             // "raster" or default
             vectorize::vectorize_to_raster(pixels, width, height, scale)
@@ -195,7 +218,7 @@ pub fn cmd_screenshot(
         (raw_fb, 160, 144)
     };
 
-    if matches!(format, "raster" | "diffusion" | "spline-diffusion" | "edge") {
+    if matches!(format, "raster" | "diffusion" | "spline-diffusion" | "edge" | "gpu-full" | "cpu-dump") {
         vectorize_and_save(fb, 160, 144, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);

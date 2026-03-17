@@ -169,6 +169,8 @@ pub enum ScaleFilter {
     Vectorize,
     /// Adaptive shared-chain: skips optimization on complex frames.
     VectorizeAdaptive,
+    /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
+    VectorizeGpu,
 }
 
 impl ScaleFilter {
@@ -181,6 +183,7 @@ impl ScaleFilter {
         "super-xbr", "nedi", "dcci", "edi",
         "omniscale", "omniscale-legacy",
         "aa-nearest", "vectorize", "vectorize-adaptive",
+        "vectorize-gpu",
         "vectorize-legacy", "vectorize-legacy-adaptive", "vectorize-diffusion",
         "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
     ];
@@ -220,6 +223,7 @@ impl ScaleFilter {
             "aa-nearest" => ScaleFilter::AaNearestNeighbor,
             "vectorize" => ScaleFilter::Vectorize,
             "vectorize-adaptive" => ScaleFilter::VectorizeAdaptive,
+            "vectorize-gpu" => ScaleFilter::VectorizeGpu,
             "vectorize-legacy" => ScaleFilter::VectorizeLegacy,
             "vectorize-legacy-adaptive" => ScaleFilter::VectorizeLegacyAdaptive,
             "vectorize-diffusion" => ScaleFilter::VectorizeDiffusion,
@@ -256,7 +260,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusion
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive => 1,
+            | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeGpu => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -281,7 +286,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusion
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive)
+            | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeGpu)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -296,7 +302,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusion
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive)
+            | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeGpu)
     }
 }
 

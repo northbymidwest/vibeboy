@@ -1,0 +1,200 @@
+#version 450
+
+// Per-pixel rasterizer: evaluate B-spline boundaries from cell graph CPs.
+//
+// For each output pixel, finds the nearest boundary B-spline curve
+// among the 4 surrounding corner CPs. Then checks which of the 4
+// adjacent source pixel CENTERS is on the SAME side of that curve
+// as the output pixel → uses that pixel's color.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
+    uint pixels[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer PosBuf {
+    float cp_positions[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer NbrBuf {
+    int cp_neighbors[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer FlagBuf {
+    uint cp_flags[];
+};
+
+layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
+
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint img_w;
+    uint img_h;
+    uint out_w;
+    uint out_h;
+    float scale;
+    uint corners_w;
+    uint _pad0;
+    uint _pad1;
+};
+
+uint px_color(int x, int y) {
+    x = clamp(x, 0, int(img_w) - 1);
+    y = clamp(y, 0, int(img_h) - 1);
+    return pixels[y * int(img_w) + x];
+}
+
+vec2 read_pos(int idx) {
+    if (idx < 0) return vec2(0.0);
+    return vec2(cp_positions[idx * 2], cp_positions[idx * 2 + 1]);
+}
+
+uint read_flag(int idx) {
+    if (idx < 0) return 0u;
+    return cp_flags[idx];
+}
+
+int read_nbr(int idx, int slot) {
+    if (idx < 0) return -1;
+    return cp_neighbors[idx * 4 + slot];
+}
+
+vec2 beval(vec2 p0, vec2 p1, vec2 p2, float t) {
+    float u = 1.0 - t;
+    return 0.5 * u * u * p0 + (u * t + 0.5) * p1 + 0.5 * t * t * p2;
+}
+
+// Find nearest point on B-spline to test point.
+// Returns (dist_sq, cross_product).
+vec2 nearest_bspline(vec2 pt, vec2 p0, vec2 p1, vec2 p2) {
+    float best_dist = 1e10;
+    float best_cross = 0.0;
+    const int N = 8;
+    vec2 prev_pt = beval(p0, p1, p2, 0.0);
+    for (int s = 1; s <= N; s++) {
+        float t = float(s) / float(N);
+        vec2 curr_pt = beval(p0, p1, p2, t);
+        vec2 seg = curr_pt - prev_pt;
+        float len_sq = dot(seg, seg);
+        float param = (len_sq > 1e-10) ? clamp(dot(pt - prev_pt, seg) / len_sq, 0.0, 1.0) : 0.0;
+        vec2 closest = prev_pt + param * seg;
+        float d = dot(pt - closest, pt - closest);
+        if (d < best_dist) {
+            best_dist = d;
+            best_cross = seg.x * (pt.y - prev_pt.y) - seg.y * (pt.x - prev_pt.x);
+        }
+        prev_pt = curr_pt;
+    }
+    return vec2(best_dist, best_cross);
+}
+
+// Compute cross product sign for a point against the same B-spline.
+float bspline_cross(vec2 pt, vec2 p0, vec2 p1, vec2 p2) {
+    return nearest_bspline(pt, p0, p1, p2).y;
+}
+
+void main() {
+    uint opx = gl_GlobalInvocationID.x;
+    uint opy = gl_GlobalInvocationID.y;
+    if (opx >= out_w || opy >= out_h) return;
+
+    float fx = (float(opx) + 0.5) / scale;
+    float fy = (float(opy) + 0.5) / scale;
+    vec2 pt = vec2(fx, fy);
+
+    int px = clamp(int(floor(fx)), 0, int(img_w) - 1);
+    int py = clamp(int(floor(fy)), 0, int(img_h) - 1);
+    uint nn_color = px_color(px, py);
+
+    // Find nearest boundary B-spline among the 4 surrounding corners
+    float best_dist = 1e10;
+    vec2 best_p0, best_p1, best_p2; // B-spline control points of nearest boundary
+    int best_corner_x = px, best_corner_y = py;
+    bool found = false;
+
+    for (int dy = 0; dy <= 1; dy++) {
+        for (int dx = 0; dx <= 1; dx++) {
+            int cx = px + dx;
+            int cy = py + dy;
+            if (cx < 0 || cy < 0 || cx >= int(corners_w) || cy > int(img_h)) continue;
+
+            int base = (cy * int(corners_w) + cx) * 2;
+            for (int slot = 0; slot < 2; slot++) {
+                int ci = base + slot;
+                uint flag = read_flag(ci);
+                if (flag == 0u) continue;
+
+                int prev = read_nbr(ci, 0);
+                int next = read_nbr(ci, 1);
+                if (prev < 0 && next < 0) continue;
+
+                vec2 cp = read_pos(ci);
+                vec2 pp = (prev >= 0) ? read_pos(prev) : cp;
+                vec2 pn = (next >= 0) ? read_pos(next) : cp;
+
+                vec2 r = nearest_bspline(pt, pp, cp, pn);
+                if (r.x < best_dist) {
+                    best_dist = r.x;
+                    best_p0 = pp;
+                    best_p1 = cp;
+                    best_p2 = pn;
+                    best_corner_x = cx;
+                    best_corner_y = cy;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    uint color = nn_color;
+
+    if (found) {
+        // We found the nearest boundary B-spline.
+        // Now determine color: check which of the 4 pixel centers around
+        // the boundary corner is on the SAME side of the curve as our point.
+        float my_cross = bspline_cross(pt, best_p0, best_p1, best_p2);
+
+        // The 4 pixels around the boundary corner
+        int px_tl_x = best_corner_x - 1, px_tl_y = best_corner_y - 1;
+        int px_tr_x = best_corner_x,     px_tr_y = best_corner_y - 1;
+        int px_bl_x = best_corner_x - 1, px_bl_y = best_corner_y;
+        int px_br_x = best_corner_x,     px_br_y = best_corner_y;
+
+        // Check each pixel center's side of the curve
+        // Pick the pixel that's on the SAME side as our output pixel
+        float best_match_dist = 1e10;
+        uint best_match_color = nn_color;
+
+        vec2 centers[4] = vec2[4](
+            vec2(float(px_tl_x) + 0.5, float(px_tl_y) + 0.5),
+            vec2(float(px_tr_x) + 0.5, float(px_tr_y) + 0.5),
+            vec2(float(px_bl_x) + 0.5, float(px_bl_y) + 0.5),
+            vec2(float(px_br_x) + 0.5, float(px_br_y) + 0.5)
+        );
+        uint colors[4] = uint[4](
+            px_color(px_tl_x, px_tl_y),
+            px_color(px_tr_x, px_tr_y),
+            px_color(px_bl_x, px_bl_y),
+            px_color(px_br_x, px_br_y)
+        );
+
+        for (int i = 0; i < 4; i++) {
+            float center_cross = bspline_cross(centers[i], best_p0, best_p1, best_p2);
+            // Same side = same sign of cross product
+            if (my_cross * center_cross > 0.0) {
+                // This pixel center is on the same side as our point
+                float d = dot(pt - centers[i], pt - centers[i]);
+                if (d < best_match_dist) {
+                    best_match_dist = d;
+                    best_match_color = colors[i];
+                }
+            }
+        }
+        color = best_match_color;
+    }
+
+    vec4 rgba = vec4(float((color >> 16u) & 0xFFu) / 255.0,
+                     float((color >> 8u) & 0xFFu) / 255.0,
+                     float(color & 0xFFu) / 255.0, 1.0);
+    imageStore(output_img, ivec2(opx, opy), rgba);
+}

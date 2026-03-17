@@ -122,6 +122,46 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[(1, 2), (2, 1)],
     },
     ShaderInfo {
+        glsl_src: "cell_rasterizer.comp",
+        spv_name: "cell_rasterizer_comp.spv",
+        msl_name: "cell_rasterizer_comp.metal",
+        // spirv-cross already puts uniforms at buffer(0) — no remap needed
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "similarity_graph.comp",
+        spv_name: "similarity_graph_comp.spv",
+        msl_name: "similarity_graph_comp.metal",
+        // spirv-cross: buffer(0)=pixels, buffer(1)=uniforms, buffer(2)=graph
+        // SDL3: buffer(0)=uniforms, buffer(1)=pixels(ro), buffer(2)=graph(rw)
+        msl_buffer_remap: &[(0, 1), (1, 0)],
+    },
+    ShaderInfo {
+        glsl_src: "resolve_crossings.comp",
+        spv_name: "resolve_crossings_comp.spv",
+        msl_name: "resolve_crossings_comp.metal",
+        // spirv-cross: buffer(0)=graph, buffer(1)=uniforms
+        // SDL3: buffer(0)=uniforms, buffer(1)=graph(rw)
+        msl_buffer_remap: &[(0, 1), (1, 0)],
+    },
+    ShaderInfo {
+        glsl_src: "cell_graph.comp",
+        spv_name: "cell_graph_comp.spv",
+        msl_name: "cell_graph_comp.metal",
+        // spirv-cross: buffer(0)=uniforms, buffer(1)=graph, buffer(2)=pos, buffer(3)=nbr, buffer(4)=flags
+        // Already correct — no remap needed
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "optimize_energy.comp",
+        spv_name: "optimize_energy_comp.spv",
+        msl_name: "optimize_energy_comp.metal",
+        // spirv-cross: buffer(0)=pos_in, buffer(1)=orig, buffer(2)=neighbors,
+        //              buffer(3)=uniforms, buffer(4)=pos_out, buffer(5)=flags
+        // SDL3: buffer(0)=uniforms, buffer(1..4)=readonly, buffer(5)=readwrite
+        msl_buffer_remap: &[(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 4)],
+    },
+    ShaderInfo {
         glsl_src: "edge_raster.comp",
         spv_name: "edge_raster_comp.spv",
         msl_name: "edge_raster_comp.metal",

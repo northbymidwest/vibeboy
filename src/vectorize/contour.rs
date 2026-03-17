@@ -1521,11 +1521,89 @@ pub fn extract_shared_edge_paths(
     extract_shared_edge_paths_inner(pixels, graph, false)
 }
 
+/// Dump CPU pipeline control points for visualization comparison with GPU.
+/// Outputs to stdout: one line per boundary node with position and chain neighbors.
+pub fn dump_cpu_control_points(pixels: &[u32], width: usize, height: usize) {
+    let graph = super::graph::build(pixels, width, height);
+    let w = graph.width;
+    let h = graph.height;
+
+    let all_cells = precompute_cells(w, h, &graph);
+    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, false);
+    let chains = chain_visible_edges(&visible_edges);
+
+    let mut junctions: HashSet<NodeId> = HashSet::new();
+    for (chain, _) in &chains {
+        let is_closed = chain.len() > 2 && chain.first() == chain.last();
+        if !is_closed && chain.len() >= 2 {
+            junctions.insert(chain[0]);
+            junctions.insert(chain[chain.len() - 1]);
+        }
+    }
+
+    let all_loops = trace_all_boundary_loops(&directed_edges);
+    let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
+    for (node_loop, _) in &all_loops {
+        for nd in node_loop {
+            node_positions.entry(*nd).or_insert_with(|| nd.to_point());
+        }
+    }
+    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+
+    // Build chain neighbor map: for each node, (prev, next) in chain
+    let mut chain_nbrs: FxHashMap<NodeId, (Option<NodeId>, Option<NodeId>)> = fx_hashmap();
+    for (chain, _) in &chains {
+        let n = chain.len();
+        for i in 0..n {
+            let prev = if i > 0 { Some(chain[i - 1]) } else { None };
+            let next = if i + 1 < n { Some(chain[i + 1]) } else { None };
+            chain_nbrs.insert(chain[i], (prev, next));
+        }
+    }
+
+    // Collect all unique boundary nodes
+    let mut all_nodes: Vec<NodeId> = node_positions.keys().copied().collect();
+    all_nodes.sort_by(|a, b| (a.y4, a.x4).cmp(&(b.y4, b.x4)));
+
+    // Create a node-to-index map for the dump
+    let mut node_idx: FxHashMap<NodeId, usize> = fx_hashmap();
+    for (i, nd) in all_nodes.iter().enumerate() {
+        node_idx.insert(*nd, i);
+    }
+
+    // Dump: idx px py 0 0 prev_idx next_idx flags
+    for (i, nd) in all_nodes.iter().enumerate() {
+        let p = node_positions.get(nd).copied().unwrap_or_else(|| nd.to_point());
+        let (prev, next) = chain_nbrs.get(nd).copied().unwrap_or((None, None));
+        let prev_i = prev.and_then(|n| node_idx.get(&n).copied()).map(|i| i as i32).unwrap_or(-1);
+        let next_i = next.and_then(|n| node_idx.get(&n).copied()).map(|i| i as i32).unwrap_or(-1);
+        let is_junction = junctions.contains(nd);
+        let flag = if is_junction { 1u32 } else { 0u32 };
+        println!("{} {:.4} {:.4} 0 0 {} {} {}", i, p.x, p.y, prev_i, next_i, flag);
+    }
+    eprintln!("CPU dump: {} boundary nodes, {} chains, {} junctions",
+        all_nodes.len(), chains.len(), junctions.len());
+}
+
 /// Inner implementation with adaptive flag.
 /// When adaptive=true and boundary count exceeds threshold, skips
 /// chain building and optimization for faster (but less smooth) output.
 pub fn extract_shared_edge_paths_inner(
     pixels: &[u32], graph: &SimilarityGraph, adaptive: bool,
+) -> (Vec<ColorPath>, u32) {
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    return extract_shared_edge_paths_gpu(pixels, graph, adaptive, None);
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    return extract_shared_edge_paths_gpu(pixels, graph, adaptive, None);
+}
+
+/// Inner implementation with optional GPU device for optimization.
+pub fn extract_shared_edge_paths_gpu(
+    pixels: &[u32], graph: &SimilarityGraph, adaptive: bool,
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    gpu: Option<&crate::scaling::gpu_pipelines::GpuOptRefs>,
+    #[cfg(not(feature = "sdl3-gpu-shaders"))]
+    _gpu: Option<&()>,
 ) -> (Vec<ColorPath>, u32) {
     let w = graph.width;
     let h = graph.height;
@@ -1585,7 +1663,22 @@ pub fn extract_shared_edge_paths_inner(
             node_positions.entry(*nd).or_insert_with(|| nd.to_point());
         }
     }
-    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+
+    // Try GPU optimizer if device provided, fall back to CPU
+    let mut used_gpu = false;
+    #[cfg(feature = "sdl3-gpu-shaders")]
+    if let Some(ctx) = gpu {
+        let gpu_data = prepare_gpu_optimizer_data(&all_loops, &node_positions, &junctions);
+        if let Some(result) = crate::scaling::gpu::gpu_optimize_energy_on_device(
+            ctx.device, ctx.pipeline, &gpu_data,
+        ) {
+            unpack_gpu_optimizer_results(&result, &gpu_data, &all_loops, &mut node_positions);
+            used_gpu = true;
+        }
+    }
+    if !used_gpu {
+        optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+    }
 
     // Fit B-splines to each chain
     let chain_segments: Vec<Vec<PathSegment>> = chains.iter().map(|(chain, _)| {
@@ -1736,6 +1829,117 @@ pub fn extract_shared_edge_paths_inner(
     (result, bg_color)
 }
 
+/// Packed node data for the GPU optimizer.
+/// All loops are flattened into contiguous arrays indexed by global node ID.
+pub struct GpuOptimizerData {
+    /// Positions: 2 floats per node (x, y)
+    pub positions: Vec<f32>,
+    /// Original positions (same layout)
+    pub orig_positions: Vec<f32>,
+    /// Neighbor indices: 4 ints per node (prev2, prev1, next1, next2)
+    pub neighbors: Vec<i32>,
+    /// Flags: 1 uint per node (bit 0 = pinned, bits 1-3 = corner span masks)
+    pub flags: Vec<u32>,
+    /// Total number of nodes
+    pub num_nodes: u32,
+    /// Mapping from global index back to (loop_index, node_index_in_loop)
+    pub index_map: Vec<(usize, usize)>,
+}
+
+/// Pack all boundary loops into flat GPU buffers for the optimizer compute shader.
+pub fn prepare_gpu_optimizer_data(
+    all_loops: &[(Vec<NodeId>, u32)],
+    positions: &FxHashMap<NodeId, Point>,
+    junctions: &HashSet<NodeId>,
+) -> GpuOptimizerData {
+    // Count total nodes
+    let total: usize = all_loops.iter()
+        .filter(|(l, _)| l.len() >= 4)
+        .map(|(l, _)| l.len())
+        .sum();
+
+    let mut pos_buf = Vec::with_capacity(total * 2);
+    let mut orig_buf = Vec::with_capacity(total * 2);
+    let mut nbr_buf = Vec::with_capacity(total * 4);
+    let mut flag_buf = Vec::with_capacity(total);
+    let mut idx_map = Vec::with_capacity(total);
+
+    let mut global_idx = 0usize;
+
+    for (li, (node_loop, _)) in all_loops.iter().enumerate() {
+        let n = node_loop.len();
+        if n < 4 { continue; }
+
+        let corners = detect_corners_from_nodes(node_loop, true);
+        let loop_start = global_idx;
+
+        for i in 0..n {
+            let nd = node_loop[i];
+            let p = positions.get(&nd).copied().unwrap_or_else(|| nd.to_point());
+
+            pos_buf.push(p.x as f32);
+            pos_buf.push(p.y as f32);
+            orig_buf.push(p.x as f32);
+            orig_buf.push(p.y as f32);
+
+            // Neighbors within this loop (circular)
+            let prev2 = (loop_start + (i + n - 2) % n) as i32;
+            let prev1 = (loop_start + (i + n - 1) % n) as i32;
+            let next1 = (loop_start + (i + 1) % n) as i32;
+            let next2 = (loop_start + (i + 2) % n) as i32;
+            nbr_buf.extend_from_slice(&[prev2, prev1, next1, next2]);
+
+            // Flags
+            let mut flags = 0u32;
+            if junctions.contains(&nd) { flags |= 1; } // pinned
+
+            // Corner span masks: check 3 spans centered at this node
+            // Span (prev1, i, next1): if any is a corner, set bit 1
+            let i0 = (i + n - 1) % n;
+            let i2 = (i + 1) % n;
+            if corners[i0] || corners[i] || corners[i2] { flags |= 2; }
+            // Span (prev2, prev1, i): bit 2
+            let i_m2 = (i + n - 2) % n;
+            if corners[i_m2] || corners[i0] || corners[i] { flags |= 4; }
+            // Span (i, next1, next2): bit 3
+            let i_p2 = (i + 2) % n;
+            if corners[i] || corners[i2] || corners[i_p2] { flags |= 8; }
+
+            flag_buf.push(flags);
+            idx_map.push((li, i));
+            global_idx += 1;
+        }
+    }
+
+    GpuOptimizerData {
+        positions: pos_buf,
+        orig_positions: orig_buf,
+        neighbors: nbr_buf,
+        flags: flag_buf,
+        num_nodes: global_idx as u32,
+        index_map: idx_map,
+    }
+}
+
+/// Unpack GPU optimizer results back into the node positions map.
+pub fn unpack_gpu_optimizer_results(
+    result_positions: &[f32],
+    data: &GpuOptimizerData,
+    all_loops: &[(Vec<NodeId>, u32)],
+    positions: &mut FxHashMap<NodeId, Point>,
+) {
+    let loops_with_nodes: Vec<&(Vec<NodeId>, u32)> = all_loops.iter()
+        .filter(|(l, _)| l.len() >= 4)
+        .collect();
+
+    for (gi, &(li, ni)) in data.index_map.iter().enumerate() {
+        let nd = loops_with_nodes[li].0[ni];
+        let x = result_positions[gi * 2] as f64;
+        let y = result_positions[gi * 2 + 1] as f64;
+        positions.insert(nd, Point::new(x, y));
+    }
+}
+
 fn reverse_segment(seg: &PathSegment) -> PathSegment {
     match seg {
         PathSegment::Line(a, b) => PathSegment::Line(*b, *a),
@@ -1788,7 +1992,6 @@ fn optimize_boundary_loops(
             .map(|nd| junctions.contains(nd))
             .collect();
 
-        let eps = GRADIENT_STEP;
         for _iter in 0..OPT_ITERATIONS {
             for i in 0..n {
                 if pinned[i] { continue; }
@@ -1797,20 +2000,11 @@ fn optimize_boundary_loops(
                 let e0 = local_energy(&pts, &orig, &corners, i, n, true);
                 if e0 < 1e-12 { continue; }
 
-                pts[i] = Point::new(current.x + eps, current.y);
-                let ex_fwd = local_energy(&pts, &orig, &corners, i, n, true);
-                pts[i] = Point::new(current.x, current.y + eps);
-                let ey_fwd = local_energy(&pts, &orig, &corners, i, n, true);
-
-                let inv_eps = 1.0 / eps;
-                let gx = (ex_fwd - e0) * inv_eps;
-                let gy = (ey_fwd - e0) * inv_eps;
+                // Analytic gradient
+                let (gx, gy) = analytic_gradient(&pts, &orig, &corners, i, n);
 
                 let grad_len = (gx * gx + gy * gy).sqrt();
-                if grad_len < 1e-12 {
-                    pts[i] = current;
-                    continue;
-                }
+                if grad_len < 1e-12 { continue; }
 
                 let step = (e0 / grad_len).min(MAX_MOVE);
                 let candidate = Point::new(
@@ -2036,39 +2230,86 @@ fn optimize_control_points(points: &mut Vec<Point>, is_closed: bool) {
             let e0 = local_energy(points, &orig, &corners, i, n, is_closed);
             if e0 < 1e-12 { continue; }
 
-            // Forward-difference gradient (3 evals instead of 5)
-            points[i] = Point::new(current.x + eps, current.y);
-            let ex_fwd = local_energy(points, &orig, &corners, i, n, is_closed);
-            points[i] = Point::new(current.x, current.y + eps);
-            let ey_fwd = local_energy(points, &orig, &corners, i, n, is_closed);
-
-            let inv_eps = 1.0 / eps;
-            let gx = (ex_fwd - e0) * inv_eps;
-            let gy = (ey_fwd - e0) * inv_eps;
+            // Analytic gradient
+            let (gx, gy) = analytic_gradient(points, &orig, &corners, i, n);
 
             let grad_len = (gx * gx + gy * gy).sqrt();
-            if grad_len < 1e-12 {
-                points[i] = current;
-                continue;
-            }
+            if grad_len < 1e-12 { continue; }
 
-            // Normalized gradient step, clamped to MAX_MOVE
             let step = (e0 / grad_len).min(MAX_MOVE);
-            let nx = current.x - step * gx / grad_len;
-            let ny = current.y - step * gy / grad_len;
-
-            // Accept if it improves energy
-            let candidate = Point::new(nx, ny);
+            let candidate = Point::new(
+                current.x - step * gx / grad_len,
+                current.y - step * gy / grad_len,
+            );
             points[i] = candidate;
             let e_new = local_energy(points, &orig, &corners, i, n, is_closed);
             if e_new >= e0 {
-                points[i] = current; // revert
+                points[i] = current;
             }
         }
     }
 }
 
 #[inline(always)]
+/// Analytic gradient of the total energy at node `idx`.
+/// Returns (∂E/∂x, ∂E/∂y).
+///
+/// Positional energy: E_pos = (s² * d²)²
+///   ∇E_pos = 4 * s⁴ * d² * (p - p_orig)
+///
+/// Curvature energy per span (p0, p1, p2): E_curv ≈ ||p0 - 2p1 + p2||²
+///   ∇E_curv w.r.t. p1 (center) = 2*(4p1 - 2p0 - 2p2)
+///   ∇E_curv w.r.t. p0 (start)  = 2*(p0 - 2p1 + p2)
+///   ∇E_curv w.r.t. p2 (end)    = 2*(p0 - 2p1 + p2)
+fn analytic_gradient(
+    points: &[Point], orig: &[Point], corners: &[bool],
+    idx: usize, n: usize,
+) -> (f64, f64) {
+    let p = points[idx];
+    let o = orig[idx];
+
+    // Positional gradient
+    let dx = p.x - o.x;
+    let dy = p.y - o.y;
+    let d_sq = dx * dx + dy * dy;
+    let s2 = POSITIONAL_SCALE * POSITIONAL_SCALE;
+    let mut gx = 4.0 * s2 * s2 * d_sq * dx;
+    let mut gy = 4.0 * s2 * s2 * d_sq * dy;
+
+    // Curvature gradient: node participates in up to 3 spans
+    for offset in 0..3i64 {
+        let span_start = ((idx as i64 - 2 + offset) % n as i64 + n as i64) as usize % n;
+        if span_start + 2 >= n { continue; }
+
+        let i0 = span_start % n;
+        let i1 = (span_start + 1) % n;
+        let i2 = (span_start + 2) % n;
+
+        if i1 >= n || i2 >= n { continue; }
+        if corners[i0] || corners[i1] || corners[i2] { continue; }
+
+        let p0 = points[i0];
+        let p1 = points[i1];
+        let p2 = points[i2];
+
+        // Second difference: dd = p0 - 2*p1 + p2
+        let ddx = p0.x - 2.0 * p1.x + p2.x;
+        let ddy = p0.y - 2.0 * p1.y + p2.y;
+
+        if i1 == idx {
+            // This node is the center of the span → ∂/∂p1 of ||dd||² = -4*dd
+            gx += 2.0 * (4.0 * p1.x - 2.0 * p0.x - 2.0 * p2.x);
+            gy += 2.0 * (4.0 * p1.y - 2.0 * p0.y - 2.0 * p2.y);
+        } else {
+            // This node is p0 or p2 → ∂/∂p0 or ∂/∂p2 of ||dd||² = 2*dd
+            gx += 2.0 * ddx;
+            gy += 2.0 * ddy;
+        }
+    }
+
+    (gx, gy)
+}
+
 fn local_energy(
     points: &[Point], orig: &[Point], corners: &[bool],
     idx: usize, n: usize, is_closed: bool,

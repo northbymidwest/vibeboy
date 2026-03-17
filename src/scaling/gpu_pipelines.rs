@@ -36,6 +36,14 @@ pub struct GpuPipelines {
     diffusion_compute: Option<gpu::ComputePipeline>,
     spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
     edge_compute: Option<gpu::ComputePipeline>,
+    optimizer_compute: Option<gpu::ComputePipeline>,
+    full_vectorize: Option<super::gpu::GpuVectorizePipelines>,
+}
+
+/// References to GPU device and optimizer pipeline for passing to vectorization.
+pub struct GpuOptRefs<'a> {
+    pub device: &'a gpu::Device,
+    pub pipeline: &'a gpu::ComputePipeline,
 }
 
 impl GpuPipelines {
@@ -103,6 +111,8 @@ impl GpuPipelines {
             diffusion_compute: None,
             spline_diff: None,
             edge_compute: None,
+            optimizer_compute: None,
+            full_vectorize: None,
         }
     }
 
@@ -307,6 +317,16 @@ impl GpuPipelines {
                     GpuRenderMode::Cpu
                 }
             }
+            ScaleFilter::VectorizeGpu => {
+                if self.full_vectorize.is_none() {
+                    self.full_vectorize = super::gpu::init_full_gpu_pipeline(&self.device);
+                }
+                if self.full_vectorize.is_some() {
+                    GpuRenderMode::FullGpuVectorize
+                } else {
+                    GpuRenderMode::Cpu
+                }
+            }
             // Filters without GPU shaders fall back to CPU
             _ => GpuRenderMode::Cpu,
         }
@@ -463,6 +483,39 @@ impl GpuPipelines {
         );
     }
 
+    /// Initialize and return GPU optimizer references for use by vectorization.
+    /// Returns None if pipeline creation fails.
+    pub fn gpu_optimizer(&mut self) -> Option<GpuOptRefs> {
+        if self.optimizer_compute.is_none() {
+            self.optimizer_compute = super::gpu::init_optimizer_compute_pipeline(&self.device);
+        }
+        self.optimizer_compute.as_ref().map(|p| GpuOptRefs {
+            device: &self.device,
+            pipeline: p,
+        })
+    }
+
+    /// Run the full GPU vectorize pipeline (all 5 stages on GPU, no CPU readback).
+    pub fn render_full_vectorize_to_window(
+        &mut self,
+        window: &sdl3::video::Window,
+        pixels: &[u32],
+        img_w: u32, img_h: u32,
+        out_w: u32, out_h: u32,
+        scale: f32,
+    ) {
+        if self.full_vectorize.is_none() {
+            self.full_vectorize = super::gpu::init_full_gpu_pipeline(&self.device);
+        }
+        self.resize_texture(out_w, out_h);
+        // Need to borrow pipelines and tex separately from self
+        let pipelines = self.full_vectorize.as_ref().unwrap();
+        super::gpu::gpu_vectorize_full_pipeline(
+            &self.device, window, &self.tex, pipelines,
+            pixels, img_w, img_h, out_w, out_h, scale,
+        );
+    }
+
     /// Edge-based rasterize render path.
     pub fn render_edge_to_window(
         &mut self,
@@ -589,6 +642,8 @@ pub enum GpuRenderMode {
     SplineDiffusion,
     /// Use GPU compute edge rasterizer pipeline.
     EdgeRasterize,
+    /// Full GPU vectorize pipeline (all stages on GPU).
+    FullGpuVectorize,
     /// No GPU pipeline available; use CPU scaling + upload_and_blit.
     Cpu,
 }

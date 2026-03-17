@@ -1,0 +1,216 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+// All buffers as readonly storage (set 0).
+// SDL3 binds readonly storage buffers in order of their binding index.
+layout(std430, set = 0, binding = 0) readonly buffer PositionsIn {
+    float pos_in[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer OrigPositions {
+    float orig_pos[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer Neighbors {
+    int neighbor_data[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Flags {
+    uint node_flags[];
+};
+
+// Output positions (set 1, readwrite storage buffer)
+layout(std430, set = 1, binding = 0) writeonly buffer PositionsOut {
+    float pos_out[];
+};
+
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint num_nodes;
+    float gradient_step;
+    float max_move;
+    float positional_scale; // 2.5
+};
+
+// Read position of node i from input buffer
+vec2 read_pos(uint i) {
+    return vec2(pos_in[i * 2u], pos_in[i * 2u + 1u]);
+}
+
+vec2 read_orig(uint i) {
+    return vec2(orig_pos[i * 2u], orig_pos[i * 2u + 1u]);
+}
+
+// Neighbor indices for node i: (prev, next, -, -)
+// Cell graph stores chain prev/next, not loop prev2/prev1/next1/next2
+int read_prev(uint i) { return neighbor_data[i * 4u]; }
+int read_next(uint i) { return neighbor_data[i * 4u + 1u]; }
+
+// Legacy: kept for buffer binding (prevents spirv-cross from dropping)
+ivec4 read_neighbors(uint i) {
+    return ivec4(
+        neighbor_data[i * 4u],
+        neighbor_data[i * 4u + 1u],
+        neighbor_data[i * 4u + 2u],
+        neighbor_data[i * 4u + 3u]
+    );
+}
+
+// Curvature squared at parameter t for B-spline span (p0, p1, p2)
+float curvature_sq_at(vec2 p0, vec2 p1, vec2 p2, float t, vec2 dd) {
+    vec2 d = (t - 1.0) * p0 + (1.0 - 2.0 * t) * p1 + t * p2;
+    float numer = d.x * dd.y - d.y * dd.x;
+    float denom_sq = dot(d, d);
+    float denom = denom_sq * sqrt(denom_sq);
+    if (denom < 1e-12) return 0.0;
+    return (numer * numer) / (denom * denom);
+}
+
+// Integrated curvature energy for one B-spline span (3 sample points)
+float span_curvature(vec2 p0, vec2 p1, vec2 p2) {
+    vec2 dd = p0 - 2.0 * p1 + p2;
+    if (dot(dd, dd) < 1e-20) return 0.0;
+    // Trapezoidal rule with 3 intervals
+    float dt = 1.0 / 3.0;
+    float result = (curvature_sq_at(p0, p1, p2, 0.0, dd)
+                  + curvature_sq_at(p0, p1, p2, 1.0, dd)) * 0.5;
+    result += curvature_sq_at(p0, p1, p2, dt, dd);
+    result += curvature_sq_at(p0, p1, p2, 2.0 * dt, dd);
+    return result * dt;
+}
+
+// Positional energy: (scale * distance)^4
+float positional_energy(vec2 pos, vec2 orig) {
+    vec2 d = pos - orig;
+    float dist_sq = dot(d, d);
+    float scaled_sq = positional_scale * positional_scale * dist_sq;
+    return scaled_sq * scaled_sq;
+}
+
+// Local energy at node i, considering 3 spans that include this node
+// (spans [i-2,i-1,i], [i-1,i,i+1], [i,i+1,i+2])
+float local_energy(vec2 pi, uint i, ivec4 nbrs, uint flags) {
+    float energy = positional_energy(pi, read_orig(i));
+
+    // Span centered at (prev1, i, next1)
+    if (nbrs.y >= 0 && nbrs.z >= 0) {
+        // Check corner flags: bit 1 = span (prev1, i, next1) has corner
+        if ((flags & 2u) == 0u) {
+            energy += span_curvature(read_pos(uint(nbrs.y)), pi, read_pos(uint(nbrs.z)));
+        }
+    }
+
+    // Span (prev2, prev1, i)
+    if (nbrs.x >= 0 && nbrs.y >= 0) {
+        if ((flags & 4u) == 0u) {
+            energy += span_curvature(read_pos(uint(nbrs.x)), read_pos(uint(nbrs.y)), pi);
+        }
+    }
+
+    // Span (i, next1, next2)
+    if (nbrs.z >= 0 && nbrs.w >= 0) {
+        if ((flags & 8u) == 0u) {
+            energy += span_curvature(pi, read_pos(uint(nbrs.z)), read_pos(uint(nbrs.w)));
+        }
+    }
+
+    return energy;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= num_nodes) return;
+
+    // First: always copy input to output (ensures non-zero baseline)
+    vec2 p_copy = read_pos(i);
+    pos_out[i * 2u] = p_copy.x;
+    pos_out[i * 2u + 1u] = p_copy.y;
+
+    uint flags = node_flags[i];
+
+    // Pinned nodes (junctions) don't move — already copied above
+    if ((flags & 1u) != 0u) {
+        return;
+    }
+
+    // Also need to touch all buffers to prevent spirv-cross from dropping them
+    int _dummy_nbr = neighbor_data[0];
+    float _dummy_orig = orig_pos[0];
+
+    ivec4 nbrs = read_neighbors(i);
+    vec2 current = read_pos(i);
+
+    // Compute current energy
+    float e0 = local_energy(current, i, nbrs, flags);
+
+    if (e0 < 1e-12) {
+        pos_out[i * 2u] = current.x;
+        pos_out[i * 2u + 1u] = current.y;
+        return;
+    }
+
+    // Analytic gradient computation.
+    // Two energy terms contribute to the gradient:
+    //
+    // 1. Positional energy: E_pos = (s² * d²)² where s=positional_scale, d²=||p-p_orig||²
+    //    ∇E_pos = 4 * s⁴ * d² * (p - p_orig)
+    //
+    // 2. Curvature energy: E_curv ≈ ||p0 - 2p1 + p2||² per span
+    //    ∇E_curv w.r.t. center point p1 = 2*(8p1 - 4p0 - 4p2) across all spans
+    //    (exact gradient of the squared second-difference approximation)
+
+    vec2 orig = read_orig(i);
+    vec2 delta = current - orig;
+    float d_sq = dot(delta, delta);
+    float s2 = positional_scale * positional_scale;
+    vec2 grad = 4.0 * s2 * s2 * d_sq * delta; // positional gradient
+
+    // Curvature gradient: for each span containing this node as center,
+    // add the contribution from ∂/∂p1 of ||p0 - 2p1 + p2||²
+    // = 2 * (4p1 - 2p0 - 2p2) = 8p1 - 4p0 - 4p2
+
+    // Span (prev1, current, next1)
+    if (nbrs.y >= 0 && nbrs.z >= 0 && (flags & 2u) == 0u) {
+        vec2 p0 = read_pos(uint(nbrs.y));
+        vec2 p2 = read_pos(uint(nbrs.z));
+        grad += 2.0 * (4.0 * current - 2.0 * p0 - 2.0 * p2);
+    }
+
+    // Span (prev2, prev1, current) — current is p2
+    if (nbrs.x >= 0 && nbrs.y >= 0 && (flags & 4u) == 0u) {
+        vec2 p0 = read_pos(uint(nbrs.x));
+        vec2 p1 = read_pos(uint(nbrs.y));
+        vec2 dd = p0 - 2.0 * p1 + current;
+        grad += 2.0 * dd; // ∂/∂p2 of ||dd||² = 2*dd
+    }
+
+    // Span (current, next1, next2) — current is p0
+    if (nbrs.z >= 0 && nbrs.w >= 0 && (flags & 8u) == 0u) {
+        vec2 p1 = read_pos(uint(nbrs.z));
+        vec2 p2 = read_pos(uint(nbrs.w));
+        vec2 dd = current - 2.0 * p1 + p2;
+        grad += 2.0 * dd; // ∂/∂p0 of ||dd||² = 2*dd
+    }
+
+    float grad_len = length(grad);
+
+    if (grad_len < 1e-12) {
+        pos_out[i * 2u] = current.x;
+        pos_out[i * 2u + 1u] = current.y;
+        return;
+    }
+
+    // Step in negative gradient direction, clamped
+    float step_size = min(e0 / grad_len, max_move);
+    vec2 candidate = current - step_size * grad / grad_len;
+
+    // Accept only if energy decreased
+    float e_new = local_energy(candidate, i, nbrs, flags);
+    if (e_new < e0) {
+        pos_out[i * 2u] = candidate.x;
+        pos_out[i * 2u + 1u] = candidate.y;
+    } else {
+        pos_out[i * 2u] = current.x;
+        pos_out[i * 2u + 1u] = current.y;
+    }
+}
