@@ -181,23 +181,6 @@ pub fn vectorize_to_raster(
     (buf, out_w, out_h)
 }
 
-/// Vectorize a pixel buffer and rasterize at a floating-point scale factor.
-/// Detects nearest-neighbor upscaling and collapses to native resolution first.
-/// Uses a single uniform scale so the aspect ratio is always preserved.
-/// Returns (pixels, output_width, output_height).
-pub fn vectorize_to_raster_scaled(
-    pixels: &[u32], width: usize, height: usize, scale: f64,
-) -> (Vec<u32>, usize, usize) {
-    let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
-    let (px, w, h) = if !native_pixels.is_empty() {
-        (native_pixels.as_slice(), nw, nh)
-    } else {
-        (pixels, width, height)
-    };
-    let (paths, bg_color) = vectorize_core(px, w, h);
-    rasterize::rasterize_scaled(&paths, w, h, bg_color, scale)
-}
-
 /// Vectorize and rasterize using shared-chain rendering (gap-free).
 /// Each boundary chain is shared between two regions, eliminating gaps.
 /// Returns (pixels, output_width, output_height).

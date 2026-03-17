@@ -2,7 +2,6 @@
 //! with 2x2 supersampling for anti-aliased edges.
 
 use super::contour::{ColorPath, PathSegment};
-use super::voronoi::Point;
 
 /// A line segment in output pixel space with precomputed fields.
 struct Edge {
@@ -708,24 +707,7 @@ fn cell_vertices_f64(px: usize, py: usize, graph: &SimilarityGraph) -> [(f64, f6
         _ => { verts[n] = (bx, by + 1.0); n += 1; }
     }
 
-    // Store count in unused slots (we know n <= 8)
-    // Return full array; caller uses cell_vertex_count to get n
     verts
-}
-
-/// Count of vertices for a cell (same logic as cell_vertices_f64).
-#[inline]
-fn cell_vertex_count(px: usize, py: usize, graph: &SimilarityGraph) -> usize {
-    let mut n = 0;
-    for &(cx, cy) in &[(px, py), (px + 1, py), (px + 1, py + 1), (px, py + 1)] {
-        let d = corner_diag(graph, cx, cy);
-        n += if d == 1 || d == 2 { if (cx == px && cy == py && d == 1)
-            || (cx == px + 1 && cy == py && d == 2)
-            || (cx == px + 1 && cy == py + 1 && d == 1)
-            || (cx == px && cy == py + 1 && d == 2) { 2 } else { 1 }
-        } else { 1 };
-    }
-    n
 }
 
 /// Build Voronoi ownership map at output resolution by scanline-filling
@@ -838,89 +820,6 @@ pub fn build_voronoi_ownership(
     ownership
 }
 
-/// Rasterize vector paths with NO anti-aliasing (single center-point sample).
-/// Produces hard region boundaries suitable for region-map usage in the
-/// spline-diffusion pipeline. Blended colors would break region matching.
-fn rasterize_noaa(
-    paths: &[ColorPath],
-    width: usize,
-    height: usize,
-    bg_color: u32,
-    scale: usize,
-) -> Vec<u32> {
-    let out_w = width * scale;
-    let out_h = height * scale;
-    let mut buffer = vec![bg_color; out_w * out_h];
-    let sx = scale as f64;
-    let sy = scale as f64;
-    let tol_sq = 0.25;
-
-    let mut edges = Vec::new();
-
-    for path in paths {
-        if path.segments.is_empty() || path.color == bg_color { continue; }
-
-        extract_edges(&path.segments, sx, sy, tol_sq, &mut edges);
-        if edges.is_empty() { continue; }
-
-        // Sort edges by y_min for scanline traversal
-        edges.sort_unstable_by(|a, b| a.y_min.total_cmp(&b.y_min));
-
-        let fill_color = path.color;
-        let mut scan_start = 0usize;
-
-        for py in 0..out_h {
-            let scan_y = py as f64 + 0.5;
-
-            while scan_start < edges.len() && edges[scan_start].y_max <= scan_y {
-                scan_start += 1;
-            }
-
-            // Collect x intersections with nonzero winding
-            let mut isects: Vec<(f64, i32)> = Vec::new();
-            for i in scan_start..edges.len() {
-                let e = &edges[i];
-                if e.y_min >= scan_y + 1.0 { break; }
-                if scan_y >= e.y_min && scan_y < e.y_max {
-                    isects.push((e.intersect_x(scan_y), e.dir));
-                }
-            }
-            if isects.is_empty() { continue; }
-
-            isects.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-
-            let mut winding = 0i32;
-            let mut i = 0;
-            while i < isects.len() {
-                winding += isects[i].1;
-                if winding != 0 {
-                    let x_enter = isects[i].0;
-                    let mut j = i + 1;
-                    while j < isects.len() {
-                        winding += isects[j].1;
-                        if winding == 0 { break; }
-                        j += 1;
-                    }
-                    let x_exit = if j < isects.len() { isects[j].0 } else { break };
-
-                    let px_start = (x_enter.ceil() as usize).min(out_w);
-                    let px_end = (x_exit.floor() as usize + 1).min(out_w);
-                    for px in px_start..px_end {
-                        let cx = px as f64 + 0.5;
-                        if cx >= x_enter && cx < x_exit {
-                            buffer[py * out_w + px] = fill_color;
-                        }
-                    }
-                    i = j + 1;
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    buffer
-}
 
 /// Flood-fill connected components on a color buffer at output resolution.
 /// Two 4-connected output pixels with the same color are in the same region.
@@ -956,237 +855,14 @@ fn flood_fill_output_regions(colors: &[u32], w: usize, h: usize) -> Vec<u32> {
     ids
 }
 
-/// Flatten all B-spline contour paths into line segments at source resolution.
-/// Returns (x0, y0, x1, y1) segments in source-pixel coordinates.
-fn flatten_contour_segments(paths: &[ColorPath]) -> Vec<[f64; 4]> {
-    let mut segs = Vec::new();
-    let tol_sq = 0.01; // tighter tolerance at source resolution
 
-    for path in paths {
-        for seg in &path.segments {
-            match seg {
-                PathSegment::Line(a, b) => {
-                    let dx = b.x - a.x;
-                    let dy = b.y - a.y;
-                    if dx * dx + dy * dy > 1e-12 {
-                        segs.push([a.x, a.y, b.x, b.y]);
-                    }
-                }
-                PathSegment::QuadBezier(start, ctrl, end) => {
-                    flatten_quad_to_segs(
-                        start.x, start.y, ctrl.x, ctrl.y, end.x, end.y,
-                        tol_sq, &mut segs,
-                    );
-                }
-            }
-        }
-    }
-    segs
-}
 
-/// Recursively flatten a quadratic Bezier into line segments.
-fn flatten_quad_to_segs(
-    x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64,
-    tol_sq: f64, out: &mut Vec<[f64; 4]>,
-) {
-    let mx = (x0 + x1) * 0.5;
-    let my = (y0 + y1) * 0.5;
-    let dx = cx - mx;
-    let dy = cy - my;
-    if dx * dx + dy * dy <= tol_sq {
-        let d = (x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0);
-        if d > 1e-12 {
-            out.push([x0, y0, x1, y1]);
-        }
-        return;
-    }
-    let mx01 = (x0 + cx) * 0.5;
-    let my01 = (y0 + cy) * 0.5;
-    let mx12 = (cx + x1) * 0.5;
-    let my12 = (cy + y1) * 0.5;
-    let midx = (mx01 + mx12) * 0.5;
-    let midy = (my01 + my12) * 0.5;
-    flatten_quad_to_segs(x0, y0, mx01, my01, midx, midy, tol_sq, out);
-    flatten_quad_to_segs(midx, midy, mx12, my12, x1, y1, tol_sq, out);
-}
 
-/// Spatial grid: for each source pixel cell, store indices of contour segments
-/// that overlap or pass near it (within 0.5 pixel margin).
-fn build_segment_grid(segs: &[[f64; 4]], w: usize, h: usize) -> Vec<Vec<u32>> {
-    let mut grid = vec![Vec::new(); w * h];
-    for (i, s) in segs.iter().enumerate() {
-        let x_min = s[0].min(s[2]) - 0.5;
-        let x_max = s[0].max(s[2]) + 0.5;
-        let y_min = s[1].min(s[3]) - 0.5;
-        let y_max = s[1].max(s[3]) + 0.5;
-        let gx0 = (x_min.floor() as i32).max(0) as usize;
-        let gx1 = (x_max.ceil() as i32).min(w as i32) as usize;
-        let gy0 = (y_min.floor() as i32).max(0) as usize;
-        let gy1 = (y_max.ceil() as i32).min(h as i32) as usize;
-        for gy in gy0..gy1 {
-            for gx in gx0..gx1 {
-                grid[gy * w + gx].push(i as u32);
-            }
-        }
-    }
-    grid
-}
 
-/// Count how many contour segments the line from (ax, ay) to (bx, by) crosses.
-/// Odd count = blocked (different side of contour). Even = visible (same side).
-/// Uses the spatial grid to test only nearby segments.
-fn ray_crossing_count(
-    ax: f64, ay: f64, bx: f64, by: f64,
-    segs: &[[f64; 4]], grid: &[Vec<u32>], grid_w: usize,
-) -> u32 {
-    let x_min = ax.min(bx) - 0.1;
-    let x_max = ax.max(bx) + 0.1;
-    let y_min = ay.min(by) - 0.1;
-    let y_max = ay.max(by) + 0.1;
-    let gx0 = (x_min.floor() as usize).min(grid_w.saturating_sub(1));
-    let gx1 = (x_max.ceil() as usize).min(grid_w);
-    let gy0 = y_min.floor() as usize;
-    let gy1 = y_max.ceil() as usize;
-    let grid_h = grid.len() / grid_w;
-    let gy1 = gy1.min(grid_h);
 
-    let mut tested = [u32::MAX; 128];
-    let mut n_tested = 0usize;
-    let mut crossings = 0u32;
 
-    for gy in gy0..gy1 {
-        for gx in gx0..gx1 {
-            for &si in &grid[gy * grid_w + gx] {
-                if n_tested < 128 && tested[..n_tested].contains(&si) { continue; }
-                if n_tested < 128 { tested[n_tested] = si; n_tested += 1; }
 
-                let s = &segs[si as usize];
-                if segments_intersect(ax, ay, bx, by, s[0], s[1], s[2], s[3]) {
-                    crossings += 1;
-                }
-            }
-        }
-    }
-    crossings
-}
 
-/// Test if two line segments intersect (strict interior intersection only).
-#[inline]
-fn segments_intersect(
-    p1x: f64, p1y: f64, p2x: f64, p2y: f64,
-    p3x: f64, p3y: f64, p4x: f64, p4y: f64,
-) -> bool {
-    let d1x = p2x - p1x;
-    let d1y = p2y - p1y;
-    let d2x = p4x - p3x;
-    let d2y = p4y - p3y;
-
-    let cross = d1x * d2y - d1y * d2x;
-    if cross.abs() < 1e-12 { return false; }
-
-    let inv_cross = 1.0 / cross;
-    let dx = p3x - p1x;
-    let dy = p3y - p1y;
-    let t = (dx * d2y - dy * d2x) * inv_cross;
-    let u = (dx * d1y - dy * d1x) * inv_cross;
-
-    // Strict interior: exclude endpoints to avoid self-intersection at corners
-    t > 0.01 && t < 0.99 && u > 0.01 && u < 0.99
-}
-
-/// Build per-source-pixel region IDs by rasterizing splines at 1x scale,
-/// snapping to palette, and flood-filling connected components.
-/// This gives small region IDs (src_w × src_h) that respect spline boundaries.
-pub fn build_src_spline_regions(
-    paths: &[ColorPath],
-    pixels: &[u32],
-    width: usize,
-    height: usize,
-    bg_color: u32,
-) -> Vec<u32> {
-    let aa_buf = rasterize(paths, width, height, bg_color, 1);
-    let palette: Vec<u32> = paths.iter().map(|p| p.color)
-        .chain(std::iter::once(bg_color)).collect();
-    let snapped: Vec<u32> = aa_buf.iter()
-        .map(|&c| snap_to_nearest(&palette, c)).collect();
-    flood_fill_output_regions(&snapped, width, height)
-}
-
-/// Build output-resolution region IDs: AA rasterize → snap → flood fill.
-pub fn build_spline_region_ids(
-    paths: &[ColorPath], width: usize, height: usize,
-    bg_color: u32, scale: usize,
-) -> Vec<u32> {
-    let out_w = width * scale;
-    let out_h = height * scale;
-    let aa_buf = rasterize(paths, width, height, bg_color, scale);
-    let palette: Vec<u32> = paths.iter().map(|p| p.color)
-        .chain(std::iter::once(bg_color)).collect();
-    let snapped: Vec<u32> = aa_buf.iter()
-        .map(|&c| snap_to_nearest(&palette, c)).collect();
-    flood_fill_output_regions(&snapped, out_w, out_h)
-}
-
-/// Flood-fill source pixels by YUV similarity (4-connected) — for GPU shader.
-pub fn build_color_regions_yuv(pixels: &[u32], w: usize, h: usize) -> Vec<u32> {
-    let mut ids = vec![u32::MAX; w * h];
-    let mut region_id = 0u32;
-    for start in 0..w * h {
-        if ids[start] != u32::MAX { continue; }
-        ids[start] = region_id;
-        let mut stack = vec![start];
-        while let Some(idx) = stack.pop() {
-            let cur_color = pixels[idx];
-            let x = idx % w;
-            let y = idx / w;
-            for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
-                let ni = ny as usize * w + nx as usize;
-                if ids[ni] != u32::MAX { continue; }
-                if super::graph::similar(cur_color, pixels[ni]) {
-                    ids[ni] = region_id;
-                    stack.push(ni);
-                }
-            }
-        }
-        region_id += 1;
-    }
-    ids
-}
-
-/// Flood-fill source pixels by YUV similarity (4-connected).
-/// Adjacent pixels that are YUV-similar (same threshold as the graph) are
-/// in the same region. Same-color areas separated by dissimilar pixels
-/// (e.g. outline) get different IDs. Small: w * h u32s.
-pub fn build_color_regions(pixels: &[u32], w: usize, h: usize) -> Vec<u32> {
-    let mut ids = vec![u32::MAX; w * h];
-    let mut region_id = 0u32;
-    for start in 0..w * h {
-        if ids[start] != u32::MAX { continue; }
-        ids[start] = region_id;
-        let mut stack = vec![start];
-        while let Some(idx) = stack.pop() {
-            let cur_color = pixels[idx];
-            let x = idx % w;
-            let y = idx / w;
-            for &(dx, dy) in &[(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
-                let ni = ny as usize * w + nx as usize;
-                if ids[ni] != u32::MAX { continue; }
-                if super::graph::similar(cur_color, pixels[ni]) {
-                    ids[ni] = region_id;
-                    stack.push(ni);
-                }
-            }
-        }
-        region_id += 1;
-    }
-    ids
-}
 
 /// Snap a color to the nearest palette color by RGB Euclidean distance.
 fn snap_to_nearest(palette: &[u32], color: u32) -> u32 {
