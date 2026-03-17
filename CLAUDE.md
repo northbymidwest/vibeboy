@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Game Boy / Game Boy Color emulator ("vibeboy") written in Rust. Supports DMG, DMG0, MGB, SGB, SGB2, CGB, and AGB (GBA in GBC mode) hardware models. Includes SGB Super Game Boy emulation with optional SNES LLE via a WDC 65C816 CPU.
+Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). Supports DMG, DMG0, MGB, SGB, SGB2, CGB, and AGB (GBA in GBC mode) hardware models. Includes SGB Super Game Boy emulation with optional SNES LLE via a WDC 65C816 CPU.
 
 ## Build & Run
 
@@ -13,7 +13,7 @@ cargo build --release
 cargo run --release -- path/to/rom.gbc
 
 # With boot ROM and model override
-cargo run --release -- path/to/rom.gbc --model dmg --boot-rom bootroms/dmg_boot.bin
+cargo run --release -- path/to/rom.gbc --model dmg --bootrom bootroms/dmg_boot.bin
 
 # With vectorized scaling filter (shared-chain gap-free rendering)
 cargo run --release -- path/to/rom.gbc --filter vectorize
@@ -109,7 +109,7 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 
 ### SGB subsystem
 - `sgb.rs`: HLE command processing (palettes, attributes, borders, masking)
-- `snes/`: Optional LLE mode with full 65C816 CPU, SNES memory map, DMA, ICD2 bridge
+- `snes/`: Optional LLE mode with full 65C816 CPU (`cpu.rs`), SNES memory map (`bus.rs`), DMA (`dma.rs`), PPU registers (`ppu_regs.rs`), ICD2 bridge (`icd2.rs`)
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
 
 ### Vectorization subsystem (`src/vectorize/`)
@@ -120,33 +120,43 @@ Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasteri
 - `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` (shared-chain) and `VectorizeLegacyCache` (original scanline) for frame caching, upscale detection/collapse, background color detection. No color quantization (removed — the paper doesn't use it).
 - `graph.rs`: Similarity graph — YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
 - `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (±0.25 pixel offsets)
-- `contour.rs`: Core pipeline stages:
-  - 81-entry compile-time Voronoi cell template table (3^4 corner states)
-  - Sort-merge boundary edge deduplication (cache-friendly, ~1.9× faster than HashMap)
-  - Chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance ≤ 100/255)
-  - T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
-  - Planar face algorithm for boundary loop tracing (flat sorted adjacency)
-  - Gradient descent optimizer with κ² smoothness energy, (2.5×distance)⁴ positional energy
-  - ×4 grid corner detection (angle ≥ 60°), corners excluded from curvature energy
-  - VOID_COLOR sentinel (0x01000000) for image border edges
-  - `VectorizeState` for split-phase optimization (CPU or GPU)
-- `svg.rs`: Serializes paths to SVG document string
-- `rasterize.rs`: Three rasterizers:
-  - **Scanline** (`rasterize`/`rasterize_scaled`): 2×2 supersampling, nonzero winding. Default for `--filter vectorize`.
-  - **Voronoi diffusion** (`rasterize_diffusion`): Gaussian blending (σ≈0.63) with graph-based region connectivity. For `--filter vectorize-diffusion`.
-  - **Spline diffusion** (`rasterize_spline_diffusion`): B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
+- `contour/`: Core pipeline stages (split into submodules):
+  - `cells.rs`: 81-entry compile-time Voronoi cell template table (3^4 corner states), per-pixel cell vertex precomputation
+  - `edges.rs`: Boundary edge deduplication (FxHashMap), chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance ≤ 100/255), T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
+  - `loops.rs`: Planar face algorithm for boundary loop tracing (flat sorted adjacency with cross-product angle ordering)
+  - `optimize.rs`: Gradient descent optimizer with κ² smoothness energy, (2.5×distance)⁴ positional energy, ×4 grid corner detection (angle ≥ 60°), corners excluded from curvature energy
+  - `mod.rs`: Orchestration, `VectorizeState` for split-phase optimization (CPU or GPU), VOID_COLOR sentinel (0x01000000) for image border edges
+- `svg.rs`: Serializes paths to SVG document string (grouped by color, BTreeMap ordering)
+- `rasterize/`: Three rasterizers (split into submodules):
+  - `scanline.rs`: 2×2 supersampling, nonzero winding, recursive Bezier flattening (tolerance 0.25). Default for `--filter vectorize`.
+  - `diffusion.rs`: Gaussian blending (σ≈0.63, gauss_k=2.5, radius=2.0) with graph-based region connectivity via 8-connected flood fill. For `--filter vectorize-diffusion`.
+  - `spline_diffusion.rs`: B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
+  - `gpu.rs`: GPU rasterization wrappers (edge data upload, buffer management)
+- `gpu_rasterize.rs`: GPU rasterization dispatch wrappers
+- `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters.
-- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, 11 graphics pipelines, 3 compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` → `GpuRenderMode` enum. Used by main.rs to replace the previous 20-variable tuple.
-- `gpu.rs`: Low-level GPU pipeline init functions, buffer upload, compute dispatch, headless screenshot support.
+- `mod.rs`: `ScaleFilter` enum (38 filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 16 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `xbr`, `xbrz`.
+- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, 11 graphics pipelines, 3+ compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` → `GpuRenderMode` enum (`Native`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
 
-### GPU compute shaders (`src/shaders/`)
-- `vectorize_raster.comp`: Scanline rasterizer (for `--filter vectorize` GPU path)
-- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer (pass 1 of spline-diffusion)
-- `spline_diffusion.comp`: Gaussian diffusion with 2×2 supersampling (pass 2 of spline-diffusion)
-- `diffusion_raster.comp`: Voronoi diffusion with diagonal state ownership computation
-- `optimize_energy.comp`: Double-buffered spline optimizer with ping-pong (on `gpu-optimizer` branch)
+### GPU shaders (`src/shaders/`)
+
+**Compute shaders (rasterization):**
+- `vectorize_raster.comp`: Scanline rasterizer with 2×2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
+- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion — produces hard region boundaries)
+- `spline_diffusion.comp`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2×2 supersampling (pass 2 of spline-diffusion)
+- `diffusion_raster.comp`: Voronoi diffusion with packed diagonal state ownership (2 bits per corner)
+
+**Compute shaders (full GPU vectorize pipeline):**
+- `similarity_graph.comp`: Builds (2W+1)×(2H+1) connectivity graph with binary color matching
+- `resolve_crossings.comp`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
+- `cell_graph.comp`: Creates B-spline control points at grid corners, T-junction merging and position correction, corner detection with `DONT_OPTIMIZE_*` flags
+- `optimize_energy.comp`: Double-buffered gradient descent optimizer — κ² smoothness + (2.5d)⁴ positional energy, max move 0.25px
+- `cell_rasterizer.comp`: Renders optimized B-spline curves to final output
+
+**Fragment shaders (scaling filters):**
+- `fullscreen.vert`: Shared vertex shader for all fragment-based filters
+- 11 filter shaders: `omniscale.frag`, `hqx.frag`, `xbr.frag`, `xbrz.frag`, `epx.frag`, `scale3x.frag`, `eagle.frag`, `aa_nearest.frag`, `omniscale_legacy.frag`, `super_xbr.frag`, `bicubic.frag`
 
 ## Tools & Scripts
 
@@ -240,11 +250,12 @@ open vectorize-tests/comparison.html
 
 ### Binaries
 
-The project produces three binaries (defined in `Cargo.toml`):
+The project produces four binaries (defined in `Cargo.toml`):
 
 - **`vibeboy`** (`src/main.rs`) — Main emulator with SDL3 window, audio, and input handling
-- **`vibeboy_cocoa`** (`src/cocoa_ui.rs`) — Native macOS Cocoa/Metal UI frontend (used by `bundle_app.sh`)
-- **`test_runner`** (`src/test_runner.rs`) — Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, screenshot). See the [Testing](#testing) section for usage
+- **`vibeboy_cocoa`** (`src/cocoa_ui.rs`) — Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
+- **`vibeboy_winit`** (`src/winit_ui.rs`) — Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
+- **`test_runner`** (`src/test_runner/main.rs`) — Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
 
 ## Conventions
 

@@ -6,7 +6,7 @@ Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GB
 
 ## Building
 
-Requires Rust 2024 edition and SDL3.
+Requires Rust 2024 edition and SDL3. Optional features: `macos-ui` (native Cocoa frontend), `winit-ui` (cross-platform winit/wgpu frontend), `gpu` (GPU compute), `sdl3-gpu-shaders` (enabled by default).
 
 ```bash
 cargo build --release
@@ -49,20 +49,35 @@ cargo run --release -- path/to/rom.gb --no-boot
 ### Scaling Filters
 
 ```bash
-# Run with a scaling filter (nearest, bilinear, epx, hq2x-4x, xbrz2x-6x, omniscale, ...)
+# Run with a scaling filter
 cargo run --release -- path/to/rom.gb --filter hq4x
+
+# Available filters: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x,
+#   eagle, 2xsai, super-2xsai, super-eagle, hq2x, hq3x, hq4x,
+#   xbr2x, xbr3x, xbr4x, xbrz2x-6x, super-xbr,
+#   nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest
 
 # Kopf-Lischinski pixel-art vectorization (scales to window size)
 cargo run --release -- path/to/rom.gb --filter vectorize
 cargo run --release -- path/to/rom.gb --filter vectorize-adaptive
 
+# Full GPU vectorize pipeline (all stages on GPU)
+cargo run --release -- path/to/rom.gb --filter vectorize-gpu
+
+# Legacy vectorize (original scanline rasterizer path)
+cargo run --release -- path/to/rom.gb --filter vectorize-legacy
+cargo run --release -- path/to/rom.gb --filter vectorize-legacy-adaptive
+
 # Gaussian diffusion renderers (paper's rendering approach)
 cargo run --release -- path/to/rom.gb --filter vectorize-diffusion
 cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion
 cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion-adaptive
+
+# Force CPU-only rendering for any filter
+cargo run --release -- path/to/rom.gb --filter vectorize --cpu-filter
 ```
 
-The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2×2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. All run in real-time.
+The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2×2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. The `vectorize-gpu` filter runs the entire pipeline on the GPU (similarity graph, crossing resolution, cell graph, optimization, and rasterization). All run in real-time.
 
 ## Features
 
@@ -75,7 +90,10 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
 - **Save states**: 9 slots with rewind support (~10 seconds buffer)
 - **Camera**: Game Boy Camera support via webcam (macOS)
+- **Printer**: Game Boy Printer emulation (saves PNG to `prints/`)
+- **Scaling**: 38 filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, and more
 - **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
+- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu
 
 ## Test Status
 
@@ -83,6 +101,7 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 |-------|--------|
 | Mooneye acceptance | 75/75 |
 | Blargg | 57/58 |
+| SameSuite APU | 55/70 |
 | dmg-acid2 | Pass |
 | cgb-acid2 | Pass |
 | cgb-acid-hell | Pass |
@@ -111,6 +130,8 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 ```
 src/
 ├── main.rs          SDL3 window, audio, input, file dialog
+├── cocoa_ui.rs      Native macOS Cocoa/Metal UI (feature: macos-ui)
+├── winit_ui.rs      Cross-platform winit/wgpu UI (feature: winit-ui)
 ├── emulator.rs      Frame loop, SGB compositing
 ├── cpu/             SM83 CPU (opcodes, interrupts, HALT)
 ├── bus.rs           Memory map, OAM DMA, HDMA, WRAM banking
@@ -120,11 +141,19 @@ src/
 ├── cartridge/       MBC implementations (1, 2, 3, 5, 6, 7)
 ├── sgb.rs           Super Game Boy HLE commands
 ├── serial.rs        Link cable / serial port
+├── printer.rs       Game Boy Printer (saves PNG to prints/)
 ├── joypad.rs        Input handling
 ├── snapshot.rs      Rewind ring buffer + save states
 ├── model.rs         GbModel enum and per-model configuration
-├── scaling/         Pixel scaling filters (EPX, HQx, xBRZ, OmniScale, ...)
-├── vectorize/       Kopf-Lischinski pixel-art vectorizer + rasterizer
+├── scaling/         38 pixel scaling filters + GPU pipeline management
+│   ├── gpu_pipelines.rs  GpuPipelines: SDL3 GPU resources, lazy init
+│   └── *.rs         EPX, HQx, xBR, xBRZ, OmniScale, NEDI, DCCI, EDI, ...
+├── shaders/         GPU shaders: 11 fragment filters + 9 compute shaders
+├── vectorize/       Kopf-Lischinski pixel-art vectorizer
+│   ├── graph.rs     Similarity graph (YUV thresholds, crossing heuristics)
+│   ├── contour/     Cell templates, edge chains, B-spline optimizer
+│   ├── rasterize/   Scanline, diffusion, spline-diffusion rasterizers
+│   └── svg.rs       SVG export
 └── test_runner/     Automated test ROM runner (modular harnesses)
 ```
 
