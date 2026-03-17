@@ -635,7 +635,7 @@ fn main() {
                             );
                         }
                     }
-                    GpuRenderMode::EdgeRasterize => {
+                    GpuRenderMode::VectorizeSharedChain => {
                         // Shared-chain winding fill with GPU optimizer + caching.
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);

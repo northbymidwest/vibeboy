@@ -60,22 +60,22 @@ fn vectorize_and_save(
             if use_gpu {
                 #[cfg(feature = "sdl3-gpu-shaders")]
                 {
-                    if let Some(result) = crate::scaling::gpu::gpu_edge_screenshot(
+                    if let Some(result) = crate::scaling::gpu::gpu_vectorize_shared_screenshot(
                         pixels, width, height, scale,
                     ) {
                         (result.0, result.1 as usize, result.2 as usize)
                     } else {
-                        eprintln!("GPU edge rasterizer failed, falling back to CPU");
-                        vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                        eprintln!("GPU vectorize failed, falling back to CPU");
+                        vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
                     }
                 }
                 #[cfg(not(feature = "sdl3-gpu-shaders"))]
                 {
                     eprintln!("GPU shaders not enabled, using CPU");
-                    vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                    vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
                 }
             } else {
-                vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
             }
         }
         "cpu-dump" => {
@@ -92,13 +92,13 @@ fn vectorize_and_save(
                     (result.0, result.1 as usize, result.2 as usize)
                 } else {
                     eprintln!("GPU full pipeline failed, falling back to CPU");
-                    vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                    vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
                 }
             }
             #[cfg(not(feature = "sdl3-gpu-shaders"))]
             {
                 eprintln!("GPU shaders not enabled");
-                vectorize::vectorize_to_raster_edge(pixels, width, height, scale)
+                vectorize::vectorize_to_raster_shared(pixels, width, height, scale)
             }
         }
         _ => {

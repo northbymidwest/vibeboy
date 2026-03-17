@@ -89,16 +89,6 @@ pub struct ColorPath {
     pub segments: Vec<PathSegment>,
 }
 
-/// A boundary span: a curve segment between two colored regions.
-/// Each span is shared by exactly two regions, so there are no gaps.
-/// left/right are determined by the cross product of the segment direction:
-/// positive cross = left side, negative cross = right side.
-#[derive(Clone, Debug)]
-pub struct BoundarySpan {
-    pub segment: PathSegment,
-    pub left_color: u32,
-    pub right_color: u32,
-}
 
 // --- Section 3.2: Reshaped cell graph (Voronoi diagram) ---
 
@@ -1414,101 +1404,6 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
 ///
 /// Pipeline: cells → boundary edges → chains → optimize → B-spline fit.
 ///
-/// Unlike the scanline renderer's extract_cells_smooth, this deliberately
-/// does NOT merge T-junctions. T-junction merging creates long chains that
-/// cross color boundaries, producing non-adjacent control points and
-/// B-spline curves that overshoot into wrong regions. By using pre-merge
-/// chains, every consecutive node pair is a real CellEdge, every edge
-/// lookup succeeds, and B-splines stay close to actual boundaries.
-///
-/// The trade-off is that chains are shorter (split at every junction),
-/// so B-splines at junction endpoints are slightly less smooth. But
-/// correctness is more important than smoothness.
-pub fn extract_boundary_spans(
-    pixels: &[u32], graph: &SimilarityGraph,
-) -> (Vec<BoundarySpan>, u32) {
-    let w = graph.width;
-    let h = graph.height;
-
-    let all_cells = precompute_cells(w, h, graph);
-    let (visible_edges, directed_edges) = build_directed_boundary_edges(pixels, w, h, &all_cells, false);
-
-    // Build chains WITHOUT T-junction merging.
-    let chains = chain_visible_edges(&visible_edges);
-
-    // Build junction set (chain endpoints) for optimization
-    let mut junctions: HashSet<NodeId> = HashSet::new();
-    for (chain, _) in &chains {
-        let is_closed = chain.len() > 2 && chain.first() == chain.last();
-        if !is_closed && chain.len() >= 2 {
-            junctions.insert(chain[0]);
-            junctions.insert(chain[chain.len() - 1]);
-        }
-    }
-
-    // Trace boundary loops and optimize node positions via gradient descent.
-    let all_loops = trace_all_boundary_loops(&directed_edges);
-    let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
-    for (node_loop, _) in &all_loops {
-        for nd in node_loop {
-            node_positions.entry(*nd).or_insert_with(|| nd.to_point());
-        }
-    }
-    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
-
-    // Build directed edge lookup from original CellEdges.
-    let mut edge_colors: FxHashMap<(NodeId, NodeId), (u32, u32)> = fx_hashmap_cap(visible_edges.len() * 2);
-    for e in &visible_edges {
-        edge_colors.insert((e.a, e.b), (e.left_color, e.right_color));
-        edge_colors.insert((e.b, e.a), (e.right_color, e.left_color));
-    }
-
-    // Fit B-splines to each chain and emit spans.
-    // Since chains are pre-merge, every edge lookup succeeds — no fallbacks needed.
-    let mut spans = Vec::new();
-    for (chain, _cpair) in &chains {
-        let n = chain.len();
-        if n < 2 { continue; }
-
-        let points: Vec<Point> = chain.iter()
-            .map(|nd| node_positions.get(nd).copied().unwrap_or_else(|| nd.to_point()))
-            .collect();
-
-        let is_closed = n > 2 && chain.first() == chain.last();
-        let segments = if is_closed {
-            bspline_closed(&points[..n - 1])
-        } else {
-            bspline_open(&points)
-        };
-
-        // Look up left/right for each segment from the edge it corresponds to.
-        let loop_len = if is_closed { n - 1 } else { n - 1 };
-        for (si, seg) in segments.iter().enumerate() {
-            let (ei, ei_next) = if is_closed {
-                (si % loop_len, (si + 1) % loop_len)
-            } else {
-                let ei = si.min(loop_len - 1);
-                (ei, ei + 1)
-            };
-            // This lookup always succeeds for pre-merge chains.
-            let (left, right) = edge_colors
-                .get(&(chain[ei], chain[ei_next]))
-                .copied()
-                .unwrap_or((0, 0));
-            if left != VOID_COLOR && right != VOID_COLOR {
-                spans.push(BoundarySpan {
-                    segment: seg.clone(),
-                    left_color: left,
-                    right_color: right,
-                });
-            }
-        }
-    }
-
-    let bg_color = detect_bg(pixels, w, h);
-    (spans, bg_color)
-}
-
 /// Extract per-region ColorPaths using shared chain B-splines with winding fill.
 ///
 /// Each boundary chain is shared between two regions. B-splines are fitted once

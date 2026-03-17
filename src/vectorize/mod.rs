@@ -218,10 +218,10 @@ pub fn vectorize_to_raster_scaled(
     rasterize::rasterize_scaled(&paths, w, h, bg_color, scale)
 }
 
-/// Vectorize and rasterize using edge-based rendering (gap-free).
-/// Each boundary span is shared between two regions, eliminating gaps.
+/// Vectorize and rasterize using shared-chain rendering (gap-free).
+/// Each boundary chain is shared between two regions, eliminating gaps.
 /// Returns (pixels, output_width, output_height).
-pub fn vectorize_to_raster_edge(
+pub fn vectorize_to_raster_shared(
     pixels: &[u32], width: usize, height: usize, scale: usize,
 ) -> (Vec<u32>, usize, usize) {
     let (native_pixels, nw, nh) = detect_and_collapse(pixels, width, height);
