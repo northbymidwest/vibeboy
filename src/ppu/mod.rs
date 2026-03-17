@@ -1033,9 +1033,7 @@ impl Ppu {
                             self.mode_for_interrupt = 2;
                             self.line_start_is_vblank = false;
                         } else {
-                            // DMG VBlank entry (ly == 144): defer mode/IF changes to
-                            // handle_dmg_line_start. On hardware, LY becomes 144 visible
-                            // at dot 2, but mode stays 0 until dot 5.
+                            // DMG VBlank entry (ly == 144): defer to line-start.
                             self.line_start_is_vblank = true;
                             self.ly_for_comparison = -1;
                             self.update_coincidence();
@@ -1162,6 +1160,15 @@ impl Ppu {
                 1 => {} // idle
                 2 => {
                     self.visible_ly = self.ly;
+                    // DMG: Mode 2 STAT quirk fires early at VBlank entry
+                    // (dot 2), before the mode transition at dot 5. Hardware
+                    // briefly pulses the Mode 2 source as the line-start
+                    // state machine begins, even on VBlank lines.
+                    if self.ly == 144 {
+                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
+                            self.if_flags |= 0x02;
+                        }
+                    }
                 }
                 3 => {} // idle
                 4 => {
@@ -1176,12 +1183,11 @@ impl Ppu {
                 5 => {
                     if self.ly == 144 || (self.ly == 0 && self.line_153_phase == 0) {
                         // VBlank entry: mode 0→1, VBlank IF, Mode 2 STAT quirk.
-                        // Only for line 144 (first VBlank line). On subsequent VBlank
-                        // lines (145-153), mode is already 1.
-                        // Note: ly==0 with line_153_phase==0 means we wrapped past 153
-                        // but that shouldn't happen here.
+                        // The Mode 2 quirk also fires at the line wrap (dot 0)
+                        // for early interrupt availability. The dot-5 injection
+                        // here is redundant (IF bit already set) but keeps the
+                        // stat_irq_line update aligned with the mode transition.
                         if self.mode != 1 {
-                            // Mode 2 STAT quirk: fires at VBlank if Mode 2 source enabled
                             if !self.stat_irq_line && self.stat & 0x20 != 0 {
                                 self.if_flags |= 0x02;
                             }
@@ -2447,13 +2453,13 @@ impl Ppu {
                         // DMG STAT write bug: writing STAT during Mode 0 or 1
                         // briefly drives the STAT IRQ line high, firing a
                         // spurious interrupt if the line was previously low.
-                        // After LCD enable, mode_for_interrupt is -1 (no mode
-                        // signal feeding the IRQ line), so the write bug does
-                        // NOT fire during the initial blank period before the
-                        // first Mode 3 transition.
+                        // The glitch fires when no interrupt enable bits (3-6)
+                        // are being set in the written value. Writing a value
+                        // that enables any interrupt source (LYC, OAM, VBlank,
+                        // HBlank) does not trigger the glitch.
                         if (self.mode == 0 || self.mode == 1)
-                            && self.mode_for_interrupt != -1
                             && !self.stat_irq_line
+                            && val & 0x78 == 0
                         {
                             self.if_flags |= 0x02;
                         }
