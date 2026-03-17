@@ -2450,18 +2450,25 @@ impl Ppu {
                         // source (bit 6) triggers during mode 2/3.
                         self.update_stat_irq_on_write();
                     } else {
-                        // DMG STAT write bug: writing STAT during Mode 0 or 1
-                        // briefly drives the STAT IRQ line high, firing a
-                        // spurious interrupt if the line was previously low.
-                        // The glitch fires when no interrupt enable bits (3-6)
-                        // are being set in the written value. Writing a value
-                        // that enables any interrupt source (LYC, OAM, VBlank,
-                        // HBlank) does not trigger the glitch.
+                        // DMG STAT write glitch (Pan Docs): behaves as if $FF
+                        // is written for one cycle, then the real value takes
+                        // effect. Evaluate the IRQ signal with all enable bits
+                        // temporarily set — any mode match or LYC coincidence
+                        // produces a rising edge. Then re-evaluate with the
+                        // real written value to set stat_irq_line correctly.
                         if (self.mode == 0 || self.mode == 1)
                             && !self.stat_irq_line
-                            && val & 0x78 == 0
                         {
-                            self.if_flags |= 0x02;
+                            // With $FF: all mode enables set. Check if
+                            // mode_for_interrupt matches ANY mode source.
+                            let mode_match = self.mode_for_interrupt >= 0
+                                && self.mode_for_interrupt <= 2;
+                            // With $FF: LYC enable (bit 6) set. Check
+                            // coincidence flag (STAT bit 2, read-only).
+                            let lyc_match = self.stat & 0x04 != 0;
+                            if mode_match || lyc_match {
+                                self.if_flags |= 0x02;
+                            }
                         }
                         self.update_stat_irq();
                     }
