@@ -1024,13 +1024,10 @@ impl Ppu {
                         // DMG: defer to line-start sequence
                         self.line_start_pending = true;
                         if self.ly < 144 {
-                            // Prime mode_for_interrupt for next active line.
-                            // Don't fire update_stat_irq here — on hardware, the
-                            // Mode 2 STAT interrupt fires at T=3 from line start
-                            // (in the handle_dmg_line_start dot 3 handler), not
-                            // at the line wrap. Setting mode_for_interrupt now
-                            // ensures the rising edge is detected at dot 3.
-                            self.mode_for_interrupt = 2;
+                            // Active line wrap: mode_for_interrupt stays at 0
+                            // (from the previous HBlank). The transition to
+                            // mode 2 happens naturally in the line-start handler:
+                            // dot 3 creates a gap (-1), dot 4 activates mode 2.
                             self.line_start_is_vblank = false;
                         } else {
                             // DMG VBlank entry (ly == 144): defer to line-start.
@@ -1123,10 +1120,15 @@ impl Ppu {
                     self.ly_for_comparison = if self.ly == 0 { 0 } else { -1 };
                     self.update_coincidence();
                     if self.ly != 0 {
+                        // Lines 1-143: activate mode 2 source. The mode
+                        // was 0 (HBlank) at the wrap; transitioning to 2
+                        // here fires the Mode 2 IRQ via rising edge if
+                        // stat_irq_line was low (mode 0 wasn't keeping it
+                        // high). If mode 0 WAS keeping it high, mode 2
+                        // doesn't create a rising edge → "STAT blocking."
                         self.mode_for_interrupt = 2;
                     }
                     // OAM reads blocked 1T before mode 2 (T=3 of line start)
-                    // OAM writes remain accessible until mode 2 proper
                     self.oam_accessible = false;
                     self.stat &= !0x03;
                     self.update_stat_irq();
@@ -1148,6 +1150,10 @@ impl Ppu {
                     self.scanline_sprites.clear();
                     self.oam_scan_index = 0;
                     self.update_stat_irq();
+                    // Clear mode_for_interrupt after the mode 2 source
+                    // has been evaluated. This allows other sources (like
+                    // LYC coincidence) to independently trigger during
+                    // mode 2 without being masked by the mode 2 source.
                     self.mode_for_interrupt = -1;
                     self.update_stat_irq();
                     self.line_start_pending = false;
