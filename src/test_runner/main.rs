@@ -30,6 +30,8 @@ mod timer;
 mod scaling;
 #[path = "../vectorize/mod.rs"]
 mod vectorize;
+#[path = "../ui_util.rs"]
+mod ui_util;
 
 #[path = "."]
 mod test_runner {
@@ -193,9 +195,7 @@ enum TestCommand {
     Tearoom(TestArgs),
 }
 
-fn parse_model(s: &str) -> Result<GbModel, String> {
-    s.parse::<GbModel>()
-}
+use ui_util::parse_model;
 
 fn main() {
     env_logger::init();

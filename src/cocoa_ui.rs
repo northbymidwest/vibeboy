@@ -14,6 +14,7 @@ mod snapshot;
 mod snes;
 mod timer;
 mod vectorize;
+mod ui_util;
 #[cfg(target_os = "macos")]
 mod macos_accel;
 
@@ -266,10 +267,7 @@ fn close_accel(source: &AccelSource) {
     }
 }
 
-fn frame_duration(model: GbModel) -> Duration {
-    let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
-    Duration::from_nanos(nanos)
-}
+use ui_util::{frame_duration, parse_filter};
 
 #[derive(Parser)]
 #[command(name = "vibeboy_cocoa", about = "Game Boy / Game Boy Color emulator (macOS native)")]
@@ -277,7 +275,7 @@ struct Cli {
     rom: Option<PathBuf>,
     #[arg(long)]
     bootrom: Option<PathBuf>,
-    #[arg(long, value_parser = |s: &str| s.parse::<GbModel>())]
+    #[arg(long, value_parser = ui_util::parse_model)]
     model: Option<GbModel>,
     #[arg(long)]
     snes_rom: Option<PathBuf>,
@@ -290,10 +288,6 @@ struct Cli {
     /// Scaling filter
     #[arg(long, default_value = "nearest", value_parser = parse_filter)]
     filter: String,
-}
-
-fn parse_filter(s: &str) -> Result<String, String> {
-    scaling::ScaleFilter::validate_name(s)
 }
 
 fn string_to_filter(s: &str) -> scaling::ScaleFilter {
@@ -1283,14 +1277,7 @@ fn model_tag_to_model(tag: isize) -> Option<Option<GbModel>> {
     }
 }
 
-fn auto_detect_model(rom: &[u8]) -> GbModel {
-    let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
-    if cgb_flag == 0x80 || cgb_flag == 0xC0 {
-        GbModel::Cgb
-    } else {
-        GbModel::Dmg
-    }
-}
+use ui_util::auto_detect_model;
 
 fn update_model_checkmarks(app: id, selected_tag: isize) {
     unsafe {
@@ -2225,9 +2212,9 @@ fn main() {
 
         // Scaling filter
         let mut scale_filter = string_to_filter(&cli.filter);
-        let mut vec_cache: Option<vectorize::VectorizeLegacyCache> = match scale_filter {
-            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeLegacyCache::new(false)),
-            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeLegacyCache::new(true)),
+        let mut vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
+            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
             _ => None,
         };
         if scale_filter != scaling::ScaleFilter::Nearest {
@@ -2461,8 +2448,8 @@ fn main() {
                     if let Some(new_filter) = filter_tag_to_filter(tag) {
                         scale_filter = new_filter;
                         vec_cache = match scale_filter {
-                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeLegacyCache::new(false)),
-                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeLegacyCache::new(true)),
+                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
                             _ => None,
                         };
                         update_filter_checkmarks(app, tag);
@@ -2610,7 +2597,7 @@ fn main() {
                     {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(adaptive));
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
                         let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
                         (raster, vw, vh)
                     } else if scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
@@ -2625,7 +2612,7 @@ fn main() {
                     {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let scale = s.round().max(1.0) as usize;
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(false));
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(false));
                         let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
                         let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
                             paths, raw_src, src_w, src_h, bg, scale,

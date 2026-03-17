@@ -14,6 +14,7 @@ mod snes;
 mod timer;
 mod scaling;
 mod vectorize;
+mod ui_util;
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -43,10 +44,7 @@ const SGB_W: u32 = 256;
 const SGB_H: u32 = 224;
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
-fn frame_duration(model: GbModel) -> Duration {
-    let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
-    Duration::from_nanos(nanos)
-}
+use ui_util::frame_duration;
 
 // ── GPU Renderer ─────────────────────────────────────────────────────────────
 
@@ -844,7 +842,7 @@ struct App {
     camera_thread: Option<CameraThread>,
     camera_buf: [u8; 128 * 112],
     scale_filter: scaling::ScaleFilter,
-    vec_cache: Option<vectorize::VectorizeLegacyCache>,
+    vec_cache: Option<vectorize::VectorizeCache>,
     frame_start: Instant,
     frame_dur: Duration,
     paused: bool,
@@ -988,10 +986,10 @@ impl App {
                     self.update_filter_checkmarks();
                     match filter {
                         scaling::ScaleFilter::VectorizeLegacy => {
-                            self.vec_cache = Some(vectorize::VectorizeLegacyCache::new(false));
+                            self.vec_cache = Some(vectorize::VectorizeCache::new_legacy(false));
                         }
                         scaling::ScaleFilter::VectorizeLegacyAdaptive => {
-                            self.vec_cache = Some(vectorize::VectorizeLegacyCache::new(true));
+                            self.vec_cache = Some(vectorize::VectorizeCache::new_legacy(true));
                         }
                         _ => {}
                     }
@@ -1087,7 +1085,7 @@ impl App {
             } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive) {
                 let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(adaptive));
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
                 let (raster, vw, vh) = cache.rasterize(fb, sw, sh, scale);
                 (raster, vw, vh)
             } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeDiffusion) {
@@ -1099,7 +1097,7 @@ impl App {
             } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive) {
                 let s = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let sc = s.round().max(1.0) as usize;
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeLegacyCache::new(false));
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(false));
                 let (paths, bg) = cache.get_paths(fb, sw, sh);
                 let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
                     paths, fb, sw, sh, bg, sc,

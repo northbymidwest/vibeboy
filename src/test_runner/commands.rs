@@ -202,7 +202,7 @@ pub fn cmd_screenshot(
         // CPU path
         if is_vectorize {
             let s = scale as f64;
-            let mut cache = crate::vectorize::VectorizeLegacyCache::new(is_adaptive);
+            let mut cache = crate::vectorize::VectorizeCache::new_legacy(is_adaptive);
             let (raster, rw, rh) = cache.rasterize(raw_fb, 160, 144, s);
             scaled_buf = raster.to_vec();
             (scaled_buf.as_slice(), rw, rh)

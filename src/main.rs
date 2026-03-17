@@ -14,6 +14,7 @@ mod snapshot;
 mod snes;
 mod timer;
 mod vectorize;
+mod ui_util;
 #[cfg(target_os = "macos")]
 mod macos_accel;
 
@@ -50,12 +51,7 @@ enum AccelSource {
 }
 
 const SCALE: u32 = 3;
-/// Target frame time: 70224 T-cycles / cpu_clock_rate.
-/// Standard: ~16.74ms (~59.73 fps). SGB1: ~16.35ms (~61.17 fps).
-fn frame_duration(model: GbModel) -> Duration {
-    let nanos = 70_224u64 * 1_000_000_000 / model.cpu_clock_rate() as u64;
-    Duration::from_nanos(nanos)
-}
+use ui_util::frame_duration;
 
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
@@ -104,13 +100,7 @@ struct Cli {
     yuv_edges: bool,
 }
 
-fn parse_model(s: &str) -> Result<GbModel, String> {
-    s.parse::<GbModel>()
-}
-
-fn parse_filter(s: &str) -> Result<String, String> {
-    scaling::ScaleFilter::validate_name(s)
-}
+use ui_util::{parse_model, parse_filter};
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
 fn pick_rom_file() -> PathBuf {
@@ -191,14 +181,7 @@ fn main() {
     });
 
     // Resolve hardware model
-    let model = cli.model.unwrap_or_else(|| {
-        let cgb_flag = rom.get(0x0143).copied().unwrap_or(0);
-        if cgb_flag == 0x80 || cgb_flag == 0xC0 {
-            GbModel::Cgb
-        } else {
-            GbModel::Dmg
-        }
-    });
+    let model = cli.model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
 
     let frame_dur = frame_duration(model);
 
@@ -285,9 +268,9 @@ fn main() {
     let _scales_to_display = scale_filter.scales_to_display();
     let mut legacy_cache = match scale_filter {
         scaling::ScaleFilter::VectorizeLegacy
-        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeLegacyCache::new(false)),
+        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeCache::new_legacy(false)),
         scaling::ScaleFilter::VectorizeLegacyAdaptive
-        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => Some(crate::vectorize::VectorizeLegacyCache::new(true)),
+        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => Some(crate::vectorize::VectorizeCache::new_legacy(true)),
         _ => None,
     };
     let mut vec_cache = match scale_filter {
@@ -835,7 +818,7 @@ fn cpu_scale_frame(
     filter: &scaling::ScaleFilter,
     src: &[u32], sw: usize, sh: usize,
     disp_w: usize, disp_h: usize,
-    legacy_cache: &mut Option<crate::vectorize::VectorizeLegacyCache>,
+    legacy_cache: &mut Option<crate::vectorize::VectorizeCache>,
     vec_cache: &mut Option<crate::vectorize::VectorizeCache>,
 ) -> (Vec<u32>, u32, u32) {
     // Legacy vectorize uses its own cache-based path
