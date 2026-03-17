@@ -831,19 +831,20 @@ impl Bus {
                 }
                 let in_mode3 = self.ppu.mode == 3;
                 if in_mode3 && self.ppu_deferred >= 4 {
-                    // 2T old + 1T glitch (old | new & BG_EN) + write real
+                    // OBJ_EN takes effect immediately when cleared —
+                    // apply it before the 2T pre-write ticks so sprite
+                    // pixels are suppressed during the entire write sequence.
+                    let saved_obj_en = self.ppu.lcdc & 0x02;
+                    if (val & 0x02) == 0 {
+                        self.ppu.lcdc &= !0x02;
+                    }
+                    // 2T old (with OBJ_EN already cleared if disabling)
                     let flags = self.ppu.step(2);
                     self.if_ |= flags;
                     self.ppu_deferred -= 2;
-                    // OBJ_EN suppression: if disabling sprites during sprite fetch
-                    // or before any visible pixel, treat old LCDC as already having
-                    // OBJ_EN=0 (hardware aborts the fetch)
                     let mut old_lcdc = self.ppu.lcdc;
-                    if (val & 0x02) == 0 {
-                        if self.ppu.position_in_line <= 0 || self.ppu.sprite_fetch_active {
-                            old_lcdc &= !0x02;
-                        }
-                    }
+                    // Restore OBJ_EN for glitch calculation
+                    // (the glitch uses the modified old_lcdc)
                     // Glitch LCDC: old | (new & BG_EN bit)
                     let glitch = old_lcdc | (val & 0x01);
                     let saved_lcdc = self.ppu.lcdc;
