@@ -132,26 +132,6 @@ impl VectorizeCache {
         (&self.cached_paths, self.cached_bg_color)
     }
 
-    /// Like get_paths but uses GPU device for optimization when available.
-    #[cfg(feature = "sdl3-gpu-shaders")]
-    pub fn get_paths_gpu(&mut self, pixels: &[u32], width: usize, height: usize,
-        gpu: Option<&crate::scaling::gpu_pipelines::GpuOptRefs>,
-    ) -> (&[contour::ColorPath], u32) {
-        if self.prev_pixels.len() == pixels.len() && self.prev_pixels == pixels {
-            return (&self.cached_paths, self.cached_bg_color);
-        }
-        let graph = graph::build(pixels, width, height);
-        let (paths, bg_color) = contour::extract_shared_edge_paths_gpu(
-            pixels, &graph, self.adaptive, gpu,
-        );
-        self.prev_pixels.clear();
-        self.prev_pixels.extend_from_slice(pixels);
-        self.cached_paths = paths;
-        self.cached_bg_color = bg_color;
-        self.cached_scale = 0.0;
-        (&self.cached_paths, self.cached_bg_color)
-    }
-
     /// Vectorize and rasterize in one call, caching both stages.
     pub fn rasterize(&mut self, pixels: &[u32], width: usize, height: usize, scale: f64)
         -> (&[u32], usize, usize)

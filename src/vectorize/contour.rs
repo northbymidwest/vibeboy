@@ -1486,19 +1486,12 @@ pub fn dump_cpu_control_points(pixels: &[u32], width: usize, height: usize) {
 pub fn extract_shared_edge_paths_inner(
     pixels: &[u32], graph: &SimilarityGraph, adaptive: bool,
 ) -> (Vec<ColorPath>, u32) {
-    #[cfg(feature = "sdl3-gpu-shaders")]
-    return extract_shared_edge_paths_gpu(pixels, graph, adaptive, None);
-    #[cfg(not(feature = "sdl3-gpu-shaders"))]
-    return extract_shared_edge_paths_gpu(pixels, graph, adaptive, None);
+    return extract_shared_edge_paths_gpu(pixels, graph, adaptive);
 }
 
-/// Inner implementation with optional GPU device for optimization.
+/// Inner implementation that builds shared-chain edge paths.
 pub fn extract_shared_edge_paths_gpu(
     pixels: &[u32], graph: &SimilarityGraph, adaptive: bool,
-    #[cfg(feature = "sdl3-gpu-shaders")]
-    gpu: Option<&crate::scaling::gpu_pipelines::GpuOptRefs>,
-    #[cfg(not(feature = "sdl3-gpu-shaders"))]
-    _gpu: Option<&()>,
 ) -> (Vec<ColorPath>, u32) {
     let w = graph.width;
     let h = graph.height;
@@ -1559,21 +1552,7 @@ pub fn extract_shared_edge_paths_gpu(
         }
     }
 
-    // Try GPU optimizer if device provided, fall back to CPU
-    let mut used_gpu = false;
-    #[cfg(feature = "sdl3-gpu-shaders")]
-    if let Some(ctx) = gpu {
-        let gpu_data = prepare_gpu_optimizer_data(&all_loops, &node_positions, &junctions);
-        if let Some(result) = crate::scaling::gpu::gpu_optimize_energy_on_device(
-            ctx.device, ctx.pipeline, &gpu_data,
-        ) {
-            unpack_gpu_optimizer_results(&result, &gpu_data, &all_loops, &mut node_positions);
-            used_gpu = true;
-        }
-    }
-    if !used_gpu {
-        optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
-    }
+    optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
 
     // Fit B-splines to each chain
     let chain_segments: Vec<Vec<PathSegment>> = chains.iter().map(|(chain, _)| {
@@ -1722,117 +1701,6 @@ pub fn extract_shared_edge_paths_gpu(
 
     let bg_color = detect_bg(pixels, w, h);
     (result, bg_color)
-}
-
-/// Packed node data for the GPU optimizer.
-/// All loops are flattened into contiguous arrays indexed by global node ID.
-pub struct GpuOptimizerData {
-    /// Positions: 2 floats per node (x, y)
-    pub positions: Vec<f32>,
-    /// Original positions (same layout)
-    pub orig_positions: Vec<f32>,
-    /// Neighbor indices: 4 ints per node (prev2, prev1, next1, next2)
-    pub neighbors: Vec<i32>,
-    /// Flags: 1 uint per node (bit 0 = pinned, bits 1-3 = corner span masks)
-    pub flags: Vec<u32>,
-    /// Total number of nodes
-    pub num_nodes: u32,
-    /// Mapping from global index back to (loop_index, node_index_in_loop)
-    pub index_map: Vec<(usize, usize)>,
-}
-
-/// Pack all boundary loops into flat GPU buffers for the optimizer compute shader.
-pub fn prepare_gpu_optimizer_data(
-    all_loops: &[(Vec<NodeId>, u32)],
-    positions: &FxHashMap<NodeId, Point>,
-    junctions: &HashSet<NodeId>,
-) -> GpuOptimizerData {
-    // Count total nodes
-    let total: usize = all_loops.iter()
-        .filter(|(l, _)| l.len() >= 4)
-        .map(|(l, _)| l.len())
-        .sum();
-
-    let mut pos_buf = Vec::with_capacity(total * 2);
-    let mut orig_buf = Vec::with_capacity(total * 2);
-    let mut nbr_buf = Vec::with_capacity(total * 4);
-    let mut flag_buf = Vec::with_capacity(total);
-    let mut idx_map = Vec::with_capacity(total);
-
-    let mut global_idx = 0usize;
-
-    for (li, (node_loop, _)) in all_loops.iter().enumerate() {
-        let n = node_loop.len();
-        if n < 4 { continue; }
-
-        let corners = detect_corners_from_nodes(node_loop, true);
-        let loop_start = global_idx;
-
-        for i in 0..n {
-            let nd = node_loop[i];
-            let p = positions.get(&nd).copied().unwrap_or_else(|| nd.to_point());
-
-            pos_buf.push(p.x as f32);
-            pos_buf.push(p.y as f32);
-            orig_buf.push(p.x as f32);
-            orig_buf.push(p.y as f32);
-
-            // Neighbors within this loop (circular)
-            let prev2 = (loop_start + (i + n - 2) % n) as i32;
-            let prev1 = (loop_start + (i + n - 1) % n) as i32;
-            let next1 = (loop_start + (i + 1) % n) as i32;
-            let next2 = (loop_start + (i + 2) % n) as i32;
-            nbr_buf.extend_from_slice(&[prev2, prev1, next1, next2]);
-
-            // Flags
-            let mut flags = 0u32;
-            if junctions.contains(&nd) { flags |= 1; } // pinned
-
-            // Corner span masks: check 3 spans centered at this node
-            // Span (prev1, i, next1): if any is a corner, set bit 1
-            let i0 = (i + n - 1) % n;
-            let i2 = (i + 1) % n;
-            if corners[i0] || corners[i] || corners[i2] { flags |= 2; }
-            // Span (prev2, prev1, i): bit 2
-            let i_m2 = (i + n - 2) % n;
-            if corners[i_m2] || corners[i0] || corners[i] { flags |= 4; }
-            // Span (i, next1, next2): bit 3
-            let i_p2 = (i + 2) % n;
-            if corners[i] || corners[i2] || corners[i_p2] { flags |= 8; }
-
-            flag_buf.push(flags);
-            idx_map.push((li, i));
-            global_idx += 1;
-        }
-    }
-
-    GpuOptimizerData {
-        positions: pos_buf,
-        orig_positions: orig_buf,
-        neighbors: nbr_buf,
-        flags: flag_buf,
-        num_nodes: global_idx as u32,
-        index_map: idx_map,
-    }
-}
-
-/// Unpack GPU optimizer results back into the node positions map.
-pub fn unpack_gpu_optimizer_results(
-    result_positions: &[f32],
-    data: &GpuOptimizerData,
-    all_loops: &[(Vec<NodeId>, u32)],
-    positions: &mut FxHashMap<NodeId, Point>,
-) {
-    let loops_with_nodes: Vec<&(Vec<NodeId>, u32)> = all_loops.iter()
-        .filter(|(l, _)| l.len() >= 4)
-        .collect();
-
-    for (gi, &(li, ni)) in data.index_map.iter().enumerate() {
-        let nd = loops_with_nodes[li].0[ni];
-        let x = result_positions[gi * 2] as f64;
-        let y = result_positions[gi * 2 + 1] as f64;
-        positions.insert(nd, Point::new(x, y));
-    }
 }
 
 fn reverse_segment(seg: &PathSegment) -> PathSegment {

@@ -35,14 +35,7 @@ pub struct GpuPipelines {
     vectorize_compute: Option<gpu::ComputePipeline>,
     diffusion_compute: Option<gpu::ComputePipeline>,
     spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
-    optimizer_compute: Option<gpu::ComputePipeline>,
     full_vectorize: Option<super::gpu::GpuVectorizePipelines>,
-}
-
-/// References to GPU device and optimizer pipeline for passing to vectorization.
-pub struct GpuOptRefs<'a> {
-    pub device: &'a gpu::Device,
-    pub pipeline: &'a gpu::ComputePipeline,
 }
 
 impl GpuPipelines {
@@ -109,7 +102,6 @@ impl GpuPipelines {
             vectorize_compute: None,
             diffusion_compute: None,
             spline_diff: None,
-            optimizer_compute: None,
             full_vectorize: None,
         }
     }
@@ -479,18 +471,6 @@ impl GpuPipelines {
             out_h,
             bg_color,
         );
-    }
-
-    /// Initialize and return GPU optimizer references for use by vectorization.
-    /// Returns None if pipeline creation fails.
-    pub fn gpu_optimizer(&mut self) -> Option<GpuOptRefs> {
-        if self.optimizer_compute.is_none() {
-            self.optimizer_compute = super::gpu::init_optimizer_compute_pipeline(&self.device);
-        }
-        self.optimizer_compute.as_ref().map(|p| GpuOptRefs {
-            device: &self.device,
-            pipeline: p,
-        })
     }
 
     /// Run the full GPU vectorize pipeline (all 5 stages on GPU, no CPU readback).
