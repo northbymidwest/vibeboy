@@ -125,8 +125,9 @@ const SHADERS: &[ShaderInfo] = &[
         glsl_src: "cell_rasterizer.comp",
         spv_name: "cell_rasterizer_comp.spv",
         msl_name: "cell_rasterizer_comp.metal",
-        // spirv-cross already puts uniforms at buffer(0) — no remap needed
-        msl_buffer_remap: &[],
+        // Raw: 0=cp_positions, 1=orig_positions, 2=uniforms, 3=flags, 4=neighbors, 5=edge_colors, 6=pixels
+        // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=flags, 5=neighbors, 6=edge_colors
+        msl_buffer_remap: &[(0,2),(1,3),(2,0),(3,4),(4,5),(5,6),(6,1)],
     },
     ShaderInfo {
         glsl_src: "similarity_graph.comp",
@@ -140,8 +141,8 @@ const SHADERS: &[ShaderInfo] = &[
         glsl_src: "resolve_crossings.comp",
         spv_name: "resolve_crossings_comp.spv",
         msl_name: "resolve_crossings_comp.metal",
-        // spirv-cross: buffer(0)=graph, buffer(1)=uniforms
-        // SDL3: buffer(0)=uniforms, buffer(1)=graph(rw)
+        // spirv-cross: buffer(0)=graph_in(ro), buffer(1)=uniforms, buffer(2)=graph_out(rw)
+        // SDL3: buffer(0)=uniforms, buffer(1)=graph_in(ro), buffer(2)=graph_out(rw)
         msl_buffer_remap: &[(0, 1), (1, 0)],
     },
     ShaderInfo {
@@ -156,10 +157,19 @@ const SHADERS: &[ShaderInfo] = &[
         glsl_src: "optimize_energy.comp",
         spv_name: "optimize_energy_comp.spv",
         msl_name: "optimize_energy_comp.metal",
-        // spirv-cross: buffer(0)=pos_in, buffer(1)=orig, buffer(2)=neighbors,
-        //              buffer(3)=uniforms, buffer(4)=pos_out, buffer(5)=flags
-        // SDL3: buffer(0)=uniforms, buffer(1..4)=readonly, buffer(5)=readwrite
-        msl_buffer_remap: &[(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 4)],
+        // spirv-cross: buffer(0)=pos_in, buffer(1)=flags, buffer(2)=orig,
+        //              buffer(3)=uniforms, buffer(4)=pos_out, buffer(5)=neighbors
+        // SDL3: buffer(0)=uniforms, buffer(1)=pos_in, buffer(2)=orig,
+        //        buffer(3)=neighbors, buffer(4)=flags, buffer(5)=pos_out
+        msl_buffer_remap: &[(0, 1), (1, 4), (3, 0), (4, 5), (5, 3)],
+    },
+    ShaderInfo {
+        glsl_src: "update_tjunction.comp",
+        spv_name: "update_tjunction_comp.spv",
+        msl_name: "update_tjunction_comp.metal",
+        // Raw: 0=uniforms, 1=flags, 2=neighbors, 3=positions
+        // SDL3: 0=uniforms, 1=neighbors, 2=flags, 3=positions
+        msl_buffer_remap: &[(1, 2), (2, 1)],
     },
 ];
 

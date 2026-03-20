@@ -15,6 +15,7 @@
 #   {name}_sdiff_gpu_8x.png     — our GPU spline-diffusion at 8x
 #   {name}_edge_cpu_8x.png      — our CPU edge-based (gap-free) at 8x
 #   {name}_edge_gpu_8x.png      — our GPU edge-based (gap-free) at 8x
+#   {name}_gpufull_8x.png       — full GPU vectorize pipeline at 8x
 #   comparison.html              — side-by-side comparison page
 
 set -e
@@ -62,7 +63,7 @@ done
 
 echo ""
 echo "=== Building test_runner ==="
-cargo build --release --bin test_runner 2>&1 | tail -1
+cargo build --release --features sdl3-gpu-shaders --bin test_runner 2>&1 | tail -1
 
 should_render() {
     [ ! -f "$1" ] || [ "$FORCE" = true ]
@@ -82,7 +83,7 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_scanline_cpu_8x.png"
     if should_render "$out"; then
         echo "  $name — scanline CPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format raster --scale "$SCALE" 2>/dev/null
     fi
 
@@ -90,7 +91,7 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_scanline_gpu_8x.png"
     if should_render "$out"; then
         echo "  $name — scanline GPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format raster --scale "$SCALE" --gpu 2>/dev/null
     fi
 
@@ -98,7 +99,7 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_sdiff_cpu_8x.png"
     if should_render "$out"; then
         echo "  $name — spline-diffusion CPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format spline-diffusion --scale "$SCALE" 2>/dev/null
     fi
 
@@ -106,7 +107,7 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_sdiff_gpu_8x.png"
     if should_render "$out"; then
         echo "  $name — spline-diffusion GPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format spline-diffusion --scale "$SCALE" --gpu 2>/dev/null
     fi
 
@@ -114,7 +115,7 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_edge_cpu_8x.png"
     if should_render "$out"; then
         echo "  $name — edge CPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format edge --scale "$SCALE" 2>/dev/null
     fi
 
@@ -122,8 +123,16 @@ for name in "${NAMES[@]}"; do
     out="$OUT_DIR/${name}_edge_gpu_8x.png"
     if should_render "$out"; then
         echo "  $name — edge GPU..."
-        cargo run --release --bin test_runner -- vectorize "$input" \
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
             --out "$out" --format edge --scale "$SCALE" --gpu 2>/dev/null
+    fi
+
+    # Full GPU vectorize pipeline
+    out="$OUT_DIR/${name}_gpufull_8x.png"
+    if should_render "$out"; then
+        echo "  $name — full GPU pipeline..."
+        cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
+            --out "$out" --format gpu-full --scale "$SCALE" --gpu 2>/dev/null
     fi
 done
 
@@ -145,7 +154,7 @@ cat > "$HTML" << 'HEADER'
   .grid { display: flex; flex-direction: column; gap: 2rem; }
   .card { background: #16213e; border-radius: 12px; overflow: hidden; border: 1px solid #2a2a4a; }
   .card-header { padding: 0.8rem 1.2rem; background: #0f3460; font-weight: 600; font-size: 1rem; }
-  .card-body { display: grid; grid-template-columns: auto repeat(4, 1fr); gap: 1px; background: #2a2a4a; }
+  .card-body { display: grid; grid-template-columns: auto repeat(5, 1fr); gap: 1px; background: #2a2a4a; }
   .card-body > div { background: #16213e; display: flex; align-items: center; justify-content: center; padding: 0.4rem; }
   .card-body .label { font-size: 0.75rem; color: #888; padding: 0.3rem 0.6rem; min-width: 2.5rem; white-space: nowrap; }
   .card-body img { display: block; max-width: 100%; height: auto; image-rendering: auto; }
@@ -168,6 +177,7 @@ for name in "${NAMES[@]}"; do
     sd_gpu="${name}_sdiff_gpu_8x.png"
     edge_cpu="${name}_edge_cpu_8x.png"
     edge_gpu="${name}_edge_gpu_8x.png"
+    gpufull="${name}_gpufull_8x.png"
 
     [ ! -f "$OUT_DIR/$input" ] && continue
 
@@ -186,16 +196,19 @@ for name in "${NAMES[@]}"; do
     <div class="col-header">Scanline</div>
     <div class="col-header">Spline Diffusion</div>
     <div class="col-header">Vectorize (gap-free)</div>
+    <div class="col-header">Full GPU</div>
     <div class="label">CPU</div>
     <div><img class="input" src="$input" width="${nn_w}" height="${nn_h}"></div>
     <div><img src="$sl_cpu"></div>
     <div><img src="$sd_cpu"></div>
     <div><img src="$edge_cpu"></div>
+    <div></div>
     <div class="label">GPU</div>
     <div><img src="$paper"></div>
     <div><img src="$sl_gpu"></div>
     <div><img src="$sd_gpu"></div>
     <div><img src="$edge_gpu"></div>
+    <div><img src="$gpufull"></div>
   </div>
 </div>
 CARD

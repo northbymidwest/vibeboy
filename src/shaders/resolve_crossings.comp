@@ -5,15 +5,21 @@
 // Three heuristics vote to decide which diagonal to keep:
 //   1. Curve length — longer connected chain wins
 //   2. Sparse pixels — smaller component (BFS in 8×8 window) wins
-//   3. Islands — valence-1 endpoint gets fixed weight 5
+//   3. Islands — valence-1 endpoint gets fixed weight 5 (early return on first found)
 // Fully-connected blocks (all 4 cardinal edges) remove both diagonals.
-// Ties keep both diagonals (matches reference implementation).
+// Single diagonals in fully-connected blocks are also removed.
+// Ties remove both diagonals (matches reference implementation).
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-// Readwrite — bound via begin_compute_pass (no readonly storage buffers)
-layout(std430, set = 1, binding = 0) buffer GraphBuf {
-    uint graph[];
+// Read from a snapshot of the graph (pre-resolution state) so all threads
+// see consistent data regardless of execution order. Write to the live graph.
+layout(std430, set = 0, binding = 0) readonly buffer GraphIn {
+    uint graph_in[];
+};
+
+layout(std430, set = 1, binding = 0) buffer GraphOut {
+    uint graph_out[];
 };
 
 layout(std140, set = 2, binding = 0) uniform Uniforms {
@@ -23,177 +29,169 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint _pad;
 };
 
-uint g(uint gx, uint gy) { return graph[gy * graph_stride + gx]; }
-void gs(uint gx, uint gy, uint val) { graph[gy * graph_stride + gx] = val; }
+uint g(uint gx, uint gy) { return graph_in[gy * graph_stride + gx]; }
+void gs(uint gx, uint gy, uint val) { graph_out[gy * graph_stride + gx] = val; }
 
-// Count how many similar neighbors pixel (x,y) has (full 8-connected valence)
-uint full_valence(uint x, uint y) {
+// Direction bitmask encoding (matches reference)
+const uint DIR_NW = 1u;
+const uint DIR_W  = 2u;
+const uint DIR_SW = 4u;
+const uint DIR_S  = 8u;
+const uint DIR_SE = 16u;
+const uint DIR_E  = 32u;
+const uint DIR_NE = 64u;
+const uint DIR_N  = 128u;
+
+// Compute 8-connected valence bitmask for pixel (x,y)
+uint valence_mask(uint x, uint y) {
     uint v = 0u;
     uint gx = 2u * x + 1u;
     uint gy = 2u * y + 1u;
     uint gw = graph_stride;
     uint gh = 2u * img_h + 1u;
 
-    if (gx >= 2u && g(gx - 1u, gy) != 0u) v++;
-    if (gx + 1u < gw && g(gx + 1u, gy) != 0u) v++;
-    if (gy >= 2u && g(gx, gy - 1u) != 0u) v++;
-    if (gy + 1u < gh && g(gx, gy + 1u) != 0u) v++;
-    if (gx >= 2u && gy >= 2u && (g(gx - 1u, gy - 1u) & 1u) != 0u) v++;
-    if (gx + 1u < gw && gy >= 2u && (g(gx + 1u, gy - 1u) & 2u) != 0u) v++;
-    if (gx >= 2u && gy + 1u < gh && (g(gx - 1u, gy + 1u) & 2u) != 0u) v++;
-    if (gx + 1u < gw && gy + 1u < gh && (g(gx + 1u, gy + 1u) & 1u) != 0u) v++;
+    // Cardinal
+    if (gx >= 2u && g(gx - 1u, gy) != 0u) v |= DIR_W;
+    if (gx + 1u < gw && g(gx + 1u, gy) != 0u) v |= DIR_E;
+    if (gy >= 2u && g(gx, gy - 1u) != 0u) v |= DIR_N;
+    if (gy + 1u < gh && g(gx, gy + 1u) != 0u) v |= DIR_S;
+    // Diagonal
+    if (gx >= 2u && gy >= 2u && (g(gx - 1u, gy - 1u) & 1u) != 0u) v |= DIR_NW;
+    if (gx + 1u < gw && gy >= 2u && (g(gx + 1u, gy - 1u) & 2u) != 0u) v |= DIR_NE;
+    if (gx >= 2u && gy + 1u < gh && (g(gx - 1u, gy + 1u) & 2u) != 0u) v |= DIR_SW;
+    if (gx + 1u < gw && gy + 1u < gh && (g(gx + 1u, gy + 1u) & 1u) != 0u) v |= DIR_SE;
     return v;
 }
 
-// Walk a chain of valence-2 nodes. Returns chain length.
+// Count bits in valence mask
+uint valence_count(uint mask) {
+    uint c = 0u;
+    uint m = mask;
+    while (m != 0u) { c += m & 1u; m >>= 1u; }
+    return c;
+}
+
+// Walk a chain of valence-2 nodes using XOR direction tracking.
+// Matches reference traceNodes() — XOR of 2-bit valence mask with predecessor
+// direction gives the single "other" direction directly.
 uint walk_chain(uint sx, uint sy, uint fx, uint fy) {
     uint cx = sx, cy = sy;
-    uint prx = fx, pry = fy;
     uint length = 1u;
-    uint gw = graph_stride;
-    uint gh = 2u * img_h + 1u;
+
+    // Compute initial predecessor direction: from (sx,sy) toward (fx,fy)
+    int idx = int(fx) - int(sx);
+    int idy = int(fy) - int(sy);
+    uint pred_dir = 0u;
+    if (idx ==  1 && idy ==  0) pred_dir = DIR_E;
+    if (idx == -1 && idy ==  0) pred_dir = DIR_W;
+    if (idx ==  0 && idy ==  1) pred_dir = DIR_S;
+    if (idx ==  0 && idy == -1) pred_dir = DIR_N;
+    if (idx ==  1 && idy ==  1) pred_dir = DIR_SE;
+    if (idx == -1 && idy == -1) pred_dir = DIR_NW;
+    if (idx ==  1 && idy == -1) pred_dir = DIR_NE;
+    if (idx == -1 && idy ==  1) pred_dir = DIR_SW;
 
     for (uint iter = 0u; iter < 200u; iter++) {
-        if (full_valence(cx, cy) != 2u) break;
+        uint mask = valence_mask(cx, cy);
+        if (valence_count(mask) != 2u) break;
 
-        uint gx = 2u * cx + 1u;
-        uint gy = 2u * cy + 1u;
-        bool found = false;
+        // XOR with predecessor direction gives the other direction
+        uint next_dir = mask ^ pred_dir;
 
-        // Try all 8 directions, skip the one we came from
-        // Right
-        if (!found && cx + 1u < img_w && gx + 1u < gw && g(gx + 1u, gy) != 0u && !(cx + 1u == prx && cy == pry)) {
-            prx = cx; pry = cy; cx++; found = true; length++;
-        }
-        // Left
-        if (!found && cx > 0u && gx >= 2u && g(gx - 1u, gy) != 0u && !(cx - 1u == prx && cy == pry)) {
-            prx = cx; pry = cy; cx--; found = true; length++;
-        }
-        // Down
-        if (!found && cy + 1u < img_h && gy + 1u < gh && g(gx, gy + 1u) != 0u && !(cx == prx && cy + 1u == pry)) {
-            prx = cx; pry = cy; cy++; found = true; length++;
-        }
-        // Up
-        if (!found && cy > 0u && gy >= 2u && g(gx, gy - 1u) != 0u && !(cx == prx && cy - 1u == pry)) {
-            prx = cx; pry = cy; cy--; found = true; length++;
-        }
-        // Down-right
-        if (!found && cx + 1u < img_w && cy + 1u < img_h && gx + 1u < gw && gy + 1u < gh
-            && (g(gx + 1u, gy + 1u) & 1u) != 0u && !(cx + 1u == prx && cy + 1u == pry)) {
-            prx = cx; pry = cy; cx++; cy++; found = true; length++;
-        }
-        // Up-left
-        if (!found && cx > 0u && cy > 0u && gx >= 2u && gy >= 2u
-            && (g(gx - 1u, gy - 1u) & 1u) != 0u && !(cx - 1u == prx && cy - 1u == pry)) {
-            prx = cx; pry = cy; cx--; cy--; found = true; length++;
-        }
-        // Down-left
-        if (!found && cx > 0u && cy + 1u < img_h && gx >= 2u && gy + 1u < gh
-            && (g(gx - 1u, gy + 1u) & 2u) != 0u && !(cx - 1u == prx && cy + 1u == pry)) {
-            prx = cx; pry = cy; cx--; cy++; found = true; length++;
-        }
-        // Up-right
-        if (!found && cx + 1u < img_w && cy > 0u && gx + 1u < gw && gy >= 2u
-            && (g(gx + 1u, gy - 1u) & 2u) != 0u && !(cx + 1u == prx && cy - 1u == pry)) {
-            prx = cx; pry = cy; cx++; cy--; found = true; length++;
+        // Move in next_dir direction and set new predecessor
+        int dx = 0, dy = 0;
+        uint reverse = 0u;
+        switch (next_dir) {
+            case DIR_N:  dy = -1; reverse = DIR_S;  break;
+            case DIR_NE: dx =  1; dy = -1; reverse = DIR_SW; break;
+            case DIR_E:  dx =  1; reverse = DIR_W;  break;
+            case DIR_SE: dx =  1; dy =  1; reverse = DIR_NW; break;
+            case DIR_S:  dy =  1; reverse = DIR_N;  break;
+            case DIR_SW: dx = -1; dy =  1; reverse = DIR_NE; break;
+            case DIR_W:  dx = -1; reverse = DIR_E;  break;
+            case DIR_NW: dx = -1; dy = -1; reverse = DIR_SE; break;
+            default: return length; // not a single direction bit
         }
 
-        if (!found) break;
+        cx = uint(int(cx) + dx);
+        cy = uint(int(cy) + dy);
+        pred_dir = reverse;
+        length++;
     }
     return length;
 }
 
-// BFS component size in 8×8 window around the diagonal endpoints.
-// Uses a uint64-equivalent (two uint32s) as a visited bitmask.
-uint component_size(uint x0, uint y0, uint x1, uint y1) {
-    int ox = int(min(x0, x1)) - 3;
-    int oy = int(min(y0, y1)) - 3;
+// Simultaneous A/B component labeling in 8×8 window around the crossing.
+// Matches reference voteSparsePixels(): center 2×2 seeded with A(1) and B(2),
+// then multi-source BFS propagates labels outward. Each pixel gets labeled by
+// whichever component reaches it first. Component sizes exclude seeds
+// (only count propagated pixels), matching reference countForComponent() behavior.
+void sparse_pixel_sizes(uint bx, uint by, out uint sizeA, out uint sizeB) {
+    // 8×8 label array: 0=unlabeled, 1=A(main/backslash), 2=B(anti/slash)
+    // Center 2×2 seeded matching reference lArray initialization:
+    //   (3,3)=A(1)  (3,4)=B(2)    (row 3)
+    //   (4,3)=B(2)  (4,4)=A(1)    (row 4)
+    int labels[64];
+    for (int i = 0; i < 64; i++) labels[i] = 0;
+    labels[3*8+3] = 1; // (bx, by) = main diagonal endpoint
+    labels[3*8+4] = 2; // (bx+1, by) = anti diagonal endpoint
+    labels[4*8+3] = 2; // (bx, by+1) = anti diagonal endpoint
+    labels[4*8+4] = 1; // (bx+1, by+1) = main diagonal endpoint
 
-    // 64-bit visited mask as two uint32s
-    uint vis_lo = 0u; // bits 0-31
-    uint vis_hi = 0u; // bits 32-63
+    sizeA = 0u; // seeds not counted (matches reference componentSizeA/B = 0)
+    sizeB = 0u;
 
-    // Stack (max 64 entries)
-    uint stack_x[64];
-    uint stack_y[64];
-    uint sp = 0u;
-    uint count = 0u;
+    // Queue-based BFS (FIFO) for level-order propagation.
+    // Seed order: NW, NE, SE, SW (matches reference processing order).
+    uint q_col[64], q_row[64];
+    uint head = 0u, tail = 0u;
+    q_col[tail] = 3u; q_row[tail] = 3u; tail++; // (3,3) = A
+    q_col[tail] = 4u; q_row[tail] = 3u; tail++; // (3,4) = B
+    q_col[tail] = 4u; q_row[tail] = 4u; tail++; // (4,4) = A
+    q_col[tail] = 3u; q_row[tail] = 4u; tail++; // (4,3) = B
 
-    uint gw = graph_stride;
-    uint gh = 2u * img_h + 1u;
+    // Direction deltas matching valence_mask encoding
+    int dcol[8] = int[8](-1, -1, -1, 0, 1, 1, 1, 0);
+    int drow[8] = int[8](-1, 0, 1, 1, 1, 0, -1, -1);
+    uint dirs[8] = uint[8](DIR_NW, DIR_W, DIR_SW, DIR_S, DIR_SE, DIR_E, DIR_NE, DIR_N);
 
-    // Seed both endpoints
-    for (uint seed = 0u; seed < 2u; seed++) {
-        uint sx = seed == 0u ? x0 : x1;
-        uint sy = seed == 0u ? y0 : y1;
-        int lx = int(sx) - ox;
-        int ly = int(sy) - oy;
-        if (lx >= 0 && lx < 8 && ly >= 0 && ly < 8) {
-            uint bit = uint(ly * 8 + lx);
-            uint mask = 1u << (bit & 31u);
-            bool already = bit < 32u ? (vis_lo & mask) != 0u : (vis_hi & mask) != 0u;
-            if (!already) {
-                if (bit < 32u) vis_lo |= mask; else vis_hi |= mask;
-                count++;
-                stack_x[sp] = sx; stack_y[sp] = sy; sp++;
-            }
-        }
-    }
+    while (head < tail) {
+        uint col = q_col[head];
+        uint row = q_row[head];
+        head++;
+        int label = labels[row*8u+col];
 
-    while (sp > 0u) {
-        sp--;
-        uint cx = stack_x[sp];
-        uint cy = stack_y[sp];
-        uint gx = 2u * cx + 1u;
-        uint gy = 2u * cy + 1u;
+        // Pixel position in image space
+        int px = int(bx) + int(col) - 3;
+        int py = int(by) + int(row) - 3;
+        if (px < 0 || py < 0 || px >= int(img_w) || py >= int(img_h)) continue;
 
-        // Check all 8 neighbors
-        int dx[8] = int[8](1, -1, 0, 0, 1, -1, 1, -1);
-        int dy[8] = int[8](0, 0, 1, -1, 1, -1, -1, 1);
+        // Get valence mask for this pixel
+        uint vmask = valence_mask(uint(px), uint(py));
 
         for (uint d = 0u; d < 8u; d++) {
-            int nx = int(cx) + dx[d];
-            int ny = int(cy) + dy[d];
-            if (nx < 0 || ny < 0 || nx >= int(img_w) || ny >= int(img_h)) continue;
+            if ((vmask & dirs[d]) == 0u) continue;
+            int nc = int(col) + dcol[d];
+            int nr = int(row) + drow[d];
+            if (nc < 0 || nc >= 8 || nr < 0 || nr >= 8) continue;
+            if (labels[nr*8+nc] != 0) continue; // already labeled
 
-            // Check if edge exists in graph
-            uint egx, egy;
-            bool has_edge = false;
-            if (d < 4u) {
-                // Cardinal: check edge at midpoint
-                egx = uint(int(gx) + dx[d]);
-                egy = uint(int(gy) + dy[d]);
-                if (egx < gw && egy < gh) has_edge = g(egx, egy) != 0u;
-            } else {
-                // Diagonal: check corner flag
-                egx = uint(int(gx) + dx[d]);
-                egy = uint(int(gy) + dy[d]);
-                if (egx < gw && egy < gh) {
-                    uint corner = g(egx, egy);
-                    if (d == 4u) has_edge = (corner & 1u) != 0u; // down-right
-                    else if (d == 5u) has_edge = (corner & 1u) != 0u; // up-left = down-right from other side
-                    else if (d == 6u) has_edge = (corner & 2u) != 0u; // up-right = down-left
-                    else has_edge = (corner & 2u) != 0u; // down-left
-                }
-            }
+            // Check neighbor pixel is in bounds
+            int npx = int(bx) + nc - 3;
+            int npy = int(by) + nr - 3;
+            if (npx < 0 || npy < 0 || npx >= int(img_w) || npy >= int(img_h)) continue;
 
-            if (!has_edge) continue;
+            labels[nr*8+nc] = label;
+            if (label == 1) sizeA++;
+            else sizeB++;
 
-            int lx = nx - ox;
-            int ly = ny - oy;
-            if (lx < 0 || lx >= 8 || ly < 0 || ly >= 8) continue;
-
-            uint bit = uint(ly * 8 + lx);
-            uint mask = 1u << (bit & 31u);
-            bool already = bit < 32u ? (vis_lo & mask) != 0u : (vis_hi & mask) != 0u;
-            if (!already) {
-                if (bit < 32u) vis_lo |= mask; else vis_hi |= mask;
-                count++;
-                if (sp < 64u) { stack_x[sp] = uint(nx); stack_y[sp] = uint(ny); sp++; }
+            if (tail < 64u) {
+                q_col[tail] = uint(nc);
+                q_row[tail] = uint(nr);
+                tail++;
             }
         }
     }
-    return count;
 }
 
 void main() {
@@ -205,15 +203,25 @@ void main() {
     uint corner_gy = 2u * by + 2u;
     uint flags = g(corner_gx, corner_gy);
 
-    if (flags != 3u) return; // not ambiguous
+    if (flags == 0u) return; // no diagonal
 
-    // Fully connected check
+    // Fully connected check: all 4 cardinal edges present
     uint top = g(corner_gx, corner_gy - 1u);
     uint bottom = g(corner_gx, corner_gy + 1u);
     uint left = g(corner_gx - 1u, corner_gy);
     uint right = g(corner_gx + 1u, corner_gy);
+    bool fully_connected = top != 0u && bottom != 0u && left != 0u && right != 0u;
 
-    if (top != 0u && bottom != 0u && left != 0u && right != 0u) {
+    // Single diagonal in fully-connected block: remove it (matches reference isFullyConnectedD)
+    if (flags == 1u || flags == 2u) {
+        if (fully_connected) {
+            gs(corner_gx, corner_gy, 0u);
+        }
+        return;
+    }
+
+    // flags == 3u: crossing (both diagonals)
+    if (fully_connected) {
         gs(corner_gx, corner_gy, 0u);
         return;
     }
@@ -230,22 +238,31 @@ void main() {
     else if (anti_len > main_len) anti_vote += int(anti_len - main_len);
 
     // Heuristic 2: Sparse pixels (smaller component wins)
-    uint main_size = component_size(bx, by, bx + 1u, by + 1u);
-    uint anti_size = component_size(bx + 1u, by, bx, by + 1u);
+    // Simultaneous A/B labeling in 8×8 window (matches reference voteSparsePixels)
+    uint main_size, anti_size;
+    sparse_pixel_sizes(bx, by, main_size, anti_size);
     if (main_size < anti_size) main_vote += int(anti_size - main_size);
     else if (anti_size < main_size) anti_vote += int(main_size - anti_size);
 
     // Heuristic 3: Islands (valence-1 endpoint)
-    bool main_island = full_valence(bx, by) == 1u || full_valence(bx + 1u, by + 1u) == 1u;
-    bool anti_island = full_valence(bx + 1u, by) == 1u || full_valence(bx, by + 1u) == 1u;
-    if (main_island && !anti_island) main_vote += 5;
-    else if (anti_island && !main_island) anti_vote += 5;
+    // Check endpoints in order: main first, then anti.
+    // Early return on first island found (matches reference voteIslands).
+    uint v_main0 = valence_count(valence_mask(bx, by));
+    uint v_main1 = valence_count(valence_mask(bx + 1u, by + 1u));
+    uint v_anti0 = valence_count(valence_mask(bx + 1u, by));
+    uint v_anti1 = valence_count(valence_mask(bx, by + 1u));
+
+    if (v_main0 == 1u) main_vote += 5;
+    else if (v_main1 == 1u) main_vote += 5;
+    else if (v_anti0 == 1u) anti_vote += 5;
+    else if (v_anti1 == 1u) anti_vote += 5;
 
     // Resolve
     if (main_vote > anti_vote) {
-        gs(corner_gx, corner_gy, 1u); // keep main
+        gs(corner_gx, corner_gy, 1u); // keep main (backslash)
     } else if (anti_vote > main_vote) {
-        gs(corner_gx, corner_gy, 2u); // keep anti
+        gs(corner_gx, corner_gy, 2u); // keep anti (slash)
+    } else {
+        gs(corner_gx, corner_gy, 0u); // tie: remove both (matches reference)
     }
-    // Tie: keep both (flags stays 3)
 }

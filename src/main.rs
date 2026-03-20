@@ -247,6 +247,7 @@ fn main() {
     eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
     eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
     eprintln!("  F5 / F7     — Save / Load state");
+    eprintln!("  F9          — Screenshot (raw + scaled)");
     eprintln!("  1-9         — Select state slot");
     eprintln!("  Escape      — Quit");
     if scale_filter != scaling::ScaleFilter::Nearest {
@@ -386,6 +387,70 @@ fn main() {
                 Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
                     emu.save_state(current_slot);
                     eprintln!("State saved to slot {}", current_slot + 1);
+                }
+                Event::KeyDown { keycode: Some(Keycode::F9), .. } => {
+                    // Screenshot: save raw PPU output and scaled GPU output
+                    let raw: &[u32] = if is_sgb { emu.sgb_composited_frame() } else { emu.frame_buffer() };
+                    let sw = src_w as usize;
+                    let sh = src_h as usize;
+
+                    // Save raw frame
+                    let raw_path = "screenshot_raw.png";
+                    let mut rgb = vec![0u8; sw * sh * 3];
+                    for (i, &c) in raw.iter().take(sw * sh).enumerate() {
+                        rgb[i*3]   = ((c >> 16) & 0xff) as u8;
+                        rgb[i*3+1] = ((c >> 8) & 0xff) as u8;
+                        rgb[i*3+2] = (c & 0xff) as u8;
+                    }
+                    if image::save_buffer(raw_path, &rgb, sw as u32, sh as u32, image::ColorType::Rgb8).is_ok() {
+                        eprintln!("Raw screenshot saved to {}", raw_path);
+                    }
+
+                    // Save scaled output by downloading the live GPU texture
+                    #[cfg(feature = "sdl3-gpu-shaders")]
+                    {
+                        let ow = gpu.tex_w;
+                        let oh = gpu.tex_h;
+                        if ow > 0 && oh > 0 {
+                            let dl_size = ow * oh * 4;
+                            if let Ok(dl_buf) = gpu.device.create_transfer_buffer()
+                                .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
+                                .with_size(dl_size).build()
+                            {
+                                if let Ok(cmd) = gpu.device.acquire_command_buffer() {
+                                    if let Ok(cp) = gpu.device.begin_copy_pass(&cmd) {
+                                        unsafe {
+                                            let mut src = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+                                            src.texture = gpu.tex.raw();
+                                            src.w = ow;
+                                            src.h = oh;
+                                            src.d = 1;
+                                            let mut dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+                                            dst.transfer_buffer = dl_buf.raw();
+                                            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src, &dst);
+                                        }
+                                        gpu.device.end_copy_pass(cp);
+                                        if let Ok(f) = cmd.submit_and_acquire_fence(&gpu.device) {
+                                            let _ = gpu.device.wait_fences(true, &[f]);
+                                            let map = dl_buf.map::<u32>(&gpu.device, false);
+                                            let px = map.mem();
+                                            let mut rgb2 = vec![0u8; (ow * oh) as usize * 3];
+                                            for (i, &c) in px.iter().take((ow * oh) as usize).enumerate() {
+                                                rgb2[i*3]   = ((c >> 16) & 0xff) as u8;
+                                                rgb2[i*3+1] = ((c >> 8) & 0xff) as u8;
+                                                rgb2[i*3+2] = (c & 0xff) as u8;
+                                            }
+                                            drop(map);
+                                            let scaled_path = "screenshot_scaled.png";
+                                            if image::save_buffer(scaled_path, &rgb2, ow, oh, image::ColorType::Rgb8).is_ok() {
+                                                eprintln!("Scaled screenshot saved to {} ({}x{})", scaled_path, ow, oh);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Event::KeyDown { keycode: Some(Keycode::F7), .. } => {
                     if emu.load_state(current_slot) {

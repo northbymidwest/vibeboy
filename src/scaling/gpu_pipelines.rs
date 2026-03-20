@@ -295,8 +295,8 @@ impl GpuPipelines {
                 }
             }
             ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
-                // Reuses the vectorize compute pipeline — same winding-number
-                // fill shader, just different input data (shared-chain paths).
+                // Reuses the vectorize compute pipeline — scanline rasterizer
+                // with shared-chain paths from the CPU vectorizer.
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
                         super::gpu::init_vectorize_compute_pipeline(&self.device);
@@ -487,7 +487,7 @@ impl GpuPipelines {
         }
         self.resize_texture(out_w, out_h);
         // Need to borrow pipelines and tex separately from self
-        let pipelines = self.full_vectorize.as_ref().unwrap();
+        let pipelines = self.full_vectorize.as_mut().unwrap();
         super::gpu::gpu_vectorize_full_pipeline(
             &self.device, window, &self.tex, pipelines,
             pixels, img_w, img_h, out_w, out_h, scale,

@@ -1,9 +1,25 @@
 #version 450
 
+// Golden section search optimizer for B-spline control points.
+// Matches the reference GPU implementation (OptimizeEnergy.vert).
+//
+// Energy function: E = E_curvature + E_positional
+//   E_curvature = |p0 - 2*p1 + p2|²  (simple κ² approximation)
+//   E_positional = (2.5 * distance(p, p_orig))⁴
+//
+// Search direction: gradient of curvature energy only (8*p1 - 4*p0 - 4*p2).
+// The golden section search minimizes total energy along this direction.
+//
+// Flag encoding:
+//   bit 0 (1u)  = pinned (junction/border — don't move)
+//   bit 4 (16u) = IS_CORNER (sharp turn detected by checkForCorner)
+//   bit 5 (32u) = IS_TJUNCTION (T-junction — will be corrected post-optimization)
+//
+// Spans containing any corner node skip optimization entirely, matching
+// the reference implementation.
+
 layout(local_size_x = 256) in;
 
-// All buffers as readonly storage (set 0).
-// SDL3 binds readonly storage buffers in order of their binding index.
 layout(std430, set = 0, binding = 0) readonly buffer PositionsIn {
     float pos_in[];
 };
@@ -20,20 +36,34 @@ layout(std430, set = 0, binding = 3) readonly buffer Flags {
     uint node_flags[];
 };
 
-// Output positions (set 1, readwrite storage buffer)
 layout(std430, set = 1, binding = 0) writeonly buffer PositionsOut {
     float pos_out[];
 };
 
 layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint num_nodes;
-    float gradient_step;
-    float max_move;
+    float gradient_step;  // unused (kept for ABI compatibility)
+    float max_move;       // unused (golden section uses its own bracket)
     float positional_scale; // 2.5
 };
 
-// Read position of node i from input buffer
+const uint IS_CORNER = 16u;
+const uint IS_TJUNCTION = 32u;
+
 vec2 read_pos(uint i) {
+    return vec2(pos_in[i * 2u], pos_in[i * 2u + 1u]);
+}
+
+// Read neighbor position, using corrected position for T-junctions.
+// When a neighbor is a T-junction, its corrected position is stored at slot+1
+// (matching reference HAS_CORRECTED_POSITION behavior).
+vec2 read_neighbor_pos(uint i) {
+    if ((node_flags[i] & IS_TJUNCTION) != 0u) {
+        uint ci = i + 1u; // corrected position at next slot
+        vec2 p = vec2(pos_in[ci * 2u], pos_in[ci * 2u + 1u]);
+        // Only use if corrected position was written (non-zero)
+        if (p.x != 0.0 || p.y != 0.0) return p;
+    }
     return vec2(pos_in[i * 2u], pos_in[i * 2u + 1u]);
 }
 
@@ -41,176 +71,170 @@ vec2 read_orig(uint i) {
     return vec2(orig_pos[i * 2u], orig_pos[i * 2u + 1u]);
 }
 
-// Neighbor indices for node i: (prev, next, -, -)
-// Cell graph stores chain prev/next, not loop prev2/prev1/next1/next2
-int read_prev(uint i) { return neighbor_data[i * 4u]; }
-int read_next(uint i) { return neighbor_data[i * 4u + 1u]; }
-
-// Legacy: kept for buffer binding (prevents spirv-cross from dropping)
-ivec4 read_neighbors(uint i) {
-    return ivec4(
-        neighbor_data[i * 4u],
-        neighbor_data[i * 4u + 1u],
-        neighbor_data[i * 4u + 2u],
-        neighbor_data[i * 4u + 3u]
-    );
+// Simple curvature energy: |p0 - 2*p1 + p2|²
+float calc_curvature_energy(vec2 n0, vec2 p, vec2 n1) {
+    vec2 tmp = n0 - 2.0 * p + n1;
+    return tmp.x * tmp.x + tmp.y * tmp.y;
 }
 
-// Curvature squared at parameter t for B-spline span (p0, p1, p2)
-float curvature_sq_at(vec2 p0, vec2 p1, vec2 p2, float t, vec2 dd) {
-    vec2 d = (t - 1.0) * p0 + (1.0 - 2.0 * t) * p1 + t * p2;
-    float numer = d.x * dd.y - d.y * dd.x;
-    float denom_sq = dot(d, d);
-    float denom = denom_sq * sqrt(denom_sq);
-    if (denom < 1e-12) return 0.0;
-    return (numer * numer) / (denom * denom);
+// Positional energy: (2.5 * distance)^4
+float calc_positional_energy(vec2 p_new, vec2 p_old) {
+    float dist = positional_scale * distance(p_new, p_old);
+    return dist * dist * dist * dist;
 }
 
-// Integrated curvature energy for one B-spline span (3 sample points)
-float span_curvature(vec2 p0, vec2 p1, vec2 p2) {
-    vec2 dd = p0 - 2.0 * p1 + p2;
-    if (dot(dd, dd) < 1e-20) return 0.0;
-    // Trapezoidal rule with 3 intervals
-    float dt = 1.0 / 3.0;
-    float result = (curvature_sq_at(p0, p1, p2, 0.0, dd)
-                  + curvature_sq_at(p0, p1, p2, 1.0, dd)) * 0.5;
-    result += curvature_sq_at(p0, p1, p2, dt, dd);
-    result += curvature_sq_at(p0, p1, p2, 2.0 * dt, dd);
-    return result * dt;
+// Total energy at a given position
+float total_energy(vec2 n0, vec2 p, vec2 n1, vec2 p_orig) {
+    return calc_curvature_energy(n0, p, n1) + calc_positional_energy(p, p_orig);
 }
 
-// Positional energy: (scale * distance)^4
-float positional_energy(vec2 pos, vec2 orig) {
-    vec2 d = pos - orig;
-    float dist_sq = dot(d, d);
-    float scaled_sq = positional_scale * positional_scale * dist_sq;
-    return scaled_sq * scaled_sq;
+// Curvature gradient: d/dp |n0 - 2p + n1|² = 8p - 4n0 - 4n1
+vec2 calc_gradient(vec2 n0, vec2 p, vec2 n1) {
+    return 8.0 * p - 4.0 * n0 - 4.0 * n1;
 }
 
-// Local energy at node i, considering 3 spans that include this node
-// (spans [i-2,i-1,i], [i-1,i,i+1], [i,i+1,i+2])
-float local_energy(vec2 pi, uint i, ivec4 nbrs, uint flags) {
-    float energy = positional_energy(pi, read_orig(i));
+// Golden section search constants (matching reference)
+const float GS_R = 0.61803399;
+const float GS_C = 0.38196601; // 1 - R
+const float GS_TOL = 0.0001;
+const int GS_MAX_ITER = 20;
+const float BRACKET_A = 0.1;
+const float BRACKET_B = -0.1;
+const float GOLD = 1.618034;
+const float GLIMIT = 10.0;
+const float TINY = 0.000000001;
 
-    // Span centered at (prev1, i, next1)
-    if (nbrs.y >= 0 && nbrs.z >= 0) {
-        // Check corner flags: bit 1 = span (prev1, i, next1) has corner
-        if ((flags & 2u) == 0u) {
-            energy += span_curvature(read_pos(uint(nbrs.y)), pi, read_pos(uint(nbrs.z)));
-        }
+// Find bracket around minimum via parabolic interpolation
+vec3 find_bracket(vec2 n0, vec2 n1, vec2 p, vec2 p_orig, vec2 gradient) {
+    float ax = BRACKET_A;
+    float bx = BRACKET_B;
+    float fa = total_energy(n0, p - gradient * ax, n1, p_orig);
+    float fb = total_energy(n0, p - gradient * bx, n1, p_orig);
+
+    // Ensure fa >= fb (go downhill from a to b)
+    if (fb > fa) {
+        float tmp;
+        tmp = ax; ax = bx; bx = tmp;
+        tmp = fa; fa = fb; fb = tmp;
     }
 
-    // Span (prev2, prev1, i)
-    if (nbrs.x >= 0 && nbrs.y >= 0) {
-        if ((flags & 4u) == 0u) {
-            energy += span_curvature(read_pos(uint(nbrs.x)), read_pos(uint(nbrs.y)), pi);
-        }
-    }
+    float cx = bx + GOLD * (bx - ax);
+    float fc = total_energy(n0, p - gradient * cx, n1, p_orig);
 
-    // Span (i, next1, next2)
-    if (nbrs.z >= 0 && nbrs.w >= 0) {
-        if ((flags & 8u) == 0u) {
-            energy += span_curvature(pi, read_pos(uint(nbrs.z)), read_pos(uint(nbrs.w)));
-        }
-    }
+    int guard = 0;
+    while (fb > fc && guard < 100) {
+        guard++;
+        float r = (bx - ax) * (fb - fc);
+        float q = (bx - cx) * (fb - fa);
+        float qr = q - r;
+        float u = bx - ((bx - cx) * q - (bx - ax) * r) / (2.0 * sign(qr) * max(abs(qr), TINY));
+        float ulim = bx + GLIMIT * (cx - bx);
+        float fu;
 
-    return energy;
+        if ((bx - u) * (u - cx) > 0.0) {
+            fu = total_energy(n0, p - gradient * u, n1, p_orig);
+            if (fu < fc) return vec3(bx, u, cx);
+            if (fu > fb) return vec3(ax, bx, u);
+            u = cx + GOLD * (cx - bx);
+            fu = total_energy(n0, p - gradient * u, n1, p_orig);
+        } else if ((cx - u) * (u - ulim) > 0.0) {
+            fu = total_energy(n0, p - gradient * u, n1, p_orig);
+            if (fu < fc) {
+                float dum = cx + GOLD * (cx - bx);
+                bx = cx; cx = u; u = dum;
+                fb = fc; fc = fu;
+                fu = total_energy(n0, p - gradient * u, n1, p_orig);
+            }
+        } else if ((u - ulim) * (ulim - cx) >= 0.0) {
+            u = ulim;
+            fu = total_energy(n0, p - gradient * u, n1, p_orig);
+        } else {
+            u = cx + GOLD * (cx - bx);
+            fu = total_energy(n0, p - gradient * u, n1, p_orig);
+        }
+
+        ax = bx; bx = cx; cx = u;
+        fa = fb; fb = fc; fc = fu;
+    }
+    return vec3(ax, bx, cx);
 }
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= num_nodes) return;
 
-    // First: always copy input to output (ensures non-zero baseline)
-    vec2 p_copy = read_pos(i);
-    pos_out[i * 2u] = p_copy.x;
-    pos_out[i * 2u + 1u] = p_copy.y;
+    vec2 p = read_pos(i);
+    pos_out[i * 2u] = p.x;
+    pos_out[i * 2u + 1u] = p.y;
 
     uint flags = node_flags[i];
 
-    // Pinned nodes (junctions) don't move — already copied above
-    if ((flags & 1u) != 0u) {
-        return;
-    }
+    // Pinned nodes don't move
+    if ((flags & 1u) != 0u) return;
 
-    // Also need to touch all buffers to prevent spirv-cross from dropping them
+    // Touch all buffers to prevent spirv-cross from dropping them
     int _dummy_nbr = neighbor_data[0];
     float _dummy_orig = orig_pos[0];
 
-    ivec4 nbrs = read_neighbors(i);
-    vec2 current = read_pos(i);
+    int prev_idx = neighbor_data[i * 4u];
+    int next_idx = neighbor_data[i * 4u + 1u];
+    if (prev_idx < 0 || next_idx < 0) return;
 
-    // Compute current energy
-    float e0 = local_energy(current, i, nbrs, flags);
+    // Skip optimization entirely for spans containing corner nodes
+    // (matches reference: DONT_OPTIMIZE flags prevent optimization)
+    if ((flags & IS_CORNER) != 0u) return;
+    if ((node_flags[uint(prev_idx)] & IS_CORNER) != 0u) return;
+    if ((node_flags[uint(next_idx)] & IS_CORNER) != 0u) return;
 
-    if (e0 < 1e-12) {
-        pos_out[i * 2u] = current.x;
-        pos_out[i * 2u + 1u] = current.y;
-        return;
-    }
+    vec2 n0 = read_neighbor_pos(uint(prev_idx));
+    vec2 n1 = read_neighbor_pos(uint(next_idx));
+    vec2 p_orig = read_orig(i);
 
-    // Analytic gradient computation.
-    // Two energy terms contribute to the gradient:
-    //
-    // 1. Positional energy: E_pos = (s² * d²)² where s=positional_scale, d²=||p-p_orig||²
-    //    ∇E_pos = 4 * s⁴ * d² * (p - p_orig)
-    //
-    // 2. Curvature energy: E_curv ≈ ||p0 - 2p1 + p2||² per span
-    //    ∇E_curv w.r.t. center point p1 = 2*(8p1 - 4p0 - 4p2) across all spans
-    //    (exact gradient of the squared second-difference approximation)
+    // Compute curvature gradient direction
+    vec2 gradient = calc_gradient(n0, p, n1);
+    float grad_len = length(gradient);
+    if (grad_len < 1e-12) return;
+    gradient = gradient / grad_len; // normalize
 
-    vec2 orig = read_orig(i);
-    vec2 delta = current - orig;
-    float d_sq = dot(delta, delta);
-    float s2 = positional_scale * positional_scale;
-    vec2 grad = 4.0 * s2 * s2 * d_sq * delta; // positional gradient
+    // Golden section search along gradient direction
+    vec3 bracket = find_bracket(n0, n1, p, p_orig, gradient);
 
-    // Curvature gradient: for each span containing this node as center,
-    // add the contribution from ∂/∂p1 of ||p0 - 2p1 + p2||²
-    // = 2 * (4p1 - 2p0 - 2p2) = 8p1 - 4p0 - 4p2
+    float x0 = bracket.x;
+    float x3 = bracket.z;
+    float x1, x2;
 
-    // Span (prev1, current, next1)
-    if (nbrs.y >= 0 && nbrs.z >= 0 && (flags & 2u) == 0u) {
-        vec2 p0 = read_pos(uint(nbrs.y));
-        vec2 p2 = read_pos(uint(nbrs.z));
-        grad += 2.0 * (4.0 * current - 2.0 * p0 - 2.0 * p2);
-    }
-
-    // Span (prev2, prev1, current) — current is p2
-    if (nbrs.x >= 0 && nbrs.y >= 0 && (flags & 4u) == 0u) {
-        vec2 p0 = read_pos(uint(nbrs.x));
-        vec2 p1 = read_pos(uint(nbrs.y));
-        vec2 dd = p0 - 2.0 * p1 + current;
-        grad += 2.0 * dd; // ∂/∂p2 of ||dd||² = 2*dd
-    }
-
-    // Span (current, next1, next2) — current is p0
-    if (nbrs.z >= 0 && nbrs.w >= 0 && (flags & 8u) == 0u) {
-        vec2 p1 = read_pos(uint(nbrs.z));
-        vec2 p2 = read_pos(uint(nbrs.w));
-        vec2 dd = current - 2.0 * p1 + p2;
-        grad += 2.0 * dd; // ∂/∂p0 of ||dd||² = 2*dd
-    }
-
-    float grad_len = length(grad);
-
-    if (grad_len < 1e-12) {
-        pos_out[i * 2u] = current.x;
-        pos_out[i * 2u + 1u] = current.y;
-        return;
-    }
-
-    // Step in negative gradient direction, clamped
-    float step_size = min(e0 / grad_len, max_move);
-    vec2 candidate = current - step_size * grad / grad_len;
-
-    // Accept only if energy decreased
-    float e_new = local_energy(candidate, i, nbrs, flags);
-    if (e_new < e0) {
-        pos_out[i * 2u] = candidate.x;
-        pos_out[i * 2u + 1u] = candidate.y;
+    if (abs(bracket.z - bracket.y) > abs(bracket.y - bracket.x)) {
+        x1 = bracket.y;
+        x2 = bracket.y + GS_C * (bracket.z - bracket.y);
     } else {
-        pos_out[i * 2u] = current.x;
-        pos_out[i * 2u + 1u] = current.y;
+        x1 = bracket.y - GS_C * (bracket.y - bracket.x);
+        x2 = bracket.y;
     }
+
+    float f1 = total_energy(n0, p - gradient * x1, n1, p_orig);
+    float f2 = total_energy(n0, p - gradient * x2, n1, p_orig);
+
+    for (int iter = 0; iter < GS_MAX_ITER; iter++) {
+        if (abs(x3 - x0) <= GS_TOL * (abs(x1) + abs(x2))) break;
+
+        if (f2 < f1) {
+            x0 = x1;
+            x1 = x2;
+            x2 = GS_R * x1 + GS_C * x3;
+            f1 = f2;
+            f2 = total_energy(n0, p - gradient * x2, n1, p_orig);
+        } else {
+            x3 = x2;
+            x2 = x1;
+            x1 = GS_R * x2 + GS_C * x0;
+            f2 = f1;
+            f1 = total_energy(n0, p - gradient * x1, n1, p_orig);
+        }
+    }
+
+    float offset = (f1 < f2) ? x1 : x2;
+    vec2 optimized = p - gradient * offset;
+
+    pos_out[i * 2u] = optimized.x;
+    pos_out[i * 2u + 1u] = optimized.y;
 }

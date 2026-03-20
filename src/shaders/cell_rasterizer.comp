@@ -1,13 +1,13 @@
 #version 450
 
-// Per-pixel rasterizer: evaluate B-spline boundaries from cell graph CPs.
+// Tile-based nearest-boundary cell rasterizer with adaptive 2×2 AA.
 //
-// For each output pixel, finds the nearest boundary B-spline curve
-// among the 4 surrounding corner CPs. Then checks which of the 4
-// adjacent source pixel CENTERS is on the SAME side of that curve
-// as the output pixel → uses that pixel's color.
+// Each workgroup handles a 2×2 source-pixel tile. CPs in the tile's
+// neighborhood are loaded into shared memory ONCE, then all output
+// pixels in the tile evaluate against shared memory — no redundant
+// global reads. Massive speedup for dense scenes.
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 256) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
     uint pixels[];
@@ -17,12 +17,20 @@ layout(std430, set = 0, binding = 1) readonly buffer PosBuf {
     float cp_positions[];
 };
 
-layout(std430, set = 0, binding = 2) readonly buffer NbrBuf {
-    int cp_neighbors[];
+layout(std430, set = 0, binding = 2) readonly buffer OrigPosBuf {
+    float orig_positions[];
 };
 
 layout(std430, set = 0, binding = 3) readonly buffer FlagBuf {
     uint cp_flags[];
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer NbrBuf {
+    int cp_neighbors[];
+};
+
+layout(std430, set = 0, binding = 5) readonly buffer EdgeColorBuf {
+    uint edge_colors[];
 };
 
 layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
@@ -34,29 +42,39 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint out_h;
     float scale;
     uint corners_w;
-    uint _pad0;
-    uint _pad1;
+    uint tiles_w;   // ceil(img_w / 2)
+    uint tiles_h;   // ceil(img_h / 2)
 };
 
-uint px_color(int x, int y) {
-    x = clamp(x, 0, int(img_w) - 1);
-    y = clamp(y, 0, int(img_h) - 1);
-    return pixels[y * int(img_w) + x];
-}
+// Shared memory: CP data for the tile's neighborhood
+// A 2×2 source tile needs CPs from a 5×5 corner region (corners ±2)
+// = 25 corners × 2 slots = 50 CPs max, but most are empty.
+const uint MAX_TILE_CPS = 50u;
+
+struct SharedCP {
+    vec2 pos;        // optimized position
+    vec2 orig_pos;   // original position
+    vec2 prev_pos;   // prev neighbor optimized position
+    vec2 next_pos;   // next neighbor optimized position
+    vec2 orig_prev;  // prev neighbor original position
+    vec2 orig_next;  // next neighbor original position
+    uint pl, pr, nl, nr;  // edge colors
+    int prev_ci;
+    int next_ci;
+    float _pad;
+};
+
+shared SharedCP sh_cps[MAX_TILE_CPS];
+shared uint sh_num_cps;
 
 vec2 read_pos(int idx) {
-    if (idx < 0) return vec2(0.0);
+    if (idx < 0) return vec2(-1e10);
     return vec2(cp_positions[idx * 2], cp_positions[idx * 2 + 1]);
 }
 
-uint read_flag(int idx) {
-    if (idx < 0) return 0u;
-    return cp_flags[idx];
-}
-
-int read_nbr(int idx, int slot) {
-    if (idx < 0) return -1;
-    return cp_neighbors[idx * 4 + slot];
+vec2 read_orig(int idx) {
+    if (idx < 0) return vec2(-1e10);
+    return vec2(orig_positions[idx * 2], orig_positions[idx * 2 + 1]);
 }
 
 vec2 beval(vec2 p0, vec2 p1, vec2 p2, float t) {
@@ -64,137 +82,282 @@ vec2 beval(vec2 p0, vec2 p1, vec2 p2, float t) {
     return 0.5 * u * u * p0 + (u * t + 0.5) * p1 + 0.5 * t * t * p2;
 }
 
-// Find nearest point on B-spline to test point.
-// Returns (dist_sq, cross_product).
-vec2 nearest_bspline(vec2 pt, vec2 p0, vec2 p1, vec2 p2) {
-    float best_dist = 1e10;
-    float best_cross = 0.0;
-    const int N = 8;
-    vec2 prev_pt = beval(p0, p1, p2, 0.0);
-    for (int s = 1; s <= N; s++) {
-        float t = float(s) / float(N);
-        vec2 curr_pt = beval(p0, p1, p2, t);
-        vec2 seg = curr_pt - prev_pt;
-        float len_sq = dot(seg, seg);
-        float param = (len_sq > 1e-10) ? clamp(dot(pt - prev_pt, seg) / len_sq, 0.0, 1.0) : 0.0;
-        vec2 closest = prev_pt + param * seg;
-        float d = dot(pt - closest, pt - closest);
-        if (d < best_dist) {
-            best_dist = d;
-            best_cross = seg.x * (pt.y - prev_pt.y) - seg.y * (pt.x - prev_pt.x);
-        }
-        prev_pt = curr_pt;
-    }
-    return vec2(best_dist, best_cross);
+vec2 beval_deriv(vec2 p0, vec2 p1, vec2 p2, float t) {
+    return (t - 1.0) * p0 + (1.0 - 2.0 * t) * p1 + t * p2;
 }
 
-// Compute cross product sign for a point against the same B-spline.
-float bspline_cross(vec2 pt, vec2 p0, vec2 p1, vec2 p2) {
-    return nearest_bspline(pt, p0, p1, p2).y;
+uint resolve_from_shared(vec2 pt, uint cp_idx, float t, uint fallback) {
+    SharedCP sc = sh_cps[cp_idx];
+
+    uint color_left = 0u, color_right = 0u;
+    float ref_t;
+    bool prev_valid = (sc.pl != sc.pr);
+    bool next_valid = (sc.nl != sc.nr);
+
+    if (sc.prev_ci < 0) {
+        vec2 toward = sc.next_pos - sc.pos;
+        if (dot(pt - sc.pos, toward) < 0.0) return fallback;
+        if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
+        else return fallback;
+    } else if (sc.next_ci < 0) {
+        vec2 toward = sc.prev_pos - sc.pos;
+        if (dot(pt - sc.pos, toward) < 0.0) return fallback;
+        if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
+        else return fallback;
+    } else if (t < 0.5) {
+        if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
+        else if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
+        else return fallback;
+    } else {
+        if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
+        else if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
+        else return fallback;
+    }
+
+    vec2 orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+    float tl2 = length(orig_tangent);
+    if (tl2 < 1e-8) return fallback;
+    orig_tangent /= tl2;
+    vec2 orig_normal = vec2(-orig_tangent.y, orig_tangent.x);
+
+    vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+    vec2 opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
+    float otl = length(opt_tangent);
+    if (otl < 1e-8) return fallback;
+    opt_tangent /= otl;
+    vec2 opt_normal = vec2(-opt_tangent.y, opt_tangent.x);
+
+    bool normals_agree = dot(opt_normal, orig_normal) > 0.0;
+    float side = dot(pt - cpt, opt_normal);
+    if (normals_agree) {
+        return (side > 0.0) ? color_left : color_right;
+    } else {
+        return (side > 0.0) ? color_right : color_left;
+    }
+}
+
+// Find nearest CP and resolve color for a single sample point
+uint sample_from_shared(vec2 pt, uint fallback_color) {
+    float best_d2 = 1e10;
+    float best_t = 0.0;
+    int best_idx = -1;
+
+    uint n = sh_num_cps;
+    for (uint i = 0u; i < n; i++) {
+        SharedCP sc = sh_cps[i];
+        float span_best_d2 = 1e10;
+        float span_best_t = 0.0;
+        const int N = 8;
+        for (int s = 0; s <= N; s++) {
+            float t = float(s) / float(N);
+            vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+            float d2 = dot(pt - bp, pt - bp);
+            if (d2 < span_best_d2) {
+                span_best_d2 = d2;
+                span_best_t = t;
+            }
+        }
+        if (span_best_d2 < best_d2) {
+            best_d2 = span_best_d2;
+            best_t = span_best_t;
+            best_idx = int(i);
+        }
+        // Early exit
+        if (best_d2 < 0.01) break;
+    }
+
+    if (best_idx < 0 || best_d2 >= 1.0) return fallback_color;
+    return resolve_from_shared(pt, uint(best_idx), best_t, fallback_color);
+}
+
+// Find nearest CP and return hit info along with resolved color
+uint sample_from_shared_ex(vec2 pt, uint fallback_color, out int out_idx, out float out_t, out float out_d2) {
+    float best_d2 = 1e10;
+    float best_t = 0.0;
+    int best_idx = -1;
+
+    uint n = sh_num_cps;
+    for (uint i = 0u; i < n; i++) {
+        SharedCP sc = sh_cps[i];
+        float span_best_d2 = 1e10;
+        float span_best_t = 0.0;
+        const int N = 8;
+        for (int s = 0; s <= N; s++) {
+            float t = float(s) / float(N);
+            vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+            float d2 = dot(pt - bp, pt - bp);
+            if (d2 < span_best_d2) {
+                span_best_d2 = d2;
+                span_best_t = t;
+            }
+        }
+        if (span_best_d2 < best_d2) {
+            best_d2 = span_best_d2;
+            best_t = span_best_t;
+            best_idx = int(i);
+        }
+        if (best_d2 < 0.01) break;
+    }
+
+    out_idx = best_idx;
+    out_t = best_t;
+    out_d2 = best_d2;
+    if (best_idx < 0 || best_d2 >= 1.0) return fallback_color;
+    return resolve_from_shared(pt, uint(best_idx), best_t, fallback_color);
 }
 
 void main() {
-    uint opx = gl_GlobalInvocationID.x;
-    uint opy = gl_GlobalInvocationID.y;
-    if (opx >= out_w || opy >= out_h) return;
+    // Each workgroup = one 2×2 source tile
+    uint tile_idx = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
 
-    float fx = (float(opx) + 0.5) / scale;
-    float fy = (float(opy) + 0.5) / scale;
-    vec2 pt = vec2(fx, fy);
+    uint tile_x = tile_idx % tiles_w;
+    uint tile_y = tile_idx / tiles_w;
+    if (tile_y >= tiles_h) return;
 
-    int px = clamp(int(floor(fx)), 0, int(img_w) - 1);
-    int py = clamp(int(floor(fy)), 0, int(img_h) - 1);
-    uint nn_color = px_color(px, py);
+    // Source-space bounds of this tile
+    int src_x0 = int(tile_x) * 2;
+    int src_y0 = int(tile_y) * 2;
 
-    // Find nearest boundary B-spline among the 4 surrounding corners
-    float best_dist = 1e10;
-    vec2 best_p0, best_p1, best_p2; // B-spline control points of nearest boundary
-    int best_corner_x = px, best_corner_y = py;
-    bool found = false;
+    // Phase 1: Cooperatively load CPs into shared memory
+    if (tid == 0u) sh_num_cps = 0u;
+    barrier();
 
-    for (int dy = 0; dy <= 1; dy++) {
-        for (int dx = 0; dx <= 1; dx++) {
-            int cx = px + dx;
-            int cy = py + dy;
-            if (cx < 0 || cy < 0 || cx >= int(corners_w) || cy > int(img_h)) continue;
+    // Search 5×5 corners around the tile center
+    int center_cx = src_x0 + 1;
+    int center_cy = src_y0 + 1;
 
-            int base = (cy * int(corners_w) + cx) * 2;
-            for (int slot = 0; slot < 2; slot++) {
-                int ci = base + slot;
-                uint flag = read_flag(ci);
-                if (flag == 0u) continue;
+    // Each thread loads a subset of the 50 potential CPs
+    for (uint slot_idx = tid; slot_idx < 50u; slot_idx += 256u) {
+        int local_idx = int(slot_idx) / 2;
+        int slot = int(slot_idx) % 2;
+        int dy = local_idx / 5 - 2;
+        int dx = local_idx % 5 - 2;
+        int cx = center_cx + dx;
+        int cy = center_cy + dy;
 
-                int prev = read_nbr(ci, 0);
-                int next = read_nbr(ci, 1);
-                if (prev < 0 && next < 0) continue;
+        if (cx < 0 || cy < 0 || cx >= int(corners_w) || cy > int(img_h)) continue;
+        int ci = (cy * int(corners_w) + cx) * 2 + slot;
+        uint flag = cp_flags[ci];
+        if (flag == 0u) continue;
 
-                vec2 cp = read_pos(ci);
-                vec2 pp = (prev >= 0) ? read_pos(prev) : cp;
-                vec2 pn = (next >= 0) ? read_pos(next) : cp;
+        int prev_ci = cp_neighbors[ci * 4];
+        int next_ci = cp_neighbors[ci * 4 + 1];
+        if (prev_ci < 0 && next_ci < 0) continue;
 
-                vec2 r = nearest_bspline(pt, pp, cp, pn);
-                if (r.x < best_dist) {
-                    best_dist = r.x;
-                    best_p0 = pp;
-                    best_p1 = cp;
-                    best_p2 = pn;
-                    best_corner_x = cx;
-                    best_corner_y = cy;
-                    found = true;
+        uint idx = atomicAdd(sh_num_cps, 1u);
+        if (idx < MAX_TILE_CPS) {
+            vec2 cp = read_pos(ci);
+            sh_cps[idx].pos = cp;
+            sh_cps[idx].orig_pos = read_orig(ci);
+            sh_cps[idx].prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
+            sh_cps[idx].next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp;
+            sh_cps[idx].orig_prev = (prev_ci >= 0) ? read_orig(prev_ci) : read_orig(ci);
+            sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
+            sh_cps[idx].pl = edge_colors[ci * 4];
+            sh_cps[idx].pr = edge_colors[ci * 4 + 1];
+            sh_cps[idx].nl = edge_colors[ci * 4 + 2];
+            sh_cps[idx].nr = edge_colors[ci * 4 + 3];
+            sh_cps[idx].prev_ci = prev_ci;
+            sh_cps[idx].next_ci = next_ci;
+        }
+    }
+    barrier();
+
+    // Phase 2: Each thread processes output pixels in the tile.
+    // Compute exact output pixel range from source tile bounds.
+    uint out_x0 = uint(floor(float(src_x0) * scale));
+    uint out_y0 = uint(floor(float(src_y0) * scale));
+    uint out_x1 = min(uint(ceil(float(src_x0 + 2) * scale)), out_w);
+    uint out_y1 = min(uint(ceil(float(src_y0 + 2) * scale)), out_h);
+    uint tile_out_w = out_x1 - out_x0;
+    uint tile_out_h = out_y1 - out_y0;
+    uint pixels_per_tile = tile_out_w * tile_out_h;
+
+    for (uint px_idx = tid; px_idx < pixels_per_tile; px_idx += 256u) {
+        uint local_x = px_idx % tile_out_w;
+        uint local_y = px_idx / tile_out_w;
+        uint opx = out_x0 + local_x;
+        uint opy = out_y0 + local_y;
+        if (opx >= out_w || opy >= out_h) continue;
+
+        float inv_scale = 1.0 / scale;
+        vec2 center = vec2(float(opx) + 0.5, float(opy) + 0.5) * inv_scale;
+
+        // Fallback: color of source pixel at this position
+        int fb_x = clamp(int(floor(center.x)), 0, int(img_w) - 1);
+        int fb_y = clamp(int(floor(center.y)), 0, int(img_h) - 1);
+        uint fallback = pixels[fb_y * int(img_w) + fb_x];
+
+        int best_idx = -1;
+        float best_t = 0.0;
+        float best_d2 = 1e10;
+        uint center_color = sample_from_shared_ex(center, fallback, best_idx, best_t, best_d2);
+
+        // AA needed if nearest boundary is within ~1.5 output pixels
+        float aa_threshold = 1.5 / (scale * scale);
+        bool need_aa = (best_idx >= 0 && best_d2 < aa_threshold);
+
+        if (!need_aa) {
+            imageStore(output_img, ivec2(opx, opy), vec4(
+                float((center_color >> 16u) & 0xFFu) / 255.0,
+                float((center_color >> 8u) & 0xFFu) / 255.0,
+                float(center_color & 0xFFu) / 255.0, 1.0));
+        } else {
+            // Analytical AA: blend left/right colors by exact coverage.
+            // The nearest boundary gives us both colors and the line equation.
+            SharedCP sc = sh_cps[uint(best_idx)];
+            vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
+            vec2 tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
+            float tl = length(tang);
+
+            if (tl < 1e-8) {
+                // Degenerate tangent — just use center color
+                imageStore(output_img, ivec2(opx, opy), vec4(
+                    float((center_color >> 16u) & 0xFFu) / 255.0,
+                    float((center_color >> 8u) & 0xFFu) / 255.0,
+                    float(center_color & 0xFFu) / 255.0, 1.0));
+            } else {
+                vec2 normal = vec2(-tang.y, tang.x) / tl;
+
+                // Get both colors from the boundary's edge colors
+                uint cl = center_color, cr = fallback;
+                uint pl = sc.pl, pr = sc.pr, nl = sc.nl, nr = sc.nr;
+                bool prev_valid = (pl != pr), next_valid = (nl != nr);
+                float ref_t = (best_t < 0.5) ? 0.0 : 1.0;
+
+                if (sc.prev_ci < 0 && next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
+                else if (sc.next_ci < 0 && prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
+                else if (best_t < 0.5 && prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
+                else if (best_t >= 0.5 && next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
+                else if (prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
+                else if (next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
+
+                // Check if original normal agrees with optimized normal
+                vec2 orig_cp = sc.orig_pos;
+                vec2 orig_pp = sc.orig_prev;
+                vec2 orig_pn = sc.orig_next;
+                vec2 orig_tang = beval_deriv(orig_pp, orig_cp, orig_pn, ref_t);
+                float otl = length(orig_tang);
+                vec2 orig_n = (otl > 1e-8) ? vec2(-orig_tang.y, orig_tang.x) / otl : normal;
+                if (dot(normal, orig_n) < 0.0) {
+                    uint tmp = cl; cl = cr; cr = tmp;
                 }
+
+                // Signed distance from pixel center to boundary line
+                float d = dot(center - cpt, normal);
+
+                // Coverage: pixel width projected onto normal direction
+                float pw = inv_scale;  // pixel width in source coords
+                float proj_w = pw * (abs(normal.x) + abs(normal.y));
+                float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
+
+                // Blend: frac = fraction on the "left" (positive normal) side
+                float r = frac * float((cl >> 16u) & 0xFFu) + (1.0 - frac) * float((cr >> 16u) & 0xFFu);
+                float g = frac * float((cl >> 8u) & 0xFFu) + (1.0 - frac) * float((cr >> 8u) & 0xFFu);
+                float b = frac * float(cl & 0xFFu) + (1.0 - frac) * float(cr & 0xFFu);
+                imageStore(output_img, ivec2(opx, opy), vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
             }
         }
     }
-
-    uint color = nn_color;
-
-    if (found) {
-        // We found the nearest boundary B-spline.
-        // Now determine color: check which of the 4 pixel centers around
-        // the boundary corner is on the SAME side of the curve as our point.
-        float my_cross = bspline_cross(pt, best_p0, best_p1, best_p2);
-
-        // The 4 pixels around the boundary corner
-        int px_tl_x = best_corner_x - 1, px_tl_y = best_corner_y - 1;
-        int px_tr_x = best_corner_x,     px_tr_y = best_corner_y - 1;
-        int px_bl_x = best_corner_x - 1, px_bl_y = best_corner_y;
-        int px_br_x = best_corner_x,     px_br_y = best_corner_y;
-
-        // Check each pixel center's side of the curve
-        // Pick the pixel that's on the SAME side as our output pixel
-        float best_match_dist = 1e10;
-        uint best_match_color = nn_color;
-
-        vec2 centers[4] = vec2[4](
-            vec2(float(px_tl_x) + 0.5, float(px_tl_y) + 0.5),
-            vec2(float(px_tr_x) + 0.5, float(px_tr_y) + 0.5),
-            vec2(float(px_bl_x) + 0.5, float(px_bl_y) + 0.5),
-            vec2(float(px_br_x) + 0.5, float(px_br_y) + 0.5)
-        );
-        uint colors[4] = uint[4](
-            px_color(px_tl_x, px_tl_y),
-            px_color(px_tr_x, px_tr_y),
-            px_color(px_bl_x, px_bl_y),
-            px_color(px_br_x, px_br_y)
-        );
-
-        for (int i = 0; i < 4; i++) {
-            float center_cross = bspline_cross(centers[i], best_p0, best_p1, best_p2);
-            // Same side = same sign of cross product
-            if (my_cross * center_cross > 0.0) {
-                // This pixel center is on the same side as our point
-                float d = dot(pt - centers[i], pt - centers[i]);
-                if (d < best_match_dist) {
-                    best_match_dist = d;
-                    best_match_color = colors[i];
-                }
-            }
-        }
-        color = best_match_color;
-    }
-
-    vec4 rgba = vec4(float((color >> 16u) & 0xFFu) / 255.0,
-                     float((color >> 8u) & 0xFFu) / 255.0,
-                     float(color & 0xFFu) / 255.0, 1.0);
-    imageStore(output_img, ivec2(opx, opy), rgba);
 }
