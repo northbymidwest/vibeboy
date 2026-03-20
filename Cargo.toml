@@ -3,6 +3,9 @@ name = "vibeboy"
 version = "0.1.0"
 edition = "2024"
 default-run = "vibeboy"
+description = "Game Boy / Game Boy Color emulator with pixel-art vectorization"
+repository = "https://github.com/northbymidwest/vibeboy"
+license = "0BSD"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

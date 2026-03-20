@@ -369,9 +369,10 @@ async function startEmulator(romBytes) {
     }
   }
 
-  // Attach printer and start webcam if needed
+  // Attach printer, start webcam and accelerometer if needed
   emu.attach_printer();
   if (emu.has_camera()) initCamera();
+  initAccelerometer();
 
   dropZone.classList.add('hidden');
   if (useGpu) filterBar.style.display = '';
@@ -408,8 +409,9 @@ function frame(timestamp) {
   // Cap catchup to avoid spiral of death (e.g. tab was backgrounded)
   if (emuTime > GB_FRAME_MS * 3) emuTime = GB_FRAME_MS * 3;
 
-  // Poll gamepad each frame
+  // Poll gamepad and accelerometer each frame
   pollGamepad();
+  feedAccelerometer();
 
   // Step emulation at GB native rate, independent of display refresh
   let stepped = false;
@@ -467,6 +469,42 @@ function frame(timestamp) {
     }
   }
   requestAnimationFrame(frame);
+}
+
+// Accelerometer (MBC7 / Kirby Tilt 'n' Tumble)
+let accelActive = false;
+let accelX = 0, accelY = 0;
+
+function initAccelerometer() {
+  if (!emu || !emu.has_accelerometer()) return;
+
+  // Try DeviceMotion API (mobile devices)
+  if (window.DeviceMotionEvent) {
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      // iOS 13+ requires user gesture for permission
+      DeviceMotionEvent.requestPermission().then(state => {
+        if (state === 'granted') enableDeviceMotion();
+      }).catch(() => {});
+    } else {
+      enableDeviceMotion();
+    }
+  }
+}
+
+function enableDeviceMotion() {
+  window.addEventListener('devicemotion', e => {
+    if (e.accelerationIncludingGravity) {
+      accelX = (e.accelerationIncludingGravity.x || 0) / 9.81;
+      accelY = (e.accelerationIncludingGravity.y || 0) / 9.81;
+      accelActive = true;
+    }
+  });
+  console.log('DeviceMotion accelerometer active for MBC7');
+}
+
+function feedAccelerometer() {
+  if (!emu || !accelActive) return;
+  emu.set_accelerometer(accelX, accelY);
 }
 
 // Keyboard input

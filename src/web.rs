@@ -303,6 +303,20 @@ impl WasmEmulator {
         self.emu.bus.cart.has_camera()
     }
 
+    /// Returns true if the cartridge has an accelerometer (MBC7 / Kirby Tilt 'n' Tumble).
+    pub fn has_accelerometer(&self) -> bool {
+        self.emu.bus.cart.has_accelerometer()
+    }
+
+    /// Feed accelerometer data. gx/gy are in g-force units (±1.0 = ±1g).
+    pub fn set_accelerometer(&mut self, gx: f32, gy: f32) {
+        const CENTER: f32 = 0x81D0 as f32;
+        const RANGE: f32 = 0x70 as f32;
+        let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
+        let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
+        self.emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
+    }
+
     /// Returns true if the cartridge has battery-backed save RAM.
     pub fn has_battery(&self) -> bool {
         self.emu.bus.cart.has_battery()
