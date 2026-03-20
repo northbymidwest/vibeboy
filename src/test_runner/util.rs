@@ -11,8 +11,7 @@ pub const GB_FB_HEIGHT: usize = 144;
 
 pub fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emulator {
     let mut emu = Emulator::new(rom, boot_rom, None, model, None);
-    emu.headless = true;
-    emu.bus.apu.headless = true;
+    emu.set_headless(true);
     emu
 }
 

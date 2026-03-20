@@ -254,7 +254,7 @@ fn main() {
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
-        emu.bus.serial.device = Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate()));
+        emu.attach_serial_device(Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
         eprintln!("Game Boy Printer connected — images will be saved to prints/");
     }
 
@@ -352,7 +352,7 @@ fn main() {
     audio_stream.clear().unwrap();
 
     // ── Camera (webcam for Pocket Camera mapper, only if cart has camera) ──
-    let camera_thread = if emu.bus.cart.has_camera() {
+    let camera_thread = if emu.has_camera() {
         CameraThread::start(&sdl)
     } else {
         None
@@ -360,7 +360,7 @@ fn main() {
     let mut camera_buf = [0u8; 128 * 112];
 
     // ── Accelerometer (MBC7 / Kirby Tilt 'n' Tumble) ──
-    let accel_source = if emu.bus.cart.has_accelerometer() {
+    let accel_source = if emu.has_accelerometer() {
         init_accel(&sdl)
     } else {
         AccelSource::None
@@ -544,7 +544,7 @@ fn main() {
         // ── Webcam → Pocket Camera ────────────────────────────────────────────
         if let Some(ref ct) = camera_thread {
             if ct.read_frame(&mut camera_buf) {
-                emu.bus.cart.set_camera_image(&camera_buf);
+                emu.set_camera_image(&camera_buf);
             }
         }
 
@@ -591,7 +591,7 @@ fn main() {
             if got {
                 let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
                 let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
-                emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
+                emu.set_accelerometer(mbc7_x, mbc7_y);
             }
         }
 
@@ -610,7 +610,7 @@ fn main() {
                 fast_forward = true;
             }
         }
-        emu.rewinding = backspace_held;
+        emu.set_rewinding(backspace_held);
 
         // Accumulate elapsed wall time and run enough emulation frames to keep up.
         // This decouples emulation speed from the display refresh rate — on a 30Hz
@@ -634,14 +634,14 @@ fn main() {
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
             emu.rewind_one_frame();
-            emu.bus.apu.drain_samples();
+            emu.drain_audio_samples();
             frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
         } else if fast_forward {
             // Run 4 frames per wall-clock frame
             for _ in 0..3 {
                 emu.step_frame();
-                emu.bus.apu.drain_samples();
+                emu.drain_audio_samples();
             }
             emu.step_frame();
             frames_stepped = 4;
@@ -664,7 +664,7 @@ fn main() {
         let emu_elapsed = emu_start.elapsed();
 
         // ── Audio ─────────────────────────────────────────────────────────────
-        let samples = emu.bus.apu.drain_samples();
+        let samples = emu.drain_audio_samples();
         if !samples.is_empty() && !fast_forward {
             // If too much audio is queued, clear it to reduce latency.
             // Target ~2 frames of buffer (stereo f32 at 96kHz/60fps ≈ 12800 bytes).

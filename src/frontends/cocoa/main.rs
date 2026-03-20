@@ -215,8 +215,8 @@ fn main() {
 
         if cli.printer {
             let output_dir = std::path::Path::new("prints");
-            emu.bus.serial.device =
-                Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate()));
+            emu.attach_serial_device(
+                Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
         }
 
@@ -323,7 +323,7 @@ fn main() {
         let _audio_unit = setup_audio(&audio_ring);
 
         // ── Camera ───────────────────────────────────────────────────────────
-        let camera = if emu.bus.cart.has_camera() {
+        let camera = if emu.has_camera() {
             CameraCapture::start()
         } else {
             None
@@ -331,7 +331,7 @@ fn main() {
         let mut camera_buf = [0u8; 128 * 112];
 
         // ── Accelerometer ────────────────────────────────────────────────────
-        let accel_source = if emu.bus.cart.has_accelerometer() {
+        let accel_source = if emu.has_accelerometer() {
             init_accel()
         } else {
             AccelSource::None
@@ -564,7 +564,7 @@ fn main() {
             // ── Camera ───────────────────────────────────────────────────────
             if let Some(ref cam) = camera {
                 if cam.read_frame(&mut camera_buf) {
-                    emu.bus.cart.set_camera_image(&camera_buf);
+                    emu.set_camera_image(&camera_buf);
                 }
             }
 
@@ -579,23 +579,23 @@ fn main() {
                 if let Some((x, y, _z)) = accel_reading {
                     let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
                     let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
-                    emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
+                    emu.set_accelerometer(mbc7_x, mbc7_y);
                 }
             }
 
             // ── Rewind / Fast-forward ────────────────────────────────────────
             let backspace_held = keys_down.contains(&K_DELETE) || gamepad_state.l_shoulder;
             let fast_forward = keys_down.contains(&K_TAB) || gamepad_state.r_shoulder;
-            emu.rewinding = backspace_held;
+            emu.set_rewinding(backspace_held);
 
             if !paused {
                 if backspace_held {
                     emu.rewind_one_frame();
-                    emu.bus.apu.drain_samples();
+                    emu.drain_audio_samples();
                 } else if fast_forward {
                     for _ in 0..3 {
                         emu.step_frame();
-                        emu.bus.apu.drain_samples();
+                        emu.drain_audio_samples();
                     }
                     emu.step_frame();
                 } else {
@@ -604,7 +604,7 @@ fn main() {
             }
 
             // ── Audio ────────────────────────────────────────────────────────
-            let samples = emu.bus.apu.drain_samples();
+            let samples = emu.drain_audio_samples();
             if !samples.is_empty() && !fast_forward {
                 let max_samples = 3200 * 2;
                 let to_write = if samples.len() <= max_samples {

@@ -132,7 +132,7 @@ impl App {
         self.src_h = if is_sgb { SGB_H } else { GB_H };
 
         // Start camera thread if cart has camera (Pocket Camera)
-        if emu.bus.cart.has_camera() && self.camera_thread.is_none() {
+        if emu.has_camera() && self.camera_thread.is_none() {
             self.camera_thread = CameraThread::start();
         }
 
@@ -255,14 +255,14 @@ impl App {
         // Feed webcam frames to Pocket Camera
         if let Some(ref ct) = self.camera_thread {
             if ct.read_frame(&mut self.camera_buf) {
-                emu.bus.cart.set_camera_image(&self.camera_buf);
+                emu.set_camera_image(&self.camera_buf);
             }
         }
 
         emu.step_frame();
 
         // Push audio samples directly to ring buffer (96kHz stereo, matching APU output)
-        let samples = emu.bus.apu.drain_samples();
+        let samples = emu.drain_audio_samples();
         if !samples.is_empty() {
             let mut ring = self.audio_ring.lock().unwrap();
             ring.push(&samples);
@@ -491,7 +491,7 @@ impl ApplicationHandler for App {
                         }
 
                         if key == KeyCode::Backspace {
-                            emu.rewinding = pressed;
+                            emu.set_rewinding(pressed);
                         }
                     }
 
@@ -629,7 +629,7 @@ impl ApplicationHandler for App {
 
                     // Shoulders for rewind
                     if gp.is_pressed(GilButton::LeftTrigger) {
-                        emu.rewinding = true;
+                        emu.set_rewinding(true);
                     }
                 }
             } else {
@@ -639,9 +639,9 @@ impl ApplicationHandler for App {
 
         // Handle rewind
         if let Some(ref mut emu) = self.emu {
-            if emu.rewinding {
+            if emu.is_rewinding() {
                 emu.rewind_one_frame();
-                emu.bus.apu.drain_samples();
+                emu.drain_audio_samples();
             }
         }
 

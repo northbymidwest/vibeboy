@@ -47,7 +47,7 @@ pub fn cmd_analyze(
             eprintln!(
                 "  LY={:3}: {:08X} {:08X} {:08X} {:08X} {:08X}  SCX={}",
                 y, right_colors[0], right_colors[1], right_colors[2], right_colors[3],
-                right_colors[4], emu.bus.ppu.scx
+                right_colors[4], emu.bus().ppu.scx
             );
         }
     }
@@ -80,14 +80,14 @@ pub fn cmd_trace_timer(
     if boot || bootrom.is_some() {
         let mut history: VecDeque<(u16, u8, u16, u16)> = VecDeque::new();
         loop {
-            let pc = emu.cpu.regs.pc;
-            let opcode = emu.bus.read_byte(pc);
-            let tc_before = emu.bus.timer.counter();
-            if pc == 0x0100 && !emu.bus.boot_rom_active {
+            let pc = emu.cpu().regs.pc;
+            let opcode = emu.bus_mut().read_byte(pc);
+            let tc_before = emu.bus().timer.counter();
+            if pc == 0x0100 && !emu.bus().boot_rom_active {
                 break;
             }
-            emu.cpu.step(&mut emu.bus);
-            let tc_after = emu.bus.timer.counter();
+            emu.cpu_step();
+            let tc_after = emu.bus().timer.counter();
             history.push_back((pc, opcode, tc_before, tc_after));
             if history.len() > 30 {
                 history.pop_front();
@@ -108,17 +108,20 @@ pub fn cmd_trace_timer(
             );
         }
     }
-    eprintln!(
-        "At PC=$0100: timer_counter={:#06X} DIV={:02X}",
-        emu.bus.timer.counter(),
-        emu.bus.timer.counter() >> 8
-    );
+    {
+        let tc = emu.bus().timer.counter();
+        eprintln!(
+            "At PC=$0100: timer_counter={:#06X} DIV={:02X}",
+            tc,
+            tc >> 8
+        );
+    }
     for i in 0..20 {
-        let pc = emu.cpu.regs.pc;
-        let opcode = emu.bus.read_byte(pc);
-        let tc_before = emu.bus.timer.counter();
-        emu.cpu.step(&mut emu.bus);
-        let tc_after = emu.bus.timer.counter();
+        let pc = emu.cpu().regs.pc;
+        let opcode = emu.bus_mut().read_byte(pc);
+        let tc_before = emu.bus().timer.counter();
+        emu.cpu_step();
+        let tc_after = emu.bus().timer.counter();
         eprintln!(
             "  step {}: PC={:#06X} op={:#04X} timer: {:#06X} -> {:#06X} (DIV: {:02X} -> {:02X})",
             i,
@@ -146,32 +149,31 @@ pub fn cmd_calibrate(path: &Path) {
     for model in &models {
         if let Some(br) = load_boot_rom(*model) {
             let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
-            emu.headless = true;
-            emu.bus.apu.headless = true;
+            emu.set_headless(true);
             for _ in 0..100_000_000u64 {
-                if emu.cpu.regs.pc == 0x0100 && !emu.bus.boot_rom_active {
-                    let div_val = emu.bus.read_byte(0xFF04);
+                if emu.cpu().regs.pc == 0x0100 && !emu.bus().boot_rom_active {
+                    let div_val = emu.bus_mut().read_byte(0xFF04);
                     eprintln!(
                         "{:?}: LY={} dot={} mode={} total_ticks={} DIV={:02X} timer_counter={:#06X} regs=A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X}",
                         model,
-                        emu.bus.ppu.ly,
-                        emu.bus.ppu.dot,
-                        emu.bus.ppu.stat & 0x03,
-                        emu.bus.ppu.total_ticks,
+                        emu.bus().ppu.ly,
+                        emu.bus().ppu.dot,
+                        emu.bus().ppu.stat & 0x03,
+                        emu.bus().ppu.total_ticks,
                         div_val,
-                        emu.bus.timer.counter(),
-                        emu.cpu.regs.a,
-                        emu.cpu.regs.f,
-                        emu.cpu.regs.b,
-                        emu.cpu.regs.c,
-                        emu.cpu.regs.d,
-                        emu.cpu.regs.e,
-                        emu.cpu.regs.h,
-                        emu.cpu.regs.l
+                        emu.bus().timer.counter(),
+                        emu.cpu().regs.a,
+                        emu.cpu().regs.f,
+                        emu.cpu().regs.b,
+                        emu.cpu().regs.c,
+                        emu.cpu().regs.d,
+                        emu.cpu().regs.e,
+                        emu.cpu().regs.h,
+                        emu.cpu().regs.l
                     );
                     break;
                 }
-                emu.cpu.step(&mut emu.bus);
+                emu.cpu_step();
             }
         } else {
             eprintln!("{:?}: no boot ROM available", model);

@@ -268,18 +268,18 @@ impl WasmEmulator {
 
     /// Enable or disable audio sample generation. Disabling saves CPU.
     pub fn set_audio_enabled(&mut self, enabled: bool) {
-        self.emu.bus.apu.headless = !enabled;
+        self.emu.set_audio_enabled(enabled);
     }
 
     /// Attach a Game Boy Printer to the serial port.
     pub fn attach_printer(&mut self) {
-        let clock_rate = if self.emu.bus.double_speed { 8_388_608 } else { 4_194_304 };
-        self.emu.bus.serial.device = Box::new(Printer::new_memory(clock_rate));
+        let clock_rate = if self.emu.is_double_speed() { 8_388_608 } else { 4_194_304 };
+        self.emu.attach_serial_device(Box::new(Printer::new_memory(clock_rate)));
     }
 
     /// Check if the printer has a completed print ready for download.
     pub fn has_print(&self) -> bool {
-        self.emu.bus.serial.device.as_any()
+        self.emu.serial_device_as_any()
             .downcast_ref::<Printer>()
             .is_some_and(|p| p.has_pending_print())
     }
@@ -287,7 +287,7 @@ impl WasmEmulator {
     /// Take the next print as RGBA pixel data. Also stores width/height
     /// for retrieval via print_width()/print_height().
     pub fn take_print_rgba(&mut self) -> Vec<u8> {
-        if let Some(printer) = self.emu.bus.serial.device.as_any_mut().downcast_mut::<Printer>() {
+        if let Some(printer) = self.emu.serial_device_as_any_mut().downcast_mut::<Printer>() {
             if let Some((rgba, w, h)) = printer.take_print() {
                 self.last_print_w = w;
                 self.last_print_h = h;
@@ -302,12 +302,12 @@ impl WasmEmulator {
 
     /// Returns true if the loaded ROM has a camera sensor (Pocket Camera).
     pub fn has_camera(&self) -> bool {
-        self.emu.bus.cart.has_camera()
+        self.emu.has_camera()
     }
 
     /// Returns true if the cartridge has an accelerometer (MBC7 / Kirby Tilt 'n' Tumble).
     pub fn has_accelerometer(&self) -> bool {
-        self.emu.bus.cart.has_accelerometer()
+        self.emu.has_accelerometer()
     }
 
     /// Feed accelerometer data. gx/gy are in g-force units (±1.0 = ±1g).
@@ -316,22 +316,22 @@ impl WasmEmulator {
         const RANGE: f32 = 0x70 as f32;
         let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
         let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
-        self.emu.bus.cart.set_accelerometer(mbc7_x, mbc7_y);
+        self.emu.set_accelerometer(mbc7_x, mbc7_y);
     }
 
     /// Returns true if the cartridge has battery-backed save RAM.
     pub fn has_battery(&self) -> bool {
-        self.emu.bus.cart.has_battery()
+        self.emu.has_battery()
     }
 
     /// Get cartridge save RAM as bytes (for persisting to localStorage).
     pub fn save_data(&self) -> Vec<u8> {
-        self.emu.bus.cart.save_data()
+        self.emu.save_data()
     }
 
     /// Load save RAM from bytes (from localStorage).
     pub fn load_save(&mut self, data: &[u8]) {
-        self.emu.bus.cart.load_ram(data);
+        self.emu.load_ram(data);
     }
 
     /// Save emulator state to slot and return serialized bytes for storage.
@@ -355,7 +355,7 @@ impl WasmEmulator {
         if grayscale.len() >= 128 * 112 {
             let mut img = [0u8; 128 * 112];
             img.copy_from_slice(&grayscale[..128 * 112]);
-            self.emu.bus.cart.set_camera_image(&img);
+            self.emu.set_camera_image(&img);
         }
     }
 
@@ -552,7 +552,7 @@ impl WasmEmulator {
 
     /// Drain audio samples into internal buffer; read via audio_ptr/audio_len.
     pub fn audio_drain(&mut self) {
-        self.audio_buf = self.emu.bus.apu.drain_samples();
+        self.audio_buf = self.emu.drain_audio_samples();
     }
 
     pub fn audio_ptr(&self) -> *const f32 {

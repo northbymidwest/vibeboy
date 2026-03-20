@@ -33,9 +33,9 @@ impl TestHarness for GbMicrotestHarness {
         }
 
         // Primary check: HRAM result at $FF80-$FF82
-        let result = emu.bus.read_byte(0xFF82);
-        let actual = emu.bus.read_byte(0xFF80);
-        let expected = emu.bus.read_byte(0xFF81);
+        let result = emu.bus_mut().read_byte(0xFF82);
+        let actual = emu.bus_mut().read_byte(0xFF80);
+        let expected = emu.bus_mut().read_byte(0xFF81);
         if result == 0x01 {
             return TestResult::Pass;
         }
@@ -49,7 +49,7 @@ impl TestHarness for GbMicrotestHarness {
         // Fallback: some gbmicrotest ROMs write their result byte to VRAM
         // $8000 instead of HRAM. Read the expected value from the ROM's
         // comparison instruction to determine pass/fail.
-        let vram_result = emu.bus.ppu.vram[0][0];
+        let vram_result = emu.bus().ppu.vram[0][0];
         if vram_result != 0 {
             // Search ROM for the CP instruction that checks the result.
             // Pattern: F0 41/44 (LDH A,(STAT/LY)) ... FE xx (CP expected)

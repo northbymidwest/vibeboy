@@ -17,8 +17,12 @@ pub const CYCLES_PER_FRAME: u32 = 70_224;
 const REWIND_BUFFER_CAPACITY: usize = 600;
 
 pub struct Emulator {
-    pub cpu: Cpu,
-    pub bus: Bus,
+    /// CPU state — use facade methods for normal access. Direct access
+    /// available via `cpu()` / `cpu_mut()` for debuggers and test harnesses.
+    cpu: Cpu,
+    /// Bus (memory + subsystems) — use facade methods for normal access.
+    /// Direct access available via `bus()` / `bus_mut()` for debuggers.
+    bus: Bus,
     model: GbModel,
     /// Composited SGB output buffer (256×224): border + game area.
     /// Border pixels persist across frames; only the game area is updated each frame.
@@ -33,9 +37,9 @@ pub struct Emulator {
     /// In-memory save state slots (1-9, index 0 = slot 1).
     save_slots: [Option<Box<Snapshot>>; 9],
     /// True while the user is holding the rewind key.
-    pub rewinding: bool,
+    rewinding: bool,
     /// When true, skip rewind snapshots and audio accumulation (test runner mode).
-    pub headless: bool,
+    headless: bool,
 }
 
 impl Emulator {
@@ -440,4 +444,72 @@ impl Emulator {
     pub const BTN_B:      u8 = BTN_B;
     pub const BTN_SELECT: u8 = BTN_SELECT;
     pub const BTN_START:  u8 = BTN_START;
+
+    // ── Audio ─────────────────────────────────────────────────────────────────
+
+    /// Drain and return all pending audio samples (interleaved L/R f32).
+    pub fn drain_audio_samples(&mut self) -> Vec<f32> {
+        self.bus.apu.drain_samples()
+    }
+
+    /// Enable or disable audio sample generation.
+    pub fn set_audio_enabled(&mut self, enabled: bool) {
+        self.bus.apu.headless = !enabled;
+    }
+
+    // ── Serial / Printer ──────────────────────────────────────────────────────
+
+    /// Attach a device to the serial port (e.g. printer).
+    pub fn attach_serial_device(&mut self, device: Box<dyn crate::serial::SerialDevice>) {
+        self.bus.serial.device = device;
+    }
+
+    /// Access the serial device as `&dyn Any` for downcasting.
+    pub fn serial_device_as_any(&self) -> &dyn std::any::Any {
+        self.bus.serial.device.as_any()
+    }
+
+    /// Access the serial device as `&mut dyn Any` for downcasting.
+    pub fn serial_device_as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self.bus.serial.device.as_any_mut()
+    }
+
+    // ── Cartridge queries ─────────────────────────────────────────────────────
+
+    pub fn has_camera(&self) -> bool { self.bus.cart.has_camera() }
+    pub fn has_accelerometer(&self) -> bool { self.bus.cart.has_accelerometer() }
+    pub fn has_battery(&self) -> bool { self.bus.cart.has_battery() }
+
+    pub fn set_camera_image(&mut self, data: &[u8; 128 * 112]) { self.bus.cart.set_camera_image(data); }
+    pub fn set_accelerometer(&mut self, x: u16, y: u16) { self.bus.cart.set_accelerometer(x, y); }
+
+    pub fn save_data(&self) -> Vec<u8> { self.bus.cart.save_data() }
+    pub fn load_ram(&mut self, data: &[u8]) { self.bus.cart.load_ram(data); }
+
+    // ── Bus state queries ─────────────────────────────────────────────────────
+
+    pub fn is_double_speed(&self) -> bool { self.bus.double_speed }
+
+    // ── Direct access (for debuggers and test harnesses) ──────────────────────
+
+    pub fn cpu(&self) -> &Cpu { &self.cpu }
+    pub fn cpu_mut(&mut self) -> &mut Cpu { &mut self.cpu }
+    pub fn bus(&self) -> &Bus { &self.bus }
+    pub fn bus_mut(&mut self) -> &mut Bus { &mut self.bus }
+
+    /// Execute one CPU instruction, advancing bus subsystems accordingly.
+    /// Wraps `cpu.step(&mut bus)` to avoid split-borrow issues for callers.
+    pub fn cpu_step(&mut self) { self.cpu.step(&mut self.bus); }
+
+    /// Enable headless mode: disables audio accumulation and rewind snapshots.
+    /// Used by test runner and calibration tools.
+    pub fn set_headless(&mut self, headless: bool) {
+        self.headless = headless;
+        self.bus.apu.headless = headless;
+    }
+
+    // ── Rewind state ──────────────────────────────────────────────────────────
+
+    pub fn set_rewinding(&mut self, active: bool) { self.rewinding = active; }
+    pub fn is_rewinding(&self) -> bool { self.rewinding }
 }

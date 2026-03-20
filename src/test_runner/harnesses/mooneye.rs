@@ -58,7 +58,7 @@ impl TestHarness for MooneyeHarness {
                                 if i % 16 == 0 && i > 0 {
                                     eprint!("\n                ");
                                 }
-                                eprint!(" {:02X}", emu.bus.read_byte(0xC000 + i));
+                                eprint!(" {:02X}", emu.bus_mut().read_byte(0xC000 + i));
                             }
                             eprintln!();
                         }
@@ -118,7 +118,7 @@ impl TestHarness for MooneyeHarness {
                                 (0xFF75, 0x8F),
                             ];
                             for &(addr, exp) in expected {
-                                let got = emu.bus.read_byte(addr);
+                                let got = emu.bus_mut().read_byte(addr);
                                 if got != exp {
                                     eprintln!(
                                         "  boot_hwio mismatch: ${:04X} expected={:02X} got={:02X}",
