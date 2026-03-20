@@ -313,8 +313,10 @@ void main() {
         float best_d2 = 1e10;
         uint center_color = sample_from_shared_ex(center, fallback, best_idx, best_t, best_d2);
 
-        // AA needed if nearest boundary is within ~1.5 output pixels
-        float aa_threshold = 1.5 / (scale * scale);
+        // AA needed if nearest boundary is within the pixel diagonal.
+        // Pixel side = 1/scale in source coords, diagonal = sqrt(2)/scale.
+        // Threshold in d2: (sqrt(2)/scale)^2 = 2/scale^2.
+        float aa_threshold = 2.0 / (scale * scale);
         bool need_aa = (best_idx >= 0 && best_d2 < aa_threshold);
 
         if (!need_aa) {

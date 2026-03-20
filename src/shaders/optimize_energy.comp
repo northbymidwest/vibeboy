@@ -61,7 +61,9 @@ vec2 read_neighbor_pos(uint i) {
     if ((node_flags[i] & IS_TJUNCTION) != 0u) {
         uint ci = i + 1u; // corrected position at next slot
         vec2 p = vec2(pos_in[ci * 2u], pos_in[ci * 2u + 1u]);
-        // Only use if corrected position was written (non-zero)
+        // Only use if corrected position was written (non-zero).
+        // Safe: (0,0) is never a valid CP position for GB images
+        // since all grid corners are at positive integer coordinates.
         if (p.x != 0.0 || p.y != 0.0) return p;
     }
     return vec2(pos_in[i * 2u], pos_in[i * 2u + 1u]);

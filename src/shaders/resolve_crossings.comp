@@ -151,9 +151,9 @@ void sparse_pixel_sizes(uint bx, uint by, out uint sizeA, out uint sizeB) {
     q_col[tail] = 3u; q_row[tail] = 4u; tail++; // (4,3) = B
 
     // Direction deltas matching valence_mask encoding
-    int dcol[8] = int[8](-1, -1, -1, 0, 1, 1, 1, 0);
-    int drow[8] = int[8](-1, 0, 1, 1, 1, 0, -1, -1);
-    uint dirs[8] = uint[8](DIR_NW, DIR_W, DIR_SW, DIR_S, DIR_SE, DIR_E, DIR_NE, DIR_N);
+    const int dcol[8] = int[8](-1, -1, -1, 0, 1, 1, 1, 0);
+    const int drow[8] = int[8](-1, 0, 1, 1, 1, 0, -1, -1);
+    const uint dirs[8] = uint[8](DIR_NW, DIR_W, DIR_SW, DIR_S, DIR_SE, DIR_E, DIR_NE, DIR_N);
 
     while (head < tail) {
         uint col = q_col[head];
