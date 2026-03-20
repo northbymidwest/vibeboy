@@ -39,9 +39,8 @@ impl Cpu {
             if self.speed_switch_remaining == self.speed_switch_toggle_at {
                 bus.do_speed_toggle();
             }
-            bus.tick_mcycle();
-            bus.check_hdma_hblank();
-            bus.step_oam_dma();
+            // During speed switch, DIV is frozen — only PPU advances.
+            bus.tick_speed_switch_idle();
             if self.speed_switch_remaining == 0 {
                 self.halted = false;
             }
@@ -583,7 +582,7 @@ impl Cpu {
                 // STOP always resets DIV (triggers falling-edge effects on timer/APU)
                 bus.do_speed_switch_prepare();
                 if bus.speed_switch_armed() {
-                    let total_mcycles = 32768u32;
+                    let total_mcycles = 2050u32;
                     let toggle_at = if bus.is_double_speed() {
                         // Double→normal: toggle near start
                         total_mcycles - 1

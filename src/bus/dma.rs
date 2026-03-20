@@ -129,6 +129,15 @@ impl Bus {
 
     // ── Tick: advance all components by T-cycles ──────────────────────────────
 
+    /// Tick only the PPU for one M-cycle during CGB speed switch idle.
+    /// Per Pan Docs, DIV resets and stops ticking during the STOP halt;
+    /// timer, serial, and APU do not advance. PPU continues rendering.
+    pub fn tick_speed_switch_idle(&mut self) {
+        let bus_cycles = if self.double_speed { 2u32 } else { 4 };
+        let ppu_flags = self.ppu.step(bus_cycles);
+        self.if_ |= ppu_flags;
+    }
+
     /// Tick the bus by one M-cycle (4 T-cycles normal speed, 2 in double-speed).
     /// Call this once per CPU M-cycle (memory access or internal cycle).
     pub fn tick_mcycle(&mut self) {
