@@ -83,31 +83,43 @@ impl Bus {
         // H-Blank DMA: transfer one block per HBlank, handled in tick()
     }
 
-    /// GDMA: transfer all blocks immediately, ticking the bus.
+    /// GDMA: transfer all blocks immediately with flat subsystem advancement.
     /// Setup: 2 bus M-cycles (normal) or 1 bus M-cycle (DS).
-    /// Transfer: 8 bus M-cycles per block.
+    /// Transfer: 8 bus M-cycles per 16-byte block.
+    ///
+    /// Unlike the old recursive approach, this does the data copy first,
+    /// then advances all subsystems once for the total elapsed time.
+    /// This avoids over-advancing DIV/timer via recursive tick() calls
+    /// and prevents HDMA re-entrancy from consuming HBlank events.
     fn do_gdma(&mut self, blocks: u8) {
         let ds = self.double_speed;
         self.hdma.in_transfer = true;
-        // Setup overhead
-        if ds {
-            self.tick(8, 4);
-        } else {
-            self.tick(4, 4);
-            self.tick(4, 4);
-        }
+
+        // Copy all blocks (data transfer doesn't need per-step ticking)
         for _ in 0..blocks {
-            self.do_hdma_block_ticked();
+            self.do_hdma_block_copy();
         }
+
         self.hdma.in_transfer = false;
-        // CPU halt: 8T setup + N * 8 * cpu_t_per_bus_m
-        let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
-        self.dma_halt_cycles += 8 + blocks as u32 * 8 * cpu_t_per_bus_m;
+
+        // Compute total elapsed time:
+        // Setup: 2 bus M-cycles (normal) or 1 (DS)
+        // Transfer: 8 bus M-cycles per block
+        let setup_bus_mcycles: u32 = if ds { 1 } else { 2 };
+        let transfer_bus_mcycles = blocks as u32 * 8;
+        let total_bus_mcycles = setup_bus_mcycles + transfer_bus_mcycles;
+
+        // Advance all subsystems once for the total duration
+        let timer_cycles = total_bus_mcycles * if ds { 8 } else { 4 };
+        let bus_cycles = total_bus_mcycles * 4; // always 4MHz rate
+        self.tick(timer_cycles, bus_cycles);
+
+        // CPU halt cycles
+        self.dma_halt_cycles += timer_cycles;
     }
 
-    /// Transfer one 16-byte HDMA block with bus ticking (2 bytes per bus M-cycle).
-    fn do_hdma_block_ticked(&mut self) {
-        let ds = self.double_speed;
+    /// Copy one 16-byte HDMA block (data only, no subsystem ticking).
+    fn do_hdma_block_copy(&mut self) {
         for byte_off in (0..16u16).step_by(2) {
             let src_addr = self.hdma.src.wrapping_add(byte_off);
             let dst_addr = self.hdma.dst.wrapping_add(byte_off);
@@ -115,11 +127,6 @@ impl Bus {
             self.ppu.write_vram(dst_addr, b0);
             let b1 = self.read_byte_raw(src_addr + 1);
             self.ppu.write_vram(dst_addr + 1, b1);
-            if ds {
-                self.tick(8, 4);
-            } else {
-                self.tick(4, 4);
-            }
         }
         self.hdma.src = self.hdma.src.wrapping_add(16);
         self.hdma.dst = self.hdma.dst.wrapping_add(16);
@@ -175,17 +182,22 @@ impl Bus {
             if self.hdma.active && self.hdma.mode == 1 {
                 let ds = self.double_speed;
                 self.hdma.in_transfer = true;
-                // Setup: 2 bus M-cycles (normal) or 1 (DS)
-                if ds {
-                    self.tick(8, 4);
-                } else {
-                    self.tick(4, 4);
-                    self.tick(4, 4);
-                }
-                self.do_hdma_block_ticked();
+
+                // Copy one 16-byte block
+                self.do_hdma_block_copy();
+
                 self.hdma.in_transfer = false;
-                let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
-                self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
+
+                // Advance subsystems for setup + transfer:
+                // Setup: 2 bus M-cycles (normal) or 1 (DS)
+                // Transfer: 8 bus M-cycles
+                let setup_bus_mcycles: u32 = if ds { 1 } else { 2 };
+                let total_bus_mcycles = setup_bus_mcycles + 8;
+                let timer_cycles = total_bus_mcycles * if ds { 8 } else { 4 };
+                let bus_cycles = total_bus_mcycles * 4;
+                self.tick(timer_cycles, bus_cycles);
+
+                self.dma_halt_cycles += timer_cycles;
                 self.hdma.blocks -= 1;
                 if self.hdma.blocks == 0 {
                     self.hdma.active = false;
@@ -256,30 +268,7 @@ impl Bus {
             self.joypad.clear_interrupt();
         }
 
-        // H-Blank HDMA: transfer one block each time the PPU enters Mode 0
-        // Skip during active DMA transfer to prevent re-entrant cascading
-        if self.ppu.hblank_entered && !self.hdma.in_transfer {
-            self.ppu.hblank_entered = false;
-            if self.hdma.active && self.hdma.mode == 1 {
-                let ds = self.double_speed;
-                self.hdma.in_transfer = true;
-                // Setup: 2 bus M-cycles (normal) or 1 (DS)
-                if ds {
-                    self.tick(8, 4);
-                } else {
-                    self.tick(4, 4);
-                    self.tick(4, 4);
-                }
-                self.do_hdma_block_ticked();
-                self.hdma.in_transfer = false;
-                // CPU halt: 8T setup + 8 bus M-cycles per block
-                let cpu_t_per_bus_m: u32 = if ds { 8 } else { 4 };
-                self.dma_halt_cycles += 8 + 8 * cpu_t_per_bus_m;
-                self.hdma.blocks -= 1;
-                if self.hdma.blocks == 0 {
-                    self.hdma.active = false;
-                }
-            }
-        }
+        // Note: HBlank HDMA is handled by check_hdma_hblank() in tick_mcycle(),
+        // not here. This avoids recursive tick() calls during DMA transfers.
     }
 }
