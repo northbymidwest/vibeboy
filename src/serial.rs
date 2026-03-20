@@ -13,6 +13,9 @@ pub trait SerialDevice {
     fn bit_end(&mut self) -> bool;
     /// Advance device timers by `ticks` clock cycles.
     fn tick(&mut self, ticks: u32);
+    /// Downcast support.
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Default device: no cable connected. Returns 1 (pull-up) for every bit.
@@ -22,6 +25,8 @@ impl SerialDevice for Disconnected {
     fn bit_start(&mut self, _bit: bool) {}
     fn bit_end(&mut self) -> bool { true }
     fn tick(&mut self, _ticks: u32) {}
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 pub struct Serial {

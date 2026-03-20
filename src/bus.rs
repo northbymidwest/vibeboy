@@ -8,7 +8,6 @@ use crate::sgb::Sgb;
 use crate::timer::Timer;
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 /// OAM DMA state.
 ///
@@ -152,10 +151,7 @@ fn ram_random(state: &mut u64) -> u8 {
 /// CGB/AGB: random fill.
 fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
     let mut wram = [[0u8; 0x1000]; 8];
-    let mut rng: u64 = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x12345678);
+    let mut rng: u64 = 0x5A6B7C8D9E0F1A2B;
     let bank_count = if model.is_cgb() { 8 } else { 2 };
     for bank in 0..bank_count {
         for i in 0..0x1000 {
@@ -181,10 +177,7 @@ fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
 /// CGB/AGB: random fill.
 fn init_hram(model: GbModel) -> [u8; 0x7F] {
     let mut hram = [0u8; 0x7F];
-    let mut rng: u64 = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x12345678);
+    let mut rng: u64 = 0x5A6B7C8D9E0F1A2B;
     for i in 0..0x7F {
         hram[i] = if model.is_cgb() {
             ram_random(&mut rng)
@@ -256,6 +249,7 @@ impl Bus {
         let save_path = rom_path
             .filter(|_| cart.has_battery())
             .map(|p| p.with_extension("sav"));
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref sp) = save_path {
             if let Ok(data) = std::fs::read(sp) {
                 log::info!("Loaded save from {}", sp.display());
@@ -371,6 +365,7 @@ impl Bus {
 
     /// Write cartridge RAM to .sav file if battery-backed.
     pub fn save_to_disk(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref path) = self.save_path {
             let data = self.cart.save_data();
             if !data.is_empty() {

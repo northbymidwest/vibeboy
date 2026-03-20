@@ -1,6 +1,34 @@
 /// Cartridge abstraction — all known Game Boy mappers.
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+// Instant and SystemTime are unavailable on wasm32 — provide substitutes.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct Instant(f64);
+
+#[cfg(target_arch = "wasm32")]
+impl Instant {
+    fn now() -> Self { Instant(js_sys::Date::now()) }
+    fn elapsed(&self) -> std::time::Duration {
+        let ms = js_sys::Date::now() - self.0;
+        std::time::Duration::from_millis(ms.max(0.0) as u64)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unix_timestamp_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
+}
 
 pub trait Cartridge: Send {
     fn read_rom(&self, addr: u16) -> u8;
@@ -409,10 +437,7 @@ impl Cartridge for Mbc3 {
             let mut footer = [0u8; 48];
             footer[..5].copy_from_slice(&self.rtc_regs);
             footer[5..10].copy_from_slice(&self.rtc_latched);
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let ts = unix_timestamp_secs() as i64;
             footer[20..28].copy_from_slice(&ts.to_le_bytes());
             data.extend_from_slice(&footer);
         }
@@ -438,10 +463,7 @@ impl Cartridge for Mbc3 {
                 let mut ts_bytes = [0u8; 8];
                 ts_bytes.copy_from_slice(&rtc[20..28]);
                 let saved_ts = i64::from_le_bytes(ts_bytes);
-                let now_ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+                let now_ts = unix_timestamp_secs() as i64;
                 let elapsed = (now_ts - saved_ts).max(0) as u64;
                 if elapsed > 0 && self.rtc_regs[4] & 0x40 == 0 {
                     self.add_seconds_to_rtc(elapsed);
@@ -1514,10 +1536,7 @@ impl Cartridge for HuC3 {
         data.extend_from_slice(&self.rtc_mem);
         data.extend_from_slice(&self.rtc_minutes.to_le_bytes());
         data.extend_from_slice(&self.rtc_days.to_le_bytes());
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let ts = unix_timestamp_secs() as i64;
         data.extend_from_slice(&ts.to_le_bytes());
         data
     }
@@ -1539,10 +1558,7 @@ impl Cartridge for HuC3 {
             let mut buf8 = [0u8; 8];
             buf8.copy_from_slice(&data[rtc_start + 136..rtc_start + 144]);
             let saved_ts = i64::from_le_bytes(buf8);
-            let now_ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let now_ts = unix_timestamp_secs() as i64;
             let elapsed_mins = ((now_ts - saved_ts).max(0) as u64) / 60;
             self.rtc_minutes += elapsed_mins as u32;
             self.rtc_days += self.rtc_minutes / 1440;
@@ -1721,10 +1737,7 @@ impl Cartridge for Tama5 {
         let mut data = Vec::new();
         data.extend_from_slice(&self.tama_ram);
         data.extend_from_slice(&self.rtc_regs);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let ts = unix_timestamp_secs() as i64;
         data.extend_from_slice(&ts.to_le_bytes());
         data
     }
@@ -1740,10 +1753,7 @@ impl Cartridge for Tama5 {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&data[84..92]);
             let saved_ts = i64::from_le_bytes(buf);
-            let now_ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let now_ts = unix_timestamp_secs() as i64;
             let elapsed = (now_ts - saved_ts).max(0) as u32;
             self.rtc_seconds += elapsed;
         }

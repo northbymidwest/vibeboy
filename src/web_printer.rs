@@ -1,22 +1,18 @@
-/// Game Boy Printer emulation.
-///
-/// Implements the SerialDevice trait to receive print data over the
-/// serial port and save images as PNG files.
+/// Web-compatible Game Boy Printer — matches native printer protocol exactly,
+/// but stores completed prints as RGBA pixel data for JS download instead of
+/// writing PNG files to disk.
 
 use crate::serial::SerialDevice;
-use std::path::{Path, PathBuf};
 
 const PRINTER_DATA_SIZE: usize = 0x280;
 const PRINTER_MAX_COMMAND_LENGTH: usize = 0x280;
-/// Maximum image size: 160 pixels wide × 200 pixels tall (25 strips of 2 tile rows)
 const PRINTER_IMAGE_SIZE: usize = 160 * 200;
 
 const COMMAND_INIT: u8 = 0x01;
 const COMMAND_START: u8 = 0x02;
 const COMMAND_DATA: u8 = 0x04;
 
-
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum CommandState {
     Magic1,
     Magic2,
@@ -49,7 +45,7 @@ impl CommandState {
     }
 }
 
-pub struct Printer {
+pub struct WebPrinter {
     command_state: CommandState,
     command_id: u8,
     compression: bool,
@@ -58,39 +54,23 @@ pub struct Printer {
     command_data: [u8; PRINTER_MAX_COMMAND_LENGTH],
     checksum: u16,
     status: u8,
-
-    /// 2-bit pixel image buffer (160 × up to 200)
     image: [u8; PRINTER_IMAGE_SIZE],
     image_offset: usize,
-
-    /// Bit accumulation for incoming serial byte
     byte_being_received: u8,
     bits_received: u8,
-
-    /// Response byte and current bit to send back
     byte_to_send: u8,
     bit_to_send: bool,
-
-    /// RLE decompression state
     compression_run_length: u8,
     compression_run_is_compressed: bool,
-
-    /// Idle time counter (in clock ticks) for protocol timeout
     idle_time: u32,
-    /// Print timer (clock ticks remaining)
     time_remaining: u32,
-
-    /// Output directory for saved PNGs
-    output_dir: PathBuf,
-    /// Counter for naming output files
-    print_count: u32,
-    /// CPU clock rate for timing calculations
     clock_rate: u32,
+    pub pending_prints: Vec<(Vec<u8>, u32, u32)>,
 }
 
-impl Printer {
-    pub fn new(output_dir: &Path, clock_rate: u32) -> Self {
-        Printer {
+impl WebPrinter {
+    pub fn new(clock_rate: u32) -> Self {
+        WebPrinter {
             command_state: CommandState::Magic1,
             command_id: 0,
             compression: false,
@@ -109,20 +89,27 @@ impl Printer {
             compression_run_is_compressed: false,
             idle_time: 0,
             time_remaining: 0,
-            output_dir: output_dir.to_path_buf(),
-            print_count: 0,
             clock_rate,
+            pending_prints: Vec::new(),
         }
     }
 
+    pub fn take_print(&mut self) -> Option<(Vec<u8>, u32, u32)> {
+        if self.pending_prints.is_empty() { None }
+        else { Some(self.pending_prints.remove(0)) }
+    }
+
+    pub fn has_pending_print(&self) -> bool {
+        !self.pending_prints.is_empty()
+    }
+
+    // Mirrors native printer's byte_receive_completed exactly
     fn byte_receive_completed(&mut self, byte_received: u8) {
         self.byte_to_send = 0;
 
         match self.command_state {
             CommandState::Magic1 => {
-                if byte_received != 0x88 {
-                    return;
-                }
+                if byte_received != 0x88 { return; }
                 self.status &= !1;
                 self.command_length = 0;
                 self.checksum = 0;
@@ -180,7 +167,7 @@ impl Printer {
             CommandState::ChecksumHigh => {
                 self.checksum ^= (byte_received as u16) << 8;
                 if self.checksum != 0 {
-                    self.status |= 1; // Checksum error
+                    self.status |= 1;
                     self.command_state = CommandState::Magic1;
                     return;
                 }
@@ -191,7 +178,7 @@ impl Printer {
                     self.byte_to_send = 0;
                 } else {
                     if self.status == 6 && self.time_remaining == 0 {
-                        self.status = 4; // Done
+                        self.status = 4; // Done printing
                     }
                     self.byte_to_send = self.status;
                 }
@@ -230,11 +217,8 @@ impl Printer {
             COMMAND_START => {
                 if self.command_length == 4 {
                     self.status = 6; // Printing
-
-                    // Calculate print time: 1 second per 8-pixel row
                     let rows = self.image_offset / 160;
                     self.time_remaining = (rows as u32) * self.clock_rate / 256 / 8;
-
                     self.save_image();
                     self.image_offset = 0;
                 }
@@ -242,7 +226,7 @@ impl Printer {
             COMMAND_DATA => {
                 if self.command_length == PRINTER_DATA_SIZE {
                     self.image_offset %= PRINTER_IMAGE_SIZE;
-                    self.status = 8; // Received full data block
+                    self.status = 8;
 
                     // Decode 2bpp tile data into image buffer
                     // 0x280 bytes = 2 rows of 20 tiles (each tile 8×8, 16 bytes)
@@ -271,70 +255,48 @@ impl Printer {
                     }
                 }
             }
-            _ => {} // NOP and unknown
+            _ => {}
         }
+        self.command_length = 0;
     }
 
     fn save_image(&mut self) {
         let height = self.image_offset / 160;
-        if height == 0 {
-            return;
-        }
+        if height == 0 { return; }
 
-        // Get palette from PRINT command data byte 2
         let palette = if self.command_length >= 3 {
             self.command_data[2]
         } else {
-            0xE4 // default: 0,1,2,3
+            0xE4
         };
 
-        // Map 2-bit values through palette to grayscale
         let gray_levels: [u8; 4] = [0xFF, 0xAA, 0x55, 0x00];
-        let width = 160;
-        let pixels: Vec<u8> = self.image[..self.image_offset]
-            .iter()
-            .map(|&px| {
-                let mapped = (palette >> (px * 2)) & 3;
-                gray_levels[mapped as usize]
-            })
-            .collect();
+        let width = 160u32;
+        let h = height as u32;
 
-        // Ensure output directory exists
-        if let Err(e) = std::fs::create_dir_all(&self.output_dir) {
-            log::error!("Failed to create printer output dir: {}", e);
-            return;
+        let mut rgba = Vec::with_capacity((width * h * 4) as usize);
+        for i in 0..(width * h) as usize {
+            let px = self.image[i];
+            let mapped = (palette >> (px * 2)) & 3;
+            let g = gray_levels[mapped as usize];
+            rgba.push(g);
+            rgba.push(g);
+            rgba.push(g);
+            rgba.push(0xFF);
         }
 
-        let path = self.output_dir.join(format!("print_{:04}.png", self.print_count));
-        self.print_count += 1;
-
-        // Create grayscale PNG using the image crate
-        let img = image::GrayImage::from_raw(width as u32, height as u32, pixels);
-        match img {
-            Some(img) => {
-                if let Err(e) = img.save(&path) {
-                    log::error!("Failed to save printer image: {}", e);
-                } else {
-                    log::info!("Printer: saved {}×{} image to {}", width, height, path.display());
-                }
-            }
-            None => {
-                log::error!("Printer: failed to create image buffer");
-            }
-        }
+        self.pending_prints.push((rgba, width, h));
     }
 }
 
-impl SerialDevice for Printer {
+impl SerialDevice for WebPrinter {
     fn bit_start(&mut self, bit: bool) {
-        // Reset protocol if idle too long (> 1 second)
         if self.idle_time > self.clock_rate {
             self.command_state = CommandState::Magic1;
             self.bits_received = 0;
         }
         self.idle_time = 0;
 
-        // Accumulate bit into byte (MSB first)
         self.byte_being_received <<= 1;
         self.byte_being_received |= if bit { 1 } else { 0 };
         self.bits_received += 1;
@@ -354,13 +316,13 @@ impl SerialDevice for Printer {
         ret
     }
 
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
     fn tick(&mut self, ticks: u32) {
-        // Accumulate idle time when protocol is active
         if self.command_state != CommandState::Magic1 || self.bits_received > 0 {
             self.idle_time += ticks;
         }
-
-        // Decrement print timer
         if self.time_remaining > 0 {
             if self.time_remaining <= ticks {
                 self.time_remaining = 0;
@@ -368,14 +330,5 @@ impl SerialDevice for Printer {
                 self.time_remaining -= ticks;
             }
         }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-}
-
-impl PartialOrd for CommandState {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((*self as u8).cmp(&(*other as u8)))
     }
 }
