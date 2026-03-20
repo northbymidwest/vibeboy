@@ -70,17 +70,31 @@ impl Bus {
         self.hdma.mode = mode;
         self.hdma.active = true;
 
-        if mode == 1 {
-            // H-Blank DMA: clear stale hblank_entered from the current M-cycle
-            self.ppu.hblank_entered = false;
-        }
-
         if mode == 0 {
             // General purpose DMA: transfer all blocks, ticking the bus
             self.do_gdma(blocks);
             self.hdma.active = false;
+        } else {
+            // H-Blank DMA: if PPU is already in mode 0 (HBlank), transfer
+            // the first block immediately per hardware behavior (jsgroth tests).
+            self.ppu.hblank_entered = false;
+            if self.ppu.mode == 0 {
+                self.hdma.in_transfer = true;
+                self.do_hdma_block_copy();
+                self.hdma.in_transfer = false;
+                let ds = self.double_speed;
+                let setup_bus_mcycles: u32 = if ds { 1 } else { 2 };
+                let total_bus_mcycles = setup_bus_mcycles + 8;
+                let timer_cycles = total_bus_mcycles * if ds { 8 } else { 4 };
+                let bus_cycles = total_bus_mcycles * 4;
+                self.tick(timer_cycles, bus_cycles);
+                self.dma_halt_cycles += timer_cycles;
+                self.hdma.blocks -= 1;
+                if self.hdma.blocks == 0 {
+                    self.hdma.active = false;
+                }
+            }
         }
-        // H-Blank DMA: transfer one block per HBlank, handled in tick()
     }
 
     /// GDMA: transfer all blocks immediately with flat subsystem advancement.
