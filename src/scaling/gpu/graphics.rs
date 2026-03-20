@@ -60,6 +60,7 @@ pub fn init_omniscale_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("OmniScale GPU: fragment shader failed: {e}")).ok()?;
 
@@ -120,6 +121,7 @@ pub fn init_hqx_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/hqx_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/hqx_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/hqx_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("HQx GPU: fragment shader failed: {e}")).ok()?;
 
@@ -177,6 +179,7 @@ pub fn init_bicubic_pipeline(
     let fs = load_fragment_shader(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/bicubic_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/bicubic_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/bicubic_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("Bicubic GPU: fs failed: {e}")).ok()?;
     create_fullscreen_pipeline(device, window, &vs, &fs)
@@ -219,6 +222,7 @@ pub fn init_omniscale_legacy_pipeline(
     let fs = load_fragment_shader(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_legacy_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_legacy_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_legacy_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("OmniScale Legacy GPU: fs failed: {e}")).ok()?;
     create_fullscreen_pipeline(device, window, &vs, &fs)
@@ -260,6 +264,7 @@ pub fn init_scale3x_pipeline(
     let fs = load_fragment_shader(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("Scale3x GPU: fs failed: {e}")).ok()?;
     create_fullscreen_pipeline(device, window, &vs, &fs)
@@ -298,6 +303,7 @@ pub fn init_eagle_pipeline(
     let fs = load_fragment_shader(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/eagle_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/eagle_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/eagle_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("Eagle GPU: fs failed: {e}")).ok()?;
     create_fullscreen_pipeline(device, window, &vs, &fs)
@@ -336,6 +342,7 @@ pub fn init_aa_nearest_pipeline(
     let fs = load_fragment_shader(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("AA Nearest GPU: fs failed: {e}")).ok()?;
     create_fullscreen_pipeline(device, window, &vs, &fs)
@@ -380,6 +387,7 @@ pub fn init_epx_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/epx_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/epx_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/epx_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("EPX GPU: fragment shader failed: {e}")).ok()?;
 
@@ -439,6 +447,7 @@ pub fn init_xbr_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/xbr_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/xbr_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbr_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("xBR GPU: fragment shader failed: {e}")).ok()?;
 
@@ -498,6 +507,7 @@ pub fn init_xbrz_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("xBRZ GPU: fragment shader failed: {e}")).ok()?;
 
@@ -557,6 +567,7 @@ pub fn init_super_xbr_pipeline(
         device,
         include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_frag.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_frag.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_frag.dxil")),
         1, 0, 1,
     ).map_err(|e| eprintln!("Super xBR GPU: fragment shader failed: {e}")).ok()?;
 

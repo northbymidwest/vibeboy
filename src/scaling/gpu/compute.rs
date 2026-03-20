@@ -8,6 +8,7 @@ use super::common::*;
 pub fn init_vectorize_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
     let comp_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.spv"));
     let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.metal"));
+    let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.dxil"));
 
     let pipeline = device.create_compute_pipeline()
         .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
@@ -17,6 +18,16 @@ pub fn init_vectorize_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comp
         .with_readwrite_storage_textures(1)
         .with_thread_count(16, 16, 1)
         .build()
+        .or_else(|_| if !comp_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(3)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::MSL, comp_msl)
             .with_entrypoint(c"main0")
@@ -191,7 +202,7 @@ pub struct GpuVectorizePipelines {
 }
 
 pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipelines> {
-    fn make(device: &gpu::Device, spirv: &[u8], msl: &[u8],
+    fn make(device: &gpu::Device, spirv: &[u8], msl: &[u8], dxil: &[u8],
             ro_bufs: u32, rw_bufs: u32, rw_tex: u32, threads: (u32,u32,u32)) -> Option<gpu::ComputePipeline> {
         device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::SPIRV, spirv)
@@ -202,6 +213,17 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
             .with_readwrite_storage_textures(rw_tex)
             .with_thread_count(threads.0, threads.1, threads.2)
             .build()
+            .or_else(|_| if !dxil.is_empty() {
+                device.create_compute_pipeline()
+                    .with_code(gpu::ShaderFormat::DXIL, dxil)
+                    .with_entrypoint(c"main")
+                    .with_uniform_buffers(1)
+                    .with_readonly_storage_buffers(ro_bufs)
+                    .with_readwrite_storage_buffers(rw_bufs)
+                    .with_readwrite_storage_textures(rw_tex)
+                    .with_thread_count(threads.0, threads.1, threads.2)
+                    .build()
+            } else { Err(sdl3::get_error()) })
             .or_else(|_| device.create_compute_pipeline()
                 .with_code(gpu::ShaderFormat::MSL, msl)
                 .with_entrypoint(c"main0")
@@ -216,31 +238,37 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
     let sim = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.dxil")),
         1, 1, 0, (16, 16, 1))?; // ro: pixels, rw: graph
 
     let resolve = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.dxil")),
         1, 1, 0, (16, 16, 1))?; // ro: graph_snapshot (set 0), rw: graph (set 1)
 
     let cell = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.dxil")),
         1, 4, 0, (16, 16, 1))?; // ro: graph, rw: positions, neighbors, flags, edge_colors
 
     let opt = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.dxil")),
         4, 1, 0, (256, 1, 1))?; // ro: pos_in, orig, neighbors, flags; rw: pos_out
 
     let tjunc = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.dxil")),
         2, 1, 0, (256, 1, 1))?; // ro: neighbors, flags; rw: positions
 
     let rast = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.dxil")),
         6, 0, 1, (256, 1, 1))?; // ro: pixels, positions, orig_positions, flags, neighbors, edge_colors; rw_tex: output (tile-based, 256 threads)
 
     eprintln!("Full GPU vectorize pipeline ready (6 stages)");
@@ -1081,6 +1109,7 @@ pub fn gpu_full_pipeline_screenshot(
 pub fn init_diffusion_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
     let comp_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.spv"));
     let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.metal"));
+    let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.dxil"));
 
     let pipeline = device.create_compute_pipeline()
         .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
@@ -1090,6 +1119,16 @@ pub fn init_diffusion_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comp
         .with_readwrite_storage_textures(1)
         .with_thread_count(16, 16, 1)
         .build()
+        .or_else(|_| if !comp_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(3)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::MSL, comp_msl)
             .with_entrypoint(c"main0")
@@ -1265,8 +1304,10 @@ pub fn diffusion_and_blit(
 pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::ComputePipeline, gpu::ComputePipeline)> {
     let pass1_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.spv"));
     let pass1_msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.metal"));
+    let pass1_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.dxil"));
     let pass2_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.spv"));
     let pass2_msl = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.metal"));
+    let pass2_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.dxil"));
 
     // Pass 1: scanline rasterize edges → storage buffer
     let p1 = device.create_compute_pipeline()
@@ -1277,6 +1318,16 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
         .with_readwrite_storage_buffers(1)       // output color buffer
         .with_thread_count(16, 16, 1)
         .build()
+        .or_else(|_| if !pass1_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, pass1_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(3)
+                .with_readwrite_storage_buffers(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::MSL, pass1_msl)
             .with_entrypoint(c"main0")
@@ -1295,6 +1346,16 @@ pub fn init_spline_diffusion_pipelines(device: &gpu::Device) -> Option<(gpu::Com
         .with_readwrite_storage_textures(1)      // output texture
         .with_thread_count(16, 16, 1)
         .build()
+        .or_else(|_| if !pass2_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, pass2_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(2)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::MSL, pass2_msl)
             .with_entrypoint(c"main0")

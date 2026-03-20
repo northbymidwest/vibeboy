@@ -125,20 +125,27 @@ pub(super) fn submit_and_sync(device: &gpu::Device, cmd: gpu::CommandBuffer, swa
 pub(super) fn load_vertex_shader(device: &gpu::Device) -> Result<gpu::Shader, sdl3::Error> {
     let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.spv"));
     let msl = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.metal"));
+    let dxil = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.dxil"));
     device.create_shader()
         .with_code(gpu::ShaderFormat::SPIRV, spirv, gpu::ShaderStage::Vertex)
         .with_entrypoint(c"main")
         .build()
+        .or_else(|_| if !dxil.is_empty() {
+            device.create_shader()
+                .with_code(gpu::ShaderFormat::DXIL, dxil, gpu::ShaderStage::Vertex)
+                .with_entrypoint(c"main")
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_shader()
             .with_code(gpu::ShaderFormat::MSL, msl, gpu::ShaderStage::Vertex)
             .with_entrypoint(c"main0")
             .build())
 }
 
-/// Create a fragment shader with SPIR-V primary + MSL fallback.
+/// Create a fragment shader with SPIR-V primary, DXIL, then MSL fallback.
 pub(super) fn load_fragment_shader(
     device: &gpu::Device,
-    spirv: &[u8], msl: &[u8],
+    spirv: &[u8], msl: &[u8], dxil: &[u8],
     samplers: u32, storage_buffers: u32, uniform_buffers: u32,
 ) -> Result<gpu::Shader, sdl3::Error> {
     device.create_shader()
@@ -148,6 +155,15 @@ pub(super) fn load_fragment_shader(
         .with_storage_buffers(storage_buffers)
         .with_uniform_buffers(uniform_buffers)
         .build()
+        .or_else(|_| if !dxil.is_empty() {
+            device.create_shader()
+                .with_code(gpu::ShaderFormat::DXIL, dxil, gpu::ShaderStage::Fragment)
+                .with_entrypoint(c"main")
+                .with_samplers(samplers)
+                .with_storage_buffers(storage_buffers)
+                .with_uniform_buffers(uniform_buffers)
+                .build()
+        } else { Err(sdl3::get_error()) })
         .or_else(|_| device.create_shader()
             .with_code(gpu::ShaderFormat::MSL, msl, gpu::ShaderStage::Fragment)
             .with_entrypoint(c"main0")

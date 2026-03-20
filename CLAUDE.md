@@ -8,6 +8,20 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 
 ## Build & Run
 
+### Prerequisites
+
+**macOS:**
+- Rust toolchain, SDL3 (via Homebrew: `brew install sdl3`)
+- For GPU shaders: `brew install shaderc spirv-cross`
+
+**Windows:**
+- Rust toolchain (MSVC), Visual Studio Build Tools
+- [LunarG Vulkan SDK](https://vulkan.lunarg.com/) — provides `glslc`, `spirv-cross`, and `dxc` for shader compilation
+- SDL3 development libraries: download the [SDL3-devel-VC](https://github.com/libsdl-org/SDL/releases) zip, place `SDL3.lib` and `SDL3.dll` in the project's `lib/` directory. The `.cargo/config.toml` already points the linker there. Copy `SDL3.dll` next to the built `.exe` (or add `lib/` to your PATH).
+
+**Linux:**
+- Rust toolchain, SDL3 dev package, `glslc` or `glslangValidator`
+
 ```bash
 cargo build --release
 cargo run --release -- path/to/rom.gbc
@@ -157,6 +171,15 @@ Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasteri
 **Fragment shaders (scaling filters):**
 - `fullscreen.vert`: Shared vertex shader for all fragment-based filters
 - 11 filter shaders: `omniscale.frag`, `hqx.frag`, `xbr.frag`, `xbrz.frag`, `epx.frag`, `scale3x.frag`, `eagle.frag`, `aa_nearest.frag`, `omniscale_legacy.frag`, `super_xbr.frag`, `bicubic.frag`
+
+**Shader cross-compilation (`build.rs`):**
+
+All shaders are authored in GLSL and cross-compiled at build time to multiple backend formats:
+1. GLSL → SPIR-V via `glslc` (Vulkan backend, all platforms)
+2. SPIR-V → MSL via `spirv-cross --msl` (Metal backend, macOS) — requires per-shader `[[buffer(N)]]` index remapping (`msl_buffer_remap` in `ShaderInfo`) because MSL uses a single buffer namespace for all resource types
+3. SPIR-V → HLSL → DXIL via `spirv-cross --hlsl` + `dxc` (Direct3D 12 backend, Windows) — requires automated register/space normalization (`remap_hlsl_registers`) because spirv-cross assigns HLSL spaces based on SPIR-V descriptor sets, but SDL3 D3D12 expects type-based grouping: `t[n] space0` (SRVs), `u[n] space1` (UAVs), `b[n] space2` (CBVs)
+
+Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles.
 
 ## Tools & Scripts
 
