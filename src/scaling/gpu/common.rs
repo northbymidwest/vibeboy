@@ -94,23 +94,6 @@ pub(super) fn aspect_viewport(tex_w: u32, tex_h: u32, sw_w: u32, sw_h: u32) -> (
     }
 }
 
-/// Begin a render pass on the swapchain texture. Returns None if swapchain unavailable.
-pub(super) fn begin_swapchain_render_pass(
-    cmd: &gpu::CommandBuffer,
-    swapchain_raw: *mut sdl3::sys::gpu::SDL_GPUTexture,
-) -> Option<gpu::RenderPass> {
-    if swapchain_raw.is_null() { return None; }
-    let mut color_info = sdl3::sys::gpu::SDL_GPUColorTargetInfo::default();
-    color_info.texture = swapchain_raw;
-    color_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
-    color_info.store_op = sdl3::sys::gpu::SDL_GPUStoreOp::STORE;
-    let raw = unsafe {
-        sdl3::sys::gpu::SDL_BeginGPURenderPass(cmd.raw(), &color_info, 1, std::ptr::null())
-    };
-    if raw.is_null() { return None; }
-    Some(unsafe { std::mem::transmute::<_, gpu::RenderPass>(raw) })
-}
-
 /// Submit command buffer and wait if swapchain was unavailable.
 pub(super) fn submit_and_sync(device: &gpu::Device, cmd: gpu::CommandBuffer, swapchain_was_null: bool) {
     cmd.submit().expect("Failed to submit GPU command buffer");
@@ -119,78 +102,38 @@ pub(super) fn submit_and_sync(device: &gpu::Device, cmd: gpu::CommandBuffer, swa
     }
 }
 
-// ── Shader loading helper ───────────────────────────────────────────────────
+// ── Upload and blit ─────────────────────────────────────────────────────────
 
-/// Create a vertex shader with SPIR-V primary + MSL fallback.
-pub(super) fn load_vertex_shader(device: &gpu::Device) -> Result<gpu::Shader, sdl3::Error> {
-    let spirv = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.spv"));
-    let msl = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.metal"));
-    let dxil = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen_vert.dxil"));
-    device.create_shader()
-        .with_code(gpu::ShaderFormat::SPIRV, spirv, gpu::ShaderStage::Vertex)
-        .with_entrypoint(c"main")
-        .build()
-        .or_else(|_| if !dxil.is_empty() {
-            device.create_shader()
-                .with_code(gpu::ShaderFormat::DXIL, dxil, gpu::ShaderStage::Vertex)
-                .with_entrypoint(c"main")
-                .build()
-        } else { Err(sdl3::get_error()) })
-        .or_else(|_| device.create_shader()
-            .with_code(gpu::ShaderFormat::MSL, msl, gpu::ShaderStage::Vertex)
-            .with_entrypoint(c"main0")
-            .build())
-}
-
-/// Create a fragment shader with SPIR-V primary, DXIL, then MSL fallback.
-pub(super) fn load_fragment_shader(
-    device: &gpu::Device,
-    spirv: &[u8], msl: &[u8], dxil: &[u8],
-    samplers: u32, storage_buffers: u32, uniform_buffers: u32,
-) -> Result<gpu::Shader, sdl3::Error> {
-    device.create_shader()
-        .with_code(gpu::ShaderFormat::SPIRV, spirv, gpu::ShaderStage::Fragment)
-        .with_entrypoint(c"main")
-        .with_samplers(samplers)
-        .with_storage_buffers(storage_buffers)
-        .with_uniform_buffers(uniform_buffers)
-        .build()
-        .or_else(|_| if !dxil.is_empty() {
-            device.create_shader()
-                .with_code(gpu::ShaderFormat::DXIL, dxil, gpu::ShaderStage::Fragment)
-                .with_entrypoint(c"main")
-                .with_samplers(samplers)
-                .with_storage_buffers(storage_buffers)
-                .with_uniform_buffers(uniform_buffers)
-                .build()
-        } else { Err(sdl3::get_error()) })
-        .or_else(|_| device.create_shader()
-            .with_code(gpu::ShaderFormat::MSL, msl, gpu::ShaderStage::Fragment)
-            .with_entrypoint(c"main0")
-            .with_samplers(samplers)
-            .with_storage_buffers(storage_buffers)
-            .with_uniform_buffers(uniform_buffers)
-            .build())
-}
-
-/// Create a fullscreen-triangle graphics pipeline with the given fragment shader.
-pub(super) fn create_fullscreen_pipeline(
+/// Upload pixel data to a texture and blit to the swapchain with the given filter.
+pub fn upload_and_blit(
     device: &gpu::Device,
     window: &sdl3::video::Window,
-    vs: &gpu::Shader,
-    fs: &gpu::Shader,
-) -> Result<gpu::GraphicsPipeline, sdl3::Error> {
-    let swapchain_fmt = device.get_swapchain_texture_format(window);
-    device.create_graphics_pipeline()
-        .with_vertex_shader(vs)
-        .with_fragment_shader(fs)
-        .with_primitive_type(gpu::PrimitiveType::TriangleList)
-        .with_target_info(
-            gpu::GraphicsPipelineTargetInfo::new()
-                .with_color_target_descriptions(&[
-                    gpu::ColorTargetDescription::new().with_format(swapchain_fmt)
-                ])
-        )
-        .build()
+    gpu_tex: &gpu::Texture<'static>,
+    transfer_buf: &gpu::TransferBuffer,
+    pixels: &[u32],
+    tex_w: u32, tex_h: u32,
+    filter: gpu::Filter,
+) {
+    upload_pixels(device, transfer_buf, pixels, tex_w, tex_h);
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+    copy_to_texture(device, &cmd, transfer_buf, gpu_tex, tex_w, tex_h);
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let (vx, vy, vw, vh) = aspect_viewport(tex_w, tex_h, sw_w, sw_h);
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = tex_w;
+        blit_info.source.h = tex_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = vx as u32;
+        blit_info.destination.y = vy as u32;
+        blit_info.destination.w = vw as u32;
+        blit_info.destination.h = vh as u32;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(filter as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 

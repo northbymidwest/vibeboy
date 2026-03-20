@@ -21,10 +21,14 @@ pub mod scaling;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vectorize;
 
-// wgpu vectorize pipeline — available for both native and wasm
+// wgpu pipelines — available for both native and wasm
 #[cfg(feature = "web")]
 #[path = "scaling/wgpu_vectorize.rs"]
 pub mod wgpu_vectorize;
+
+#[cfg(feature = "web")]
+#[path = "scaling/wgpu_scale.rs"]
+pub mod wgpu_scale;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ui_util;

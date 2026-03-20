@@ -8,6 +8,19 @@ use sdl3::gpu;
 use super::ScaleFilter;
 use crate::vectorize::rasterize::{GpuEdgeV2, GpuRowRange};
 
+/// Index into `scale_pipelines` array for each compute-based scaling filter.
+const SP_OMNISCALE: usize = 0;
+const SP_EPX: usize = 1;
+const SP_EAGLE: usize = 2;
+const SP_SCALE3X: usize = 3;
+const SP_BICUBIC: usize = 4;
+const SP_AA_NEAREST: usize = 5;
+const SP_HQX: usize = 6;
+const SP_XBR: usize = 7;
+const SP_XBRZ: usize = 8;
+const SP_SUPER_XBR: usize = 9;
+const SP_OMNISCALE_LEGACY: usize = 10;
+
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
     pub device: gpu::Device,
@@ -18,20 +31,13 @@ pub struct GpuPipelines {
     pub transfer_buf_size: u32,
     pub sampler: gpu::Sampler,
 
-    // Lazily-initialized graphics pipelines (fragment shaders)
-    omniscale: Option<gpu::GraphicsPipeline>,
-    hqx: Option<gpu::GraphicsPipeline>,
-    bicubic: Option<gpu::GraphicsPipeline>,
-    omniscale_legacy: Option<gpu::GraphicsPipeline>,
-    scale3x: Option<gpu::GraphicsPipeline>,
-    eagle: Option<gpu::GraphicsPipeline>,
-    aa_nearest: Option<gpu::GraphicsPipeline>,
-    epx: Option<gpu::GraphicsPipeline>,
-    xbr: Option<gpu::GraphicsPipeline>,
-    xbrz: Option<gpu::GraphicsPipeline>,
-    super_xbr: Option<gpu::GraphicsPipeline>,
+    // Lazily-initialized graphics pipelines (fragment shaders — legacy, kept for reference)
+    // All scaling filters now use compute pipelines instead.
 
-    // Lazily-initialized compute pipelines
+    // Lazily-initialized compute pipelines (scaling filters)
+    scale_pipelines: [Option<gpu::ComputePipeline>; 11],
+
+    // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
     diffusion_compute: Option<gpu::ComputePipeline>,
     spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
@@ -79,17 +85,7 @@ impl GpuPipelines {
             transfer_buf: xfer,
             transfer_buf_size: max_xfer,
             sampler,
-            omniscale: None,
-            hqx: None,
-            bicubic: None,
-            omniscale_legacy: None,
-            scale3x: None,
-            eagle: None,
-            aa_nearest: None,
-            epx: None,
-            xbr: None,
-            xbrz: None,
-            super_xbr: None,
+            scale_pipelines: Default::default(),
             vectorize_compute: None,
             diffusion_compute: None,
             spline_diff: None,
@@ -131,126 +127,46 @@ impl GpuPipelines {
         if force_cpu {
             return GpuRenderMode::Cpu;
         }
+        // Map scaling filters to compute pipeline index + init function
+        let scale_idx: Option<(usize, fn(&gpu::Device) -> Option<gpu::ComputePipeline>)> = match filter {
+            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute =>
+                Some((SP_OMNISCALE, super::gpu::init_omniscale_compute_pipeline)),
+            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x =>
+                Some((SP_EPX, super::gpu::init_epx_compute_pipeline)),
+            ScaleFilter::Eagle =>
+                Some((SP_EAGLE, super::gpu::init_eagle_compute_pipeline)),
+            ScaleFilter::Scale3x =>
+                Some((SP_SCALE3X, super::gpu::init_scale3x_compute_pipeline)),
+            ScaleFilter::Bicubic =>
+                Some((SP_BICUBIC, super::gpu::init_bicubic_compute_pipeline)),
+            ScaleFilter::AaNearestNeighbor =>
+                Some((SP_AA_NEAREST, super::gpu::init_aa_nearest_compute_pipeline)),
+            ScaleFilter::Hqx(_) =>
+                Some((SP_HQX, super::gpu::init_hqx_compute_pipeline)),
+            ScaleFilter::Xbr(_) =>
+                Some((SP_XBR, super::gpu::init_xbr_compute_pipeline)),
+            ScaleFilter::Xbrz(_) =>
+                Some((SP_XBRZ, super::gpu::init_xbrz_compute_pipeline)),
+            ScaleFilter::SuperXbr =>
+                Some((SP_SUPER_XBR, super::gpu::init_super_xbr_compute_pipeline)),
+            ScaleFilter::OmniScaleLegacy =>
+                Some((SP_OMNISCALE_LEGACY, super::gpu::init_omniscale_legacy_compute_pipeline)),
+            _ => None,
+        };
+
+        if let Some((idx, init_fn)) = scale_idx {
+            if self.scale_pipelines[idx].is_none() {
+                self.scale_pipelines[idx] = init_fn(&self.device);
+            }
+            return if self.scale_pipelines[idx].is_some() {
+                GpuRenderMode::ScaleCompute
+            } else {
+                GpuRenderMode::Cpu
+            };
+        }
+
         match filter {
             ScaleFilter::Nearest | ScaleFilter::Bilinear => GpuRenderMode::Native,
-            ScaleFilter::OmniScale => {
-                if self.omniscale.is_none() {
-                    self.omniscale =
-                        super::gpu::init_omniscale_pipeline(&self.device, window);
-                }
-                if self.omniscale.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Hqx(_) => {
-                if self.hqx.is_none() {
-                    self.hqx = super::gpu::init_hqx_pipeline(&self.device, window);
-                }
-                if self.hqx.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Bicubic => {
-                if self.bicubic.is_none() {
-                    self.bicubic =
-                        super::gpu::init_bicubic_pipeline(&self.device, window);
-                }
-                if self.bicubic.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::OmniScaleLegacy => {
-                if self.omniscale_legacy.is_none() {
-                    self.omniscale_legacy =
-                        super::gpu::init_omniscale_legacy_pipeline(&self.device, window);
-                }
-                if self.omniscale_legacy.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Scale3x => {
-                if self.scale3x.is_none() {
-                    self.scale3x =
-                        super::gpu::init_scale3x_pipeline(&self.device, window);
-                }
-                if self.scale3x.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Eagle => {
-                if self.eagle.is_none() {
-                    self.eagle =
-                        super::gpu::init_eagle_pipeline(&self.device, window);
-                }
-                if self.eagle.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::AaNearestNeighbor => {
-                if self.aa_nearest.is_none() {
-                    self.aa_nearest =
-                        super::gpu::init_aa_nearest_pipeline(&self.device, window);
-                }
-                if self.aa_nearest.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => {
-                if self.epx.is_none() {
-                    self.epx = super::gpu::init_epx_pipeline(&self.device, window);
-                }
-                if self.epx.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Xbr(_) => {
-                if self.xbr.is_none() {
-                    self.xbr = super::gpu::init_xbr_pipeline(&self.device, window);
-                }
-                if self.xbr.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Xbrz(_) => {
-                if self.xbrz.is_none() {
-                    self.xbrz =
-                        super::gpu::init_xbrz_pipeline(&self.device, window);
-                }
-                if self.xbrz.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::SuperXbr => {
-                if self.super_xbr.is_none() {
-                    self.super_xbr =
-                        super::gpu::init_super_xbr_pipeline(&self.device, window);
-                }
-                if self.super_xbr.is_some() {
-                    GpuRenderMode::Native
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
             ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
@@ -286,8 +202,6 @@ impl GpuPipelines {
                 }
             }
             ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
-                // Reuses the vectorize compute pipeline — scanline rasterizer
-                // with shared-chain paths from the CPU vectorizer.
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
                         super::gpu::init_vectorize_compute_pipeline(&self.device);
@@ -308,134 +222,96 @@ impl GpuPipelines {
                     GpuRenderMode::Cpu
                 }
             }
-            // Filters without GPU shaders fall back to CPU
             _ => GpuRenderMode::Cpu,
         }
     }
 
-    /// Render a frame using the appropriate GPU shader pipeline.
-    /// Assumes `ensure_pipeline` was called and returned a non-Cpu mode.
-    pub fn render_native(
+    /// Render using a compute scaling filter. Computes uniforms and dispatches.
+    pub fn render_scale_compute(
         &mut self,
         filter: ScaleFilter,
-        pixels: &[u32],
-        src_w: u32,
-        src_h: u32,
         window: &sdl3::video::Window,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        out_w: u32, out_h: u32,
+    ) {
+        // Determine which pipeline index this filter uses
+        let idx = match filter {
+            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => SP_OMNISCALE,
+            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => SP_EPX,
+            ScaleFilter::Eagle => SP_EAGLE,
+            ScaleFilter::Scale3x => SP_SCALE3X,
+            ScaleFilter::Bicubic => SP_BICUBIC,
+            ScaleFilter::AaNearestNeighbor => SP_AA_NEAREST,
+            ScaleFilter::Hqx(_) => SP_HQX,
+            ScaleFilter::Xbr(_) => SP_XBR,
+            ScaleFilter::Xbrz(_) => SP_XBRZ,
+            ScaleFilter::SuperXbr => SP_SUPER_XBR,
+            ScaleFilter::OmniScaleLegacy => SP_OMNISCALE_LEGACY,
+            _ => return,
+        };
+
+        // Integer-scale filters render at native dimensions
+        let (out_w, out_h) = match filter {
+            ScaleFilter::Eagle | ScaleFilter::SuperXbr => (src_w * 2, src_h * 2),
+            ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
+            ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),
+            ScaleFilter::Scale4x => (src_w * 4, src_h * 4),
+            ScaleFilter::Hqx(h) => { let f = h.factor(); (src_w * f, src_h * f) }
+            ScaleFilter::Xbr(x) => { let f = x.factor(); (src_w * f, src_h * f) }
+            ScaleFilter::Xbrz(x) => { let f = x.factor(); (src_w * f, src_h * f) }
+            _ => (out_w, out_h), // resolution-independent filters use display size
+        };
+
+        self.resize_texture(out_w, out_h);
+        let pipeline = self.scale_pipelines[idx].as_ref().unwrap();
+
+        // Super xBR uses a special 3-pass dispatch
+        if matches!(filter, ScaleFilter::SuperXbr) {
+            super::gpu::super_xbr_compute_and_blit(
+                &self.device, window, &self.tex, pipeline,
+                pixels, src_w, src_h, out_w, out_h,
+            );
+            return;
+        }
+
+        // Build uniforms: [src_w, src_h, out_w, out_h, extra, 0, 0, 0]
+        // The 5th u32 is filter-specific: iscale for integer filters, pixel_size for omniscale
+        let extra = match filter {
+            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+                let sx = src_w as f32 / out_w as f32;
+                let sy = src_h as f32 / out_h as f32;
+                f32::to_bits((sx * sx + sy * sy).sqrt())
+            }
+            ScaleFilter::Epx | ScaleFilter::Scale4x
+            | ScaleFilter::Hqx(_) | ScaleFilter::Xbr(_) | ScaleFilter::Xbrz(_) => {
+                out_w / src_w
+            }
+            _ => 0,
+        };
+        let uniforms = [src_w, src_h, out_w, out_h, extra, 0, 0, 0];
+
+        super::gpu::scale_compute_and_blit(
+            &self.device, window, &self.tex, pipeline,
+            pixels, out_w, out_h, &uniforms,
+        );
+    }
+
+    /// Render with simple texture blit (nearest/bilinear).
+    pub fn render_blit(
+        &mut self,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        window: &sdl3::video::Window,
+        filter_mode: gpu::Filter,
     ) {
         self.resize_texture(src_w, src_h);
         let needed = src_w * src_h * 4;
         self.ensure_transfer_buf(needed);
-
-        match filter {
-            ScaleFilter::Scale3x => {
-                super::gpu::render_scale3x(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.scale3x.as_ref().unwrap(), &self.sampler,
-                );
-            }
-            ScaleFilter::Eagle => {
-                super::gpu::render_eagle(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.eagle.as_ref().unwrap(), &self.sampler,
-                );
-            }
-            ScaleFilter::AaNearestNeighbor => {
-                let (ww, wh) = window.size();
-                super::gpu::render_aa_nearest(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.aa_nearest.as_ref().unwrap(), &self.sampler,
-                    ww, wh,
-                );
-            }
-            ScaleFilter::Bicubic => {
-                let (ww, wh) = window.size();
-                super::gpu::render_bicubic(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.bicubic.as_ref().unwrap(), &self.sampler,
-                    ww, wh,
-                );
-            }
-            ScaleFilter::OmniScaleLegacy => {
-                super::gpu::render_omniscale_legacy(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.omniscale_legacy.as_ref().unwrap(), &self.sampler,
-                );
-            }
-            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => {
-                let epx_scale = match filter {
-                    ScaleFilter::Scale4x => 4.0,
-                    _ => 2.0,
-                };
-                super::gpu::render_epx(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.epx.as_ref().unwrap(), &self.sampler, epx_scale,
-                );
-            }
-            ScaleFilter::Hqx(h) => {
-                let hqx_scale = h.factor() as f32;
-                super::gpu::render_hqx(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.hqx.as_ref().unwrap(), &self.sampler, hqx_scale,
-                );
-            }
-            ScaleFilter::Xbr(x) => {
-                let xbr_scale = x.factor() as f32;
-                super::gpu::render_xbr(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.xbr.as_ref().unwrap(), &self.sampler, xbr_scale,
-                );
-            }
-            ScaleFilter::Xbrz(x) => {
-                let xbrz_scale = x.factor() as f32;
-                super::gpu::render_xbrz(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.xbrz.as_ref().unwrap(), &self.sampler, xbrz_scale,
-                );
-            }
-            ScaleFilter::SuperXbr => {
-                super::gpu::render_super_xbr(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h,
-                    self.super_xbr.as_ref().unwrap(), &self.sampler,
-                );
-            }
-            ScaleFilter::OmniScale => {
-                if let Some(ref pipeline) = self.omniscale {
-                    super::gpu::render_omniscale(
-                        &self.device, window, &self.tex, &self.transfer_buf,
-                        pixels, src_w, src_h, pipeline, &self.sampler,
-                    );
-                } else {
-                    super::gpu::upload_and_blit(
-                        &self.device, window, &self.tex, &self.transfer_buf,
-                        pixels, src_w, src_h, gpu::Filter::Nearest,
-                    );
-                }
-            }
-            ScaleFilter::Bilinear => {
-                super::gpu::upload_and_blit(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h, gpu::Filter::Linear,
-                );
-            }
-            _ => {
-                // Nearest or unsupported — plain blit
-                super::gpu::upload_and_blit(
-                    &self.device, window, &self.tex, &self.transfer_buf,
-                    pixels, src_w, src_h, gpu::Filter::Nearest,
-                );
-            }
-        }
+        super::gpu::upload_and_blit(
+            &self.device, window, &self.tex, &self.transfer_buf,
+            pixels, src_w, src_h, filter_mode,
+        );
     }
 
     /// Full vectorize render path: prepare edges, upload to GPU, blit to window.
@@ -578,8 +454,10 @@ impl GpuPipelines {
 /// Result of `ensure_pipeline` — tells the caller which render path to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuRenderMode {
-    /// Use GPU fragment shader pipeline (render_native).
+    /// Use GPU texture blit (nearest/bilinear — no shader).
     Native,
+    /// Use GPU compute scaling filter pipeline.
+    ScaleCompute,
     /// Use GPU compute vectorize pipeline.
     Vectorize,
     /// Use GPU compute diffusion pipeline.

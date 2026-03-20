@@ -760,8 +760,15 @@ fn main() {
                             out_w, out_h, scale as f32,
                         );
                     }
+                    GpuRenderMode::ScaleCompute => {
+                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
+                        gpu.render_scale_compute(
+                            scale_filter, &window, raw_src,
+                            src_w, src_h, disp_w as u32, disp_h as u32,
+                        );
+                    }
                     GpuRenderMode::Native => {
-                        gpu.render_native(scale_filter, raw_src, src_w, src_h, &window);
+                        gpu.render_blit(raw_src, src_w, src_h, &window, sdl3::gpu::Filter::Nearest);
                     }
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);

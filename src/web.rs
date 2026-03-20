@@ -5,6 +5,7 @@ use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::web_printer::WebPrinter;
 use crate::wgpu_vectorize::WgpuVectorizePipeline;
+use crate::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 
 fn auto_detect_model(rom: &[u8]) -> GbModel {
     if rom.len() > 0x143 && (rom[0x143] & 0x80) != 0 {
@@ -39,6 +40,17 @@ fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Active rendering filter for the web frontend.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebFilter {
+    /// Nearest-neighbor (direct Canvas2D blit, no GPU)
+    Nearest,
+    /// Kopf-Lischinski vectorize pipeline
+    Vectorize,
+    /// GPU compute scaling filter
+    Scale(WgpuScaleFilter),
+}
+
 #[wasm_bindgen]
 pub struct WasmEmulator {
     emu: Emulator,
@@ -47,6 +59,7 @@ pub struct WasmEmulator {
     last_print_w: u32,
     last_print_h: u32,
     save_key: String,
+    filter: WebFilter,
     // GPU state (initialized async after construction)
     gpu: Option<GpuState>,
 }
@@ -60,6 +73,7 @@ struct GpuState {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vectorize: WgpuVectorizePipeline,
+    scale: WgpuScalePipeline,
 }
 
 #[wasm_bindgen]
@@ -96,6 +110,7 @@ impl WasmEmulator {
             last_print_w: 0,
             last_print_h: 0,
             save_key,
+            filter: WebFilter::Vectorize,
             gpu: None,
         })
     }
@@ -217,6 +232,7 @@ impl WasmEmulator {
         });
 
         let vectorize = WgpuVectorizePipeline::new(&device);
+        let scale = WgpuScalePipeline::new(&device);
 
         self.gpu = Some(GpuState {
             device,
@@ -227,6 +243,7 @@ impl WasmEmulator {
             blit_bind_group_layout,
             sampler,
             vectorize,
+            scale,
         });
 
         log::info!("WebGPU initialized");
@@ -315,9 +332,41 @@ impl WasmEmulator {
         }
     }
 
-    /// Render the current frame via WebGPU vectorize pipeline.
+    /// Set the active scaling filter by name.
+    /// Valid names: "nearest", "vectorize", "epx", "eagle", "scale3x",
+    /// "bicubic", "aa-nearest", "omniscale".
+    /// Returns true if the filter was recognized.
+    pub fn set_filter(&mut self, name: &str) -> bool {
+        match name {
+            "nearest" => { self.filter = WebFilter::Nearest; true }
+            "vectorize" => { self.filter = WebFilter::Vectorize; true }
+            _ => {
+                if let Some(f) = WgpuScaleFilter::from_name(name) {
+                    self.filter = WebFilter::Scale(f);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Get the name of the current filter.
+    pub fn current_filter(&self) -> String {
+        match self.filter {
+            WebFilter::Nearest => "nearest".to_string(),
+            WebFilter::Vectorize => "vectorize".to_string(),
+            WebFilter::Scale(f) => format!("{:?}", f).to_lowercase(),
+        }
+    }
+
+    /// Render the current frame via WebGPU.
     /// Returns true if GPU rendering was used, false if fallback needed.
     pub fn render_gpu(&mut self) -> bool {
+        if self.filter == WebFilter::Nearest {
+            return false; // caller should use Canvas2D path
+        }
+
         let gpu = match &mut self.gpu {
             Some(g) => g,
             None => return false,
@@ -338,17 +387,29 @@ impl WasmEmulator {
         let out_h = gpu.surface_config.height;
         let scale = (out_w as f64 / src_w as f64).min(out_h as f64 / src_h as f64) as f32;
 
-        let vec_w = (src_w as f32 * scale).round() as u32;
-        let vec_h = (src_h as f32 * scale).round() as u32;
+        let render_w = (src_w as f32 * scale).round() as u32;
+        let render_h = (src_h as f32 * scale).round() as u32;
 
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("vectorize+blit"),
+            label: Some("filter+blit"),
         });
 
-        let out_tex = gpu.vectorize.encode(
-            &gpu.device, &gpu.queue, &mut encoder,
-            &fb, src_w, src_h, vec_w, vec_h, scale,
-        );
+        // Dispatch the appropriate pipeline
+        let out_tex = match self.filter {
+            WebFilter::Vectorize => {
+                gpu.vectorize.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    &fb, src_w, src_h, render_w, render_h, scale,
+                )
+            }
+            WebFilter::Scale(filter) => {
+                gpu.scale.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    filter, &fb, src_w, src_h, render_w, render_h,
+                )
+            }
+            WebFilter::Nearest => unreachable!(),
+        };
 
         let frame = match gpu.surface.get_current_texture() {
             Ok(f) => f,

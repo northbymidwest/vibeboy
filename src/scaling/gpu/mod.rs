@@ -5,33 +5,22 @@
 //! and eventually adapted for other backends (Metal, wgpu).
 
 mod common;
-mod graphics;
 mod compute;
 mod screenshot;
 
-// Re-export all public items so callers can use `super::gpu::function_name()`
-// exactly as before the split.
-pub use common::create_texture;
-pub use graphics::{
-    upload_and_blit,
-    init_omniscale_pipeline, render_omniscale,
-    init_hqx_pipeline, render_hqx,
-    init_bicubic_pipeline, render_bicubic,
-    init_omniscale_legacy_pipeline, render_omniscale_legacy,
-    init_scale3x_pipeline, render_scale3x,
-    init_eagle_pipeline, render_eagle,
-    init_aa_nearest_pipeline, render_aa_nearest,
-    init_epx_pipeline, render_epx,
-    init_xbr_pipeline, render_xbr,
-    init_xbrz_pipeline, render_xbrz,
-    init_super_xbr_pipeline, render_super_xbr,
-};
+pub use common::{create_texture, upload_and_blit};
 pub use compute::{
     init_vectorize_compute_pipeline, vectorize_and_blit,
     GpuVectorizePipelines, init_full_gpu_pipeline, gpu_vectorize_full_pipeline,
     gpu_full_pipeline_screenshot,
     init_diffusion_compute_pipeline, prepare_diffusion_data, diffusion_and_blit,
     init_spline_diffusion_pipelines, spline_diffusion_and_blit,
+    init_omniscale_compute_pipeline, scale_compute_and_blit, super_xbr_compute_and_blit,
+    init_epx_compute_pipeline, init_eagle_compute_pipeline,
+    init_scale3x_compute_pipeline, init_bicubic_compute_pipeline,
+    init_aa_nearest_compute_pipeline, init_hqx_compute_pipeline,
+    init_xbr_compute_pipeline, init_xbrz_compute_pipeline,
+    init_super_xbr_compute_pipeline, init_omniscale_legacy_compute_pipeline,
 };
 pub use screenshot::{
     gpu_screenshot,

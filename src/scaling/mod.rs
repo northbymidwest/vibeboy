@@ -173,6 +173,8 @@ pub enum ScaleFilter {
     VectorizeAdaptive,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     VectorizeGpu,
+    /// OmniScale via compute shader (for A/B comparison with fragment version).
+    OmniScaleCompute,
 }
 
 impl ScaleFilter {
@@ -188,6 +190,7 @@ impl ScaleFilter {
         "vectorize-gpu",
         "vectorize-legacy", "vectorize-legacy-adaptive", "vectorize-diffusion",
         "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
+        "omniscale-compute",
     ];
 
     /// Parse a filter name string into a ScaleFilter enum variant.
@@ -231,6 +234,7 @@ impl ScaleFilter {
             "vectorize-diffusion" => ScaleFilter::VectorizeDiffusion,
             "vectorize-spline-diffusion" => ScaleFilter::VectorizeSplineDiffusion,
             "vectorize-spline-diffusion-adaptive" => ScaleFilter::VectorizeSplineDiffusionAdaptive,
+            "omniscale-compute" => ScaleFilter::OmniScaleCompute,
             _ => return None,
         })
     }
@@ -263,7 +267,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
             | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu => 1,
+            | ScaleFilter::VectorizeGpu
+            | ScaleFilter::OmniScaleCompute => 1,
             ScaleFilter::Hqx(h) => h.factor(),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
@@ -289,7 +294,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
             | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu)
+            | ScaleFilter::VectorizeGpu
+            | ScaleFilter::OmniScaleCompute)
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
@@ -305,7 +311,8 @@ impl ScaleFilter {
             | ScaleFilter::VectorizeSplineDiffusionAdaptive
             | ScaleFilter::Vectorize
             | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu)
+            | ScaleFilter::VectorizeGpu
+            | ScaleFilter::OmniScaleCompute)
     }
 }
 

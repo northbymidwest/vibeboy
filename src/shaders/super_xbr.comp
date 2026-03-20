@@ -1,0 +1,222 @@
+#version 450
+
+// Super xBR — edge-directed 2x scaling by Hyllian (3-pass compute version).
+//
+// This shader handles all 3 passes, selected by the `pass` uniform:
+//   pass 0: Diagonal — compute (odd,odd) positions from source pixels
+//   pass 1: Cardinal — compute (odd,even) and (even,odd) from pass 0 + source
+//   pass 2: Polish   — refine all positions from pass 1 output
+//
+// Pass 0 and 1 write to an intermediate RGBA buffer (storage buffer).
+// Pass 2 writes to the output image.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// SDL3 compute binding convention:
+//   set 0 = readonly storage buffers
+//   set 1 = readwrite storage buffers
+//   set 2 = readwrite storage textures
+//   set 3 = uniform buffers
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf { uint pixels[]; };
+layout(std430, set = 1, binding = 0) buffer IntermBuf { uint intermed[]; };
+layout(set = 2, binding = 0, rgba8) writeonly uniform image2D output_img;
+layout(std140, set = 3, binding = 0) uniform Uniforms {
+    uint src_w;
+    uint src_h;
+    uint out_w;
+    uint out_h;
+    uint pass;   // 0=diagonal, 1=cardinal, 2=polish
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+// ── Module-scope globals for naga WGSL compatibility ────────────────────────
+vec4 g_p[16];
+float g_wp[6];
+float g_i[4];
+float g_e[4];
+
+// ── Constants ───────────────────────────────────────────────────────────────
+const float DIAG_WP[6]    = float[](2.0, 1.0, -1.0, 4.0, -1.0, 1.0);
+const float CARD_WP[6]    = float[](1.0, 0.0,  0.0, 0.0,  0.0, 0.0);
+const float POLISH_WP[6]  = float[](0.0, 0.0,  0.0, 1.0,  0.0, 0.0);
+const float DIAG_SHARP  = 1.29633 / 10.0;
+const float ORTHO_SHARP = 1.75068 / 20.0;
+const float EDGE_LIMIT = 5.000001;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+vec4 unpack(uint c) {
+    return vec4(float((c >> 16u) & 0xFFu) / 255.0,
+                float((c >> 8u) & 0xFFu) / 255.0,
+                float(c & 0xFFu) / 255.0, 1.0);
+}
+
+uint pack(vec4 c) {
+    uint r = uint(clamp(c.r, 0.0, 1.0) * 255.0 + 0.5);
+    uint g = uint(clamp(c.g, 0.0, 1.0) * 255.0 + 0.5);
+    uint b = uint(clamp(c.b, 0.0, 1.0) * 255.0 + 0.5);
+    return (r << 16u) | (g << 8u) | b;
+}
+
+vec4 src_fetch(ivec2 coord) {
+    coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+}
+
+vec4 buf_fetch(ivec2 coord) {
+    coord = clamp(coord, ivec2(0), ivec2(int(out_w) - 1, int(out_h) - 1));
+    return unpack(intermed[coord.y * int(out_w) + coord.x]);
+}
+
+void buf_write(ivec2 coord, vec4 c) {
+    if (coord.x >= 0 && coord.y >= 0 && coord.x < int(out_w) && coord.y < int(out_h))
+        intermed[coord.y * int(out_w) + coord.x] = pack(c);
+}
+
+float luma(vec4 c) { return dot(c.rgb * 255.0, vec3(0.2126, 0.7152, 0.0722)); }
+float ld(float a, float b) { return abs(a - b); }
+
+float smooth_threshold(float x, float limit) {
+    float t = clamp(x / limit, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+float diag_grad(
+    float outer_a, float outer_b,
+    float axis_l, float axis_c, float axis_r,
+    float core_a, float core_b, float far_a, float far_b,
+    float par_a, float par_b, float par_c,
+    float cross_a, float cross_b
+) {
+    return g_wp[0] * (ld(axis_c, axis_r) + ld(axis_c, axis_l)
+                  + ld(par_b, par_a) + ld(par_b, par_c))
+         + g_wp[1] * (ld(far_a, far_b) + ld(core_a, core_b))
+         + g_wp[2] * (ld(core_b, far_b) + ld(core_a, far_a))
+         + g_wp[3] * ld(core_b, far_a)
+         + g_wp[4] * (ld(axis_l, axis_r) + ld(par_a, par_c))
+         + g_wp[5] * (ld(outer_a, outer_b) + ld(cross_a, cross_b));
+}
+
+float card_grad() {
+    return g_wp[3] * (ld(g_i[0], g_i[1]) + ld(g_i[2], g_i[3]))
+         + g_wp[0] * (ld(g_i[0], g_e[0]) + ld(g_i[1], g_e[1]) + ld(g_i[2], g_e[2]) + ld(g_i[3], g_e[3]))
+         + g_wp[2] * (ld(g_i[0], g_e[1]) + ld(g_i[2], g_e[3]) + ld(g_e[0], g_i[1]) + ld(g_e[2], g_i[3]));
+}
+
+vec3 cubic4(float sharp, vec4 c0, vec4 c1, vec4 c2, vec4 c3) {
+    float t0 = -sharp, t1 = 0.5 + sharp, t2 = 0.5 + sharp, t3 = -sharp;
+    return t0*c0.rgb + t1*c1.rgb + t2*c2.rgb + t3*c3.rgb;
+}
+
+vec3 cubic4_paired(float sharp, vec4 a0, vec4 b0, vec4 a1, vec4 b1,
+                                vec4 a2, vec4 b2, vec4 a3, vec4 b3) {
+    float t0 = -sharp, t1 = 0.25 + sharp, t2 = 0.25 + sharp, t3 = -sharp;
+    return t0*(a0.rgb+b0.rgb) + t1*(a1.rgb+b1.rgb)
+         + t2*(a2.rgb+b2.rgb) + t3*(a3.rgb+b3.rgb);
+}
+
+vec4 edge_interp() {
+    float l[16];
+    for (int i = 0; i < 16; i++) l[i] = luma(g_p[i]);
+
+    const int CTL=0, TL=1, TR=2, CTR=3;
+    const int LT=4,  ITL=5, ITR=6, RT=7;
+    const int LB=8,  IBL=9, IBR=10, RB=11;
+    const int CBL=12, BL=13, BR=14, CBR=15;
+
+    float grad_bs = diag_grad(l[LT], l[TL], l[LB], l[ITL], l[TR],
+        l[CBL], l[IBL], l[ITR], l[CTR], l[BL], l[IBR], l[RT], l[BR], l[RB]);
+    float grad_sl = diag_grad(l[TR], l[RT], l[TL], l[ITR], l[RB],
+        l[CTL], l[ITL], l[IBR], l[CBR], l[LT], l[IBL], l[BR], l[LB], l[BL]);
+
+    float diag_bias = grad_bs - grad_sl;
+    float diag_conf = smooth_threshold(abs(diag_bias), EDGE_LIMIT);
+
+    g_i = float[](l[ITR], l[IBR], l[ITL], l[IBL]);
+    g_e = float[](l[TR], l[BR], l[TL], l[BL]);
+    float grad_h = card_grad();
+    g_i = float[](l[ITL], l[ITR], l[IBL], l[IBR]);
+    g_e = float[](l[LT], l[RT], l[LB], l[RB]);
+    float grad_v = card_grad();
+    float card_bias = grad_h - grad_v;
+
+    vec3 slash     = cubic4(DIAG_SHARP, g_p[CBL], g_p[IBL], g_p[ITR], g_p[CTR]);
+    vec3 backslash = cubic4(DIAG_SHARP, g_p[CTL], g_p[ITL], g_p[IBR], g_p[CBR]);
+    vec3 horiz = cubic4_paired(ORTHO_SHARP,
+        g_p[LT],g_p[LB], g_p[ITL],g_p[IBL], g_p[ITR],g_p[IBR], g_p[RT],g_p[RB]);
+    vec3 vert = cubic4_paired(ORTHO_SHARP,
+        g_p[TR],g_p[TL], g_p[ITR],g_p[ITL], g_p[IBR],g_p[IBL], g_p[BR],g_p[BL]);
+
+    vec3 diag_pick = (diag_bias >= 0.0) ? backslash : slash;
+    vec3 card_pick = (card_bias >= 0.0) ? vert : horiz;
+    vec3 result = card_pick + diag_conf * (diag_pick - card_pick);
+
+    vec3 lo = min(min(g_p[ITL].rgb, g_p[ITR].rgb), min(g_p[IBL].rgb, g_p[IBR].rgb));
+    vec3 hi = max(max(g_p[ITL].rgb, g_p[ITR].rgb), max(g_p[IBL].rgb, g_p[IBR].rgb));
+    result = clamp(result, lo, hi);
+
+    return vec4(result, 1.0);
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= int(out_w) || pos.y >= int(out_h)) return;
+
+    if (pass == 0u) {
+        // Pass 0: Write source pixels to (even,even) and diagonal to (odd,odd)
+        int px = pos.x & 1, py = pos.y & 1;
+        if (px == 0 && py == 0) {
+            // Copy source pixel
+            buf_write(pos, src_fetch(pos / 2));
+        } else if (px == 1 && py == 1) {
+            // Diagonal interpolation
+            ivec2 src = pos / 2;
+            for (int j = 0; j < 4; j++)
+                for (int i = 0; i < 4; i++)
+                    g_p[j*4+i] = src_fetch(src + ivec2(i-1, j-1));
+            g_wp = DIAG_WP;
+            buf_write(pos, edge_interp());
+        }
+        // (odd,even) and (even,odd) positions left uninitialized — filled in pass 1
+
+    } else if (pass == 1u) {
+        // Pass 1: Cardinal interpolation for (odd,even) and (even,odd)
+        int px = pos.x & 1, py = pos.y & 1;
+        if ((px == 1 && py == 0) || (px == 0 && py == 1)) {
+            int ox = pos.x, oy = pos.y;
+            if (px == 1 && py == 0) {
+                // Horizontal midpoint — rotated 45° grid
+                g_p[0]  = buf_fetch(ivec2(ox-3,oy));   g_p[1]  = buf_fetch(ivec2(ox-2,oy-1));
+                g_p[2]  = buf_fetch(ivec2(ox-1,oy-2)); g_p[3]  = buf_fetch(ivec2(ox,  oy-3));
+                g_p[4]  = buf_fetch(ivec2(ox-2,oy+1)); g_p[5]  = buf_fetch(ivec2(ox-1,oy));
+                g_p[6]  = buf_fetch(ivec2(ox,  oy-1)); g_p[7]  = buf_fetch(ivec2(ox+1,oy-2));
+                g_p[8]  = buf_fetch(ivec2(ox-1,oy+2)); g_p[9]  = buf_fetch(ivec2(ox,  oy+1));
+                g_p[10] = buf_fetch(ivec2(ox+1,oy));   g_p[11] = buf_fetch(ivec2(ox+2,oy-1));
+                g_p[12] = buf_fetch(ivec2(ox,  oy+3)); g_p[13] = buf_fetch(ivec2(ox+1,oy+2));
+                g_p[14] = buf_fetch(ivec2(ox+2,oy+1)); g_p[15] = buf_fetch(ivec2(ox+3,oy));
+            } else {
+                // Vertical midpoint — rotated 45° grid (transposed)
+                g_p[0]  = buf_fetch(ivec2(ox,  oy-3)); g_p[1]  = buf_fetch(ivec2(ox-1,oy-2));
+                g_p[2]  = buf_fetch(ivec2(ox-2,oy-1)); g_p[3]  = buf_fetch(ivec2(ox-3,oy));
+                g_p[4]  = buf_fetch(ivec2(ox+1,oy-2)); g_p[5]  = buf_fetch(ivec2(ox,  oy-1));
+                g_p[6]  = buf_fetch(ivec2(ox-1,oy));   g_p[7]  = buf_fetch(ivec2(ox-2,oy+1));
+                g_p[8]  = buf_fetch(ivec2(ox+2,oy-1)); g_p[9]  = buf_fetch(ivec2(ox+1,oy));
+                g_p[10] = buf_fetch(ivec2(ox,  oy+1)); g_p[11] = buf_fetch(ivec2(ox-1,oy+2));
+                g_p[12] = buf_fetch(ivec2(ox+3,oy));   g_p[13] = buf_fetch(ivec2(ox+2,oy+1));
+                g_p[14] = buf_fetch(ivec2(ox+1,oy+2)); g_p[15] = buf_fetch(ivec2(ox,  oy+3));
+            }
+            g_wp = CARD_WP;
+            buf_write(pos, edge_interp());
+        }
+
+    } else {
+        // Pass 2: Polish — refine all positions
+        for (int j = 0; j < 4; j++)
+            for (int i = 0; i < 4; i++)
+                g_p[j*4+i] = buf_fetch(pos + ivec2(i-2, j-2));
+        g_wp = POLISH_WP;
+        imageStore(output_img, pos, edge_interp());
+    }
+}

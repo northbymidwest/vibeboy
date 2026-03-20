@@ -1,25 +1,41 @@
-//\! Headless GPU screenshot and rendering functions.
+//! Headless GPU screenshot and rendering functions.
 
 use sdl3::gpu;
 use super::common::*;
-use super::graphics::*;
 use super::compute::*;
 
-// ── Headless GPU screenshot ────────────────────────────────────────────────
+// ── Headless GPU screenshot (compute shader path) ─────────────────────────
 
-/// Render a scaling filter on the GPU and read pixels back to CPU.
+/// Render a scaling filter on the GPU via compute shader and read pixels back.
 ///
-/// Creates a hidden SDL window and GPU device, renders the filter to an
-/// offscreen texture, downloads the result. Returns (pixels, width, height).
+/// Creates a hidden SDL window and GPU device, dispatches the compute shader
+/// to an offscreen texture, downloads the result. Returns (pixels, width, height).
 pub fn gpu_screenshot(
     src: &[u32], src_w: u32, src_h: u32,
     filter: super::super::ScaleFilter,
 ) -> Option<(Vec<u32>, u32, u32)> {
+    use super::super::ScaleFilter;
+
     let factor = filter.factor();
     let (out_w, out_h) = if factor > 1 {
         (src_w * factor, src_h * factor)
     } else {
         (src_w * 4, src_h * 4)
+    };
+
+    let pipeline_init: fn(&gpu::Device) -> Option<gpu::ComputePipeline> = match filter {
+        ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => init_omniscale_compute_pipeline,
+        ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => init_epx_compute_pipeline,
+        ScaleFilter::Eagle => init_eagle_compute_pipeline,
+        ScaleFilter::Scale3x => init_scale3x_compute_pipeline,
+        ScaleFilter::Bicubic => init_bicubic_compute_pipeline,
+        ScaleFilter::AaNearestNeighbor => init_aa_nearest_compute_pipeline,
+        ScaleFilter::Hqx(_) => init_hqx_compute_pipeline,
+        ScaleFilter::Xbr(_) => init_xbr_compute_pipeline,
+        ScaleFilter::Xbrz(_) => init_xbrz_compute_pipeline,
+        ScaleFilter::SuperXbr => init_super_xbr_compute_pipeline,
+        ScaleFilter::OmniScaleLegacy => init_omniscale_legacy_compute_pipeline,
+        _ => return None,
     };
 
     let sdl = sdl3::init().ok()?;
@@ -31,108 +47,119 @@ pub fn gpu_screenshot(
         | gpu::ShaderFormat::DXBC | gpu::ShaderFormat::DXIL;
     let device = gpu::Device::new(all_formats, false).ok()?.with_window(&window).ok()?;
 
-    let src_tex = create_texture(&device, src_w, src_h);
-    let xfer = device.create_transfer_buffer()
-        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-        .with_size(src_w * src_h * 4)
-        .build().ok()?;
-    upload_pixels(&device, &xfer, src, src_w, src_h);
+    let pipeline = pipeline_init(&device)?;
 
-    // Create offscreen render target
-    let rt_tex = device.create_texture(
+    // Create output storage texture
+    let out_tex = device.create_texture(
         gpu::TextureCreateInfo::new()
             .with_type(gpu::TextureType::_2D)
             .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
-            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COLOR_TARGET)
+            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
             .with_width(out_w).with_height(out_h)
             .with_layer_count_or_depth(1).with_num_levels(1)
     ).ok()?;
 
-    let sampler = device.create_sampler(
-        gpu::SamplerCreateInfo::new()
-            .with_min_filter(gpu::Filter::Nearest)
-            .with_mag_filter(gpu::Filter::Nearest)
-    ).ok()?;
+    // Build uniforms
+    let iscale = out_w / src_w;
+    let extra = match filter {
+        ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+            let sx = src_w as f32 / out_w as f32;
+            let sy = src_h as f32 / out_h as f32;
+            f32::to_bits((sx * sx + sy * sy).sqrt())
+        }
+        ScaleFilter::Epx | ScaleFilter::Scale4x
+        | ScaleFilter::Hqx(_) | ScaleFilter::Xbr(_) | ScaleFilter::Xbrz(_) => iscale,
+        _ => 0,
+    };
+    let uniforms = [src_w, src_h, out_w, out_h, extra, 0, 0, 0];
 
-    let pipeline = match filter {
-        super::super::ScaleFilter::Hqx(_) => init_hqx_pipeline(&device, &window),
-        super::super::ScaleFilter::Xbr(_) => init_xbr_pipeline(&device, &window),
-        super::super::ScaleFilter::Xbrz(_) => init_xbrz_pipeline(&device, &window),
-        super::super::ScaleFilter::SuperXbr => init_super_xbr_pipeline(&device, &window),
-        super::super::ScaleFilter::Epx | super::super::ScaleFilter::Scale2x | super::super::ScaleFilter::Scale4x
-            => init_epx_pipeline(&device, &window),
-        super::super::ScaleFilter::Scale3x => init_scale3x_pipeline(&device, &window),
-        super::super::ScaleFilter::Eagle => init_eagle_pipeline(&device, &window),
-        super::super::ScaleFilter::AaNearestNeighbor => init_aa_nearest_pipeline(&device, &window),
-        super::super::ScaleFilter::Bicubic => init_bicubic_pipeline(&device, &window),
-        super::super::ScaleFilter::OmniScale => init_omniscale_pipeline(&device, &window),
-        super::super::ScaleFilter::OmniScaleLegacy => init_omniscale_legacy_pipeline(&device, &window),
-        _ => return None,
-    }?;
-
-    // Single command buffer: upload → render → download
+    // Upload pixels + dispatch compute + download
     let cmd = device.acquire_command_buffer().ok()?;
-    copy_to_texture(&device, &cmd, &xfer, &src_tex, src_w, src_h);
-    let mut color_info = sdl3::sys::gpu::SDL_GPUColorTargetInfo::default();
-    color_info.texture = rt_tex.raw();
-    color_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
-    color_info.store_op = sdl3::sys::gpu::SDL_GPUStoreOp::STORE;
-    let rp_raw = unsafe {
-        sdl3::sys::gpu::SDL_BeginGPURenderPass(cmd.raw(), &color_info, 1, std::ptr::null())
-    };
-    if rp_raw.is_null() { return None; }
-    let rp: gpu::RenderPass = unsafe { std::mem::transmute(rp_raw) };
 
-    rp.bind_graphics_pipeline(&pipeline);
-    device.set_viewport(&rp, gpu::Viewport::new(0.0, 0.0, out_w as f32, out_h as f32, 0.0, 1.0));
-    rp.bind_fragment_samplers(0, &[
-        gpu::TextureSamplerBinding::new().with_texture(&src_tex).with_sampler(&sampler)
-    ]);
-
-    // Push uniforms
-    #[repr(C)] struct Uniforms4 { a: f32, b: f32, c: f32, d: f32 }
-    let scale_f = match filter {
-        super::super::ScaleFilter::Hqx(h) => h.factor() as f32,
-        super::super::ScaleFilter::Xbr(x) => x.factor() as f32,
-        super::super::ScaleFilter::Xbrz(x) => x.factor() as f32,
-        super::super::ScaleFilter::Scale4x => 4.0,
-        super::super::ScaleFilter::Epx | super::super::ScaleFilter::Scale2x => 2.0,
-        _ => 0.0,
+    let px_bytes = unsafe {
+        std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len() * 4)
     };
-    let needs_dst = matches!(filter,
-        super::super::ScaleFilter::AaNearestNeighbor | super::super::ScaleFilter::Bicubic
-        | super::super::ScaleFilter::OmniScale | super::super::ScaleFilter::OmniScaleLegacy);
-    if needs_dst {
-        cmd.push_fragment_uniform_data(0, &Uniforms4 {
-            a: src_w as f32, b: src_h as f32, c: out_w as f32, d: out_h as f32,
-        });
-    } else {
-        cmd.push_fragment_uniform_data(0, &Uniforms4 {
-            a: src_w as f32, b: src_h as f32, c: scale_f, d: 0.0,
-        });
+    let px_size = px_bytes.len().max(4) as u32;
+    let px_xfer = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+        .with_size(px_size).build().ok()?;
+    {
+        let mut map = px_xfer.map::<u8>(&device, true);
+        map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
+        map.unmap();
+    }
+    let px_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)
+        .with_size(px_size).build().ok()?;
+
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
+            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
+        device.end_copy_pass(cp);
     }
 
-    rp.draw_primitives(3, 1, 0, 0);
-    device.end_render_pass(rp);
+    let dispatch_x = (out_w + 15) / 16;
+    let dispatch_y = (out_h + 15) / 16;
 
-    // Download pixels from render target
+    if matches!(filter, ScaleFilter::SuperXbr) {
+        // Super xBR: 3-pass pipeline with intermediate buffer
+        let intermed_size = out_w * out_h * 4;
+        let intermed_buf = device.create_buffer()
+            .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
+            .with_size(intermed_size.max(4)).build().ok()?;
+
+        #[repr(C)]
+        struct SxbrUniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+
+        for pass_idx in 0u32..3 {
+            let cp = device.begin_compute_pass(
+                &cmd,
+                &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex)
+                    .with_cycle(pass_idx == 0)],
+                &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&intermed_buf.clone())
+                    .with_cycle(pass_idx == 0)],
+            ).ok()?;
+            cp.bind_compute_pipeline(&pipeline);
+            cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+            cmd.push_compute_uniform_data(0, &SxbrUniforms {
+                src_w, src_h, out_w, out_h, pass: pass_idx, _pad: [0; 3],
+            });
+            cp.dispatch(dispatch_x, dispatch_y, 1);
+            device.end_compute_pass(cp);
+        }
+    } else {
+        // Standard single-pass filters
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
+            &[],
+        ).ok()?;
+        compute_pass.bind_compute_pipeline(&pipeline);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf]);
+        #[repr(C)] struct RawUniforms([u32; 8]);
+        cmd.push_compute_uniform_data(0, &RawUniforms(uniforms));
+        compute_pass.dispatch(dispatch_x, dispatch_y, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    // Download pixels
     let dl_buf = device.create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-        .with_size(out_w * out_h * 4)
-        .build().ok()?;
-    let copy_pass = device.begin_copy_pass(&cmd).ok()?;
-    // Use raw SDL3 API — the Rust wrapper doesn't expose download yet
-    unsafe {
-        let mut src_region = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
-        src_region.texture = rt_tex.raw();
-        src_region.w = out_w;
-        src_region.h = out_h;
-        src_region.d = 1;
-        let mut dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
-        dst_info.transfer_buffer = dl_buf.raw();
-        sdl3::sys::gpu::SDL_DownloadFromGPUTexture(copy_pass.raw(), &src_region, &dst_info);
+        .with_size(out_w * out_h * 4).build().ok()?;
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        unsafe {
+            let mut src_region = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+            src_region.texture = out_tex.raw();
+            src_region.w = out_w; src_region.h = out_h; src_region.d = 1;
+            let mut dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+            dst_info.transfer_buffer = dl_buf.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_region, &dst_info);
+        }
+        device.end_copy_pass(cp);
     }
-    device.end_copy_pass(copy_pass);
     let fence = cmd.submit_and_acquire_fence(&device).ok()?;
     device.wait_fences(true, &[fence]).ok()?;
 

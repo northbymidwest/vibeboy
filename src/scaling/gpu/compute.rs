@@ -164,6 +164,280 @@ pub fn vectorize_and_blit(
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
 
+// ── OmniScale compute pipeline ──────────────────────────────────────────────
+
+/// Create a scaling filter compute pipeline from pre-compiled shader bytecode.
+/// All scaling compute shaders share the same descriptor layout:
+///   set 0 = 1 readonly storage buffer (pixels)
+///   set 1 = 1 readwrite storage texture (output)
+///   set 2 = 1 uniform buffer
+fn init_scale_compute(
+    device: &gpu::Device,
+    spirv: &[u8], msl: &[u8], dxil: &[u8],
+    label: &str,
+) -> Option<gpu::ComputePipeline> {
+    let pipeline = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(1)
+        .with_readwrite_storage_textures(1)
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| if !dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(1)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, msl)
+            .with_entrypoint(c"main0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(1)
+            .with_readwrite_storage_textures(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    match pipeline {
+        Ok(p) => { eprintln!("{label} compute pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("{label} compute pipeline failed: {e}"); None }
+    }
+}
+
+macro_rules! init_scale_pipeline {
+    ($name:ident, $base:literal) => {
+        pub fn $name(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
+            init_scale_compute(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/", $base, "_comp.spv")),
+                include_bytes!(concat!(env!("OUT_DIR"), "/", $base, "_comp.metal")),
+                include_bytes!(concat!(env!("OUT_DIR"), "/", $base, "_comp.dxil")),
+                $base,
+            )
+        }
+    };
+}
+
+init_scale_pipeline!(init_omniscale_compute_pipeline, "omniscale");
+init_scale_pipeline!(init_epx_compute_pipeline, "epx");
+init_scale_pipeline!(init_eagle_compute_pipeline, "eagle");
+init_scale_pipeline!(init_scale3x_compute_pipeline, "scale3x");
+init_scale_pipeline!(init_bicubic_compute_pipeline, "bicubic");
+init_scale_pipeline!(init_aa_nearest_compute_pipeline, "aa_nearest");
+init_scale_pipeline!(init_hqx_compute_pipeline, "hqx");
+init_scale_pipeline!(init_xbr_compute_pipeline, "xbr");
+init_scale_pipeline!(init_xbrz_compute_pipeline, "xbrz");
+// Super xBR uses a different pipeline descriptor (2 storage buffers for 3-pass)
+pub fn init_super_xbr_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
+    let comp_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.spv"));
+    let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.metal"));
+    let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.dxil"));
+
+    let pipeline = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(1)
+        .with_readwrite_storage_buffers(1)
+        .with_readwrite_storage_textures(1)
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| if !comp_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(1)
+                .with_readwrite_storage_buffers(1)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, comp_msl)
+            .with_entrypoint(c"main0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(1)
+            .with_readwrite_storage_buffers(1)
+            .with_readwrite_storage_textures(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    match pipeline {
+        Ok(p) => { eprintln!("super_xbr compute pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("super_xbr compute pipeline failed: {e}"); None }
+    }
+}
+init_scale_pipeline!(init_omniscale_legacy_compute_pipeline, "omniscale_legacy");
+
+/// Dispatch a scaling compute shader and blit to the swapchain.
+/// `uniforms` must be exactly 32 bytes (8 × u32) matching the shader's uniform block.
+pub fn scale_compute_and_blit(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    pipeline: &gpu::ComputePipeline,
+    pixels: &[u32],
+    out_w: u32, out_h: u32,
+    uniforms: &[u32; 8],
+) {
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+
+    let px_bytes = unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+    };
+
+    let px_size = px_bytes.len().max(4) as u32;
+    let px_xfer = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+        .with_size(px_size)
+        .build().expect("px transfer");
+    {
+        let mut map = px_xfer.map::<u8>(device, true);
+        map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
+        map.unmap();
+    }
+    let px_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)
+        .with_size(px_size)
+        .build().expect("px buf");
+
+    {
+        let cp = device.begin_copy_pass(&cmd).expect("copy pass");
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
+            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size),
+            false,
+        );
+        device.end_copy_pass(cp);
+    }
+
+    {
+        let compute_pass = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
+            &[],
+        ).expect("compute pass");
+        compute_pass.bind_compute_pipeline(pipeline);
+        compute_pass.bind_compute_storage_buffers(0, &[px_buf]);
+
+        #[repr(C)]
+        struct RawUniforms([u32; 8]);
+        cmd.push_compute_uniform_data(0, &RawUniforms(*uniforms));
+        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        device.end_compute_pass(compute_pass);
+    }
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let (vx, vy, vw, vh) = aspect_viewport(out_w, out_h, sw_w, sw_h);
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = out_w;
+        blit_info.source.h = out_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = vx as u32;
+        blit_info.destination.y = vy as u32;
+        blit_info.destination.w = vw as u32;
+        blit_info.destination.h = vh as u32;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
+/// Dispatch Super xBR 3-pass compute pipeline and blit to swapchain.
+pub fn super_xbr_compute_and_blit(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    pipeline: &gpu::ComputePipeline,
+    pixels: &[u32],
+    src_w: u32, src_h: u32,
+    out_w: u32, out_h: u32,
+) {
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+
+    // Upload pixel data
+    let px_bytes = unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+    };
+    let px_size = px_bytes.len().max(4) as u32;
+    let px_xfer = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+        .with_size(px_size).build().expect("px transfer");
+    {
+        let mut map = px_xfer.map::<u8>(device, true);
+        map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
+        map.unmap();
+    }
+    let px_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)
+        .with_size(px_size).build().expect("px buf");
+
+    // Intermediate buffer (out_w * out_h * 4 bytes)
+    let intermed_size = out_w * out_h * 4;
+    let intermed_buf = device.create_buffer()
+        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
+        .with_size(intermed_size.max(4)).build().expect("intermed buf");
+
+    #[repr(C)]
+    struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+
+    let dispatch_x = (out_w + 15) / 16;
+    let dispatch_y = (out_h + 15) / 16;
+
+    // Upload pixels
+    {
+        let cp = device.begin_copy_pass(&cmd).expect("copy pass");
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
+            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
+        device.end_copy_pass(cp);
+    }
+
+    // 3 passes in one command buffer — clone handles for each bind call
+    for pass_idx in 0u32..3 {
+        let cp = device.begin_compute_pass(
+            &cmd,
+            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex)
+                .with_cycle(pass_idx == 0)],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&intermed_buf.clone())
+                .with_cycle(pass_idx == 0)],
+        ).expect("compute pass");
+        cp.bind_compute_pipeline(pipeline);
+        cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+        cmd.push_compute_uniform_data(0, &Uniforms {
+            src_w, src_h, out_w, out_h, pass: pass_idx, _pad: [0; 3],
+        });
+        cp.dispatch(dispatch_x, dispatch_y, 1);
+        device.end_compute_pass(cp);
+    }
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let (vx, vy, vw, vh) = aspect_viewport(out_w, out_h, sw_w, sw_h);
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = out_w;
+        blit_info.source.h = out_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = vx as u32;
+        blit_info.destination.y = vy as u32;
+        blit_info.destination.w = vw as u32;
+        blit_info.destination.h = vh as u32;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 // ── Full GPU vectorize pipeline ─────────────────────────────────────────────
 //
 // Six-stage pipeline: similarity_graph → resolve_crossings → cell_graph →
