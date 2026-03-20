@@ -1,6 +1,6 @@
 #[path = "../../apu.rs"]
 mod apu;
-#[path = "../../bus.rs"]
+#[path = "../../bus/mod.rs"]
 mod bus;
 #[path = "../../cartridge/mod.rs"]
 mod cartridge;
