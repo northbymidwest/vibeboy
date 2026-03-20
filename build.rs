@@ -295,6 +295,8 @@ fn main() {
             std::fs::write(&msl_path, msl.as_bytes())
                 .unwrap_or_else(|e| panic!("Failed to write {}: {e}", msl_path.display()));
         } else {
+            // Write empty stub so include_bytes! compiles on all platforms
+            let _ = std::fs::write(&msl_path, b"");
             eprintln!(
                 "cargo:warning=spirv-cross not found, MSL shaders will not be generated. \
                  Install with: brew install spirv-cross"
