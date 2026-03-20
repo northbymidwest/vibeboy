@@ -23,7 +23,7 @@ pub fn gpu_screenshot(
     };
 
     let pipeline_init: fn(&gpu::Device) -> Option<gpu::ComputePipeline> = match filter {
-        ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => init_omniscale_compute_pipeline,
+        ScaleFilter::OmniScale => init_omniscale_compute_pipeline,
         ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => init_epx_compute_pipeline,
         ScaleFilter::Eagle => init_eagle_compute_pipeline,
         ScaleFilter::Scale3x => init_scale3x_compute_pipeline,
@@ -61,7 +61,7 @@ pub fn gpu_screenshot(
     // Build uniforms
     let iscale = out_w / src_w;
     let extra = match filter {
-        ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+        ScaleFilter::OmniScale => {
             let sx = src_w as f32 / out_w as f32;
             let sy = src_h as f32 / out_h as f32;
             f32::to_bits((sx * sx + sy * sy).sqrt())

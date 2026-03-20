@@ -173,8 +173,6 @@ pub enum ScaleFilter {
     VectorizeAdaptive,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     VectorizeGpu,
-    /// OmniScale via compute shader (for A/B comparison with fragment version).
-    OmniScaleCompute,
 }
 
 /// Filter metadata: (variant, cli_name, display_name, scale_factor).
@@ -226,7 +224,6 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Vectorize,        cli_name: "vectorize",    display_name: "Vectorize",      factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeAdaptive, cli_name: "vectorize-adaptive", display_name: "Vectorize Adaptive", factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeGpu,     cli_name: "vectorize-gpu", display_name: "Vectorize GPU", factor: 0 },
-    FilterInfo { filter: ScaleFilter::OmniScaleCompute, cli_name: "omniscale-compute", display_name: "OmniScale Compute", factor: 0 },
 ];
 
 impl ScaleFilter {
@@ -295,10 +292,10 @@ impl ScaleFilter {
     }
 
     /// Iterator over (display_name, ScaleFilter) pairs for menu building.
-    /// Excludes Scale2x (alias for EPX) and OmniScaleCompute (debug only).
+    /// Excludes Scale2x (alias for EPX).
     pub fn menu_entries() -> impl Iterator<Item = (&'static str, ScaleFilter)> {
         REGISTRY.iter()
-            .filter(|e| !matches!(e.filter, ScaleFilter::Scale2x | ScaleFilter::OmniScaleCompute))
+            .filter(|e| e.filter != ScaleFilter::Scale2x)
             .map(|e| (e.display_name, e.filter))
     }
 }

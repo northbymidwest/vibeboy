@@ -129,7 +129,7 @@ impl GpuPipelines {
         }
         // Map scaling filters to compute pipeline index + init function
         let scale_idx: Option<(usize, fn(&gpu::Device) -> Option<gpu::ComputePipeline>)> = match filter {
-            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute =>
+            ScaleFilter::OmniScale =>
                 Some((SP_OMNISCALE, super::gpu::init_omniscale_compute_pipeline)),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x =>
                 Some((SP_EPX, super::gpu::init_epx_compute_pipeline)),
@@ -237,7 +237,7 @@ impl GpuPipelines {
     ) {
         // Determine which pipeline index this filter uses
         let idx = match filter {
-            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => SP_OMNISCALE,
+            ScaleFilter::OmniScale => SP_OMNISCALE,
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => SP_EPX,
             ScaleFilter::Eagle => SP_EAGLE,
             ScaleFilter::Scale3x => SP_SCALE3X,
@@ -278,7 +278,7 @@ impl GpuPipelines {
         // Build uniforms: [src_w, src_h, out_w, out_h, extra, 0, 0, 0]
         // The 5th u32 is filter-specific: iscale for integer filters, pixel_size for omniscale
         let extra = match filter {
-            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+            ScaleFilter::OmniScale => {
                 let sx = src_w as f32 / out_w as f32;
                 let sy = src_h as f32 / out_h as f32;
                 f32::to_bits((sx * sx + sy * sy).sqrt())

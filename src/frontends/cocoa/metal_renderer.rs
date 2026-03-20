@@ -450,7 +450,7 @@ impl MetalRenderer {
         use scaling::ScaleFilter;
 
         let (idx, msl): (usize, &[u8]) = match filter {
-            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute =>
+            ScaleFilter::OmniScale =>
                 (0, include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_comp.metal"))),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x =>
                 (1, include_bytes!(concat!(env!("OUT_DIR"), "/epx_comp.metal"))),
@@ -513,7 +513,7 @@ impl MetalRenderer {
         // Build uniforms
         let iscale = if src_w > 0 { out_w / src_w } else { 1 };
         let extra = match filter {
-            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+            ScaleFilter::OmniScale => {
                 let sx = src_w as f32 / out_w as f32;
                 let sy = src_h as f32 / out_h as f32;
                 f32::to_bits((sx * sx + sy * sy).sqrt())
