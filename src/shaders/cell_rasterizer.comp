@@ -139,10 +139,47 @@ bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
     return true;
 }
 
+// Find closest parameter t on a quadratic B-spline span to point pt.
+// Uses a coarse N=4 sweep to seed, then 4 Newton-Raphson iterations
+// minimizing D(t) = |B(t) - pt|^2. Returns refined (t, d2).
+vec2 closest_on_span(vec2 p0, vec2 p1, vec2 p2, vec2 pt) {
+    // Coarse sweep: 5 samples to find the best starting interval
+    float best_d2 = 1e10;
+    float best_t = 0.0;
+    for (int s = 0; s <= 4; s++) {
+        float t = float(s) * 0.25;
+        vec2 bp = beval(p0, p1, p2, t);
+        float d2 = dot(pt - bp, pt - bp);
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best_t = t;
+        }
+    }
+
+    // Newton-Raphson: minimize D(t) = |B(t) - pt|^2
+    // D'(t) = 2 * B'(t) · (B(t) - pt)
+    // D''(t) = 2 * (B''(t) · (B(t) - pt) + |B'(t)|^2)
+    // Update: t -= D'(t) / D''(t) = f / g
+    // B''(t) is constant for quadratic: p0 - 2*p1 + p2
+    vec2 b2 = p0 - 2.0 * p1 + p2;
+    for (int i = 0; i < 4; i++) {
+        vec2 bt = beval(p0, p1, p2, best_t);
+        vec2 bt1 = beval_deriv(p0, p1, p2, best_t);
+        vec2 diff = bt - pt;
+        float f = dot(bt1, diff);
+        float g = dot(b2, diff) + dot(bt1, bt1);
+        if (abs(g) > 1e-10)
+            best_t = clamp(best_t - f / g, 0.0, 1.0);
+    }
+
+    vec2 bp = beval(p0, p1, p2, best_t);
+    best_d2 = dot(pt - bp, pt - bp);
+    return vec2(best_t, best_d2);
+}
+
 // Single-pass: find nearest CPs, resolve color, and return hit info.
 // Scans all CPs exactly once (builds top-4 sorted list for resolve fallback,
-// and tracks absolute nearest for AA threshold). This avoids the duplicate
-// scan that occurred when sample_from_shared_ex called sample_from_shared.
+// and tracks absolute nearest for AA threshold).
 uint sample_from_shared(vec2 pt, uint fallback_color,
                         out int out_idx, out float out_t, out float out_d2) {
     struct SHit { float d2; float t; int idx; };
@@ -153,18 +190,10 @@ uint sample_from_shared(vec2 pt, uint fallback_color,
     uint n = sh_num_cps;
     for (uint i = 0u; i < n; i++) {
         SharedCP sc = sh_cps[i];
-        float span_best_d2 = 1e10;
-        float span_best_t = 0.0;
-        const int N = 16;
-        for (int s = 0; s <= N; s++) {
-            float t = float(s) / float(N);
-            vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
-            float d2 = dot(pt - bp, pt - bp);
-            if (d2 < span_best_d2) {
-                span_best_d2 = d2;
-                span_best_t = t;
-            }
-        }
+        vec2 result = closest_on_span(sc.prev_pos, sc.pos, sc.next_pos, pt);
+        float span_best_t = result.x;
+        float span_best_d2 = result.y;
+
         if (span_best_d2 < 1.0) {
             for (int h = 0; h < 4; h++) {
                 if (span_best_d2 < hits[h].d2) {

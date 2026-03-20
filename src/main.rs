@@ -246,6 +246,9 @@ fn main() {
     eprintln!("  Right Shift — Select        Gamepad Back");
     eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
     eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
+    eprintln!("  Minus       — Slow motion   (hold for half speed)");
+    eprintln!("  Space       — Pause         (toggle)");
+    eprintln!("  Period      — Frame advance  (step one frame while paused)");
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  F9          — Screenshot (raw + scaled)");
     eprintln!("  1-9         — Select state slot");
@@ -372,6 +375,8 @@ fn main() {
     };
 
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
+    let mut paused = false;
+    let mut step_one_frame = false;
 
     let mut frame_start = Instant::now();
     let mut emu_time_debt = Duration::ZERO; // accumulated emulation time for vsync decoupling
@@ -458,6 +463,20 @@ fn main() {
                         eprintln!("State loaded from slot {}", current_slot + 1);
                     } else {
                         eprintln!("Slot {} is empty", current_slot + 1);
+                    }
+                }
+                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
+                    paused = !paused;
+                    if paused {
+                        eprintln!("Paused");
+                    } else {
+                        eprintln!("Resumed");
+                        emu_time_debt = Duration::ZERO;
+                    }
+                }
+                Event::KeyDown { keycode: Some(Keycode::Period), .. } => {
+                    if paused {
+                        step_one_frame = true;
                     }
                 }
                 Event::KeyDown { keycode: Some(k), .. } => {
@@ -565,10 +584,11 @@ fn main() {
             }
         }
 
-        // ── Rewind / Fast-forward ─────────────────────────────────────────────
+        // ── Rewind / Fast-forward / Slow-motion ─────────────────────────────
         let ks = event_pump.keyboard_state();
         let mut backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
         let mut fast_forward = ks.is_scancode_pressed(Scancode::Tab);
+        let slow_motion = ks.is_scancode_pressed(Scancode::Minus);
         drop(ks);
         // Left shoulder = rewind, right shoulder = fast forward
         if let Some(ref gp) = gamepad {
@@ -581,6 +601,8 @@ fn main() {
         }
         emu.rewinding = backspace_held;
 
+        let work_start = Instant::now();
+
         // Accumulate elapsed wall time and run enough emulation frames to keep up.
         // This decouples emulation speed from the display refresh rate — on a 30Hz
         // monitor with vsync, we run 2 frames per loop iteration.
@@ -591,7 +613,14 @@ fn main() {
         let max_debt = frame_dur * 4;
         if emu_time_debt > max_debt { emu_time_debt = max_debt; }
 
-        if backspace_held {
+        if paused && !step_one_frame {
+            // Consume time but don't step emulation
+            emu_time_debt = Duration::ZERO;
+        } else if step_one_frame {
+            emu.step_frame();
+            step_one_frame = false;
+            emu_time_debt = Duration::ZERO;
+        } else if backspace_held {
             emu.rewind_one_frame();
             emu.bus.apu.drain_samples();
             emu_time_debt = Duration::ZERO;
@@ -603,6 +632,13 @@ fn main() {
             }
             emu.step_frame();
             emu_time_debt = Duration::ZERO;
+        } else if slow_motion {
+            // Half speed: double the effective frame duration
+            let slow_dur = frame_dur * 2;
+            while emu_time_debt >= slow_dur {
+                emu.step_frame();
+                emu_time_debt -= slow_dur;
+            }
         } else {
             while emu_time_debt >= frame_dur {
                 emu.step_frame();
@@ -783,7 +819,7 @@ fn main() {
         }
 
         // ── FPS counter ───────────────────────────────────────────────────────
-        let emu_time = frame_start.elapsed();
+        let emu_time = work_start.elapsed();
         fps_count += 1;
         fps_emu_total += emu_time;
         let fps_elapsed = fps_timer.elapsed();
