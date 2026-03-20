@@ -91,7 +91,18 @@
     <canvas id="screen-2d" width="160" height="144" style="display:none;"></canvas>
   </div>
   <div id="status"></div>
-  <button id="toggle-filter" style="margin-top:8px; padding:4px 12px; display:none;">Switch to Nearest</button>
+  <div id="filter-bar" style="margin-top:8px;">
+    <select id="filter-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
+      <option value="vectorize">Vectorize</option>
+      <option value="omniscale">OmniScale</option>
+      <option value="epx">EPX / Scale2x</option>
+      <option value="eagle">Eagle</option>
+      <option value="scale3x">Scale3x</option>
+      <option value="bicubic">Bicubic</option>
+      <option value="aa-nearest">AA Nearest</option>
+      <option value="nearest">Nearest</option>
+    </select>
+  </div>
   <div id="controls">
     Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select
   </div>
@@ -200,7 +211,8 @@ let ctx = null;
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const status = document.getElementById('status');
-const toggleBtn = document.getElementById('toggle-filter');
+const filterBar = document.getElementById('filter-bar');
+const filterSelect = document.getElementById('filter-select');
 
 // Load wasm eagerly
 let keyMap = {};
@@ -357,23 +369,20 @@ async function startEmulator(romBytes) {
   if (emu.has_camera()) initCamera();
 
   dropZone.classList.add('hidden');
-  if (useGpu) toggleBtn.style.display = '';
+  if (useGpu) filterBar.style.display = '';
   requestAnimationFrame(frame);
 }
 
-let filterMode = 'vectorize'; // 'vectorize' or 'nearest'
-toggleBtn.addEventListener('click', () => {
+filterSelect.addEventListener('change', () => {
   if (!emu) return;
-  if (filterMode === 'vectorize') {
-    filterMode = 'nearest';
-    toggleBtn.textContent = 'Switch to Vectorize';
+  const name = filterSelect.value;
+  emu.set_filter(name);
+  if (name === 'nearest') {
     status.textContent = 'Rendering: Nearest neighbor';
     canvas.style.display = 'none';
     canvas2d.style.display = '';
   } else {
-    filterMode = 'vectorize';
-    toggleBtn.textContent = 'Switch to Nearest';
-    status.textContent = 'Rendering: WebGPU vectorize';
+    status.textContent = 'Rendering: ' + filterSelect.options[filterSelect.selectedIndex].text;
     canvas.style.display = '';
     canvas2d.style.display = 'none';
   }
@@ -436,8 +445,8 @@ function frame(timestamp) {
 
   // Only render if we stepped at least one frame
   if (stepped) {
-    if (useGpu && filterMode === 'vectorize') {
-      emu.render_gpu();
+    if (useGpu && emu.render_gpu()) {
+      // GPU rendered successfully
     } else if (ctx) {
       emu.frame_buffer_update();
       const ptr = emu.frame_buffer_ptr();
