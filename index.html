@@ -120,7 +120,7 @@
     </select>
   </div>
   <div id="controls">
-    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Gamepad supported
+    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 1-9: Slot &nbsp; | &nbsp; Gamepad
   </div>
   <!-- Hidden elements for webcam capture -->
   <video id="cam-video" autoplay playsinline style="display:none;"></video>
@@ -553,10 +553,60 @@ function feedAccelerometer() {
   emu.set_accelerometer(accelX, accelY);
 }
 
+// Save states (localStorage)
+let currentSlot = 0;
+
+function saveStateKey(slot) {
+  if (!emu) return null;
+  return 'vibeboy_ss_' + emu.save_key() + '_' + slot;
+}
+
+function saveState() {
+  if (!emu) return;
+  const data = emu.save_state_to_bytes(currentSlot);
+  if (data && data.length > 0) {
+    const key = saveStateKey(currentSlot);
+    let bin = '';
+    for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
+    try {
+      localStorage.setItem(key, btoa(bin));
+      status.textContent = 'State saved to slot ' + (currentSlot + 1);
+    } catch (e) {
+      status.textContent = 'Save state failed: ' + e.message;
+    }
+  }
+}
+
+function loadState() {
+  if (!emu) return;
+  const key = saveStateKey(currentSlot);
+  const saved = localStorage.getItem(key);
+  if (saved) {
+    const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
+    if (emu.load_state_from_bytes(currentSlot, bytes)) {
+      status.textContent = 'State loaded from slot ' + (currentSlot + 1);
+    } else {
+      status.textContent = 'Failed to load state (incompatible version?)';
+    }
+  } else {
+    status.textContent = 'Slot ' + (currentSlot + 1) + ' is empty';
+  }
+}
+
 // Keyboard input
 document.addEventListener('keydown', e => {
+  if (!emu) return;
+  // Save state slots: 1-9 select slot, F5 save, F7 load
+  if (e.code >= 'Digit1' && e.code <= 'Digit9') {
+    currentSlot = parseInt(e.code.charAt(5)) - 1;
+    status.textContent = 'Slot ' + (currentSlot + 1) + ' selected';
+    e.preventDefault(); return;
+  }
+  if (e.code === 'F5') { saveState(); e.preventDefault(); return; }
+  if (e.code === 'F7') { loadState(); e.preventDefault(); return; }
+
   const btn = keyMap[e.code];
-  if (btn !== undefined && emu) { emu.set_button(btn, true); e.preventDefault(); }
+  if (btn !== undefined) { emu.set_button(btn, true); e.preventDefault(); }
 });
 document.addEventListener('keyup', e => {
   const btn = keyMap[e.code];

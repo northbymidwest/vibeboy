@@ -133,6 +133,18 @@ export class WasmEmulator {
         wasm.wasmemulator_load_save(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * Load emulator state from serialized bytes into slot.
+     * @param {number} slot
+     * @param {Uint8Array} data
+     * @returns {boolean}
+     */
+    load_state_from_bytes(slot, data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmemulator_load_state_from_bytes(this.__wbg_ptr, slot, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
      * Create a new emulator from ROM bytes. Call init_gpu() after to enable WebGPU rendering.
      * @param {Uint8Array} rom
      */
@@ -203,6 +215,20 @@ export class WasmEmulator {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
+    }
+    /**
+     * Save emulator state to slot and return serialized bytes for storage.
+     * @param {number} slot
+     * @returns {Uint8Array | undefined}
+     */
+    save_state_to_bytes(slot) {
+        const ret = wasm.wasmemulator_save_state_to_bytes(this.__wbg_ptr, slot);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
     }
     /**
      * Feed accelerometer data. gx/gy are in g-force units (±1.0 = ±1g).
@@ -1214,7 +1240,7 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 213, function: Function { arguments: [Externref], shim_idx: 214, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 244, function: Function { arguments: [Externref], shim_idx: 245, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen_998a1f080b72a94d___closure__destroy___dyn_core_1d30e4ad3f208054___ops__function__FnMut__wasm_bindgen_998a1f080b72a94d___JsValue____Output___core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___, wasm_bindgen_998a1f080b72a94d___convert__closures_____invoke___wasm_bindgen_998a1f080b72a94d___JsValue__core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___true_);
             return ret;
         },
