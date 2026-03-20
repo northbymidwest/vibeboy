@@ -15,3 +15,5 @@ profile.json.gz
 .claude/worktrees/
 vectorize-tests/
 lib/
+pkg/
+web/pkg/
