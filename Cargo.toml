@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "vibeboy"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "vibeboy"
 path = "src/main.rs"
@@ -13,12 +16,12 @@ name = "test_runner"
 path = "src/test_runner/main.rs"
 
 [dependencies]
-sdl3 = { version = "0.17", features = ["hidapi"] }
 log = "0.4"
-env_logger = "0.11"
-clap = { version = "4", features = ["derive"] }
-image = "0.25"
-svg = "0.18.0"
+sdl3 = { version = "0.17", features = ["hidapi"], optional = true }
+env_logger = { version = "0.11", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+image = { version = "0.25", optional = true }
+svg = { version = "0.18.0", optional = true }
 wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
@@ -28,6 +31,17 @@ cpal = { version = "0.15", optional = true }
 rfd = { version = "0.15", optional = true }
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"], optional = true }
 gilrs = { version = "0.11", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window", "Document", "HtmlCanvasElement", "CanvasRenderingContext2d",
+    "ImageData", "KeyboardEvent", "HtmlInputElement", "FileReader",
+    "DragEvent", "DataTransfer", "FileList", "File", "Blob",
+    "EventTarget", "Event", "Performance", "Storage",
+] }
+js-sys = { version = "0.3", optional = true }
+console_log = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
@@ -46,9 +60,14 @@ name = "vibeboy_winit"
 path = "src/winit_ui.rs"
 required-features = ["winit-ui"]
 
+[build-dependencies]
+naga = { version = "24", features = ["spv-in", "wgsl-out"] }
+
 [features]
-default = ["sdl3-gpu-shaders"]
+default = ["native", "sdl3-gpu-shaders"]
+native = ["sdl3", "clap", "env_logger", "image", "svg"]
 macos-ui = []
 sdl3-gpu-shaders = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 winit-ui = ["winit", "wgpu", "bytemuck", "pollster", "muda", "cpal", "rfd", "nokhwa", "gilrs"]
+web = ["wgpu", "bytemuck", "wasm-bindgen", "web-sys", "js-sys", "console_log", "wasm-bindgen-futures", "console_error_panic_hook"]

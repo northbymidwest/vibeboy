@@ -139,9 +139,12 @@ bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
     return true;
 }
 
-// Find nearest CP and resolve color for a single sample point
-uint sample_from_shared(vec2 pt, uint fallback_color) {
-    // Build top-4 nearest hits, then try each until one resolves
+// Single-pass: find nearest CPs, resolve color, and return hit info.
+// Scans all CPs exactly once (builds top-4 sorted list for resolve fallback,
+// and tracks absolute nearest for AA threshold). This avoids the duplicate
+// scan that occurred when sample_from_shared_ex called sample_from_shared.
+uint sample_from_shared(vec2 pt, uint fallback_color,
+                        out int out_idx, out float out_t, out float out_d2) {
     struct SHit { float d2; float t; int idx; };
     SHit hits[4];
     int num_hits = 0;
@@ -176,7 +179,12 @@ uint sample_from_shared(vec2 pt, uint fallback_color) {
         }
     }
 
-    // Try each hit until one resolves (matches original sample_color behavior)
+    // Return absolute nearest hit info (hits[0] is nearest since sorted)
+    out_idx = (num_hits > 0) ? hits[0].idx : -1;
+    out_t = (num_hits > 0) ? hits[0].t : 0.0;
+    out_d2 = (num_hits > 0) ? hits[0].d2 : 1e10;
+
+    // Try each hit until one resolves
     for (int h = 0; h < num_hits; h++) {
         uint c;
         if (resolve_from_shared(pt, uint(hits[h].idx), hits[h].t, c)) {
@@ -186,42 +194,10 @@ uint sample_from_shared(vec2 pt, uint fallback_color) {
     return fallback_color;
 }
 
-// Find nearest CP, try all hits, return resolved color + hit info
-uint sample_from_shared_ex(vec2 pt, uint fallback_color, out int out_idx, out float out_t, out float out_d2) {
-    // Reuse sample_from_shared for the color, but also find the nearest hit info
-    // for AA threshold checking
-    float best_d2 = 1e10;
-    float best_t = 0.0;
-    int best_idx = -1;
-
-    uint n = sh_num_cps;
-    for (uint i = 0u; i < n; i++) {
-        SharedCP sc = sh_cps[i];
-        float span_best_d2 = 1e10;
-        float span_best_t = 0.0;
-        const int N = 16;
-        for (int s = 0; s <= N; s++) {
-            float t = float(s) / float(N);
-            vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
-            float d2 = dot(pt - bp, pt - bp);
-            if (d2 < span_best_d2) {
-                span_best_d2 = d2;
-                span_best_t = t;
-            }
-        }
-        if (span_best_d2 < best_d2) {
-            best_d2 = span_best_d2;
-            best_t = span_best_t;
-            best_idx = int(i);
-        }
-    }
-
-    out_idx = best_idx;
-    out_t = best_t;
-    out_d2 = best_d2;
-
-    // Use sample_from_shared which tries all hits properly
-    return sample_from_shared(pt, fallback_color);
+// Simple version for AA other-point sampling (no hit info needed)
+uint sample_from_shared_simple(vec2 pt, uint fallback_color) {
+    int dummy_idx; float dummy_t, dummy_d2;
+    return sample_from_shared(pt, fallback_color, dummy_idx, dummy_t, dummy_d2);
 }
 
 void main() {
@@ -231,57 +207,60 @@ void main() {
 
     uint tile_x = tile_idx % tiles_w;
     uint tile_y = tile_idx / tiles_w;
-    if (tile_y >= tiles_h) return;
+    bool valid_tile = (tile_y < tiles_h);
 
     // Source-space bounds of this tile
     int src_x0 = int(tile_x) * 2;
     int src_y0 = int(tile_y) * 2;
 
-    // Phase 1: Cooperatively load CPs into shared memory
+    // Phase 1: Cooperatively load CPs into shared memory.
+    // Barriers must be unconditional for WebGPU WGSL uniformity rules
+    // (naga copies workgroup_id to a private var, losing uniformity proof).
     if (tid == 0u) sh_num_cps = 0u;
     barrier();
 
-    // Search 5×5 corners around the tile center
-    int center_cx = src_x0 + 1;
-    int center_cy = src_y0 + 1;
+    if (valid_tile) {
+        int center_cx = src_x0 + 1;
+        int center_cy = src_y0 + 1;
 
-    // Each thread loads a subset of the 98 potential CPs (7×7 corners × 2 slots)
-    // ±3 covers the ±2 per-pixel search radius plus the 2-pixel tile width
-    for (uint slot_idx = tid; slot_idx < 98u; slot_idx += 256u) {
-        int local_idx = int(slot_idx) / 2;
-        int slot = int(slot_idx) % 2;
-        int dy = local_idx / 7 - 3;
-        int dx = local_idx % 7 - 3;
-        int cx = center_cx + dx;
-        int cy = center_cy + dy;
+        for (uint slot_idx = tid; slot_idx < 98u; slot_idx += 256u) {
+            int local_idx = int(slot_idx) / 2;
+            int slot = int(slot_idx) % 2;
+            int dy = local_idx / 7 - 3;
+            int dx = local_idx % 7 - 3;
+            int cx = center_cx + dx;
+            int cy = center_cy + dy;
 
-        if (cx < 0 || cy < 0 || cx >= int(corners_w) || cy > int(img_h)) continue;
-        int ci = (cy * int(corners_w) + cx) * 2 + slot;
-        uint flag = cp_flags[ci];
-        if (flag == 0u) continue;
+            if (cx < 0 || cy < 0 || cx >= int(corners_w) || cy > int(img_h)) continue;
+            int ci = (cy * int(corners_w) + cx) * 2 + slot;
+            uint flag = cp_flags[ci];
+            if (flag == 0u) continue;
 
-        int prev_ci = cp_neighbors[ci * 4];
-        int next_ci = cp_neighbors[ci * 4 + 1];
-        if (prev_ci < 0 && next_ci < 0) continue;
+            int prev_ci = cp_neighbors[ci * 4];
+            int next_ci = cp_neighbors[ci * 4 + 1];
+            if (prev_ci < 0 && next_ci < 0) continue;
 
-        uint idx = atomicAdd(sh_num_cps, 1u);
-        if (idx < MAX_TILE_CPS) {
-            vec2 cp = read_pos(ci);
-            sh_cps[idx].pos = cp;
-            sh_cps[idx].orig_pos = read_orig(ci);
-            sh_cps[idx].prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
-            sh_cps[idx].next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp;
-            sh_cps[idx].orig_prev = (prev_ci >= 0) ? read_orig(prev_ci) : read_orig(ci);
-            sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
-            sh_cps[idx].pl = edge_colors[ci * 4];
-            sh_cps[idx].pr = edge_colors[ci * 4 + 1];
-            sh_cps[idx].nl = edge_colors[ci * 4 + 2];
-            sh_cps[idx].nr = edge_colors[ci * 4 + 3];
-            sh_cps[idx].prev_ci = prev_ci;
-            sh_cps[idx].next_ci = next_ci;
+            uint idx = atomicAdd(sh_num_cps, 1u);
+            if (idx < MAX_TILE_CPS) {
+                vec2 cp = read_pos(ci);
+                sh_cps[idx].pos = cp;
+                sh_cps[idx].orig_pos = read_orig(ci);
+                sh_cps[idx].prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
+                sh_cps[idx].next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp;
+                sh_cps[idx].orig_prev = (prev_ci >= 0) ? read_orig(prev_ci) : read_orig(ci);
+                sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
+                sh_cps[idx].pl = edge_colors[ci * 4];
+                sh_cps[idx].pr = edge_colors[ci * 4 + 1];
+                sh_cps[idx].nl = edge_colors[ci * 4 + 2];
+                sh_cps[idx].nr = edge_colors[ci * 4 + 3];
+                sh_cps[idx].prev_ci = prev_ci;
+                sh_cps[idx].next_ci = next_ci;
+            }
         }
     }
     barrier();
+
+    if (!valid_tile) return;
 
     // Phase 2: Each thread processes output pixels in the tile.
     // Compute exact output pixel range from source tile bounds.
@@ -311,7 +290,7 @@ void main() {
         int best_idx = -1;
         float best_t = 0.0;
         float best_d2 = 1e10;
-        uint center_color = sample_from_shared_ex(center, fallback, best_idx, best_t, best_d2);
+        uint center_color = sample_from_shared(center, fallback, best_idx, best_t, best_d2);
 
         // AA needed if nearest boundary is within the pixel diagonal.
         // Pixel side = 1/scale in source coords, diagonal = sqrt(2)/scale.
@@ -349,7 +328,7 @@ void main() {
                 int ofb_x = clamp(int(floor(other_pt.x)), 0, int(img_w) - 1);
                 int ofb_y = clamp(int(floor(other_pt.y)), 0, int(img_h) - 1);
                 uint other_fb = pixels[ofb_y * int(img_w) + ofb_x];
-                uint other_color = sample_from_shared(other_pt, other_fb);
+                uint other_color = sample_from_shared_simple(other_pt, other_fb);
                 // If other color matches center, AA won't help — skip blending
                 if (other_color == center_color) {
                     imageStore(output_img, ivec2(opx, opy), vec4(
@@ -374,4 +353,5 @@ void main() {
             }
         }
     }
+
 }

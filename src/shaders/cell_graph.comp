@@ -27,15 +27,15 @@ layout(std430, set = 0, binding = 0) readonly buffer GraphBuf {
 };
 
 // Readwrite outputs
-layout(std430, set = 1, binding = 0) writeonly buffer PosBuf {
+layout(std430, set = 1, binding = 0) buffer PosBuf {
     float positions[];
 };
 
-layout(std430, set = 1, binding = 1) writeonly buffer NbrBuf {
+layout(std430, set = 1, binding = 1) buffer NbrBuf {
     int neighbors[];
 };
 
-layout(std430, set = 1, binding = 2) writeonly buffer FlagBuf {
+layout(std430, set = 1, binding = 2) buffer FlagBuf {
     uint flags[];
 };
 
@@ -44,7 +44,7 @@ layout(std430, set = 1, binding = 2) writeonly buffer FlagBuf {
 // "left" = counterclockwise side of tangent, "right" = clockwise side.
 // The tangent points from the neighbor TOWARD this CP for prev,
 // and from this CP TOWARD the neighbor for next.
-layout(std430, set = 1, binding = 3) writeonly buffer EdgeColorBuf {
+layout(std430, set = 1, binding = 3) buffer EdgeColorBuf {
     uint edge_colors[];
 };
 

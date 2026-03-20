@@ -7,6 +7,7 @@ struct ShaderInfo {
     spv_name: &'static str,
     msl_name: &'static str,
     dxil_name: &'static str,
+    wgsl_name: &'static str,
     /// MSL buffer index remapping: maps spirv-cross index → SDL3-expected index.
     /// spirv-cross assigns Metal buffer indices by descriptor set/binding order,
     /// but SDL3 MSL expects: uniform buffers first, then storage buffers.
@@ -20,6 +21,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "fullscreen_vert.spv",
         msl_name: "fullscreen_vert.metal",
         dxil_name: "fullscreen_vert.dxil",
+        wgsl_name: "fullscreen_vert.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -27,6 +29,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "omniscale_frag.spv",
         msl_name: "omniscale_frag.metal",
         dxil_name: "omniscale_frag.dxil",
+        wgsl_name: "omniscale_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -34,6 +37,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "hqx_frag.spv",
         msl_name: "hqx_frag.metal",
         dxil_name: "hqx_frag.dxil",
+        wgsl_name: "hqx_frag.wgsl",
         // spirv-cross already generates correct order for fragment:
         //   buffer(0)=uniform, buffer(1)=storage — matches SDL3 MSL convention
         msl_buffer_remap: &[],
@@ -43,6 +47,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "bicubic_frag.spv",
         msl_name: "bicubic_frag.metal",
         dxil_name: "bicubic_frag.dxil",
+        wgsl_name: "bicubic_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -50,6 +55,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "omniscale_legacy_frag.spv",
         msl_name: "omniscale_legacy_frag.metal",
         dxil_name: "omniscale_legacy_frag.dxil",
+        wgsl_name: "omniscale_legacy_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -57,6 +63,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "scale3x_frag.spv",
         msl_name: "scale3x_frag.metal",
         dxil_name: "scale3x_frag.dxil",
+        wgsl_name: "scale3x_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -64,6 +71,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "eagle_frag.spv",
         msl_name: "eagle_frag.metal",
         dxil_name: "eagle_frag.dxil",
+        wgsl_name: "eagle_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -71,6 +79,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "aa_nearest_frag.spv",
         msl_name: "aa_nearest_frag.metal",
         dxil_name: "aa_nearest_frag.dxil",
+        wgsl_name: "aa_nearest_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -78,6 +87,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "epx_frag.spv",
         msl_name: "epx_frag.metal",
         dxil_name: "epx_frag.dxil",
+        wgsl_name: "epx_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -85,6 +95,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "xbr_frag.spv",
         msl_name: "xbr_frag.metal",
         dxil_name: "xbr_frag.dxil",
+        wgsl_name: "xbr_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -92,6 +103,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "xbrz_frag.spv",
         msl_name: "xbrz_frag.metal",
         dxil_name: "xbrz_frag.dxil",
+        wgsl_name: "xbrz_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -99,6 +111,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "super_xbr_frag.spv",
         msl_name: "super_xbr_frag.metal",
         dxil_name: "super_xbr_frag.dxil",
+        wgsl_name: "super_xbr_frag.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {
@@ -106,6 +119,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "vectorize_raster_comp.spv",
         msl_name: "vectorize_raster_comp.metal",
         dxil_name: "vectorize_raster_comp.dxil",
+        wgsl_name: "vectorize_raster_comp.wgsl",
         // spirv-cross generates: buffer(0)=edges, buffer(1)=rows, buffer(2)=uniforms, buffer(3)=indices
         // SDL3 MSL compute expects: uniform buffers first, then readonly storage buffers:
         //   buffer(0)=uniforms, buffer(1)=edges, buffer(2)=rows, buffer(3)=indices
@@ -116,6 +130,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "diffusion_raster_comp.spv",
         msl_name: "diffusion_raster_comp.metal",
         dxil_name: "diffusion_raster_comp.dxil",
+        wgsl_name: "diffusion_raster_comp.wgsl",
         // spirv-cross generates: buffer(0)=diags, buffer(1)=uniforms, buffer(2)=regions, buffer(3)=pixels
         // SDL3 MSL compute expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=regions, buffer(3)=diags
         msl_buffer_remap: &[(0, 3), (1, 0), (3, 1)],
@@ -125,6 +140,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "vectorize_to_buf_comp.spv",
         msl_name: "vectorize_to_buf_comp.metal",
         dxil_name: "vectorize_to_buf_comp.dxil",
+        wgsl_name: "vectorize_to_buf_comp.wgsl",
         // spirv-cross: buffer(0)=edges, buffer(1)=rows, buffer(2)=uniforms, buffer(3)=indices, buffer(4)=output
         // SDL3 expects: buffer(0)=uniforms, buffer(1)=edges, buffer(2)=rows, buffer(3)=indices, buffer(4)=output
         msl_buffer_remap: &[(0, 1), (1, 2), (2, 0)],
@@ -134,6 +150,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "spline_diffusion_comp.spv",
         msl_name: "spline_diffusion_comp.metal",
         dxil_name: "spline_diffusion_comp.dxil",
+        wgsl_name: "spline_diffusion_comp.wgsl",
         // spirv-cross: buffer(0)=uniforms, buffer(1)=region_colors, buffer(2)=pixels
         // SDL3 expects: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors
         msl_buffer_remap: &[(1, 2), (2, 1)],
@@ -143,6 +160,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "cell_rasterizer_comp.spv",
         msl_name: "cell_rasterizer_comp.metal",
         dxil_name: "cell_rasterizer_comp.dxil",
+        wgsl_name: "cell_rasterizer_comp.wgsl",
         // Raw: 0=cp_positions, 1=orig_positions, 2=uniforms, 3=flags, 4=neighbors, 5=edge_colors, 6=pixels
         // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=flags, 5=neighbors, 6=edge_colors
         msl_buffer_remap: &[(0,2),(1,3),(2,0),(3,4),(4,5),(5,6),(6,1)],
@@ -152,6 +170,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "similarity_graph_comp.spv",
         msl_name: "similarity_graph_comp.metal",
         dxil_name: "similarity_graph_comp.dxil",
+        wgsl_name: "similarity_graph_comp.wgsl",
         // spirv-cross: buffer(0)=pixels, buffer(1)=uniforms, buffer(2)=graph
         // SDL3: buffer(0)=uniforms, buffer(1)=pixels(ro), buffer(2)=graph(rw)
         msl_buffer_remap: &[(0, 1), (1, 0)],
@@ -161,6 +180,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "resolve_crossings_comp.spv",
         msl_name: "resolve_crossings_comp.metal",
         dxil_name: "resolve_crossings_comp.dxil",
+        wgsl_name: "resolve_crossings_comp.wgsl",
         // spirv-cross: buffer(0)=graph_in(ro), buffer(1)=uniforms, buffer(2)=graph_out(rw)
         // SDL3: buffer(0)=uniforms, buffer(1)=graph_in(ro), buffer(2)=graph_out(rw)
         msl_buffer_remap: &[(0, 1), (1, 0)],
@@ -170,6 +190,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "cell_graph_comp.spv",
         msl_name: "cell_graph_comp.metal",
         dxil_name: "cell_graph_comp.dxil",
+        wgsl_name: "cell_graph_comp.wgsl",
         // spirv-cross: buffer(0)=uniforms, buffer(1)=graph, buffer(2)=pos, buffer(3)=nbr, buffer(4)=flags
         // Already correct — no remap needed
         msl_buffer_remap: &[],
@@ -179,6 +200,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "optimize_energy_comp.spv",
         msl_name: "optimize_energy_comp.metal",
         dxil_name: "optimize_energy_comp.dxil",
+        wgsl_name: "optimize_energy_comp.wgsl",
         // spirv-cross: buffer(0)=pos_in, buffer(1)=flags, buffer(2)=orig,
         //              buffer(3)=uniforms, buffer(4)=pos_out, buffer(5)=neighbors
         // SDL3: buffer(0)=uniforms, buffer(1)=pos_in, buffer(2)=orig,
@@ -190,6 +212,7 @@ const SHADERS: &[ShaderInfo] = &[
         spv_name: "update_tjunction_comp.spv",
         msl_name: "update_tjunction_comp.metal",
         dxil_name: "update_tjunction_comp.dxil",
+        wgsl_name: "update_tjunction_comp.wgsl",
         // Raw: 0=uniforms, 1=flags, 2=neighbors, 3=positions
         // SDL3: 0=uniforms, 1=neighbors, 2=flags, 3=positions
         msl_buffer_remap: &[(1, 2), (2, 1)],
@@ -197,8 +220,10 @@ const SHADERS: &[ShaderInfo] = &[
 ];
 
 fn main() {
-    // Only compile shaders when the GPU shader feature is enabled
-    if std::env::var("CARGO_FEATURE_SDL3_GPU_SHADERS").is_err() {
+    // Compile shaders when GPU features are enabled
+    if std::env::var("CARGO_FEATURE_SDL3_GPU_SHADERS").is_err()
+        && std::env::var("CARGO_FEATURE_WEB").is_err()
+    {
         return;
     }
 
@@ -353,7 +378,45 @@ fn main() {
                 );
             }
         }
+
+        // Step 4: SPIR-V → WGSL via naga (for wgpu/WebGPU backends)
+        let wgsl_path = Path::new(&out_dir).join(shader.wgsl_name);
+        if spv_path.exists() {
+            let spv_bytes = std::fs::read(&spv_path).unwrap_or_default();
+            if !spv_bytes.is_empty() {
+                match naga_spv_to_wgsl(&spv_bytes) {
+                    Ok(wgsl) => { let _ = std::fs::write(&wgsl_path, wgsl); }
+                    Err(e) => {
+                        eprintln!("cargo:warning=naga WGSL conversion failed for {}: {e}", shader.spv_name);
+                        let _ = std::fs::write(&wgsl_path, "");
+                    }
+                }
+            } else {
+                let _ = std::fs::write(&wgsl_path, "");
+            }
+        } else {
+            let _ = std::fs::write(&wgsl_path, "");
+        }
     }
+}
+
+/// Convert SPIR-V bytecode to WGSL using naga.
+fn naga_spv_to_wgsl(spv_bytes: &[u8]) -> Result<String, String> {
+    let options = naga::front::spv::Options {
+        adjust_coordinate_space: false,
+        ..Default::default()
+    };
+    let module = naga::front::spv::parse_u8_slice(spv_bytes, &options)
+        .map_err(|e| format!("SPIR-V parse error: {e}"))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|e| format!("Validation error: {e}"))?;
+    let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+        .map_err(|e| format!("WGSL write error: {e}"))?;
+    Ok(wgsl)
 }
 
 /// Remap MSL [[buffer(N)]] indices so resources match SDL3's expected layout.

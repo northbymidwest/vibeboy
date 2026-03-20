@@ -36,7 +36,7 @@ layout(std430, set = 0, binding = 3) readonly buffer Flags {
     uint node_flags[];
 };
 
-layout(std430, set = 1, binding = 0) writeonly buffer PositionsOut {
+layout(std430, set = 1, binding = 0) buffer PositionsOut {
     float pos_out[];
 };
 

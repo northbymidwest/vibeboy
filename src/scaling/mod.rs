@@ -20,6 +20,8 @@ pub mod xbrz;
 pub mod gpu;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod gpu_pipelines;
+#[cfg(any(feature = "gpu", feature = "winit-ui"))]
+pub mod wgpu_vectorize;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]

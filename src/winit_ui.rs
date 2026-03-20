@@ -335,6 +335,59 @@ impl GpuRenderer {
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
+
+    /// Blit an external wgpu texture to screen using the given encoder.
+    /// Caller must submit the encoder and present the frame.
+    fn encode_blit(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        tex: &wgpu::Texture,
+        surface_view: &wgpu::TextureView,
+        src_w: u32, src_h: u32,
+    ) {
+        let win_w = self.surface_config.width as f32;
+        let win_h = self.surface_config.height as f32;
+        let src_aspect = src_w as f32 / src_h as f32;
+        let win_aspect = win_w / win_h;
+        let (scale_x, scale_y) = if win_aspect > src_aspect {
+            (src_aspect / win_aspect, 1.0)
+        } else {
+            (1.0, win_aspect / src_aspect)
+        };
+        let uniform_data = [scale_x, scale_y, 0.0f32, 0.0f32];
+        let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&uniform_data),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let view = tex.create_view(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: uniform_buf.as_entire_binding() },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..4, 0..1);
+        }
+    }
 }
 
 use wgpu::util::DeviceExt;
@@ -448,6 +501,7 @@ fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
         ("filter_vec_diff",    "Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
         ("filter_vec_sdiff",   "Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
         ("filter_vec_sdiffa",  "Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
+        ("filter_vec_gpu",     "Vectorize GPU",  ScaleFilter::VectorizeGpu),
     ]
 }
 
@@ -843,6 +897,7 @@ struct App {
     camera_buf: [u8; 128 * 112],
     scale_filter: scaling::ScaleFilter,
     vec_cache: Option<vectorize::VectorizeCache>,
+    wgpu_vectorize: Option<scaling::wgpu_vectorize::WgpuVectorizePipeline>,
     frame_start: Instant,
     frame_dur: Duration,
     paused: bool,
@@ -880,6 +935,7 @@ impl App {
             camera_buf: [0u8; 128 * 112],
             scale_filter: scaling::ScaleFilter::Nearest,
             vec_cache: None,
+            wgpu_vectorize: None,
             frame_start: Instant::now(),
             frame_dur: frame_duration(model),
             paused: false,
@@ -1104,6 +1160,34 @@ impl App {
                 );
                 scaled = buf;
                 (&scaled, dw, dh)
+            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeGpu) {
+                // Use logical pixels for vectorize output, not Retina physical pixels.
+                // The blit sampler upscales to physical resolution.
+                let scale_factor = window.scale_factor();
+                let logical_w = disp_w as f64 / scale_factor;
+                let logical_h = disp_h as f64 / scale_factor;
+                let s = (logical_w / sw as f64).min(logical_h / sh as f64);
+                let ow = (sw as f64 * s).round() as u32;
+                let oh = (sh as f64 * s).round() as u32;
+                if self.wgpu_vectorize.is_none() {
+                    self.wgpu_vectorize = Some(
+                        scaling::wgpu_vectorize::WgpuVectorizePipeline::new(&gpu.device)
+                    );
+                }
+                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vectorize+blit"),
+                });
+                let pipeline = self.wgpu_vectorize.as_mut().unwrap();
+                let out_tex = pipeline.encode(&gpu.device, &gpu.queue, &mut encoder, fb, sw as u32, sh as u32, ow, oh, s as f32);
+                let frame = match gpu.surface.get_current_texture() {
+                    Ok(f) => f,
+                    Err(_) => return,
+                };
+                let fb_view = frame.texture.create_view(&Default::default());
+                gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+                frame.present();
+                return; // skip normal render path
             } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
                 scaled = s;
                 (&scaled, w as usize, h as usize)
