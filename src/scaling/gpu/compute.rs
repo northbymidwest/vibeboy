@@ -178,13 +178,15 @@ struct CellRastBufCache {
 }
 
 /// All pipelines for the full GPU vectorize pipeline.
+/// Six stages: similarity_graph → resolve_crossings → cell_graph →
+/// optimize_energy → tjunction_correction → cell_rasterizer.
 pub struct GpuVectorizePipelines {
-    pub sim_graph: gpu::ComputePipeline,
-    pub resolve: gpu::ComputePipeline,
-    pub cell_graph: gpu::ComputePipeline,
-    pub optimizer: gpu::ComputePipeline,
-    pub tjunction: gpu::ComputePipeline,
-    pub rasterizer: gpu::ComputePipeline,
+    sim_graph: gpu::ComputePipeline,
+    resolve: gpu::ComputePipeline,
+    cell_graph: gpu::ComputePipeline,
+    optimizer: gpu::ComputePipeline,
+    tjunction: gpu::ComputePipeline,
+    rasterizer: gpu::ComputePipeline,
     buf_cache: Option<CellRastBufCache>,
 }
 
@@ -245,7 +247,129 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
     Some(GpuVectorizePipelines { sim_graph: sim, resolve, cell_graph: cell, optimizer: opt, tjunction: tjunc, rasterizer: rast, buf_cache: None })
 }
 
+/// Dispatch stages 1-4b (similarity graph through T-junction correction).
+/// Shared between live pipeline and screenshot pipeline.
+/// Returns the buffer containing the optimized+corrected positions.
+fn dispatch_stages_1_4b(
+    device: &gpu::Device,
+    cmd: &gpu::CommandBuffer,
+    pipelines: &GpuVectorizePipelines,
+    px_buf: &gpu::Buffer,
+    graph_buf: &gpu::Buffer,
+    graph_snapshot: &gpu::Buffer,
+    pos_buf: &gpu::Buffer,
+    nbr_buf: &gpu::Buffer,
+    flag_buf: &gpu::Buffer,
+    ecolor_buf: &gpu::Buffer,
+    opt_out_buf: &gpu::Buffer,
+    orig_pos_buf: &gpu::Buffer,
+    img_w: u32, img_h: u32,
+) -> gpu::Buffer {
+    let graph_stride = 2 * img_w + 1;
+    let corners_w = img_w + 1;
+    let corners_h = img_h + 1;
+    let num_cps = corners_w * corners_h * 2;
+    let graph_size = (graph_stride * (2 * img_h + 1) * 4).max(4) as u32;
+    let pos_size = (num_cps * 2 * 4).max(4) as u32;
+
+    // Stage 1: Similarity graph
+    {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false)]).expect("sim pass");
+        cp.bind_compute_pipeline(&pipelines.sim_graph);
+        cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
+        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
+        cp.dispatch((img_w + 15) / 16, (img_h + 15) / 16, 1);
+        device.end_compute_pass(cp);
+    }
+
+    // Stage 2: Resolve crossings
+    {
+        let cp = device.begin_copy_pass(cmd).expect("graph copy");
+        unsafe {
+            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_buf.raw(), offset: 0 };
+            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_snapshot.raw(), offset: 0 };
+            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, graph_size, false);
+        }
+        device.end_copy_pass(cp);
+    }
+    {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false)]).expect("resolve pass");
+        cp.bind_compute_pipeline(&pipelines.resolve);
+        cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone()]);
+        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
+        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
+        cp.dispatch((img_w.saturating_sub(1) + 15) / 16, (img_h.saturating_sub(1) + 15) / 16, 1);
+        device.end_compute_pass(cp);
+    }
+
+    // Stage 3: Cell graph
+    {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(pos_buf).with_cycle(false),
+              gpu::StorageBufferReadWriteBinding::new().with_buffer(nbr_buf).with_cycle(false),
+              gpu::StorageBufferReadWriteBinding::new().with_buffer(flag_buf).with_cycle(false),
+              gpu::StorageBufferReadWriteBinding::new().with_buffer(ecolor_buf).with_cycle(false),
+            ]).expect("cell pass");
+        cp.bind_compute_pipeline(&pipelines.cell_graph);
+        cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
+        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, corners_w: u32 }
+        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, corners_w });
+        cp.dispatch((corners_w + 15) / 16, (corners_h + 15) / 16, 1);
+        device.end_compute_pass(cp);
+    }
+
+    // Save original positions before optimization
+    {
+        let cp = device.begin_copy_pass(cmd).expect("orig pos copy");
+        unsafe {
+            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: pos_buf.raw(), offset: 0 };
+            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: orig_pos_buf.raw(), offset: 0 };
+            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size, false);
+        }
+        device.end_copy_pass(cp);
+    }
+
+    // Stage 4: Optimize energy (2-pass ping-pong)
+    let mut cur_in = pos_buf.clone();
+    let mut cur_out = opt_out_buf.clone();
+    for _ in 0..2u32 {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false)],
+        ).expect("opt pass");
+        cp.bind_compute_pipeline(&pipelines.optimizer);
+        cp.bind_compute_storage_buffers(0, &[cur_in.clone(), pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
+        #[repr(C)] struct U { num_nodes: u32, gradient_step: f32, max_move: f32, positional_scale: f32 }
+        cmd.push_compute_uniform_data(0, &U {
+            num_nodes: num_cps, gradient_step: 0.01, max_move: 0.25, positional_scale: 2.5 });
+        cp.dispatch((num_cps + 255) / 256, 1, 1);
+        device.end_compute_pass(cp);
+        std::mem::swap(&mut cur_in, &mut cur_out);
+    }
+    let optimized_pos = cur_in;
+
+    // Stage 4b: T-junction position correction + stem CP alignment
+    {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&optimized_pos).with_cycle(false)],
+        ).expect("tjunc pass");
+        cp.bind_compute_pipeline(&pipelines.tjunction);
+        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone()]);
+        #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
+        cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
+        cp.dispatch((num_cps + 255) / 256, 1, 1);
+        device.end_compute_pass(cp);
+    }
+
+    optimized_pos
+}
+
 /// Run the full GPU vectorize pipeline and blit to window.
+/// Called every frame from the emulator's render loop. Uses cached GPU
+/// buffers for zero per-frame allocation. No CPU computation after the
+/// initial pixel upload — all stages run on GPU back-to-back.
 pub fn gpu_vectorize_full_pipeline(
     device: &gpu::Device,
     window: &sdl3::video::Window,
@@ -308,96 +432,13 @@ pub fn gpu_vectorize_full_pipeline(
         device.end_copy_pass(cp);
     }
 
-    // Stage 1: Similarity graph
-    {
-        let cp = device.begin_compute_pass(&cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.graph_buf).with_cycle(false)]).expect("sim pass");
-        cp.bind_compute_pipeline(&pipelines.sim_graph);
-        cp.bind_compute_storage_buffers(0, &[b.px_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
-        cp.dispatch((img_w + 15) / 16, (img_h + 15) / 16, 1);
-        device.end_compute_pass(cp);
-    }
-
-    // Stage 2: Resolve crossings
-    {
-        let cp = device.begin_copy_pass(&cmd).expect("graph copy pass");
-        unsafe {
-            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: b.graph_buf.raw(), offset: 0 };
-            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: b.graph_snapshot.raw(), offset: 0 };
-            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, graph_size as u32, false);
-        }
-        device.end_copy_pass(cp);
-    }
-    {
-        let cp = device.begin_compute_pass(&cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.graph_buf).with_cycle(false)]).expect("resolve pass");
-        cp.bind_compute_pipeline(&pipelines.resolve);
-        cp.bind_compute_storage_buffers(0, &[b.graph_snapshot.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
-        cp.dispatch((img_w.saturating_sub(1) + 15) / 16, (img_h.saturating_sub(1) + 15) / 16, 1);
-        device.end_compute_pass(cp);
-    }
-
-    // Stage 3: Cell graph (builds B-spline control points at grid corners)
-    {
-        let cp = device.begin_compute_pass(&cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.pos_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.nbr_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.flag_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.ecolor_buf).with_cycle(false),
-            ]).expect("cell pass");
-        cp.bind_compute_pipeline(&pipelines.cell_graph);
-        cp.bind_compute_storage_buffers(0, &[b.graph_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, corners_w: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, corners_w });
-        cp.dispatch((corners_w + 15) / 16, (corners_h + 15) / 16, 1);
-        device.end_compute_pass(cp);
-    }
-
-    // Save original positions before optimization (for rasterizer color sampling)
-    {
-        let cp = device.begin_copy_pass(&cmd).expect("orig pos copy");
-        unsafe {
-            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: b.pos_buf.raw(), offset: 0 };
-            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: b.orig_pos_buf.raw(), offset: 0 };
-            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size as u32, false);
-        }
-        device.end_copy_pass(cp);
-    }
-
-    // Stage 4: Optimize energy (2-pass ping-pong)
-    let mut cur_in = b.pos_buf.clone();
-    let mut cur_out = b.opt_out_buf.clone();
-    for _ in 0..2u32 {
-        let cp = device.begin_compute_pass(&cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false)],
-        ).expect("opt pass");
-        cp.bind_compute_pipeline(&pipelines.optimizer);
-        cp.bind_compute_storage_buffers(0, &[cur_in.clone(), b.pos_buf.clone(), b.nbr_buf.clone(), b.flag_buf.clone()]);
-        #[repr(C)] struct U { num_nodes: u32, gradient_step: f32, max_move: f32, positional_scale: f32 }
-        cmd.push_compute_uniform_data(0, &U {
-            num_nodes: num_cps, gradient_step: 0.01, max_move: 0.25, positional_scale: 2.5 });
-        cp.dispatch((num_cps + 255) / 256, 1, 1);
-        device.end_compute_pass(cp);
-        std::mem::swap(&mut cur_in, &mut cur_out);
-    }
-    let optimized_pos = cur_in;
-
-    // Stage 4b: T-junction position correction + stem CP alignment
-    {
-        let cp = device.begin_compute_pass(&cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&optimized_pos).with_cycle(false)],
-        ).expect("tjunc pass");
-        cp.bind_compute_pipeline(&pipelines.tjunction);
-        cp.bind_compute_storage_buffers(0, &[b.nbr_buf.clone(), b.flag_buf.clone()]);
-        #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
-        cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
-        cp.dispatch((num_cps + 255) / 256, 1, 1);
-        device.end_compute_pass(cp);
-    }
+    // Stages 1-4b: vectorize pipeline (shared with screenshot path)
+    let optimized_pos = dispatch_stages_1_4b(
+        device, &cmd, pipelines,
+        &b.px_buf, &b.graph_buf, &b.graph_snapshot,
+        &b.pos_buf, &b.nbr_buf, &b.flag_buf, &b.ecolor_buf,
+        &b.opt_out_buf, &b.orig_pos_buf, img_w, img_h,
+    );
 
     // Stage 5: Tile-based cell rasterizer (one workgroup per 2×2 source tile)
     {
@@ -446,6 +487,9 @@ pub fn gpu_vectorize_full_pipeline(
 }
 
 /// CPU mirror of cell_rasterizer.comp for debugging.
+/// Activated by setting the `CPU_RASTER` environment variable.
+/// Set `CPU_RASTER_PX=x,y` to debug a specific pixel.
+#[allow(dead_code)]
 /// Takes the same buffers the GPU rasterizer uses and runs the identical logic
 /// on CPU, printing debug info for specific artifact pixels.
 #[allow(clippy::too_many_arguments)]
@@ -720,6 +764,10 @@ fn cpu_rasterize_debug(
 }
 
 /// Headless GPU full-pipeline screenshot (creates own device).
+/// Used by the test_runner for offline vectorization. Creates a temporary
+/// SDL context and GPU device, runs the full pipeline, and downloads the
+/// result. Uses `dispatch_stages_1_4b()` shared with the live pipeline.
+/// Includes optional CPU debug rasterizer (set `CPU_RASTER` env var).
 pub fn gpu_full_pipeline_screenshot(
     src: &[u32], src_w: usize, src_h: usize, scale: usize,
 ) -> Option<(Vec<u32>, u32, u32)> {
@@ -793,78 +841,16 @@ pub fn gpu_full_pipeline_screenshot(
           gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
       device.end_copy_pass(cp); }
 
-    // Stage 1-5 (same as gpu_vectorize_full_pipeline)
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&graph_buf).with_cycle(true)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.sim_graph);
-      cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
-      #[repr(C)] struct U{w:u32,h:u32,s:u32,p:u32}
-      cmd.push_compute_uniform_data(0,&U{w:img_w,h:img_h,s:graph_stride,p:0});
-      cp.dispatch((img_w+15)/16,(img_h+15)/16,1); device.end_compute_pass(cp); }
-
     let graph_snapshot = device.create_buffer().with_usage(ro).with_size(graph_size.max(4)).build().ok()?;
-    { let cp = device.begin_copy_pass(&cmd).ok()?;
-      unsafe {
-          let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_buf.raw(), offset: 0 };
-          let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_snapshot.raw(), offset: 0 };
-          sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, graph_size, false);
-      }
-      device.end_copy_pass(cp); }
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&graph_buf).with_cycle(false)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.resolve);
-      cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone()]);
-      #[repr(C)] struct U{w:u32,h:u32,s:u32,p:u32}
-      cmd.push_compute_uniform_data(0,&U{w:img_w,h:img_h,s:graph_stride,p:0});
-      cp.dispatch((img_w.saturating_sub(1)+15)/16,(img_h.saturating_sub(1)+15)/16,1); device.end_compute_pass(cp); }
-
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&pos_buf).with_cycle(true),
-            gpu::StorageBufferReadWriteBinding::new().with_buffer(&nbr_buf).with_cycle(true),
-            gpu::StorageBufferReadWriteBinding::new().with_buffer(&flag_buf).with_cycle(true),
-            gpu::StorageBufferReadWriteBinding::new().with_buffer(&ecolor_buf).with_cycle(true)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.cell_graph);
-      cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
-      #[repr(C)] struct U{w:u32,h:u32,s:u32,c:u32}
-      cmd.push_compute_uniform_data(0,&U{w:img_w,h:img_h,s:graph_stride,c:corners_w});
-      cp.dispatch((corners_w+15)/16,(corners_h+15)/16,1); device.end_compute_pass(cp); }
-
-    // Save original positions before optimization (for rasterizer color sampling)
     let orig_pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
-    { let cp = device.begin_copy_pass(&cmd).ok()?;
-      unsafe {
-          let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: pos_buf.raw(), offset: 0 };
-          let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: orig_pos_buf.raw(), offset: 0 };
-          sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size, false);
-      }
-      device.end_copy_pass(cp); }
 
-    // Stage 4: Optimize energy (2-pass ping-pong, matching reference TWOPASS)
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&opt_out_buf).with_cycle(false)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.optimizer);
-      cp.bind_compute_storage_buffers(0, &[pos_buf.clone(), pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
-      #[repr(C)] struct U{n:u32,g:f32,m:f32,s:f32}
-      cmd.push_compute_uniform_data(0,&U{n:num_cps,g:0.01,m:0.25,s:2.5});
-      cp.dispatch((num_cps+255)/256,1,1); device.end_compute_pass(cp); }
-    // Pass 2: read from opt_out_buf, write back to pos_buf
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&pos_buf).with_cycle(false)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.optimizer);
-      cp.bind_compute_storage_buffers(0, &[opt_out_buf.clone(), pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
-      #[repr(C)] struct U{n:u32,g:f32,m:f32,s:f32}
-      cmd.push_compute_uniform_data(0,&U{n:num_cps,g:0.01,m:0.25,s:2.5});
-      cp.dispatch((num_cps+255)/256,1,1); device.end_compute_pass(cp); }
-    // After 2 passes: result is in pos_buf
-
-    // Stage 4b: T-junction correction (operates on final optimized positions in pos_buf)
-    { let cp = device.begin_compute_pass(&cmd, &[],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&pos_buf).with_cycle(false)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.tjunction);
-      cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone()]);
-      #[repr(C)] struct U{n:u32,p0:u32,p1:u32,p2:u32}
-      cmd.push_compute_uniform_data(0,&U{n:num_cps,p0:0,p1:0,p2:0});
-      cp.dispatch((num_cps+255)/256,1,1); device.end_compute_pass(cp); }
+    // Stages 1-4b: shared vectorize pipeline dispatch
+    dispatch_stages_1_4b(
+        &device, &cmd, &pipelines,
+        &px_buf, &graph_buf, &graph_snapshot,
+        &pos_buf, &nbr_buf, &flag_buf, &ecolor_buf,
+        &opt_out_buf, &orig_pos_buf, img_w, img_h,
+    );
 
     // Debug: download positions before and after optimizer
     let pos_dl_size = num_cps * 2 * 4;
