@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
-use crate::emulator::Emulator;
-use crate::model::GbModel;
-use crate::test_runner::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
-use crate::test_runner::util::{make_emu, GB_FB_WIDTH, GB_FB_HEIGHT};
+use vibeboy::emulator::Emulator;
+use vibeboy::model::GbModel;
+use crate::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
+use crate::util::{make_emu, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 pub fn cmd_analyze(
     path: &Path,

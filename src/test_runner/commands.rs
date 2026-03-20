@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use crate::model::GbModel;
-use crate::scaling;
-use crate::vectorize;
-use crate::test_runner::test_model::{detect_model_with_rom, resolve_boot_rom};
-use crate::test_runner::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
+use vibeboy::model::GbModel;
+use vibeboy::scaling;
+use vibeboy::vectorize;
+use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
+use crate::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
     let mut rgb = Vec::with_capacity(w * h * 3);
@@ -95,7 +95,7 @@ fn vectorize_and_save(
                 || {
                     #[cfg(feature = "sdl3-gpu-shaders")]
                     {
-                        crate::scaling::gpu::gpu_vectorize_shared_screenshot(
+                        vibeboy::scaling::gpu::gpu_vectorize_shared_screenshot(
                             pixels, width, height, scale,
                         )
                     }
@@ -119,7 +119,7 @@ fn vectorize_and_save(
                 || {
                     #[cfg(feature = "sdl3-gpu-shaders")]
                     {
-                        crate::scaling::gpu::gpu_full_pipeline_screenshot(
+                        vibeboy::scaling::gpu::gpu_full_pipeline_screenshot(
                             pixels, width, height, scale,
                         )
                     }
@@ -263,7 +263,7 @@ pub fn cmd_screenshot(
         // CPU path
         if is_vectorize {
             let s = scale as f64;
-            let mut cache = crate::vectorize::VectorizeCache::new_legacy(is_adaptive);
+            let mut cache = vibeboy::vectorize::VectorizeCache::new_legacy(is_adaptive);
             let (raster, rw, rh) = cache.rasterize(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s);
             scaled_buf = raster.to_vec();
             (scaled_buf.as_slice(), rw, rh)

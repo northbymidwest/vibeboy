@@ -141,7 +141,7 @@ unsafe fn process_camera_frame(
     buffer: &Arc<Mutex<[u8; 128 * 112]>>,
     has_new_frame: &Arc<AtomicBool>,
 ) {
-    let surf: &SDL_Surface = &*surface;
+    let surf: &SDL_Surface = unsafe { &*surface };
     let src_w = surf.w as usize;
     let src_h = surf.h as usize;
     let pitch = surf.pitch as usize;
@@ -154,9 +154,9 @@ unsafe fn process_camera_frame(
     // Build RGBA image from SDL surface (may have row padding)
     let mut rgba = vec![0u8; src_w * src_h * 4];
     for y in 0..src_h {
-        let src_row = pixels.add(y * pitch);
+        let src_row = unsafe { pixels.add(y * pitch) };
         let dst_off = y * src_w * 4;
-        std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4);
+        unsafe { std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4) };
     }
 
     let img = image::RgbaImage::from_raw(src_w as u32, src_h as u32, rgba)

@@ -113,7 +113,7 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 ### Key data flow
 - **CPU** (`cpu/mod.rs`) executes SM83 opcodes, calls `bus.tick_mcycle()` between M-cycles, reads/writes memory via `bus.read_byte()`/`bus.write_byte()`
 - **Bus** (`bus.rs`) owns all subsystems and implements the memory map. `tick_mcycle()` steps Timer, PPU, APU, Joypad, OAM DMA, and HDMA each M-cycle
-- **PPU** (`ppu/mod.rs`) is a pixel FIFO renderer ticked 1 T-cycle at a time internally via `step(4)`. VRAM and OAM live in the Ppu struct; Bus delegates access
+- **PPU** (`ppu/mod.rs`) is a pixel FIFO renderer ticked 1 T-cycle at a time internally via `step(4)`. VRAM and OAM live in the Ppu struct; Bus delegates access. DMG models use classic green LCD palette (`DMG_SHADES`).
 - **APU** (`apu.rs`) uses a DIV-coupled frame sequencer; Bus detects DIV falling edges and calls `apu.div_event()`
 
 ### PPU timing model
@@ -122,9 +122,9 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - `oam_bug_row` captures `accessed_oam_row` at end of `step()` for CPU-side OAM corruption checks
 
 ### Memory ownership
-- VRAM (2 banks), OAM (160 bytes) → owned by `Ppu`
-- WRAM (8 banks), HRAM, IO registers → owned by `Bus`
-- Cart ROM/RAM → owned by `Cartridge` trait objects in `Bus`
+- VRAM (2 banks), OAM (160 bytes) -> owned by `Ppu`
+- WRAM (8 banks), HRAM, IO registers -> owned by `Bus`
+- Cart ROM/RAM -> owned by `Cartridge` trait objects in `Bus`
 
 ### SGB subsystem
 - `sgb.rs`: HLE command processing (palettes, attributes, borders, masking)
@@ -134,21 +134,21 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 ### Vectorization subsystem (`src/vectorize/`)
 Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)). Converts frame buffers into smooth vector paths, then rasterizes at any scale with anti-aliased edges. Implementation aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs).
 
-Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasterize`
+Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
 
-- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` (shared-chain) and `VectorizeLegacyCache` (original scanline) for frame caching, upscale detection/collapse, background color detection. No color quantization (removed — the paper doesn't use it).
-- `graph.rs`: Similarity graph — YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
-- `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (±0.25 pixel offsets)
+- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` (shared-chain) and `VectorizeLegacyCache` (original scanline) for frame caching, upscale detection/collapse, background color detection. No color quantization (removed -- the paper doesn't use it).
+- `graph.rs`: Similarity graph -- YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
+- `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (+/-0.25 pixel offsets)
 - `contour/`: Core pipeline stages (split into submodules):
   - `cells.rs`: 81-entry compile-time Voronoi cell template table (3^4 corner states), per-pixel cell vertex precomputation
-  - `edges.rs`: Boundary edge deduplication (FxHashMap), chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance ≤ 100/255), T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
+  - `edges.rs`: Boundary edge deduplication (FxHashMap), chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance <= 100/255), T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
   - `loops.rs`: Planar face algorithm for boundary loop tracing (flat sorted adjacency with cross-product angle ordering)
-  - `optimize.rs`: Gradient descent optimizer with κ² smoothness energy, (2.5×distance)⁴ positional energy, ×4 grid corner detection (angle ≥ 60°), corners excluded from curvature energy
+  - `optimize.rs`: Gradient descent optimizer with kappa^2 smoothness energy, (2.5x distance)^4 positional energy, x4 grid corner detection (angle >= 60 degrees), corners excluded from curvature energy
   - `mod.rs`: Orchestration, `VectorizeState` for split-phase optimization (CPU or GPU), VOID_COLOR sentinel (0x01000000) for image border edges
 - `svg.rs`: Serializes paths to SVG document string (grouped by color, BTreeMap ordering)
 - `rasterize/`: Three rasterizers (split into submodules):
-  - `scanline.rs`: 2×2 supersampling, nonzero winding, recursive Bezier flattening (tolerance 0.25). Default for `--filter vectorize`.
-  - `diffusion.rs`: Gaussian blending (σ≈0.63, gauss_k=2.5, radius=2.0) with graph-based region connectivity via 8-connected flood fill. For `--filter vectorize-diffusion`.
+  - `scanline.rs`: 2x2 supersampling, nonzero winding, recursive Bezier flattening (tolerance 0.25). Default for `--filter vectorize`.
+  - `diffusion.rs`: Gaussian blending (sigma ~= 0.63, gauss_k=2.5, radius=2.0) with graph-based region connectivity via 8-connected flood fill. For `--filter vectorize-diffusion`.
   - `spline_diffusion.rs`: B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
   - `gpu.rs`: GPU rasterization wrappers (edge data upload, buffer management)
 - `gpu_rasterize.rs`: GPU rasterization dispatch wrappers
@@ -156,41 +156,78 @@ Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasteri
 
 ### Scaling filter infrastructure (`src/scaling/`)
 - `mod.rs`: `ScaleFilter` enum (38 filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 16 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `xbr`, `xbrz`.
-- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, 11 graphics pipelines, 3+ compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` → `GpuRenderMode` enum (`Native`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
-- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` — full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
+- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
+- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
 
-### WebAssembly frontend (`src/web.rs`, `src/web_printer.rs`, `web/index.html`)
+### Printer (`src/printer.rs`)
+Unified Game Boy Printer implementation with `PrintOutput` enum:
+- `PrintOutput::File { output_dir }` -- saves completed prints as PNG files to disk (used by native frontends)
+- `PrintOutput::Memory` -- queues completed prints as RGBA pixel data in memory (used by WebAssembly frontend for browser download)
+
+### Save states (`src/savestate.rs`, `src/snapshot.rs`)
+- `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state, rewind ring buffer (VecDeque)
+- `savestate.rs`: Serialization via serde + bincode with magic header (`VIBEBOY\0`), layout version hash for compatibility detection. Produces/consumes `Vec<u8>` that frontends write as `rom.N.ss` files (native) or localStorage (web).
+
+### Frontends (`src/frontends/`)
+
+**SDL3 frontend** (`src/frontends/sdl/`):
+- `main.rs`: SDL3 window loop, audio callback, input handling, file dialog
+- `render.rs`: GPU rendering via `GpuPipelines` (SDL3 GPU API)
+- `input.rs`: Keyboard/gamepad input mapping
+- `camera.rs`: SDL3 webcam capture for Game Boy Camera
+- `accel.rs`: Accelerometer input for MBC7
+
+**Cocoa frontend** (`src/frontends/cocoa/`):
+- `main.rs`: Native macOS Cocoa event loop, Metal rendering
+- `metal_renderer.rs`: Metal GPU compute pipeline for all filters including the 6-stage vectorize pipeline, GPU scanline rasterizer, diffusion rasterizer, and spline-diffusion 2-pass pipeline
+- `vectorize_metal.rs`: `MetalVectorizePipeline` -- Metal-native full GPU vectorize (similarity graph through rasterization)
+- `menu.rs`: Native macOS menu bar (File, Emulation, Filter, Help)
+- `audio.rs`: CoreAudio output
+- `camera.rs`: AVFoundation webcam capture
+- `gamepad.rs`: Game Controller framework input
+- `controls.rs`, `font.rs`, `persistence.rs`, `accel.rs`: Input, OSD font, settings, accelerometer
+
+**Winit frontend** (`src/frontends/winit/`):
+- `main.rs`: Cross-platform winit/wgpu window with menus, file dialog, filter selection
+- `app.rs`: Application state and event handling
+- `gpu.rs`: wgpu rendering pipeline
+- `audio.rs`: Audio output
+- `camera.rs`: Webcam capture
+- `menu.rs`: Native menu integration
+
+**WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/index.html`):
 - `lib.rs`: Library crate re-exporting core emulator modules. Gates `printer`, `scaling`, `vectorize` behind `#[cfg(not(wasm32))]`. Exposes `wgpu_vectorize` for the `web` feature.
-- `web.rs`: `WasmEmulator` struct with wasm-bindgen exports — constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence.
-- `web_printer.rs`: Filesystem-free Game Boy Printer — matches native printer protocol exactly, queues completed prints as RGBA pixel data for JS download.
-- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU vectorize rendering, resizable canvas wrapper, frame-rate independent emulation (~59.73fps via time accumulator), Web Audio at native 96kHz, webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, filter toggle button.
+- `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence.
+- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU rendering with all GPU filters (vectorize, OmniScale, HQx, xBR, xBRZ, Super xBR, EPX, Eagle, Scale3x, bicubic, AA nearest) via filter dropdown, model select dropdown, built-in ROM selector with public domain games, gamepad support (Gamepad API), accelerometer (DeviceMotion API for MBC7), frame-rate independent emulation (~59.73fps via time accumulator), AudioWorklet at native 96kHz, webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, favicon.
 
 ### GPU shaders (`src/shaders/`)
 
+All shaders are compute shaders authored in GLSL 4.50. Fragment shaders have been removed; all scaling filters now use compute pipelines.
+
+**Compute shaders (scaling filters):**
+- `aa_nearest.comp`, `bicubic.comp`, `eagle.comp`, `epx.comp`, `hqx.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
+
 **Compute shaders (rasterization):**
-- `vectorize_raster.comp`: Scanline rasterizer with 2×2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
-- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion — produces hard region boundaries)
-- `spline_diffusion.comp`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2×2 supersampling (pass 2 of spline-diffusion)
+- `vectorize_raster.comp`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
+- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion -- produces hard region boundaries)
+- `spline_diffusion.comp`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2x2 supersampling (pass 2 of spline-diffusion)
 - `diffusion_raster.comp`: Voronoi diffusion with packed diagonal state ownership (2 bits per corner)
 
 **Compute shaders (full GPU vectorize pipeline):**
-- `similarity_graph.comp`: Builds (2W+1)×(2H+1) connectivity graph with binary color matching
+- `similarity_graph.comp`: Builds (2W+1)x(2H+1) connectivity graph with binary color matching
 - `resolve_crossings.comp`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
 - `cell_graph.comp`: Creates B-spline control points at grid corners, T-junction merging and position correction, corner detection with `DONT_OPTIMIZE_*` flags
-- `optimize_energy.comp`: Double-buffered gradient descent optimizer — κ² smoothness + (2.5d)⁴ positional energy, max move 0.25px
+- `update_tjunction.comp`: T-junction position update pass
+- `optimize_energy.comp`: Double-buffered gradient descent optimizer -- kappa^2 smoothness + (2.5d)^4 positional energy, max move 0.25px
 - `cell_rasterizer.comp`: Renders optimized B-spline curves to final output
-
-**Fragment shaders (scaling filters):**
-- `fullscreen.vert`: Shared vertex shader for all fragment-based filters
-- 11 filter shaders: `omniscale.frag`, `hqx.frag`, `xbr.frag`, `xbrz.frag`, `epx.frag`, `scale3x.frag`, `eagle.frag`, `aa_nearest.frag`, `omniscale_legacy.frag`, `super_xbr.frag`, `bicubic.frag`
 
 **Shader cross-compilation (`build.rs`):**
 
 All shaders are authored in GLSL and cross-compiled at build time to multiple backend formats:
-1. GLSL → SPIR-V via `glslc` (Vulkan backend, all platforms)
-2. SPIR-V → MSL via `spirv-cross --msl` (Metal backend, macOS) — requires per-shader `[[buffer(N)]]` index remapping (`msl_buffer_remap` in `ShaderInfo`) because MSL uses a single buffer namespace for all resource types
-3. SPIR-V → HLSL → DXIL via `spirv-cross --hlsl` + `dxc` (Direct3D 12 backend, Windows) — requires automated register/space normalization (`remap_hlsl_registers`) because spirv-cross assigns HLSL spaces based on SPIR-V descriptor sets, but SDL3 D3D12 expects type-based grouping: `t[n] space0` (SRVs), `u[n] space1` (UAVs), `b[n] space2` (CBVs)
-4. SPIR-V → WGSL via `naga` (WebGPU backend, browser/wgpu) — naga is a Rust build dependency; converts at build time. Note: `cell_rasterizer.comp` has barriers restructured for WGSL uniformity rules (naga copies `workgroup_id` to a private variable, losing uniformity proof).
+1. GLSL -> SPIR-V via `glslc` (Vulkan backend, all platforms)
+2. SPIR-V -> MSL via `spirv-cross --msl` (Metal backend, macOS) -- requires per-shader `[[buffer(N)]]` index remapping (`msl_buffer_remap` in `ShaderInfo`) because MSL uses a single buffer namespace for all resource types
+3. SPIR-V -> HLSL -> DXIL via `spirv-cross --hlsl` + `dxc` (Direct3D 12 backend, Windows) -- requires automated register/space normalization (`remap_hlsl_registers`) because spirv-cross assigns HLSL spaces based on SPIR-V descriptor sets, but SDL3 D3D12 expects type-based grouping: `t[n] space0` (SRVs), `u[n] space1` (UAVs), `b[n] space2` (CBVs)
+4. SPIR-V -> WGSL via `naga` (WebGPU backend, browser/wgpu) -- naga is a Rust build dependency; converts at build time. Note: `cell_rasterizer.comp` has barriers restructured for WGSL uniformity rules (naga copies `workgroup_id` to a private variable, losing uniformity proof).
 
 Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles. WGSL files are loaded via `include_str!` for wgpu/WebGPU backends.
 
@@ -198,7 +235,7 @@ Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are e
 
 ### Disassemblers (`tools/`)
 
-#### `tools/dis_sm83.py` — SM83 (Game Boy CPU) Disassembler
+#### `tools/dis_sm83.py` -- SM83 (Game Boy CPU) Disassembler
 
 Disassembles Game Boy ROM files. Supports all SM83 opcodes including CB-prefixed bit operations. Can disassemble at arbitrary ROM offsets or GB addresses, search for byte patterns, hex dump, and display cartridge header info.
 
@@ -222,7 +259,7 @@ python3 tools/dis_sm83.py path/to/rom.gb --search FE0C --context 8
 python3 tools/dis_sm83.py path/to/rom.gb --header
 ```
 
-#### `tools/dis65816.py` — WDC 65C816 (SNES CPU) Disassembler
+#### `tools/dis65816.py` -- WDC 65C816 (SNES CPU) Disassembler
 
 Disassembles SNES ROM files, primarily for SGB BIOS analysis. Automatically tracks M/X processor flag state through REP/SEP instructions to correctly decode 8-bit vs 16-bit immediate operands. Uses LoROM address mapping.
 
@@ -245,7 +282,7 @@ python3 tools/dis65816.py sgb1.program.rom --search 8D0042 --context 5
 
 ### Scripts (`scripts/`)
 
-#### `scripts/fetch-test-roms.sh` — Download Test ROM Suite
+#### `scripts/fetch-test-roms.sh` -- Download Test ROM Suite
 
 Downloads the c-sp/game-boy-test-roms v7.0 release from GitHub and unpacks it into the `game-boy-test-roms/` directory. Will not overwrite an existing directory.
 
@@ -253,7 +290,7 @@ Downloads the c-sp/game-boy-test-roms v7.0 release from GitHub and unpacks it in
 ./scripts/fetch-test-roms.sh
 ```
 
-#### `scripts/bundle_app.sh` — Build macOS Application Bundle
+#### `scripts/bundle_app.sh` -- Build macOS Application Bundle
 
 Builds the `vibeboy_cocoa` binary in release mode and packages it into a `VibeBoy.app` macOS application bundle under `target/VibeBoy.app`. Copies the binary, `Info.plist`, and app icon (`resources/AppIcon.icns`) into the bundle structure.
 
@@ -265,7 +302,7 @@ open target/VibeBoy.app
 cp -r target/VibeBoy.app /Applications/
 ```
 
-#### `scripts/generate_icon.py` — Generate App Icon
+#### `scripts/generate_icon.py` -- Generate App Icon
 
 Generates the VibeBoy macOS app icon (a stylized Game Boy Color) at all required sizes (16x16 through 1024x1024), saves them as an `.iconset`, and converts to `.icns` using `iconutil`. Requires the Python `Pillow` library. Output goes to `resources/AppIcon.icns`.
 
@@ -274,9 +311,9 @@ pip install Pillow  # if not already installed
 python3 scripts/generate_icon.py
 ```
 
-#### `scripts/vectorize_comparison.sh` — Vectorize Comparison Test Suite
+#### `scripts/vectorize_comparison.sh` -- Vectorize Comparison Test Suite
 
-Downloads all 54 input sprites and the paper's 8× results from the Kopf-Lischinski supplementary page, then runs our scanline and spline-diffusion rasterizers (CPU and GPU) on each for side-by-side comparison. Generates an HTML page.
+Downloads all 54 input sprites and the paper's 8x results from the Kopf-Lischinski supplementary page, then runs our scanline and spline-diffusion rasterizers (CPU and GPU) on each for side-by-side comparison. Generates an HTML page.
 
 ```bash
 ./scripts/vectorize_comparison.sh          # skip existing outputs
@@ -288,16 +325,17 @@ open vectorize-tests/comparison.html
 
 The project produces four native binaries plus a WebAssembly library:
 
-- **`vibeboy`** (`src/main.rs`) — Main emulator with SDL3 window, audio, and input handling
-- **`vibeboy_cocoa`** (`src/cocoa_ui.rs`) — Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
-- **`vibeboy_winit`** (`src/winit_ui.rs`) — Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
-- **`test_runner`** (`src/test_runner/main.rs`) — Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
-- **WebAssembly** (`src/lib.rs` + `src/web.rs`) — Browser frontend via wasm-bindgen (requires `web` feature). Builds to `pkg/vibeboy_bg.wasm` + JS glue. Served from `web/index.html`. Deployed to GitHub Pages via the `gh-pages` branch.
+- **`vibeboy`** (`src/frontends/sdl/main.rs`) -- Main emulator with SDL3 window, audio, and input handling
+- **`vibeboy_cocoa`** (`src/frontends/cocoa/main.rs`) -- Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
+- **`vibeboy_winit`** (`src/frontends/winit/main.rs`) -- Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
+- **`test_runner`** (`src/test_runner/main.rs`) -- Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
+- **WebAssembly** (`src/lib.rs` + `src/frontends/web/mod.rs`) -- Browser frontend via wasm-bindgen (requires `web` feature). Builds to `pkg/vibeboy_bg.wasm` + JS glue. Served from `web/index.html`. Deployed to GitHub Pages via the `gh-pages` branch.
 
 ## Conventions
 
 - Models are `GbModel` enum in `model.rs`. Use `model.is_cgb()` to check CGB/AGB, `model.is_sgb()` for SGB/SGB2
-- Double-speed mode: `bus_cycles = cpu_cycles / 2` — Bus handles this in `tick_mcycle()`
-- Snapshots (`snapshot.rs`) support rewind (VecDeque ring buffer) and save states (F5/F7, slots 1-9)
+- Double-speed mode: `bus_cycles = cpu_cycles / 2` -- Bus handles this in `tick_mcycle()`
+- Snapshots (`snapshot.rs`) support rewind (VecDeque ring buffer) and save states (F5/F7, slots 1-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
 - OAM DMA is instant (0xA0 byte copy); HDMA mode 0 instant, mode 1 per-HBlank
 - Boot ROMs are in `bootroms/` directory; test runner loads them with `--boot` flag
+- DMG models use classic green Game Boy LCD palette (shades: `#9BBC0F`, `#8BAC0F`, `#306230`, `#0F380F`)

@@ -80,24 +80,24 @@ cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion-adapti
 cargo run --release -- path/to/rom.gb --filter vectorize --cpu-filter
 ```
 
-The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2×2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. The `vectorize-gpu` filter runs the entire pipeline on the GPU (similarity graph, crossing resolution, cell graph, optimization, and rasterization). All run in real-time.
+The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2x2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. The `vectorize-gpu` filter runs the entire pipeline on the GPU (similarity graph, crossing resolution, cell graph, optimization, and rasterization). All run in real-time.
 
 ## Features
 
 - **CPU**: Full SM83 instruction set with accurate M-cycle timing
-- **PPU**: Pixel FIFO renderer with per-T-cycle accuracy
+- **PPU**: Pixel FIFO renderer with per-T-cycle accuracy; DMG models use classic green LCD palette
 - **APU**: DIV-coupled frame sequencer, all 4 channels
 - **Cartridges**: ROM-only, MBC1, MBC2, MBC3 (with RTC), MBC5, MBC6, MBC7 (accelerometer + EEPROM)
 - **CGB**: Double-speed mode, VRAM banking, color palettes, HDMA, WRAM banking
 - **SGB**: HLE command processing (palettes, attributes, borders)
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
-- **Save states**: 9 slots with rewind support (~10 seconds buffer)
+- **Save states**: Serialized via serde + bincode (`rom.N.ss` files), 9 slots with rewind support (~10 seconds buffer)
 - **Camera**: Game Boy Camera support via webcam (macOS native, SDL3, browser getUserMedia)
 - **Printer**: Game Boy Printer emulation (saves PNG to `prints/`, or browser download)
-- **Scaling**: 38 filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, and more
+- **Scaling**: 38 filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, and more — all GPU filters use compute shaders
 - **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
 - **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, WebAssembly/WebGPU browser
-- **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, WebGPU vectorize filter, Web Audio at 96kHz, webcam for Game Boy Camera, localStorage save persistence
+- **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, built-in ROM selector with public domain games, all GPU filters via dropdown, model selection, gamepad support, accelerometer (DeviceMotion for MBC7), AudioWorklet at 96kHz, webcam for Game Boy Camera, localStorage save persistence
 
 ## Test Status
 
@@ -133,9 +133,11 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 
 ```
 src/
-├── main.rs          SDL3 window, audio, input, file dialog
-├── cocoa_ui.rs      Native macOS Cocoa/Metal UI (feature: macos-ui)
-├── winit_ui.rs      Cross-platform winit/wgpu UI (feature: winit-ui)
+├── frontends/       Frontend binaries (moved from src/ root)
+│   ├── sdl/         SDL3 window, audio, input, file dialog
+│   ├── cocoa/       Native macOS Cocoa/Metal UI (feature: macos-ui)
+│   ├── winit/       Cross-platform winit/wgpu UI (feature: winit-ui)
+│   └── web/         WebAssembly/wasm-bindgen frontend (feature: web)
 ├── emulator.rs      Frame loop, SGB compositing
 ├── cpu/             SM83 CPU (opcodes, interrupts, HALT)
 ├── bus.rs           Memory map, OAM DMA, HDMA, WRAM banking
@@ -145,26 +147,27 @@ src/
 ├── cartridge/       MBC implementations (1, 2, 3, 5, 6, 7)
 ├── sgb.rs           Super Game Boy HLE commands
 ├── serial.rs        Link cable / serial port
-├── printer.rs       Game Boy Printer (saves PNG to prints/)
+├── printer.rs       Unified Game Boy Printer (PrintOutput::File/Memory)
 ├── joypad.rs        Input handling
 ├── snapshot.rs      Rewind ring buffer + save states
+├── savestate.rs     serde + bincode serialization (rom.N.ss files)
 ├── model.rs         GbModel enum and per-model configuration
 ├── scaling/         38 pixel scaling filters + GPU pipeline management
 │   ├── gpu_pipelines.rs  GpuPipelines: SDL3 GPU resources, lazy init
 │   ├── wgpu_vectorize.rs wgpu compute pipeline (6-stage, WebGPU-compatible)
 │   └── *.rs         EPX, HQx, xBR, xBRZ, OmniScale, NEDI, DCCI, EDI, ...
-├── shaders/         GPU shaders: 11 fragment filters + 10 compute shaders
+├── shaders/         GPU compute shaders (21 .comp files, GLSL 4.50)
 ├── vectorize/       Kopf-Lischinski pixel-art vectorizer
 │   ├── graph.rs     Similarity graph (YUV thresholds, crossing heuristics)
 │   ├── contour/     Cell templates, edge chains, B-spline optimizer
 │   ├── rasterize/   Scanline, diffusion, spline-diffusion rasterizers
 │   └── svg.rs       SVG export
 ├── lib.rs           Library crate for WebAssembly builds
-├── web.rs           WebAssembly/wasm-bindgen frontend
-├── web_printer.rs   Browser-compatible Game Boy Printer
 ├── test_runner/     Automated test ROM runner (modular harnesses)
 web/
-└── index.html       Browser UI (Canvas2D/WebGPU, Web Audio, drag-and-drop)
+├── index.html       Browser UI (Canvas2D/WebGPU, Web Audio, drag-and-drop)
+├── favicon.ico      App icon
+└── roms/            Built-in public domain ROMs
 ```
 
 The main loop: `Emulator::step_frame()` calls `Cpu::step()` per instruction. Each M-cycle, `Bus::tick_mcycle()` advances PPU (4 T-cycles), APU, Timer, Serial, OAM DMA, and HDMA.

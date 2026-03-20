@@ -1,63 +1,22 @@
-#[path = "../apu.rs"]
-mod apu;
-#[path = "../bus.rs"]
-mod bus;
-#[path = "../cartridge/mod.rs"]
-mod cartridge;
-#[path = "../cpu/mod.rs"]
-mod cpu;
-#[path = "../emulator.rs"]
-mod emulator;
-#[path = "../joypad.rs"]
-mod joypad;
-#[path = "../model.rs"]
-mod model;
-#[path = "../ppu/mod.rs"]
-mod ppu;
-#[path = "../printer.rs"]
-mod printer;
-#[path = "../serial.rs"]
-mod serial;
-#[path = "../sgb.rs"]
-mod sgb;
-#[path = "../savestate.rs"]
-mod savestate;
-#[path = "../snapshot.rs"]
-mod snapshot;
-#[path = "../snes/mod.rs"]
-mod snes;
-#[path = "../timer.rs"]
-mod timer;
-#[path = "../scaling/mod.rs"]
-mod scaling;
-#[path = "../vectorize/mod.rs"]
-mod vectorize;
-#[path = "../ui_util.rs"]
-mod ui_util;
-
-#[path = "."]
-mod test_runner {
-    pub mod commands;
-    pub mod debug_commands;
-    pub mod harness;
-    pub mod harnesses;
-    #[path = "model.rs"]
-    pub mod test_model;
-    pub mod util;
-}
+mod commands;
+mod debug_commands;
+mod harness;
+mod harnesses;
+#[path = "model.rs"]
+mod test_model;
+mod util;
 
 use clap::{Parser, Subcommand};
-use model::GbModel;
+use vibeboy::model::GbModel;
 use std::path::PathBuf;
 
-use test_runner::commands;
-use test_runner::harness::run_tests;
-use test_runner::harnesses::blargg::BlarggHarness;
-use test_runner::harnesses::gambatte::GambatteHarness;
-use test_runner::harnesses::gbmicrotest::GbMicrotestHarness;
-use test_runner::harnesses::mooneye::MooneyeHarness;
-use test_runner::harnesses::tearoom::TearoomHarness;
-use test_runner::test_model::resolve_boot_rom;
+use harness::run_tests;
+use harnesses::blargg::BlarggHarness;
+use harnesses::gambatte::GambatteHarness;
+use harnesses::gbmicrotest::GbMicrotestHarness;
+use harnesses::mooneye::MooneyeHarness;
+use harnesses::tearoom::TearoomHarness;
+use test_model::resolve_boot_rom;
 
 #[derive(Parser)]
 #[command(name = "test_runner", about = "Game Boy emulator test runner")]
@@ -198,7 +157,7 @@ enum TestCommand {
     Tearoom(TestArgs),
 }
 
-use ui_util::parse_model;
+use vibeboy::ui_util::parse_model;
 
 fn main() {
     env_logger::init();
@@ -214,7 +173,7 @@ fn main() {
             let verbose = args.verbose;
             let quiet = args.quiet;
             let path = args.path.clone();
-            let harness: Box<dyn test_runner::harness::TestHarness> = match subcommand {
+            let harness: Box<dyn harness::TestHarness> = match subcommand {
                 TestCommand::Mooneye(args) => {
                     let br = resolve_boot_rom(
                         args.boot,
@@ -267,7 +226,7 @@ fn main() {
             boot,
             bootrom,
         } => {
-            test_runner::debug_commands::cmd_analyze(&path, model, boot, bootrom.as_deref(), frames);
+            debug_commands::cmd_analyze(&path, model, boot, bootrom.as_deref(), frames);
         }
         Command::TraceTimer {
             path,
@@ -275,10 +234,10 @@ fn main() {
             boot,
             bootrom,
         } => {
-            test_runner::debug_commands::cmd_trace_timer(&path, model, boot, bootrom.as_deref());
+            debug_commands::cmd_trace_timer(&path, model, boot, bootrom.as_deref());
         }
         Command::Calibrate { path } => {
-            test_runner::debug_commands::cmd_calibrate(&path);
+            debug_commands::cmd_calibrate(&path);
         }
     }
 }

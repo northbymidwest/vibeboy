@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::test_runner::util::collect_roms;
+use crate::util::collect_roms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestResult {

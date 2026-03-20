@@ -102,7 +102,7 @@ pub struct Bus {
     /// Boot ROM bytes (up to 0x900 for CGB). None = skip boot ROM.
     boot_rom: Option<Vec<u8>>,
     /// Whether the boot ROM is still mapped (cleared by writing 0xFF50).
-    pub(crate) boot_rom_active: bool,
+    pub boot_rom_active: bool,
 
     /// Path to .sav file (set when cartridge has battery).
     save_path: Option<PathBuf>,

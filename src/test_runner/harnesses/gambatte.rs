@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::model::GbModel;
-use crate::test_runner::harness::{TestHarness, TestResult};
-use crate::test_runner::util::{make_emu, GB_FB_WIDTH};
+use vibeboy::model::GbModel;
+use crate::harness::{TestHarness, TestResult};
+use crate::util::{make_emu, GB_FB_WIDTH};
 
 // Gambatte hex digit tile patterns (8x8 pixels each, bit 7=leftmost pixel)
 // 1 = black (0x000000), 0 = white (0xF8F8F8)

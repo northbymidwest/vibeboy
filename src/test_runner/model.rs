@@ -1,4 +1,4 @@
-use crate::model::GbModel;
+use vibeboy::model::GbModel;
 use std::fs;
 use std::path::Path;
 

@@ -1,6 +1,6 @@
-use crate::emulator::Emulator;
-use crate::joypad;
-use crate::model::GbModel;
+use vibeboy::emulator::Emulator;
+use vibeboy::joypad;
+use vibeboy::model::GbModel;
 use std::fs;
 use std::path::{Path, PathBuf};
 

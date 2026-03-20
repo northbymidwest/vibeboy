@@ -135,91 +135,97 @@ unsafe extern "C" fn report_callback(
     report: *mut u8,
     report_length: CFIndex,
 ) {
-    if report_length != IMU_REPORT_LEN {
-        return;
+    unsafe {
+        if report_length != IMU_REPORT_LEN {
+            return;
+        }
+
+        let mut raw_x: i32 = 0;
+        let mut raw_y: i32 = 0;
+        let mut raw_z: i32 = 0;
+        std::ptr::copy_nonoverlapping(
+            report.add(IMU_DATA_OFF) as *const u8,
+            &mut raw_x as *mut i32 as *mut u8,
+            4,
+        );
+        std::ptr::copy_nonoverlapping(
+            report.add(IMU_DATA_OFF + 4) as *const u8,
+            &mut raw_y as *mut i32 as *mut u8,
+            4,
+        );
+        std::ptr::copy_nonoverlapping(
+            report.add(IMU_DATA_OFF + 8) as *const u8,
+            &mut raw_z as *mut i32 as *mut u8,
+            4,
+        );
+
+        ACCEL_X.store(f32::to_bits(raw_x as f32 / ACCEL_SCALE), Ordering::Relaxed);
+        ACCEL_Y.store(f32::to_bits(raw_y as f32 / ACCEL_SCALE), Ordering::Relaxed);
+        ACCEL_Z.store(f32::to_bits(raw_z as f32 / ACCEL_SCALE), Ordering::Relaxed);
+        HAS_DATA.store(true, Ordering::Release);
     }
-
-    let mut raw_x: i32 = 0;
-    let mut raw_y: i32 = 0;
-    let mut raw_z: i32 = 0;
-    std::ptr::copy_nonoverlapping(
-        report.add(IMU_DATA_OFF) as *const u8,
-        &mut raw_x as *mut i32 as *mut u8,
-        4,
-    );
-    std::ptr::copy_nonoverlapping(
-        report.add(IMU_DATA_OFF + 4) as *const u8,
-        &mut raw_y as *mut i32 as *mut u8,
-        4,
-    );
-    std::ptr::copy_nonoverlapping(
-        report.add(IMU_DATA_OFF + 8) as *const u8,
-        &mut raw_z as *mut i32 as *mut u8,
-        4,
-    );
-
-    ACCEL_X.store(f32::to_bits(raw_x as f32 / ACCEL_SCALE), Ordering::Relaxed);
-    ACCEL_Y.store(f32::to_bits(raw_y as f32 / ACCEL_SCALE), Ordering::Relaxed);
-    ACCEL_Z.store(f32::to_bits(raw_z as f32 / ACCEL_SCALE), Ordering::Relaxed);
-    HAS_DATA.store(true, Ordering::Release);
 }
 
 /// Wake SPU drivers so they start producing reports.
 unsafe fn wake_spu_drivers() -> bool {
-    let match_dict = IOServiceMatching(b"AppleSPUHIDDriver\0".as_ptr());
-    if match_dict.is_null() {
-        return false;
-    }
-
-    let mut iter: u32 = 0;
-    let kr = IOServiceGetMatchingServices(kIOMainPortDefault, match_dict, &mut iter);
-    if kr != KERN_SUCCESS {
-        return false;
-    }
-
-    let mut woke = 0;
-    loop {
-        let svc = IOIteratorNext(iter);
-        if svc == IO_OBJECT_NULL {
-            break;
+    unsafe {
+        let match_dict = IOServiceMatching(b"AppleSPUHIDDriver\0".as_ptr());
+        if match_dict.is_null() {
+            return false;
         }
 
-        let k1 = cfstr(b"SensorPropertyReportingState\0");
-        let k2 = cfstr(b"SensorPropertyPowerState\0");
-        let k3 = cfstr(b"ReportInterval\0");
-        let v1 = cfnum32(1);
-        let v2 = cfnum32(1);
-        let v3 = cfnum32(1000);
+        let mut iter: u32 = 0;
+        let kr = IOServiceGetMatchingServices(kIOMainPortDefault, match_dict, &mut iter);
+        if kr != KERN_SUCCESS {
+            return false;
+        }
 
-        IORegistryEntrySetCFProperty(svc, k1, v1);
-        IORegistryEntrySetCFProperty(svc, k2, v2);
-        IORegistryEntrySetCFProperty(svc, k3, v3);
+        let mut woke = 0;
+        loop {
+            let svc = IOIteratorNext(iter);
+            if svc == IO_OBJECT_NULL {
+                break;
+            }
 
-        CFRelease(k1);
-        CFRelease(k2);
-        CFRelease(k3);
-        CFRelease(v1);
-        CFRelease(v2);
-        CFRelease(v3);
-        IOObjectRelease(svc);
-        woke += 1;
+            let k1 = cfstr(b"SensorPropertyReportingState\0");
+            let k2 = cfstr(b"SensorPropertyPowerState\0");
+            let k3 = cfstr(b"ReportInterval\0");
+            let v1 = cfnum32(1);
+            let v2 = cfnum32(1);
+            let v3 = cfnum32(1000);
+
+            IORegistryEntrySetCFProperty(svc, k1, v1);
+            IORegistryEntrySetCFProperty(svc, k2, v2);
+            IORegistryEntrySetCFProperty(svc, k3, v3);
+
+            CFRelease(k1);
+            CFRelease(k2);
+            CFRelease(k3);
+            CFRelease(v1);
+            CFRelease(v2);
+            CFRelease(v3);
+            IOObjectRelease(svc);
+            woke += 1;
+        }
+        IOObjectRelease(iter);
+        woke > 0
     }
-    IOObjectRelease(iter);
-    woke > 0
 }
 
 /// Read an integer property from an IOService.
 unsafe fn prop_int(svc: u32, key: &[u8]) -> i32 {
-    let cfkey = cfstr(key);
-    let r = IORegistryEntryCreateCFProperty(svc, cfkey, kCFAllocatorDefault, 0);
-    CFRelease(cfkey);
-    if r.is_null() {
-        return 0;
+    unsafe {
+        let cfkey = cfstr(key);
+        let r = IORegistryEntryCreateCFProperty(svc, cfkey, kCFAllocatorDefault, 0);
+        CFRelease(cfkey);
+        if r.is_null() {
+            return 0;
+        }
+        let mut val: i32 = 0;
+        CFNumberGetValue(r, K_CF_NUMBER_SINT32_TYPE, &mut val);
+        CFRelease(r);
+        val
     }
-    let mut val: i32 = 0;
-    CFNumberGetValue(r, K_CF_NUMBER_SINT32_TYPE, &mut val);
-    CFRelease(r);
-    val
 }
 
 /// Initialize the macOS native accelerometer. Returns true on success.

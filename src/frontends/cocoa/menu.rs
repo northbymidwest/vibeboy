@@ -309,18 +309,20 @@ pub(super) mod menu_handler {
 
     /// Create a menu handler instance and wire it up. Returns (handler_id, actions_ptr).
     pub unsafe fn create(app: id) -> (id, *mut MenuActions) {
-        let class = register_class();
-        let handler: id = msg_send![class, new];
+        unsafe {
+            let class = register_class();
+            let handler: id = msg_send![class, new];
 
-        let actions = Box::into_raw(Box::new(MenuActions::new()));
-        (*handler).set_ivar("_actions", actions as *mut c_void);
+            let actions = Box::into_raw(Box::new(MenuActions::new()));
+            (*handler).set_ivar("_actions", actions as *mut c_void);
 
-        // Set as first responder target for menu items that use menuAction: selector.
-        // We do this by making the handler the app's delegate — the responder chain
-        // sends unhandled actions up to the app delegate.
-        let _: () = msg_send![app, setDelegate: handler];
+            // Set as first responder target for menu items that use menuAction: selector.
+            // We do this by making the handler the app's delegate — the responder chain
+            // sends unhandled actions up to the app delegate.
+            let _: () = msg_send![app, setDelegate: handler];
 
-        (handler, actions)
+            (handler, actions)
+        }
     }
 }
 
@@ -331,40 +333,47 @@ pub(super) const K_F5_EQUIV: &str = "\u{F708}";  // NSF5FunctionKey
 pub(super) const K_F7_EQUIV: &str = "\u{F70A}";  // NSF7FunctionKey
 
 pub(super) unsafe fn menu_item(title: &str, action: SEL, key: &str) -> id {
-    NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-        NSString::alloc(nil).init_str(title),
-        action,
-        NSString::alloc(nil).init_str(key),
-    ).autorelease()
+    unsafe {
+        NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str(title),
+            action,
+            NSString::alloc(nil).init_str(key),
+        ).autorelease()
+    }
 }
 
 pub(super) unsafe fn menu_item_with_tag(title: &str, action: SEL, key: &str, tag: isize) -> id {
-    let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-        NSString::alloc(nil).init_str(title),
-        action,
-        NSString::alloc(nil).init_str(key),
-    ).autorelease();
-    let _: () = msg_send![item, setTag: tag];
-    // Target the app delegate (first responder chain will route to us)
-    item
+    unsafe {
+        let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str(title),
+            action,
+            NSString::alloc(nil).init_str(key),
+        ).autorelease();
+        let _: () = msg_send![item, setTag: tag];
+        // Target the app delegate (first responder chain will route to us)
+        item
+    }
 }
 
 pub(super) unsafe fn menu_item_with_tag_and_key(title: &str, action: SEL, tag: isize, key: &str) -> id {
-    let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
-        NSString::alloc(nil).init_str(title),
-        action,
-        NSString::alloc(nil).init_str(key),
-    ).autorelease();
-    let _: () = msg_send![item, setTag: tag];
-    // Function keys need NSFunctionKeyMask
-    let ns_function_key_mask: u64 = 1 << 23;
-    let _: () = msg_send![item, setKeyEquivalentModifierMask: ns_function_key_mask];
-    item
+    unsafe {
+        let item = NSMenuItem::alloc(nil).initWithTitle_action_keyEquivalent_(
+            NSString::alloc(nil).init_str(title),
+            action,
+            NSString::alloc(nil).init_str(key),
+        ).autorelease();
+        let _: () = msg_send![item, setTag: tag];
+        // Function keys need NSFunctionKeyMask
+        let ns_function_key_mask: u64 = 1 << 23;
+        let _: () = msg_send![item, setKeyEquivalentModifierMask: ns_function_key_mask];
+        item
+    }
 }
 
 // ── create_menu_bar ──────────────────────────────────────────────────────────
 
 pub(super) unsafe fn create_menu_bar(app: id) {
+  unsafe {
     let main_menu = NSMenu::new(nil).autorelease();
 
     // -- VibeBoy menu --
@@ -557,4 +566,5 @@ pub(super) unsafe fn create_menu_bar(app: id) {
 
     app.setMainMenu_(main_menu);
     let _: () = msg_send![app, setWindowsMenu: window_menu];
+  }
 }

@@ -212,10 +212,10 @@ pub struct Ppu {
     // Internal state
     pub(crate) mode: u8,
     /// T-cycle counter within the current scanline (0..455)
-    pub(crate) dot: u32,
+    pub dot: u32,
 
     /// Debug: total ticks since LCD enable
-    pub(crate) total_ticks: u64,
+    pub total_ticks: u64,
 
     /// Previous state of internal STAT IRQ signal (for edge detection)
     stat_irq_line: bool,
