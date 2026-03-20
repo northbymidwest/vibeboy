@@ -1,23 +1,47 @@
+#[path = "../../apu.rs"]
 mod apu;
+#[path = "../../bus.rs"]
 mod bus;
+#[path = "../../cartridge/mod.rs"]
 mod cartridge;
+#[path = "../../cpu/mod.rs"]
 mod cpu;
+#[path = "../../emulator.rs"]
 mod emulator;
+#[path = "../../joypad.rs"]
 mod joypad;
+#[path = "../../scaling/mod.rs"]
 mod scaling;
+#[path = "../../model.rs"]
 mod model;
+#[path = "../../ppu/mod.rs"]
 mod ppu;
+#[path = "../../printer.rs"]
 mod printer;
+#[path = "../../serial.rs"]
 mod serial;
+#[path = "../../sgb.rs"]
 mod sgb;
+#[path = "../../savestate.rs"]
 mod savestate;
+#[path = "../../snapshot.rs"]
 mod snapshot;
+#[path = "../../snes/mod.rs"]
 mod snes;
+#[path = "../../timer.rs"]
 mod timer;
+#[path = "../../vectorize/mod.rs"]
 mod vectorize;
+#[path = "../../ui_util.rs"]
 mod ui_util;
 #[cfg(target_os = "macos")]
+#[path = "../../macos_accel.rs"]
 mod macos_accel;
+
+mod input;
+mod camera;
+mod accel;
+mod render;
 
 use clap::Parser;
 use emulator::Emulator;
@@ -43,6 +67,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use input::handle_input;
+use camera::CameraThread;
+use accel::{init_accel, enable_gamepad_sensors};
+use render::{display_size, compute_integer_scale, cpu_scale_frame};
+
+use ui_util::frame_duration;
+use ui_util::{parse_model, parse_filter};
+
 /// Which accelerometer source is active.
 enum AccelSource {
     None,
@@ -52,7 +84,6 @@ enum AccelSource {
 }
 
 const SCALE: u32 = 3;
-use ui_util::frame_duration;
 
 const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
@@ -100,8 +131,6 @@ struct Cli {
     #[arg(long)]
     yuv_edges: bool,
 }
-
-use ui_util::{parse_model, parse_filter};
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
 fn pick_rom_file() -> PathBuf {
@@ -881,367 +910,4 @@ fn main() {
     drop(camera_thread);
 
     emu.save();
-}
-
-fn handle_input(emu: &mut Emulator, ks: &sdl3::keyboard::KeyboardState, gp: Option<&sdl3::gamepad::Gamepad>) {
-    const STICK_DEADZONE: i16 = 8000;
-
-    let map: &[(Scancode, u8)] = &[
-        (Scancode::Z,      Emulator::BTN_B),
-        (Scancode::X,      Emulator::BTN_A),
-        (Scancode::Return, Emulator::BTN_START),
-        (Scancode::RShift, Emulator::BTN_SELECT),
-        (Scancode::Right,  Emulator::BTN_RIGHT),
-        (Scancode::Left,   Emulator::BTN_LEFT),
-        (Scancode::Up,     Emulator::BTN_UP),
-        (Scancode::Down,   Emulator::BTN_DOWN),
-    ];
-
-    if let Some(gp) = gp {
-        // Gamepad buttons (OR'd with keyboard — either source can press)
-        let gp_map: &[(GpButton, u8)] = &[
-            (GpButton::East,      Emulator::BTN_A),
-            (GpButton::South,     Emulator::BTN_B),
-            (GpButton::Start,     Emulator::BTN_START),
-            (GpButton::Back,      Emulator::BTN_SELECT),
-            (GpButton::DPadRight, Emulator::BTN_RIGHT),
-            (GpButton::DPadLeft,  Emulator::BTN_LEFT),
-            (GpButton::DPadUp,    Emulator::BTN_UP),
-            (GpButton::DPadDown,  Emulator::BTN_DOWN),
-        ];
-
-        // Left analog stick → d-pad
-        let lx = gp.axis(GpAxis::LeftX);
-        let ly = gp.axis(GpAxis::LeftY);
-
-        for (sc, btn) in map {
-            let kb = ks.is_scancode_pressed(*sc);
-            let gp_btn = gp_map.iter().find(|(_, b)| b == btn).map_or(false, |(gb, _)| gp.button(*gb));
-            let stick = match *btn {
-                b if b == Emulator::BTN_RIGHT => lx > STICK_DEADZONE,
-                b if b == Emulator::BTN_LEFT  => lx < -STICK_DEADZONE,
-                b if b == Emulator::BTN_DOWN  => ly > STICK_DEADZONE,
-                b if b == Emulator::BTN_UP    => ly < -STICK_DEADZONE,
-                _ => false,
-            };
-            emu.set_button(*btn, kb || gp_btn || stick);
-        }
-    } else {
-        for (sc, btn) in map {
-            emu.set_button(*btn, ks.is_scancode_pressed(*sc));
-        }
-    }
-}
-
-// ── Display geometry helpers ─────────────────────────────────────────────────
-
-/// Compute aspect-correct display dimensions for the current window.
-fn display_size(window: &sdl3::video::Window, src_w: u32, src_h: u32) -> (usize, usize) {
-    let (ww, wh) = window.size();
-    let src_aspect = src_w as f64 / src_h as f64;
-    let win_aspect = ww as f64 / wh as f64;
-    if win_aspect > src_aspect {
-        ((wh as f64 * src_aspect) as usize, wh as usize)
-    } else {
-        (ww as usize, (ww as f64 / src_aspect) as usize)
-    }
-}
-
-/// Compute rounded integer scale factor from display size and source size.
-fn compute_integer_scale(disp_w: usize, disp_h: usize, sw: usize, sh: usize) -> usize {
-    let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-    scale_f.round().max(1.0) as usize
-}
-
-// ── CPU scaling helper ───────────────────────────────────────────────────────
-
-/// Run a CPU scaling filter and return (pixels, width, height).
-fn cpu_scale_frame(
-    filter: &scaling::ScaleFilter,
-    src: &[u32], sw: usize, sh: usize,
-    disp_w: usize, disp_h: usize,
-    legacy_cache: &mut Option<crate::vectorize::VectorizeCache>,
-    vec_cache: &mut Option<crate::vectorize::VectorizeCache>,
-) -> (Vec<u32>, u32, u32) {
-    // Legacy vectorize uses its own cache-based path
-    if matches!(filter, scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive) {
-        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let cache = legacy_cache.as_mut().unwrap();
-        let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
-        return (raster.to_vec(), w as u32, h as u32);
-    }
-    // Diffusion rasterizer works directly from pixels (no vector paths)
-    if matches!(filter, scaling::ScaleFilter::VectorizeDiffusion) {
-        let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let scale = scale_f.round().max(1.0) as usize;
-        let (raster, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
-        return (raster, w as u32, h as u32);
-    }
-    // Shared-chain vectorization: gap-free rendering using shared boundary chains
-    if matches!(filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
-        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let cache = vec_cache.as_mut().unwrap();
-        let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
-        return (raster.to_vec(), w as u32, h as u32);
-    }
-    // Spline-diffusion: vectorize for paths, then Gaussian diffusion with spline boundaries
-    if matches!(filter, scaling::ScaleFilter::VectorizeSplineDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive) {
-        let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let scale = scale_f.round().max(1.0) as usize;
-        let cache = legacy_cache.as_mut().unwrap();
-        let (paths, bg_color) = cache.get_paths(src, sw, sh);
-        let (raster, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
-            paths, src, sw, sh, bg_color, scale,
-        );
-        return (raster, w as u32, h as u32);
-    }
-    // All other CPU filters use the shared dispatcher
-    scaling::cpu_scale(*filter, src, sw, sh, disp_w, disp_h)
-        .unwrap_or_else(|| (src.to_vec(), sw as u32, sh as u32))
-}
-
-
-// ── Gamepad helpers ──────────────────────────────────────────────────────────
-
-/// Open a gamepad and enable its accelerometer if present. Logs the result.
-fn enable_gamepad_sensors(gp: &sdl3::gamepad::Gamepad) {
-    if unsafe { gp.has_sensor(SensorType::Accelerometer) } {
-        if gp.sensor_set_enabled(SensorType::Accelerometer, true).is_ok() {
-            eprintln!("  Accelerometer enabled");
-        }
-    }
-}
-
-// ── Webcam helpers ───────────────────────────────────────────────────────────
-
-/// Handle to a background camera capture thread.
-struct CameraThread {
-    buffer: Arc<Mutex<[u8; 128 * 112]>>,
-    has_new_frame: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-    _camera_subsystem: sdl3::CameraSubsystem,
-}
-
-impl CameraThread {
-    /// Enumerate cameras on the main thread, spawn a background thread to capture frames.
-    /// Returns None if no camera is available (cart falls back to noise generator).
-    fn start(sdl: &sdl3::Sdl) -> Option<Self> {
-        let cam_sys = match sdl.camera() {
-            Ok(cs) => cs,
-            Err(e) => {
-                log::warn!("SDL camera subsystem init failed: {} — webcam disabled", e);
-                return None;
-            }
-        };
-
-        let device_id = unsafe {
-            let mut count: std::ffi::c_int = 0;
-            let ids = SDL_GetCameras(&mut count);
-            if ids.is_null() || count <= 0 {
-                log::info!("No cameras found — using noise generator for Pocket Camera");
-                if !ids.is_null() {
-                    SDL_free(ids as *mut _);
-                }
-                return None;
-            }
-            let first_id = *ids;
-            SDL_free(ids as *mut _);
-            first_id
-        };
-
-        let buffer: Arc<Mutex<[u8; 128 * 112]>> = Arc::new(Mutex::new([0u8; 128 * 112]));
-        let has_new_frame = Arc::new(AtomicBool::new(false));
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let buf_clone = Arc::clone(&buffer);
-        let new_frame_clone = Arc::clone(&has_new_frame);
-        let stop_clone = Arc::clone(&stop);
-
-        let handle = std::thread::Builder::new()
-            .name("camera".into())
-            .spawn(move || {
-                camera_thread_main(device_id.0, buf_clone, new_frame_clone, stop_clone);
-            })
-            .expect("failed to spawn camera thread");
-
-        log::info!("Camera capture thread started");
-        Some(CameraThread {
-            buffer,
-            has_new_frame,
-            stop,
-            handle: Some(handle),
-            _camera_subsystem: cam_sys,
-        })
-    }
-
-    /// Read the latest frame into `buf`. Returns true if a new frame was available.
-    fn read_frame(&self, buf: &mut [u8; 128 * 112]) -> bool {
-        if self.has_new_frame.swap(false, Ordering::Acquire) {
-            let lock = self.buffer.lock().unwrap();
-            buf.copy_from_slice(&*lock);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl Drop for CameraThread {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-/// Background thread: opens the camera, captures and processes frames in a loop.
-fn camera_thread_main(
-    device_id: u32,
-    buffer: Arc<Mutex<[u8; 128 * 112]>>,
-    has_new_frame: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-) {
-    use sdl3::sys::camera::SDL_CameraID;
-
-    // Open the camera on this thread (SDL_Camera* is not Send)
-    let camera = unsafe {
-        let spec = SDL_CameraSpec {
-            format: SysPixelFormat::RGBA32,
-            colorspace: SDL_Colorspace::SRGB,
-            width: 640,
-            height: 480,
-            framerate_numerator: 30,
-            framerate_denominator: 1,
-        };
-        let cam = SDL_OpenCamera(SDL_CameraID(device_id), &spec);
-        if cam.is_null() {
-            log::warn!("Camera thread: failed to open camera");
-            return;
-        }
-        cam
-    };
-
-    log::info!("Camera thread: webcam opened (640x480 requested)");
-
-    while !stop.load(Ordering::Acquire) {
-        let got_frame = unsafe {
-            let mut ts: u64 = 0;
-            let surface = SDL_AcquireCameraFrame(camera, &mut ts);
-            if surface.is_null() || ts == 0 {
-                false
-            } else {
-                process_camera_frame(surface, &buffer, &has_new_frame);
-                SDL_ReleaseCameraFrame(camera, surface);
-                true
-            }
-        };
-
-        if !got_frame {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    unsafe {
-        SDL_CloseCamera(camera);
-    }
-    log::info!("Camera thread: shut down");
-}
-
-/// Process a raw SDL surface into 128×112 grayscale and write to shared buffer.
-unsafe fn process_camera_frame(
-    surface: *mut SDL_Surface,
-    buffer: &Arc<Mutex<[u8; 128 * 112]>>,
-    has_new_frame: &Arc<AtomicBool>,
-) {
-    let surf: &SDL_Surface = &*surface;
-    let src_w = surf.w as usize;
-    let src_h = surf.h as usize;
-    let pitch = surf.pitch as usize;
-    let pixels = surf.pixels as *const u8;
-
-    if pixels.is_null() || src_w == 0 || src_h == 0 {
-        return;
-    }
-
-    // Build RGBA image from SDL surface (may have row padding)
-    let mut rgba = vec![0u8; src_w * src_h * 4];
-    for y in 0..src_h {
-        let src_row = pixels.add(y * pitch);
-        let dst_off = y * src_w * 4;
-        std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4);
-    }
-
-    let img = image::RgbaImage::from_raw(src_w as u32, src_h as u32, rgba)
-        .expect("camera frame size mismatch");
-
-    // Crop to 8:7 aspect ratio (128:112) before resizing
-    let target_ratio = 128.0 / 112.0;
-    let src_ratio = src_w as f64 / src_h as f64;
-    let (crop_w, crop_h) = if src_ratio > target_ratio {
-        let cw = (src_h as f64 * target_ratio) as u32;
-        (cw, src_h as u32)
-    } else {
-        let ch = (src_w as f64 / target_ratio) as u32;
-        (src_w as u32, ch)
-    };
-    let crop_x = (src_w as u32 - crop_w) / 2;
-    let crop_y = (src_h as u32 - crop_h) / 2;
-    let cropped =
-        image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
-
-    // Convert to grayscale and resize with Lanczos3
-    let gray = image::imageops::grayscale(&cropped);
-    let resized =
-        image::imageops::resize(&gray, 128, 112, image::imageops::FilterType::Lanczos3);
-
-    // Write to shared buffer (lock held only for memcpy)
-    {
-        let mut lock = buffer.lock().unwrap();
-        lock.copy_from_slice(resized.as_raw());
-    }
-    has_new_frame.store(true, Ordering::Release);
-}
-
-// ── Accelerometer helpers ─────────────────────────────────────────────────────
-
-/// Try to open an accelerometer: prefer macOS native IOKit on Apple Silicon,
-/// fall back to SDL3 sensor API.
-fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
-    // Try macOS native accelerometer first
-    #[cfg(target_os = "macos")]
-    {
-        if macos_accel::init() {
-            eprintln!("Accelerometer: macOS native (Apple Silicon)");
-            return AccelSource::MacosNative;
-        }
-        log::info!("macOS native accelerometer not available, trying SDL3");
-    }
-
-    // Fall back to SDL3 sensor
-    let sensor_sys = match sdl.sensor() {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("SDL sensor subsystem init failed: {} — accelerometer disabled", e);
-            return AccelSource::None;
-        }
-    };
-    let ids = match sensor_sys.num_sensors() {
-        Ok(ids) => ids,
-        Err(e) => {
-            log::info!("No sensors found: {} — accelerometer disabled", e);
-            return AccelSource::None;
-        }
-    };
-    for id in ids {
-        if let Ok(sensor) = sensor_sys.open(id) {
-            if sensor.sensor_type() == SensorType::Accelerometer {
-                eprintln!("Accelerometer: SDL3 ({})", sensor.name());
-                return AccelSource::Sdl(sensor);
-            }
-        }
-    }
-    log::info!("No accelerometer found — MBC7 will use center values");
-    AccelSource::None
 }

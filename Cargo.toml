@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "vibeboy"
-path = "src/main.rs"
+path = "src/frontends/sdl/main.rs"
 
 [[bin]]
 name = "test_runner"
@@ -58,12 +58,12 @@ block2 = "0.6"
 
 [[bin]]
 name = "vibeboy_cocoa"
-path = "src/cocoa_ui.rs"
+path = "src/frontends/cocoa/main.rs"
 required-features = ["macos-ui"]
 
 [[bin]]
 name = "vibeboy_winit"
-path = "src/winit_ui.rs"
+path = "src/frontends/winit/main.rs"
 required-features = ["winit-ui"]
 
 [build-dependencies]

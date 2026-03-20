@@ -35,7 +35,9 @@ pub mod wgpu_scale;
 pub mod ui_util;
 
 #[cfg(feature = "web")]
+#[path = "frontends/web/printer.rs"]
 pub mod web_printer;
 
 #[cfg(feature = "web")]
+#[path = "frontends/web/mod.rs"]
 pub mod web;
