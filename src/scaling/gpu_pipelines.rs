@@ -50,20 +50,11 @@ impl GpuPipelines {
             .expect("Failed to create GPU device")
             .with_window(window)
             .expect("Failed to claim window for GPU device");
-        if dev
-            .set_swapchain_parameters(
-                window,
-                gpu::PresentMode::Mailbox,
-                gpu::SwapchainComposition::Sdr,
-            )
-            .is_err()
-        {
-            let _ = dev.set_swapchain_parameters(
-                window,
-                gpu::PresentMode::Immediate,
-                gpu::SwapchainComposition::Sdr,
-            );
-        }
+        let _ = dev.set_swapchain_parameters(
+            window,
+            gpu::PresentMode::Vsync,
+            gpu::SwapchainComposition::Sdr,
+        );
         let tex = super::gpu::create_texture(&dev, src_w, src_h);
         let max_xfer = src_w * src_h * 4;
         let xfer = dev

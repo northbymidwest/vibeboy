@@ -374,6 +374,7 @@ fn main() {
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
 
     let mut frame_start = Instant::now();
+    let mut emu_time_debt = Duration::ZERO; // accumulated emulation time for vsync decoupling
     let mut fps_timer = Instant::now();
     let mut fps_count = 0u32;
     let mut fps_emu_total = Duration::ZERO;
@@ -580,19 +581,33 @@ fn main() {
         }
         emu.rewinding = backspace_held;
 
+        // Accumulate elapsed wall time and run enough emulation frames to keep up.
+        // This decouples emulation speed from the display refresh rate — on a 30Hz
+        // monitor with vsync, we run 2 frames per loop iteration.
+        let elapsed = frame_start.elapsed();
+        frame_start = Instant::now();
+        emu_time_debt += elapsed;
+        // Cap catchup to avoid spiral of death (e.g. window was being dragged)
+        let max_debt = frame_dur * 4;
+        if emu_time_debt > max_debt { emu_time_debt = max_debt; }
+
         if backspace_held {
             emu.rewind_one_frame();
             emu.bus.apu.drain_samples();
+            emu_time_debt = Duration::ZERO;
         } else if fast_forward {
-            // Run 4 frames, discard audio from the first 3
+            // Run 4 frames per wall-clock frame
             for _ in 0..3 {
                 emu.step_frame();
                 emu.bus.apu.drain_samples();
             }
             emu.step_frame();
+            emu_time_debt = Duration::ZERO;
         } else {
-            // ── Emulate one frame ─────────────────────────────────────────────
-            emu.step_frame();
+            while emu_time_debt >= frame_dur {
+                emu.step_frame();
+                emu_time_debt -= frame_dur;
+            }
         }
 
         // ── Audio ─────────────────────────────────────────────────────────────
@@ -781,17 +796,9 @@ fn main() {
             fps_timer = Instant::now();
         }
 
-        // ── Frame rate cap ────────────────────────────────────────────────────
-        // Normal: cap to ~59.73 fps. Fast-forward: same wall-clock cap but we
-        // ran 4 emulated frames, so effective speed is 4×.
-        let remaining = frame_dur.saturating_sub(frame_start.elapsed());
-        if remaining > Duration::from_millis(2) {
-            std::thread::sleep(remaining - Duration::from_millis(2));
-        }
-        while frame_start.elapsed() < frame_dur {
-            std::hint::spin_loop();
-        }
-        frame_start = Instant::now();
+        // No manual frame cap — vsync handles pacing, and the time accumulator
+        // above ensures emulation runs at the correct speed regardless of
+        // display refresh rate.
     }
 
     // Cleanup accelerometer
