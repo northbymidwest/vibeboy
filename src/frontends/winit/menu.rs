@@ -19,46 +19,16 @@ pub(super) fn slot_load_id(n: usize) -> String {
 }
 
 /// All filter menu entries: (menu_id, display_name, ScaleFilter).
-/// Filters that support arbitrary resolution (Bilinear, Bicubic, OmniScale,
-/// AA Nearest, Vectorize) appear as a single entry -- no per-scale variants.
+/// Derived from the central registry; menu_id is generated from the CLI name.
 pub(super) fn filter_entries() -> Vec<(&'static str, &'static str, scaling::ScaleFilter)> {
-    use scaling::*;
-    vec![
-        ("filter_nearest",     "Nearest",       ScaleFilter::Nearest),
-        ("filter_bilinear",    "Bilinear",      ScaleFilter::Bilinear),
-        ("filter_bicubic",     "Bicubic",       ScaleFilter::Bicubic),
-        ("filter_epx",         "EPX / Scale2x", ScaleFilter::Epx),
-        ("filter_scale3x",    "Scale3x",       ScaleFilter::Scale3x),
-        ("filter_scale4x",    "Scale4x",       ScaleFilter::Scale4x),
-        ("filter_eagle",       "Eagle",         ScaleFilter::Eagle),
-        ("filter_2xsai",       "2xSaI",         ScaleFilter::Sai2x),
-        ("filter_s2xsai",     "Super 2xSaI",   ScaleFilter::Super2xSai),
-        ("filter_seagle",      "Super Eagle",   ScaleFilter::SuperEagle),
-        ("filter_hq2x",       "HQ2x",          ScaleFilter::Hqx(HqxScale::Hq2x)),
-        ("filter_hq3x",       "HQ3x",          ScaleFilter::Hqx(HqxScale::Hq3x)),
-        ("filter_hq4x",       "HQ4x",          ScaleFilter::Hqx(HqxScale::Hq4x)),
-        ("filter_xbr2x",      "xBR 2x",        ScaleFilter::Xbr(XbrScale::Xbr2x)),
-        ("filter_xbr3x",      "xBR 3x",        ScaleFilter::Xbr(XbrScale::Xbr3x)),
-        ("filter_xbr4x",      "xBR 4x",        ScaleFilter::Xbr(XbrScale::Xbr4x)),
-        ("filter_super_xbr",  "Super xBR",     ScaleFilter::SuperXbr),
-        ("filter_xbrz2x",     "xBRZ 2x",       ScaleFilter::Xbrz(XbrzScale::Xbrz2x)),
-        ("filter_xbrz3x",     "xBRZ 3x",       ScaleFilter::Xbrz(XbrzScale::Xbrz3x)),
-        ("filter_xbrz4x",     "xBRZ 4x",       ScaleFilter::Xbrz(XbrzScale::Xbrz4x)),
-        ("filter_xbrz5x",     "xBRZ 5x",       ScaleFilter::Xbrz(XbrzScale::Xbrz5x)),
-        ("filter_xbrz6x",     "xBRZ 6x",       ScaleFilter::Xbrz(XbrzScale::Xbrz6x)),
-        ("filter_nedi",        "NEDI",          ScaleFilter::Nedi),
-        ("filter_dcci",        "DCCI",          ScaleFilter::Dcci),
-        ("filter_edi",         "EDI",           ScaleFilter::Edi),
-        ("filter_omniscale",   "OmniScale",     ScaleFilter::OmniScale),
-        ("filter_omniscale_l", "OmniScale Legacy", ScaleFilter::OmniScaleLegacy),
-        ("filter_aanear",      "AA Nearest",    ScaleFilter::AaNearestNeighbor),
-        ("filter_vectorize",   "Vectorize Legacy",          ScaleFilter::VectorizeLegacy),
-        ("filter_vec_adapt",   "Vectorize Legacy Adaptive", ScaleFilter::VectorizeLegacyAdaptive),
-        ("filter_vec_diff",    "Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
-        ("filter_vec_sdiff",   "Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
-        ("filter_vec_sdiffa",  "Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
-        ("filter_vec_gpu",     "Vectorize GPU",  ScaleFilter::VectorizeGpu),
-    ]
+    scaling::ScaleFilter::menu_entries()
+        .map(|(display, filter)| {
+            // Use cli_name as a stable menu ID (prefixed with "filter_")
+            // We leak the string to get a &'static str since these are created once
+            let id: &'static str = Box::leak(format!("filter_{}", filter.cli_name()).into_boxed_str());
+            (id, display, filter)
+        })
+        .collect()
 }
 
 pub(super) fn filter_id_to_filter(id: &str) -> Option<scaling::ScaleFilter> {

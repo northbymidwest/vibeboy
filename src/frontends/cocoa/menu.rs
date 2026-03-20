@@ -31,48 +31,9 @@ pub(super) const MENU_TAG_CLEAR_RECENT: isize = 510;
 pub(super) const MENU_TAG_FILTER_BASE: isize = 600; // 600..699 for filters
 pub(super) const MENU_TAG_SHOW_FPS: isize = 700;
 
-/// Filter entries: (display_name, ScaleFilter, is_submenu_item).
-/// Items marked as submenu items go into HQx/xBR/xBRZ/Edge submenus.
+/// Filter entries from the central registry.
 pub(super) fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
-    use scaling::*;
-    vec![
-        ("Nearest",            ScaleFilter::Nearest),
-        ("Bilinear",           ScaleFilter::Bilinear),
-        ("Bicubic",            ScaleFilter::Bicubic),
-        ("EPX / Scale2x",     ScaleFilter::Epx),
-        ("Scale3x",           ScaleFilter::Scale3x),
-        ("Scale4x",           ScaleFilter::Scale4x),
-        ("Eagle",             ScaleFilter::Eagle),
-        ("2xSaI",             ScaleFilter::Sai2x),
-        ("Super 2xSaI",      ScaleFilter::Super2xSai),
-        ("Super Eagle",      ScaleFilter::SuperEagle),
-        ("HQ2x",             ScaleFilter::Hqx(HqxScale::Hq2x)),
-        ("HQ3x",             ScaleFilter::Hqx(HqxScale::Hq3x)),
-        ("HQ4x",             ScaleFilter::Hqx(HqxScale::Hq4x)),
-        ("xBR 2x",           ScaleFilter::Xbr(XbrScale::Xbr2x)),
-        ("xBR 3x",           ScaleFilter::Xbr(XbrScale::Xbr3x)),
-        ("xBR 4x",           ScaleFilter::Xbr(XbrScale::Xbr4x)),
-        ("Super xBR",        ScaleFilter::SuperXbr),
-        ("xBRZ 2x",          ScaleFilter::Xbrz(XbrzScale::Xbrz2x)),
-        ("xBRZ 3x",          ScaleFilter::Xbrz(XbrzScale::Xbrz3x)),
-        ("xBRZ 4x",          ScaleFilter::Xbrz(XbrzScale::Xbrz4x)),
-        ("xBRZ 5x",          ScaleFilter::Xbrz(XbrzScale::Xbrz5x)),
-        ("xBRZ 6x",          ScaleFilter::Xbrz(XbrzScale::Xbrz6x)),
-        ("NEDI",             ScaleFilter::Nedi),
-        ("DCCI",             ScaleFilter::Dcci),
-        ("EDI",              ScaleFilter::Edi),
-        ("OmniScale",        ScaleFilter::OmniScale),
-        ("OmniScale Legacy", ScaleFilter::OmniScaleLegacy),
-        ("AA Nearest",       ScaleFilter::AaNearestNeighbor),
-        ("Vectorize Legacy",  ScaleFilter::VectorizeLegacy),
-        ("Vectorize Legacy Adaptive", ScaleFilter::VectorizeLegacyAdaptive),
-        ("Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
-        ("Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
-        ("Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
-        ("Vectorize", ScaleFilter::Vectorize),
-        ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
-        ("Vectorize GPU", ScaleFilter::VectorizeGpu),
-    ]
+    scaling::ScaleFilter::menu_entries().collect()
 }
 
 pub(super) fn filter_tag_to_filter(tag: isize) -> Option<scaling::ScaleFilter> {

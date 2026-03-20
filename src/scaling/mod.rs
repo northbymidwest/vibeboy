@@ -177,142 +177,129 @@ pub enum ScaleFilter {
     OmniScaleCompute,
 }
 
-impl ScaleFilter {
-    /// All valid filter name strings for CLI validation.
-    pub const ALL_NAMES: &[&str] = &[
-        "nearest", "none", "bilinear", "bicubic", "epx", "scale2x", "scale3x", "scale4x", "eagle",
-        "2xsai", "super-2xsai", "super-eagle",
-        "hq2x", "hq3x", "hq4x", "xbr2x", "xbr3x", "xbr4x",
-        "xbrz2x", "xbrz3x", "xbrz4x", "xbrz5x", "xbrz6x",
-        "super-xbr", "nedi", "dcci", "edi",
-        "omniscale", "omniscale-legacy",
-        "aa-nearest", "vectorize", "vectorize-adaptive",
-        "vectorize-gpu",
-        "vectorize-legacy", "vectorize-legacy-adaptive", "vectorize-diffusion",
-        "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
-        "omniscale-compute",
-    ];
+/// Filter metadata: (variant, cli_name, display_name, scale_factor).
+/// Scale factor 0 = adaptive (scales to display size). This is the single
+/// source of truth — ALL_NAMES, from_name(), factor(), menu entries, etc.
+/// are all derived from this table.
+pub struct FilterInfo {
+    pub filter: ScaleFilter,
+    pub cli_name: &'static str,
+    pub display_name: &'static str,
+    pub factor: u32,  // 0 = adaptive
+}
 
-    /// Parse a filter name string into a ScaleFilter enum variant.
-    /// Returns None for unrecognized names.
+const REGISTRY: &[FilterInfo] = &[
+    FilterInfo { filter: ScaleFilter::Nearest,          cli_name: "nearest",      display_name: "Nearest",       factor: 0 },
+    FilterInfo { filter: ScaleFilter::Bilinear,         cli_name: "bilinear",     display_name: "Bilinear",      factor: 0 },
+    FilterInfo { filter: ScaleFilter::Bicubic,          cli_name: "bicubic",      display_name: "Bicubic",       factor: 0 },
+    FilterInfo { filter: ScaleFilter::Epx,              cli_name: "epx",          display_name: "EPX / Scale2x", factor: 2 },
+    FilterInfo { filter: ScaleFilter::Scale2x,          cli_name: "scale2x",      display_name: "Scale2x",       factor: 2 },
+    FilterInfo { filter: ScaleFilter::Scale3x,          cli_name: "scale3x",      display_name: "Scale3x",       factor: 3 },
+    FilterInfo { filter: ScaleFilter::Scale4x,          cli_name: "scale4x",      display_name: "Scale4x",       factor: 4 },
+    FilterInfo { filter: ScaleFilter::Eagle,            cli_name: "eagle",        display_name: "Eagle",          factor: 2 },
+    FilterInfo { filter: ScaleFilter::Sai2x,            cli_name: "2xsai",       display_name: "2xSaI",          factor: 2 },
+    FilterInfo { filter: ScaleFilter::Super2xSai,       cli_name: "super-2xsai", display_name: "Super 2xSaI",    factor: 2 },
+    FilterInfo { filter: ScaleFilter::SuperEagle,       cli_name: "super-eagle",  display_name: "Super Eagle",    factor: 2 },
+    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq2x), cli_name: "hq2x",    display_name: "HQ2x",          factor: 2 },
+    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq3x), cli_name: "hq3x",    display_name: "HQ3x",          factor: 3 },
+    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq4x), cli_name: "hq4x",    display_name: "HQ4x",          factor: 4 },
+    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr2x), cli_name: "xbr2x",  display_name: "xBR 2x",        factor: 2 },
+    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr3x), cli_name: "xbr3x",  display_name: "xBR 3x",        factor: 3 },
+    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr4x), cli_name: "xbr4x",  display_name: "xBR 4x",        factor: 4 },
+    FilterInfo { filter: ScaleFilter::SuperXbr,         cli_name: "super-xbr",    display_name: "Super xBR",     factor: 2 },
+    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz2x), cli_name: "xbrz2x", display_name: "xBRZ 2x",    factor: 2 },
+    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz3x), cli_name: "xbrz3x", display_name: "xBRZ 3x",    factor: 3 },
+    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz4x), cli_name: "xbrz4x", display_name: "xBRZ 4x",    factor: 4 },
+    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz5x), cli_name: "xbrz5x", display_name: "xBRZ 5x",    factor: 5 },
+    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz6x), cli_name: "xbrz6x", display_name: "xBRZ 6x",    factor: 6 },
+    FilterInfo { filter: ScaleFilter::Nedi,             cli_name: "nedi",         display_name: "NEDI",           factor: 2 },
+    FilterInfo { filter: ScaleFilter::Dcci,             cli_name: "dcci",         display_name: "DCCI",           factor: 2 },
+    FilterInfo { filter: ScaleFilter::Edi,              cli_name: "edi",          display_name: "EDI",            factor: 2 },
+    FilterInfo { filter: ScaleFilter::OmniScale,        cli_name: "omniscale",    display_name: "OmniScale",      factor: 0 },
+    FilterInfo { filter: ScaleFilter::OmniScaleLegacy,  cli_name: "omniscale-legacy", display_name: "OmniScale Legacy", factor: 0 },
+    FilterInfo { filter: ScaleFilter::AaNearestNeighbor, cli_name: "aa-nearest",  display_name: "AA Nearest",     factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeLegacy,  cli_name: "vectorize-legacy", display_name: "Vectorize Legacy", factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeLegacyAdaptive, cli_name: "vectorize-legacy-adaptive", display_name: "Vectorize Legacy Adaptive", factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeDiffusion, cli_name: "vectorize-diffusion", display_name: "Vectorize Diffusion", factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeSplineDiffusion, cli_name: "vectorize-spline-diffusion", display_name: "Vectorize Spline Diffusion", factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeSplineDiffusionAdaptive, cli_name: "vectorize-spline-diffusion-adaptive", display_name: "Vectorize Spline Diff Adaptive", factor: 0 },
+    FilterInfo { filter: ScaleFilter::Vectorize,        cli_name: "vectorize",    display_name: "Vectorize",      factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeAdaptive, cli_name: "vectorize-adaptive", display_name: "Vectorize Adaptive", factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeGpu,     cli_name: "vectorize-gpu", display_name: "Vectorize GPU", factor: 0 },
+    FilterInfo { filter: ScaleFilter::OmniScaleCompute, cli_name: "omniscale-compute", display_name: "OmniScale Compute", factor: 0 },
+];
+
+impl ScaleFilter {
+    fn info(self) -> &'static FilterInfo {
+        REGISTRY.iter().find(|e| e.filter == self).expect("filter not in registry")
+    }
+
+    /// All valid CLI name strings (includes "none" as alias for "nearest").
+    pub fn all_names() -> Vec<&'static str> {
+        let mut names: Vec<&str> = REGISTRY.iter().map(|e| e.cli_name).collect();
+        names.push("none"); // alias
+        names
+    }
+
+    /// Parse a CLI name into a ScaleFilter. Returns None for unrecognized names.
     pub fn from_name(s: &str) -> Option<ScaleFilter> {
-        Some(match s {
-            "nearest" | "none" => ScaleFilter::Nearest,
-            "bilinear" => ScaleFilter::Bilinear,
-            "bicubic" => ScaleFilter::Bicubic,
-            "epx" => ScaleFilter::Epx,
-            "scale2x" => ScaleFilter::Scale2x,
-            "scale3x" => ScaleFilter::Scale3x,
-            "scale4x" => ScaleFilter::Scale4x,
-            "eagle" => ScaleFilter::Eagle,
-            "2xsai" => ScaleFilter::Sai2x,
-            "super-2xsai" => ScaleFilter::Super2xSai,
-            "super-eagle" => ScaleFilter::SuperEagle,
-            "hq2x" => ScaleFilter::Hqx(HqxScale::Hq2x),
-            "hq3x" => ScaleFilter::Hqx(HqxScale::Hq3x),
-            "hq4x" => ScaleFilter::Hqx(HqxScale::Hq4x),
-            "xbr2x" => ScaleFilter::Xbr(XbrScale::Xbr2x),
-            "xbr3x" => ScaleFilter::Xbr(XbrScale::Xbr3x),
-            "xbr4x" => ScaleFilter::Xbr(XbrScale::Xbr4x),
-            "xbrz2x" => ScaleFilter::Xbrz(XbrzScale::Xbrz2x),
-            "xbrz3x" => ScaleFilter::Xbrz(XbrzScale::Xbrz3x),
-            "xbrz4x" => ScaleFilter::Xbrz(XbrzScale::Xbrz4x),
-            "xbrz5x" => ScaleFilter::Xbrz(XbrzScale::Xbrz5x),
-            "xbrz6x" => ScaleFilter::Xbrz(XbrzScale::Xbrz6x),
-            "super-xbr" => ScaleFilter::SuperXbr,
-            "nedi" => ScaleFilter::Nedi,
-            "dcci" => ScaleFilter::Dcci,
-            "edi" => ScaleFilter::Edi,
-            "omniscale" => ScaleFilter::OmniScale,
-            "omniscale-legacy" => ScaleFilter::OmniScaleLegacy,
-            "aa-nearest" => ScaleFilter::AaNearestNeighbor,
-            "vectorize" => ScaleFilter::Vectorize,
-            "vectorize-adaptive" => ScaleFilter::VectorizeAdaptive,
-            "vectorize-gpu" => ScaleFilter::VectorizeGpu,
-            "vectorize-legacy" => ScaleFilter::VectorizeLegacy,
-            "vectorize-legacy-adaptive" => ScaleFilter::VectorizeLegacyAdaptive,
-            "vectorize-diffusion" => ScaleFilter::VectorizeDiffusion,
-            "vectorize-spline-diffusion" => ScaleFilter::VectorizeSplineDiffusion,
-            "vectorize-spline-diffusion-adaptive" => ScaleFilter::VectorizeSplineDiffusionAdaptive,
-            "omniscale-compute" => ScaleFilter::OmniScaleCompute,
-            _ => return None,
-        })
+        if s == "none" { return Some(ScaleFilter::Nearest); }
+        REGISTRY.iter().find(|e| e.cli_name == s).map(|e| e.filter)
     }
 
     /// Validate a filter name string for CLI parsing.
     pub fn validate_name(s: &str) -> Result<String, String> {
         let lower = s.to_lowercase();
-        if Self::ALL_NAMES.contains(&lower.as_str()) {
+        if Self::from_name(&lower).is_some() {
             Ok(lower)
         } else {
+            let names = Self::all_names();
             Err(format!(
                 "unknown filter '{}'\n  [possible values: {}]",
                 s,
-                Self::ALL_NAMES.join(", ")
+                names.join(", ")
             ))
         }
     }
 
-    /// Returns the fixed scale factor for fixed-factor filters,
-    /// or 1 for resolution-adaptive filters (which scale to window size).
+    /// Human-readable display name for menus.
+    pub fn display_name(self) -> &'static str {
+        self.info().display_name
+    }
+
+    /// CLI name string.
+    pub fn cli_name(self) -> &'static str {
+        self.info().cli_name
+    }
+
+    /// Scale factor: 0 for adaptive filters that scale to display size,
+    /// or the fixed integer multiplier (2, 3, 4, etc.).
     pub fn factor(self) -> u32 {
-        match self {
-            ScaleFilter::Nearest
-            | ScaleFilter::Bilinear | ScaleFilter::Bicubic
-            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
-            | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
-            | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive
-            | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu
-            | ScaleFilter::OmniScaleCompute => 1,
-            ScaleFilter::Hqx(h) => h.factor(),
-            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Eagle
-            | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle => 2,
-            ScaleFilter::Scale3x => 3,
-            ScaleFilter::Scale4x => 4,
-            ScaleFilter::Xbr(x) => x.factor(),
-            ScaleFilter::Xbrz(x) => x.factor(),
-            ScaleFilter::SuperXbr
-            | ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => 2,
-        }
+        self.info().factor
     }
 
     /// Whether the window should be freely resizable with this filter.
     pub fn is_resizable(self) -> bool {
-        matches!(self,
-            ScaleFilter::Nearest
-            | ScaleFilter::Bilinear | ScaleFilter::Bicubic
-            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
-            | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
-            | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive
-            | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu
-            | ScaleFilter::OmniScaleCompute)
+        self.factor() == 0
     }
 
     /// Whether this filter produces output scaled to the display dimensions.
     /// Nearest is resizable but relies on GPU texture stretching instead.
     pub fn scales_to_display(self) -> bool {
-        matches!(self,
-            ScaleFilter::Bilinear | ScaleFilter::Bicubic
-            | ScaleFilter::OmniScale | ScaleFilter::OmniScaleLegacy
-            | ScaleFilter::AaNearestNeighbor
-            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive
-            | ScaleFilter::VectorizeDiffusion
-            | ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive
-            | ScaleFilter::Vectorize
-            | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeGpu
-            | ScaleFilter::OmniScaleCompute)
+        self.factor() == 0 && self != ScaleFilter::Nearest
+    }
+
+    /// All registered filters in display order (for building menus).
+    pub fn all_filters() -> &'static [FilterInfo] {
+        REGISTRY
+    }
+
+    /// Iterator over (display_name, ScaleFilter) pairs for menu building.
+    /// Excludes Scale2x (alias for EPX) and OmniScaleCompute (debug only).
+    pub fn menu_entries() -> impl Iterator<Item = (&'static str, ScaleFilter)> {
+        REGISTRY.iter()
+            .filter(|e| !matches!(e.filter, ScaleFilter::Scale2x | ScaleFilter::OmniScaleCompute))
+            .map(|e| (e.display_name, e.filter))
     }
 }
 
