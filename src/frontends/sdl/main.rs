@@ -274,12 +274,12 @@ fn main() {
         scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
         _ => None,
     };
-    let filter_factor = scale_filter.factor();
+    let filter_factor = scale_filter.factor().max(1); // 0 = adaptive, treat as 1× for initial sizing
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
     // Resizable filters start at SCALE * src size (factor=1); fixed-factor
     // filters compute window size from their native output dimensions.
-    let win_scale = if filter_factor > 1 { SCALE / filter_factor.max(1) } else { SCALE };
+    let win_scale = if filter_factor > 1 { SCALE / filter_factor } else { SCALE };
     let win_scale = win_scale.max(1);
     let win_w = tex_w * win_scale;
     let win_h = tex_h * win_scale;
