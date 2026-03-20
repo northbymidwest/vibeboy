@@ -255,6 +255,9 @@ impl WaveCh {
     }
 
     pub fn tick_freq(&mut self, mut cycles: u32) {
+        if !self.enabled {
+            return;
+        }
         self.wave_form_just_read = false;
         loop {
             if self.freq_timer > cycles {
@@ -262,23 +265,14 @@ impl WaveCh {
                 return;
             }
             cycles -= self.freq_timer;
-            // Advance sample position (only when enabled)
-            if self.enabled {
-                self.sample_pos = (self.sample_pos + 1) & 31;
-                // Read nibble from wave RAM
-                let byte = self.wave_ram[(self.sample_pos >> 1) as usize];
-                self.last_nibble = if self.sample_pos & 1 == 0 {
-                    byte >> 4
-                } else {
-                    byte & 0x0F
-                };
-                self.wave_form_just_read = true;
-            }
+            self.sample_pos = (self.sample_pos + 1) & 31;
+            let byte = self.wave_ram[(self.sample_pos >> 1) as usize];
+            self.last_nibble = if self.sample_pos & 1 == 0 { byte >> 4 } else { byte & 0xF };
+            self.wave_form_just_read = cycles == 0;
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
                 self.freq_timer = 1;
             }
-            if cycles == 0 { return; }
         }
     }
 
