@@ -54,6 +54,7 @@ enum WebFilter {
 #[wasm_bindgen]
 pub struct WasmEmulator {
     emu: Emulator,
+    rom: Vec<u8>,
     rgba_buf: Vec<u8>,
     audio_buf: Vec<f32>,
     last_print_w: u32,
@@ -99,11 +100,12 @@ impl WasmEmulator {
         let checksum = ((rom_vec[0x14E] as u16) << 8) | rom_vec[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
-        let emu = Emulator::new(rom_vec, None, None, model, None);
+        let emu = Emulator::new(rom_vec.clone(), None, None, model, None);
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
         Ok(WasmEmulator {
+            rom: rom_vec,
             emu,
             rgba_buf: vec![0u8; w * h * 4],
             audio_buf: Vec::new(),
@@ -372,6 +374,29 @@ impl WasmEmulator {
             WebFilter::Vectorize => "vectorize".to_string(),
             WebFilter::Scale(f) => format!("{:?}", f).to_lowercase(),
         }
+    }
+
+    /// Set the hardware model and restart emulation.
+    /// Valid names: "auto", "dmg0", "dmg", "mgb", "sgb", "sgb2", "cgb0", "cgb", "agb".
+    /// Returns true if the model was recognized.
+    pub fn set_model(&mut self, name: &str) -> bool {
+        let model = match name {
+            "auto" => auto_detect_model(&self.rom),
+            "dmg0" => GbModel::Dmg0,
+            "dmg" => GbModel::Dmg,
+            "mgb" => GbModel::Mgb,
+            "sgb" => GbModel::Sgb,
+            "sgb2" => GbModel::Sgb2,
+            "cgb0" => GbModel::Cgb0,
+            "cgb" => GbModel::Cgb,
+            "agb" => GbModel::Agb,
+            _ => return false,
+        };
+        self.emu = Emulator::new(self.rom.clone(), None, None, model, None);
+        let w = if self.emu.is_sgb() { 256 } else { 160 };
+        let h = if self.emu.is_sgb() { 224 } else { 144 };
+        self.rgba_buf = vec![0u8; w * h * 4];
+        true
     }
 
     /// Render the current frame via WebGPU.

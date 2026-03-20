@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>VibeBoy</title>
+<link rel="icon" href="favicon.ico">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -91,7 +93,16 @@
     <canvas id="screen-2d" width="160" height="144" style="display:none;"></canvas>
   </div>
   <div id="status"></div>
-  <div id="filter-bar" style="margin-top:8px;">
+  <div id="filter-bar" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+    <select id="model-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
+      <option value="auto">Auto</option>
+      <option value="dmg">DMG</option>
+      <option value="mgb">MGB</option>
+      <option value="sgb">SGB</option>
+      <option value="sgb2">SGB2</option>
+      <option value="cgb">CGB</option>
+      <option value="agb">AGB</option>
+    </select>
     <select id="filter-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
       <option value="vectorize">Vectorize</option>
       <option value="omniscale">OmniScale</option>
@@ -374,7 +385,6 @@ async function startEmulator(romBytes) {
   if (emu.has_camera()) initCamera();
   initAccelerometer();
 
-  dropZone.classList.add('hidden');
   if (useGpu) filterBar.style.display = '';
   requestAnimationFrame(frame);
 }
@@ -392,6 +402,13 @@ filterSelect.addEventListener('change', () => {
     canvas.style.display = '';
     canvas2d.style.display = 'none';
   }
+});
+
+const modelSelect = document.getElementById('model-select');
+modelSelect.addEventListener('change', () => {
+  if (!emu) return;
+  emu.set_model(modelSelect.value);
+  status.textContent = 'Model: ' + modelSelect.options[modelSelect.selectedIndex].text;
 });
 
 let saveCounter = 0;
@@ -579,6 +596,7 @@ function loadFile(file) {
 }
 
 dropZone.addEventListener('click', () => fileInput.click());
+document.getElementById('canvas-wrapper').addEventListener('dblclick', () => fileInput.click());
 fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('hover'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('hover'));

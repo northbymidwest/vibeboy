@@ -2278,8 +2278,9 @@ impl Ppu {
         Self::gbc_15bit_to_32bit(c)
     }
 
-    /// DMG palette lookup: map a 2-bit color index through a palette register to grayscale.
-    const DMG_SHADES: [u32; 4] = [0x00FFFFFF, 0x00AAAAAA, 0x00555555, 0x00000000];
+    /// DMG palette lookup: map a 2-bit color index through a palette register.
+    /// Classic green Game Boy LCD colors.
+    const DMG_SHADES: [u32; 4] = [0x009BBC0F, 0x008BAC0F, 0x00306230, 0x000F380F];
 
     fn dmg_color(palette_reg: u8, color_idx: u8) -> u32 {
         let shade = (palette_reg >> (color_idx * 2)) & 0x03;
