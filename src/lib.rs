@@ -32,6 +32,9 @@ pub mod wgpu_scale;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ui_util;
 
+#[cfg(target_os = "macos")]
+pub mod macos_accel;
+
 #[cfg(feature = "web")]
 #[path = "frontends/web/mod.rs"]
 pub mod web;

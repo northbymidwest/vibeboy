@@ -1,42 +1,4 @@
-#[path = "../../apu/mod.rs"]
-mod apu;
-#[path = "../../bus/mod.rs"]
-mod bus;
-#[path = "../../cartridge/mod.rs"]
-mod cartridge;
-#[path = "../../cpu/mod.rs"]
-mod cpu;
-#[path = "../../emulator.rs"]
-mod emulator;
-#[path = "../../joypad.rs"]
-mod joypad;
-#[path = "../../scaling/mod.rs"]
-mod scaling;
-#[path = "../../model.rs"]
-mod model;
-#[path = "../../ppu/mod.rs"]
-mod ppu;
-#[path = "../../printer.rs"]
-mod printer;
-#[path = "../../serial.rs"]
-mod serial;
-#[path = "../../sgb.rs"]
-mod sgb;
-#[path = "../../savestate.rs"]
-mod savestate;
-#[path = "../../snapshot.rs"]
-mod snapshot;
-#[path = "../../snes/mod.rs"]
-mod snes;
-#[path = "../../timer.rs"]
-mod timer;
-#[path = "../../vectorize/mod.rs"]
-mod vectorize;
-#[path = "../../ui_util.rs"]
-mod ui_util;
-#[cfg(target_os = "macos")]
-#[path = "../../macos_accel.rs"]
-mod macos_accel;
+use vibeboy::*;
 
 mod input;
 mod camera;
