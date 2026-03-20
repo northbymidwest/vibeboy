@@ -58,10 +58,11 @@ struct SharedCP {
     vec2 next_pos;   // next neighbor optimized position
     vec2 orig_prev;  // prev neighbor original position
     vec2 orig_next;  // next neighbor original position
+    vec2 bbox_min;   // axis-aligned bounding box of the span (prev, pos, next)
+    vec2 bbox_max;
     uint pl, pr, nl, nr;  // edge colors
     int prev_ci;
     int next_ci;
-    float _pad;
 };
 
 shared SharedCP sh_cps[MAX_TILE_CPS];
@@ -190,6 +191,13 @@ uint sample_from_shared(vec2 pt, uint fallback_color,
     uint n = sh_num_cps;
     for (uint i = 0u; i < n; i++) {
         SharedCP sc = sh_cps[i];
+
+        // Early-out: skip if point is outside span's bounding box + 1.0 margin
+        // (1.0 matches the distance threshold below)
+        if (pt.x < sc.bbox_min.x - 1.0 || pt.x > sc.bbox_max.x + 1.0 ||
+            pt.y < sc.bbox_min.y - 1.0 || pt.y > sc.bbox_max.y + 1.0)
+            continue;
+
         vec2 result = closest_on_span(sc.prev_pos, sc.pos, sc.next_pos, pt);
         float span_best_t = result.x;
         float span_best_d2 = result.y;
@@ -221,12 +229,6 @@ uint sample_from_shared(vec2 pt, uint fallback_color,
         }
     }
     return fallback_color;
-}
-
-// Simple version for AA other-point sampling (no hit info needed)
-uint sample_from_shared_simple(vec2 pt, uint fallback_color) {
-    int dummy_idx; float dummy_t, dummy_d2;
-    return sample_from_shared(pt, fallback_color, dummy_idx, dummy_t, dummy_d2);
 }
 
 void main() {
@@ -272,12 +274,16 @@ void main() {
             uint idx = atomicAdd(sh_num_cps, 1u);
             if (idx < MAX_TILE_CPS) {
                 vec2 cp = read_pos(ci);
+                vec2 pp = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
+                vec2 np = (next_ci >= 0) ? read_pos(next_ci) : cp;
                 sh_cps[idx].pos = cp;
                 sh_cps[idx].orig_pos = read_orig(ci);
-                sh_cps[idx].prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
-                sh_cps[idx].next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp;
+                sh_cps[idx].prev_pos = pp;
+                sh_cps[idx].next_pos = np;
                 sh_cps[idx].orig_prev = (prev_ci >= 0) ? read_orig(prev_ci) : read_orig(ci);
                 sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
+                sh_cps[idx].bbox_min = min(min(pp, cp), np);
+                sh_cps[idx].bbox_max = max(max(pp, cp), np);
                 sh_cps[idx].pl = edge_colors[ci * 4];
                 sh_cps[idx].pr = edge_colors[ci * 4 + 1];
                 sh_cps[idx].nl = edge_colors[ci * 4 + 2];
@@ -333,8 +339,8 @@ void main() {
                 float((center_color >> 8u) & 0xFFu) / 255.0,
                 float(center_color & 0xFFu) / 255.0, 1.0));
         } else {
-            // Analytical AA: use center_color and find the other color
-            // by resolving a point on the opposite side of the boundary.
+            // Analytical AA: determine both colors from the nearest boundary's
+            // edge colors directly, avoiding a second full CP scan.
             SharedCP sc = sh_cps[uint(best_idx)];
             vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             vec2 tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
@@ -349,36 +355,56 @@ void main() {
                 vec2 normal = vec2(-tang.y, tang.x) / tl;
                 float d = dot(center - cpt, normal);
 
-                // Get the other color: resolve a point shifted across the boundary
-                float pw = inv_scale;
-                float offset = pw * 0.5;
-                vec2 other_pt = (d > 0.0) ? center - normal * (d + offset)
-                                           : center - normal * (d - offset);
-                int ofb_x = clamp(int(floor(other_pt.x)), 0, int(img_w) - 1);
-                int ofb_y = clamp(int(floor(other_pt.y)), 0, int(img_h) - 1);
-                uint other_fb = pixels[ofb_y * int(img_w) + ofb_x];
-                uint other_color = sample_from_shared_simple(other_pt, other_fb);
-                // If other color matches center, AA won't help — skip blending
-                if (other_color == center_color) {
+                // Resolve both colors from edge colors without a second scan.
+                // Pick the edge (prev or next) based on t, then use normal
+                // direction to determine left/right → center/other.
+                uint color_left, color_right;
+                bool have_edge = false;
+                float ref_t;
+
+                // Use original tangent to establish consistent left/right
+                if (best_t < 0.5 && sc.pl != sc.pr) {
+                    color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; have_edge = true;
+                } else if (best_t >= 0.5 && sc.nl != sc.nr) {
+                    color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; have_edge = true;
+                } else if (sc.nl != sc.nr) {
+                    color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; have_edge = true;
+                } else if (sc.pl != sc.pr) {
+                    color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; have_edge = true;
+                }
+
+                if (!have_edge) {
                     imageStore(output_img, ivec2(opx, opy), vec4(
                         float((center_color >> 16u) & 0xFFu) / 255.0,
                         float((center_color >> 8u) & 0xFFu) / 255.0,
                         float(center_color & 0xFFu) / 255.0, 1.0));
-                    continue;
+                } else {
+                    // Determine which side of the boundary is "left" vs "right"
+                    // using the original normal orientation
+                    vec2 orig_tang = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+                    vec2 orig_norm = vec2(-orig_tang.y, orig_tang.x);
+                    bool flip = dot(normal, orig_norm) < 0.0;
+                    uint pos_side = flip ? color_right : color_left;
+                    uint neg_side = flip ? color_left : color_right;
+
+                    // If both sides are the same color, no AA needed
+                    if (pos_side == neg_side) {
+                        imageStore(output_img, ivec2(opx, opy), vec4(
+                            float((center_color >> 16u) & 0xFFu) / 255.0,
+                            float((center_color >> 8u) & 0xFFu) / 255.0,
+                            float(center_color & 0xFFu) / 255.0, 1.0));
+                    } else {
+                        // Coverage: pixel width projected onto normal direction
+                        float pw = inv_scale;
+                        float proj_w = pw * (abs(normal.x) + abs(normal.y));
+                        float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
+
+                        float r = frac * float((pos_side >> 16u) & 0xFFu) + (1.0 - frac) * float((neg_side >> 16u) & 0xFFu);
+                        float g = frac * float((pos_side >> 8u) & 0xFFu) + (1.0 - frac) * float((neg_side >> 8u) & 0xFFu);
+                        float b = frac * float(pos_side & 0xFFu) + (1.0 - frac) * float(neg_side & 0xFFu);
+                        imageStore(output_img, ivec2(opx, opy), vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
+                    }
                 }
-
-                // Coverage: pixel width projected onto normal direction
-                float proj_w = pw * (abs(normal.x) + abs(normal.y));
-                float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
-
-                // center is on the positive-d side, other is on negative-d side
-                uint pos_color = (d > 0.0) ? center_color : other_color;
-                uint neg_color = (d > 0.0) ? other_color : center_color;
-
-                float r = frac * float((pos_color >> 16u) & 0xFFu) + (1.0 - frac) * float((neg_color >> 16u) & 0xFFu);
-                float g = frac * float((pos_color >> 8u) & 0xFFu) + (1.0 - frac) * float((neg_color >> 8u) & 0xFFu);
-                float b = frac * float(pos_color & 0xFFu) + (1.0 - frac) * float(neg_color & 0xFFu);
-                imageStore(output_img, ivec2(opx, opy), vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
             }
         }
     }

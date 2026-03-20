@@ -601,8 +601,6 @@ fn main() {
         }
         emu.rewinding = backspace_held;
 
-        let work_start = Instant::now();
-
         // Accumulate elapsed wall time and run enough emulation frames to keep up.
         // This decouples emulation speed from the display refresh rate — on a 30Hz
         // monitor with vsync, we run 2 frames per loop iteration.
@@ -613,16 +611,20 @@ fn main() {
         let max_debt = frame_dur * 4;
         if emu_time_debt > max_debt { emu_time_debt = max_debt; }
 
+        let emu_start = Instant::now();
+        let mut frames_stepped: u32 = 0;
         if paused && !step_one_frame {
             // Consume time but don't step emulation
             emu_time_debt = Duration::ZERO;
         } else if step_one_frame {
             emu.step_frame();
+            frames_stepped = 1;
             step_one_frame = false;
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
             emu.rewind_one_frame();
             emu.bus.apu.drain_samples();
+            frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
         } else if fast_forward {
             // Run 4 frames per wall-clock frame
@@ -631,20 +633,24 @@ fn main() {
                 emu.bus.apu.drain_samples();
             }
             emu.step_frame();
+            frames_stepped = 4;
             emu_time_debt = Duration::ZERO;
         } else if slow_motion {
             // Half speed: double the effective frame duration
             let slow_dur = frame_dur * 2;
             while emu_time_debt >= slow_dur {
                 emu.step_frame();
+                frames_stepped += 1;
                 emu_time_debt -= slow_dur;
             }
         } else {
             while emu_time_debt >= frame_dur {
                 emu.step_frame();
+                frames_stepped += 1;
                 emu_time_debt -= frame_dur;
             }
         }
+        let emu_elapsed = emu_start.elapsed();
 
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.bus.apu.drain_samples();
@@ -819,9 +825,10 @@ fn main() {
         }
 
         // ── FPS counter ───────────────────────────────────────────────────────
-        let emu_time = work_start.elapsed();
-        fps_count += 1;
-        fps_emu_total += emu_time;
+        fps_count += frames_stepped;
+        if frames_stepped > 0 {
+            fps_emu_total += emu_elapsed;
+        }
         let fps_elapsed = fps_timer.elapsed();
         if fps_elapsed >= Duration::from_secs(1) {
             let fps = fps_count as f64 / fps_elapsed.as_secs_f64();
