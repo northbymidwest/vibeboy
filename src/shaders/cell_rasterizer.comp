@@ -49,7 +49,7 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
 // Shared memory: CP data for the tile's neighborhood
 // A 2×2 source tile needs CPs from a 5×5 corner region (corners ±2)
 // = 25 corners × 2 slots = 50 CPs max, but most are empty.
-const uint MAX_TILE_CPS = 50u;
+const uint MAX_TILE_CPS = 98u;  // 7×7 corners × 2 slots
 
 struct SharedCP {
     vec2 pos;        // optimized position
@@ -86,7 +86,9 @@ vec2 beval_deriv(vec2 p0, vec2 p1, vec2 p2, float t) {
     return (t - 1.0) * p0 + (1.0 - 2.0 * t) * p1 + t * p2;
 }
 
-uint resolve_from_shared(vec2 pt, uint cp_idx, float t, uint fallback) {
+// Returns true if resolved, false if this hit should be skipped.
+// Resolved color is written to out_color.
+bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
     SharedCP sc = sh_cps[cp_idx];
 
     uint color_left = 0u, color_right = 0u;
@@ -96,58 +98,61 @@ uint resolve_from_shared(vec2 pt, uint cp_idx, float t, uint fallback) {
 
     if (sc.prev_ci < 0) {
         vec2 toward = sc.next_pos - sc.pos;
-        if (dot(pt - sc.pos, toward) < 0.0) return fallback;
+        if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
-        else return fallback;
+        else return false;
     } else if (sc.next_ci < 0) {
         vec2 toward = sc.prev_pos - sc.pos;
-        if (dot(pt - sc.pos, toward) < 0.0) return fallback;
+        if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
-        else return fallback;
+        else return false;
     } else if (t < 0.5) {
         if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
         else if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
-        else return fallback;
+        else return false;
     } else {
         if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
         else if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
-        else return fallback;
+        else return false;
     }
 
     vec2 orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
     float tl2 = length(orig_tangent);
-    if (tl2 < 1e-8) return fallback;
+    if (tl2 < 1e-8) return false;
     orig_tangent /= tl2;
     vec2 orig_normal = vec2(-orig_tangent.y, orig_tangent.x);
 
     vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
     vec2 opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
     float otl = length(opt_tangent);
-    if (otl < 1e-8) return fallback;
+    if (otl < 1e-8) return false;
     opt_tangent /= otl;
     vec2 opt_normal = vec2(-opt_tangent.y, opt_tangent.x);
 
     bool normals_agree = dot(opt_normal, orig_normal) > 0.0;
     float side = dot(pt - cpt, opt_normal);
     if (normals_agree) {
-        return (side > 0.0) ? color_left : color_right;
+        out_color = (side > 0.0) ? color_left : color_right;
     } else {
-        return (side > 0.0) ? color_right : color_left;
+        out_color = (side > 0.0) ? color_right : color_left;
     }
+    return true;
 }
 
 // Find nearest CP and resolve color for a single sample point
 uint sample_from_shared(vec2 pt, uint fallback_color) {
-    float best_d2 = 1e10;
-    float best_t = 0.0;
-    int best_idx = -1;
+    // Build top-4 nearest hits, then try each until one resolves
+    struct SHit { float d2; float t; int idx; };
+    SHit hits[4];
+    int num_hits = 0;
+    for (int i = 0; i < 4; i++) { hits[i].d2 = 1e10; hits[i].idx = -1; }
 
     uint n = sh_num_cps;
     for (uint i = 0u; i < n; i++) {
         SharedCP sc = sh_cps[i];
         float span_best_d2 = 1e10;
         float span_best_t = 0.0;
-        const int N = 8;
+        const int N = 16;
         for (int s = 0; s <= N; s++) {
             float t = float(s) / float(N);
             vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
@@ -157,21 +162,34 @@ uint sample_from_shared(vec2 pt, uint fallback_color) {
                 span_best_t = t;
             }
         }
-        if (span_best_d2 < best_d2) {
-            best_d2 = span_best_d2;
-            best_t = span_best_t;
-            best_idx = int(i);
+        if (span_best_d2 < 1.0) {
+            for (int h = 0; h < 4; h++) {
+                if (span_best_d2 < hits[h].d2) {
+                    for (int j = 3; j > h; j--) hits[j] = hits[j-1];
+                    hits[h].d2 = span_best_d2;
+                    hits[h].t = span_best_t;
+                    hits[h].idx = int(i);
+                    if (num_hits < 4) num_hits++;
+                    break;
+                }
+            }
         }
-        // Early exit
-        if (best_d2 < 0.01) break;
     }
 
-    if (best_idx < 0 || best_d2 >= 1.0) return fallback_color;
-    return resolve_from_shared(pt, uint(best_idx), best_t, fallback_color);
+    // Try each hit until one resolves (matches original sample_color behavior)
+    for (int h = 0; h < num_hits; h++) {
+        uint c;
+        if (resolve_from_shared(pt, uint(hits[h].idx), hits[h].t, c)) {
+            return c;
+        }
+    }
+    return fallback_color;
 }
 
-// Find nearest CP and return hit info along with resolved color
+// Find nearest CP, try all hits, return resolved color + hit info
 uint sample_from_shared_ex(vec2 pt, uint fallback_color, out int out_idx, out float out_t, out float out_d2) {
+    // Reuse sample_from_shared for the color, but also find the nearest hit info
+    // for AA threshold checking
     float best_d2 = 1e10;
     float best_t = 0.0;
     int best_idx = -1;
@@ -181,7 +199,7 @@ uint sample_from_shared_ex(vec2 pt, uint fallback_color, out int out_idx, out fl
         SharedCP sc = sh_cps[i];
         float span_best_d2 = 1e10;
         float span_best_t = 0.0;
-        const int N = 8;
+        const int N = 16;
         for (int s = 0; s <= N; s++) {
             float t = float(s) / float(N);
             vec2 bp = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
@@ -196,14 +214,14 @@ uint sample_from_shared_ex(vec2 pt, uint fallback_color, out int out_idx, out fl
             best_t = span_best_t;
             best_idx = int(i);
         }
-        if (best_d2 < 0.01) break;
     }
 
     out_idx = best_idx;
     out_t = best_t;
     out_d2 = best_d2;
-    if (best_idx < 0 || best_d2 >= 1.0) return fallback_color;
-    return resolve_from_shared(pt, uint(best_idx), best_t, fallback_color);
+
+    // Use sample_from_shared which tries all hits properly
+    return sample_from_shared(pt, fallback_color);
 }
 
 void main() {
@@ -227,12 +245,13 @@ void main() {
     int center_cx = src_x0 + 1;
     int center_cy = src_y0 + 1;
 
-    // Each thread loads a subset of the 50 potential CPs
-    for (uint slot_idx = tid; slot_idx < 50u; slot_idx += 256u) {
+    // Each thread loads a subset of the 98 potential CPs (7×7 corners × 2 slots)
+    // ±3 covers the ±2 per-pixel search radius plus the 2-pixel tile width
+    for (uint slot_idx = tid; slot_idx < 98u; slot_idx += 256u) {
         int local_idx = int(slot_idx) / 2;
         int slot = int(slot_idx) % 2;
-        int dy = local_idx / 5 - 2;
-        int dx = local_idx % 5 - 2;
+        int dy = local_idx / 7 - 3;
+        int dx = local_idx % 7 - 3;
         int cx = center_cx + dx;
         int cy = center_cy + dy;
 
@@ -304,58 +323,51 @@ void main() {
                 float((center_color >> 8u) & 0xFFu) / 255.0,
                 float(center_color & 0xFFu) / 255.0, 1.0));
         } else {
-            // Analytical AA: blend left/right colors by exact coverage.
-            // The nearest boundary gives us both colors and the line equation.
+            // Analytical AA: use center_color and find the other color
+            // by resolving a point on the opposite side of the boundary.
             SharedCP sc = sh_cps[uint(best_idx)];
             vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             vec2 tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             float tl = length(tang);
 
             if (tl < 1e-8) {
-                // Degenerate tangent — just use center color
                 imageStore(output_img, ivec2(opx, opy), vec4(
                     float((center_color >> 16u) & 0xFFu) / 255.0,
                     float((center_color >> 8u) & 0xFFu) / 255.0,
                     float(center_color & 0xFFu) / 255.0, 1.0));
             } else {
                 vec2 normal = vec2(-tang.y, tang.x) / tl;
-
-                // Get both colors from the boundary's edge colors
-                uint cl = center_color, cr = fallback;
-                uint pl = sc.pl, pr = sc.pr, nl = sc.nl, nr = sc.nr;
-                bool prev_valid = (pl != pr), next_valid = (nl != nr);
-                float ref_t = (best_t < 0.5) ? 0.0 : 1.0;
-
-                if (sc.prev_ci < 0 && next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
-                else if (sc.next_ci < 0 && prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
-                else if (best_t < 0.5 && prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
-                else if (best_t >= 0.5 && next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
-                else if (prev_valid) { cl = sc.pl; cr = sc.pr; ref_t = 0.0; }
-                else if (next_valid) { cl = sc.nr; cr = sc.nl; ref_t = 1.0; }
-
-                // Check if original normal agrees with optimized normal
-                vec2 orig_cp = sc.orig_pos;
-                vec2 orig_pp = sc.orig_prev;
-                vec2 orig_pn = sc.orig_next;
-                vec2 orig_tang = beval_deriv(orig_pp, orig_cp, orig_pn, ref_t);
-                float otl = length(orig_tang);
-                vec2 orig_n = (otl > 1e-8) ? vec2(-orig_tang.y, orig_tang.x) / otl : normal;
-                if (dot(normal, orig_n) < 0.0) {
-                    uint tmp = cl; cl = cr; cr = tmp;
-                }
-
-                // Signed distance from pixel center to boundary line
                 float d = dot(center - cpt, normal);
 
+                // Get the other color: resolve a point shifted across the boundary
+                float pw = inv_scale;
+                float offset = pw * 0.5;
+                vec2 other_pt = (d > 0.0) ? center - normal * (d + offset)
+                                           : center - normal * (d - offset);
+                int ofb_x = clamp(int(floor(other_pt.x)), 0, int(img_w) - 1);
+                int ofb_y = clamp(int(floor(other_pt.y)), 0, int(img_h) - 1);
+                uint other_fb = pixels[ofb_y * int(img_w) + ofb_x];
+                uint other_color = sample_from_shared(other_pt, other_fb);
+                // If other color matches center, AA won't help — skip blending
+                if (other_color == center_color) {
+                    imageStore(output_img, ivec2(opx, opy), vec4(
+                        float((center_color >> 16u) & 0xFFu) / 255.0,
+                        float((center_color >> 8u) & 0xFFu) / 255.0,
+                        float(center_color & 0xFFu) / 255.0, 1.0));
+                    continue;
+                }
+
                 // Coverage: pixel width projected onto normal direction
-                float pw = inv_scale;  // pixel width in source coords
                 float proj_w = pw * (abs(normal.x) + abs(normal.y));
                 float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
 
-                // Blend: frac = fraction on the "left" (positive normal) side
-                float r = frac * float((cl >> 16u) & 0xFFu) + (1.0 - frac) * float((cr >> 16u) & 0xFFu);
-                float g = frac * float((cl >> 8u) & 0xFFu) + (1.0 - frac) * float((cr >> 8u) & 0xFFu);
-                float b = frac * float(cl & 0xFFu) + (1.0 - frac) * float(cr & 0xFFu);
+                // center is on the positive-d side, other is on negative-d side
+                uint pos_color = (d > 0.0) ? center_color : other_color;
+                uint neg_color = (d > 0.0) ? other_color : center_color;
+
+                float r = frac * float((pos_color >> 16u) & 0xFFu) + (1.0 - frac) * float((neg_color >> 16u) & 0xFFu);
+                float g = frac * float((pos_color >> 8u) & 0xFFu) + (1.0 - frac) * float((neg_color >> 8u) & 0xFFu);
+                float b = frac * float(pos_color & 0xFFu) + (1.0 - frac) * float(neg_color & 0xFFu);
                 imageStore(output_img, ivec2(opx, opy), vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
             }
         }
