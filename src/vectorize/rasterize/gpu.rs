@@ -1,7 +1,7 @@
 //! GPU edge preparation for compute shader upload.
 
-use super::super::contour::{ColorPath, PathSegment};
-use super::scanline::{Edge, extract_edges};
+use super::super::contour::ColorPath;
+use super::scanline::extract_edges;
 
 /// GPU-ready edge data for compute shader upload.
 #[derive(Clone, Copy)]

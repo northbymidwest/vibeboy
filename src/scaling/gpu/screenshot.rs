@@ -1,7 +1,6 @@
 //! Headless GPU screenshot and rendering functions.
 
 use sdl3::gpu;
-use super::common::*;
 use super::compute::*;
 
 // ── Headless GPU screenshot (compute shader path) ─────────────────────────

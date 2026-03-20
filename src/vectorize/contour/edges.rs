@@ -1,10 +1,8 @@
 //! Boundary edge building, chain construction, and T-junction merging (Paper Section 3.3).
 
-use super::{NodeId, CellEdge, PathSegment, VOID_COLOR, YUV_VISIBLE_EDGES};
+use super::{NodeId, CellEdge, VOID_COLOR, YUV_VISIBLE_EDGES};
 use super::cells::InlineCell;
 use super::{FxHashMap, fx_hashmap, fx_hashmap_cap};
-use crate::vectorize::voronoi::Point;
-use std::collections::HashSet;
 
 /// Pack a NodeId into a u32 for fast hashing. Coordinates are offset by +2
 /// so negative border values (-1) become non-negative.
@@ -236,8 +234,8 @@ fn is_shading_cpair(cpair: (u32, u32)) -> bool {
     let db = (a & 0xFF) as f64 - (b & 0xFF) as f64;
     // YUV conversion (same coefficients as similarity graph)
     let dy = (0.299 * dr + 0.587 * dg + 0.114 * db) / 255.0;
-    let du = (0.493 * (db / 255.0 - dy)) ;
-    let dv = (0.877 * (dr / 255.0 - dy)) ;
+    let du = 0.493 * (db / 255.0 - dy);
+    let dv = 0.877 * (dr / 255.0 - dy);
     // Euclidean distance in YUV space <= 100/255
     let dist_sq = dy * dy + du * du + dv * dv;
     let threshold = 100.0 / 255.0;

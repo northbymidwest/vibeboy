@@ -192,10 +192,10 @@ fn cell_vertices_f64(px: usize, py: usize, graph: &SimilarityGraph) -> [(f64, f6
         _ => { verts[n] = (bx + 1.0, by + 1.0); n += 1; }
     }
     match corner_diag(graph, px, py + 1) {
-        1 => { verts[n] = (bx + 0.25, by + 0.75); n += 1; }
+        1 => { verts[n] = (bx + 0.25, by + 0.75); }
         2 => { verts[n] = (bx + 0.25, by + 1.25); n += 1;
-               verts[n] = (bx - 0.25, by + 0.75); n += 1; }
-        _ => { verts[n] = (bx, by + 1.0); n += 1; }
+               verts[n] = (bx - 0.25, by + 0.75); }
+        _ => { verts[n] = (bx, by + 1.0); }
     }
 
     verts

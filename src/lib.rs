@@ -12,8 +12,6 @@ pub mod savestate;
 pub mod snapshot;
 pub mod snes;
 pub mod timer;
-
-#[cfg(not(target_arch = "wasm32"))]
 pub mod printer;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,10 +31,6 @@ pub mod wgpu_scale;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ui_util;
-
-#[cfg(feature = "web")]
-#[path = "frontends/web/printer.rs"]
-pub mod web_printer;
 
 #[cfg(feature = "web")]
 #[path = "frontends/web/mod.rs"]

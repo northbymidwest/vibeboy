@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 ///   - After first byte (progress>0 while active): always blocking
 ///   - After DMA finishes (active==false): never blocking
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct OamDma {
+pub struct OamDma {
     active: bool,
     source: u16,        // source base address (source_page << 8)
     progress: u8,       // bytes copied so far (0–159)
@@ -52,7 +52,7 @@ impl OamDma {
 
 /// HDMA state (0xFF51–0xFF55).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Hdma {
+pub struct Hdma {
     src: u16,
     dst: u16,
     /// Remaining blocks (each block = 16 bytes). 0 = inactive.
@@ -829,7 +829,7 @@ impl Bus {
                     // OBJ_EN takes effect immediately when cleared —
                     // apply it before the 2T pre-write ticks so sprite
                     // pixels are suppressed during the entire write sequence.
-                    let saved_obj_en = self.ppu.lcdc & 0x02;
+                    let _saved_obj_en = self.ppu.lcdc & 0x02;
                     if (val & 0x02) == 0 {
                         self.ppu.lcdc &= !0x02;
                     }
@@ -837,7 +837,7 @@ impl Bus {
                     let flags = self.ppu.step(2);
                     self.if_ |= flags;
                     self.ppu_deferred -= 2;
-                    let mut old_lcdc = self.ppu.lcdc;
+                    let old_lcdc = self.ppu.lcdc;
                     // Restore OBJ_EN for glitch calculation
                     // (the glitch uses the modified old_lcdc)
                     // Glitch LCDC: old | (new & BG_EN bit)

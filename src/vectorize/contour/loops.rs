@@ -1,7 +1,7 @@
 //! Boundary loop tracing using the planar face algorithm.
 
-use super::{NodeId, PathSegment, VOID_COLOR};
-use super::{FxHashMap, fx_hashmap, fx_hashmap_cap};
+use super::{NodeId, PathSegment};
+use super::{FxHashMap, fx_hashmap_cap};
 use super::optimize::bspline_closed;
 use crate::vectorize::voronoi::Point;
 use std::collections::HashSet;
@@ -109,8 +109,8 @@ pub(super) fn trace_all_boundary_loops(
 pub(super) fn boundary_loop_to_segments(
     nodes: &[NodeId],
     optimized: &FxHashMap<NodeId, Point>,
-    junctions: &HashSet<NodeId>,
-    tjunc_corrected: &FxHashMap<NodeId, Point>,
+    _junctions: &HashSet<NodeId>,
+    _tjunc_corrected: &FxHashMap<NodeId, Point>,
 ) -> Vec<PathSegment> {
     let n = nodes.len();
     let points: Vec<Point> = nodes

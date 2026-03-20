@@ -1,20 +1,23 @@
 /// Game Boy Printer emulation.
 ///
 /// Implements the SerialDevice trait to receive print data over the
-/// serial port and save images as PNG files.
+/// serial port and render completed prints. Output mode determines
+/// whether images are saved as PNG files (native) or queued as RGBA
+/// pixel data in memory (web).
 
 use crate::serial::SerialDevice;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
 const PRINTER_DATA_SIZE: usize = 0x280;
 const PRINTER_MAX_COMMAND_LENGTH: usize = 0x280;
-/// Maximum image size: 160 pixels wide × 200 pixels tall (25 strips of 2 tile rows)
+/// Maximum image size: 160 pixels wide x 200 pixels tall (25 strips of 2 tile rows)
 const PRINTER_IMAGE_SIZE: usize = 160 * 200;
 
 const COMMAND_INIT: u8 = 0x01;
 const COMMAND_START: u8 = 0x02;
 const COMMAND_DATA: u8 = 0x04;
-
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CommandState {
@@ -49,6 +52,21 @@ impl CommandState {
     }
 }
 
+impl PartialOrd for CommandState {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some((*self as u8).cmp(&(*other as u8)))
+    }
+}
+
+/// Determines where completed prints are sent.
+pub enum PrintOutput {
+    /// Save PNGs to disk (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    File { output_dir: PathBuf },
+    /// Queue completed prints as (RGBA pixels, width, height) tuples in memory.
+    Memory,
+}
+
 pub struct Printer {
     command_state: CommandState,
     command_id: u8,
@@ -59,7 +77,7 @@ pub struct Printer {
     checksum: u16,
     status: u8,
 
-    /// 2-bit pixel image buffer (160 × up to 200)
+    /// 2-bit pixel image buffer (160 x up to 200)
     image: [u8; PRINTER_IMAGE_SIZE],
     image_offset: usize,
 
@@ -80,16 +98,30 @@ pub struct Printer {
     /// Print timer (clock ticks remaining)
     time_remaining: u32,
 
-    /// Output directory for saved PNGs
-    output_dir: PathBuf,
-    /// Counter for naming output files
+    /// Output mode
+    output: PrintOutput,
+    /// Counter for naming output files (File mode only)
     print_count: u32,
     /// CPU clock rate for timing calculations
     clock_rate: u32,
+
+    /// Completed prints waiting for retrieval (Memory mode only)
+    pending_prints: Vec<(Vec<u8>, u32, u32)>,
 }
 
 impl Printer {
+    /// Create a printer that saves PNGs to the given directory.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(output_dir: &Path, clock_rate: u32) -> Self {
+        Self::with_output(PrintOutput::File { output_dir: output_dir.to_path_buf() }, clock_rate)
+    }
+
+    /// Create a printer that queues completed prints in memory.
+    pub fn new_memory(clock_rate: u32) -> Self {
+        Self::with_output(PrintOutput::Memory, clock_rate)
+    }
+
+    fn with_output(output: PrintOutput, clock_rate: u32) -> Self {
         Printer {
             command_state: CommandState::Magic1,
             command_id: 0,
@@ -109,9 +141,24 @@ impl Printer {
             compression_run_is_compressed: false,
             idle_time: 0,
             time_remaining: 0,
-            output_dir: output_dir.to_path_buf(),
+            output,
             print_count: 0,
             clock_rate,
+            pending_prints: Vec::new(),
+        }
+    }
+
+    /// Returns true if there are completed prints waiting for retrieval (Memory mode).
+    pub fn has_pending_print(&self) -> bool {
+        !self.pending_prints.is_empty()
+    }
+
+    /// Take the next completed print as (RGBA pixels, width, height).
+    pub fn take_print(&mut self) -> Option<(Vec<u8>, u32, u32)> {
+        if self.pending_prints.is_empty() {
+            None
+        } else {
+            Some(self.pending_prints.remove(0))
         }
     }
 
@@ -235,7 +282,7 @@ impl Printer {
                     let rows = self.image_offset / 160;
                     self.time_remaining = (rows as u32) * self.clock_rate / 256 / 8;
 
-                    self.save_image();
+                    self.output_image();
                     self.image_offset = 0;
                 }
             }
@@ -245,7 +292,7 @@ impl Printer {
                     self.status = 8; // Received full data block
 
                     // Decode 2bpp tile data into image buffer
-                    // 0x280 bytes = 2 rows of 20 tiles (each tile 8×8, 16 bytes)
+                    // 0x280 bytes = 2 rows of 20 tiles (each tile 8x8, 16 bytes)
                     let mut byte_idx = 0usize;
                     for _row in 0..2 {
                         for tile_x in 0..20 {
@@ -273,9 +320,60 @@ impl Printer {
             }
             _ => {} // NOP and unknown
         }
+        self.command_length = 0;
     }
 
-    fn save_image(&mut self) {
+    /// Render the 2-bit image buffer to RGBA pixels using the print palette.
+    fn render_rgba(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let height = self.image_offset / 160;
+        if height == 0 {
+            return None;
+        }
+
+        // Get palette from PRINT command data byte 2
+        let palette = if self.command_length >= 3 {
+            self.command_data[2]
+        } else {
+            0xE4 // default: 0,1,2,3
+        };
+
+        let gray_levels: [u8; 4] = [0xFF, 0xAA, 0x55, 0x00];
+        let width = 160u32;
+        let h = height as u32;
+
+        let mut rgba = Vec::with_capacity((width * h * 4) as usize);
+        for i in 0..(width * h) as usize {
+            let px = self.image[i];
+            let mapped = (palette >> (px * 2)) & 3;
+            let g = gray_levels[mapped as usize];
+            rgba.push(g);
+            rgba.push(g);
+            rgba.push(g);
+            rgba.push(0xFF);
+        }
+
+        Some((rgba, width, h))
+    }
+
+    /// Output the completed print image according to the configured output mode.
+    fn output_image(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let PrintOutput::File { ref output_dir } = self.output {
+            let dir = output_dir.clone();
+            self.save_image_to_file(&dir);
+            return;
+        }
+
+        if let PrintOutput::Memory = self.output {
+            if let Some(print) = self.render_rgba() {
+                self.pending_prints.push(print);
+            }
+        }
+    }
+
+    /// Save the image as a grayscale PNG file (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_image_to_file(&mut self, output_dir: &std::path::Path) {
         let height = self.image_offset / 160;
         if height == 0 {
             return;
@@ -300,12 +398,12 @@ impl Printer {
             .collect();
 
         // Ensure output directory exists
-        if let Err(e) = std::fs::create_dir_all(&self.output_dir) {
+        if let Err(e) = std::fs::create_dir_all(output_dir) {
             log::error!("Failed to create printer output dir: {}", e);
             return;
         }
 
-        let path = self.output_dir.join(format!("print_{:04}.png", self.print_count));
+        let path = output_dir.join(format!("print_{:04}.png", self.print_count));
         self.print_count += 1;
 
         // Create grayscale PNG using the image crate
@@ -315,7 +413,7 @@ impl Printer {
                 if let Err(e) = img.save(&path) {
                     log::error!("Failed to save printer image: {}", e);
                 } else {
-                    log::info!("Printer: saved {}×{} image to {}", width, height, path.display());
+                    log::info!("Printer: saved {}x{} image to {}", width, height, path.display());
                 }
             }
             None => {
@@ -372,10 +470,4 @@ impl SerialDevice for Printer {
 
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-}
-
-impl PartialOrd for CommandState {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((*self as u8).cmp(&(*other as u8)))
-    }
 }

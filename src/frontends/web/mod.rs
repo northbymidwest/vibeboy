@@ -3,7 +3,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::emulator::Emulator;
 use crate::model::GbModel;
-use crate::web_printer::WebPrinter;
+use crate::printer::Printer;
 use crate::wgpu_vectorize::WgpuVectorizePipeline;
 use crate::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 
@@ -274,20 +274,20 @@ impl WasmEmulator {
     /// Attach a Game Boy Printer to the serial port.
     pub fn attach_printer(&mut self) {
         let clock_rate = if self.emu.bus.double_speed { 8_388_608 } else { 4_194_304 };
-        self.emu.bus.serial.device = Box::new(WebPrinter::new(clock_rate));
+        self.emu.bus.serial.device = Box::new(Printer::new_memory(clock_rate));
     }
 
     /// Check if the printer has a completed print ready for download.
     pub fn has_print(&self) -> bool {
         self.emu.bus.serial.device.as_any()
-            .downcast_ref::<WebPrinter>()
+            .downcast_ref::<Printer>()
             .is_some_and(|p| p.has_pending_print())
     }
 
     /// Take the next print as RGBA pixel data. Also stores width/height
     /// for retrieval via print_width()/print_height().
     pub fn take_print_rgba(&mut self) -> Vec<u8> {
-        if let Some(printer) = self.emu.bus.serial.device.as_any_mut().downcast_mut::<WebPrinter>() {
+        if let Some(printer) = self.emu.bus.serial.device.as_any_mut().downcast_mut::<Printer>() {
             if let Some((rgba, w, h)) = printer.take_print() {
                 self.last_print_w = w;
                 self.last_print_h = h;
