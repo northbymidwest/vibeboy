@@ -35,10 +35,13 @@ const BLIP_PHASES: usize = 256;
 const BLIP_BUF_SIZE: usize = BLIP_WIDTH * 2; // 128
 const BLIP_ONE: i32 = 0x10000; // 65536
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct BlipBuf {
+    #[serde(skip, default = "blip_sinc_table")]
     steps: Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>,
+    #[serde(with = "serde_big_array::BigArray")]
     buf_l: [i32; BLIP_BUF_SIZE],
+    #[serde(with = "serde_big_array::BigArray")]
     buf_r: [i32; BLIP_BUF_SIZE],
     pos: usize,
     out_l: i32,
@@ -77,6 +80,10 @@ fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
         }
         Arc::from(steps)
     }).clone()
+}
+
+fn default_blip_buf() -> BlipBuf {
+    BlipBuf::new()
 }
 
 impl BlipBuf {
@@ -119,7 +126,7 @@ impl BlipBuf {
 
 // ── Envelope clock tracking ───────────────────────────────────────────────
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct EnvelopeClock {
     clock: bool,
     locked: bool,
@@ -140,7 +147,7 @@ fn set_envelope_clock(ec: &mut EnvelopeClock, value: bool, direction: bool, volu
 
 // ── Square channel ─────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SquareCh {
     // NRx1
     duty: u8,
@@ -270,7 +277,7 @@ impl SquareCh {
 
 // ── CH1 sweep ──────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Sweep {
     period: u8,
     negate: bool,
@@ -325,7 +332,7 @@ impl Sweep {
 
 // ── Wave channel (CH3) ─────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct WaveCh {
     dac_on: bool,
     vol_code: u8,  // 0=mute, 1=100%, 2=50%, 3=25%
@@ -410,7 +417,7 @@ impl WaveCh {
 
 // ── Noise channel (CH4) ────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct NoiseCh {
     env_init_vol: u8,
     env_add: bool,
@@ -592,7 +599,7 @@ fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, countdown: &mut u8, lo
 
 const SAMPLE_RATE: u32 = 96_000;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apu {
     ch1: SquareCh,
     sweep: Sweep,
@@ -622,20 +629,29 @@ pub struct Apu {
     sample_accum: u64,
 
     // Output buffer (interleaved L/R f32 pairs)
+    #[serde(skip)]
     pub sample_buf: Vec<f32>,
 
     // When true, skip sample_buf accumulation (headless / test runner mode)
+    #[serde(skip)]
     pub headless: bool,
 
     // BLIP buffer for band-limited resampling
+    #[serde(skip, default = "default_blip_buf")]
     blip: BlipBuf,
+    #[serde(skip)]
     prev_left: i32,
+    #[serde(skip)]
     prev_right: i32,
 
     // High-pass filter state (models the coupling capacitor on real hardware)
+    #[serde(skip)]
     hpf_left: f32,
+    #[serde(skip)]
     hpf_right: f32,
+    #[serde(skip)]
     hpf_prev_in_l: f32,
+    #[serde(skip)]
     hpf_prev_in_r: f32,
 
     // Model-dependent clock rate for sample timing

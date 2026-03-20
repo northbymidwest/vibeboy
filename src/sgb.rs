@@ -8,14 +8,74 @@
 /// the SGB BIOS after the boot animation completes.
 const DEFAULT_PALETTE: [u16; 4] = [0x67BF, 0x265B, 0x10B5, 0x2866];
 
-#[derive(Clone, Copy, PartialEq)]
+/// Serde helpers for large boxed arrays that exceed serde's default array limit.
+mod serde_boxed_u16_2048 {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &Box<[u16; 2048]>, ser: S) -> Result<S::Ok, S::Error> {
+        data.as_ref().as_slice().serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u16; 2048]>, D::Error> {
+        let v: Vec<u16> = Vec::deserialize(de)?;
+        if v.len() != 2048 { return Err(serde::de::Error::custom("expected 2048 u16")); }
+        let mut arr = Box::new([0u16; 2048]);
+        arr.copy_from_slice(&v);
+        Ok(arr)
+    }
+}
+
+mod serde_boxed_attr_files {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &Box<[[u8; 90]; 45]>, ser: S) -> Result<S::Ok, S::Error> {
+        let flat: Vec<u8> = data.iter().flat_map(|a| a.iter().copied()).collect();
+        flat.serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[[u8; 90]; 45]>, D::Error> {
+        let flat: Vec<u8> = Vec::deserialize(de)?;
+        if flat.len() != 90 * 45 { return Err(serde::de::Error::custom("expected 4050 bytes")); }
+        let mut arr = Box::new([[0u8; 90]; 45]);
+        for (i, chunk) in flat.chunks_exact(90).enumerate() {
+            arr[i].copy_from_slice(chunk);
+        }
+        Ok(arr)
+    }
+}
+
+mod serde_boxed_u8_8192 {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &Box<[u8; 8192]>, ser: S) -> Result<S::Ok, S::Error> {
+        data.as_ref().as_slice().serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u8; 8192]>, D::Error> {
+        let v: Vec<u8> = Vec::deserialize(de)?;
+        if v.len() != 8192 { return Err(serde::de::Error::custom("expected 8192 bytes")); }
+        let mut arr = Box::new([0u8; 8192]);
+        arr.copy_from_slice(&v);
+        Ok(arr)
+    }
+}
+
+mod serde_boxed_u16_896 {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &Box<[u16; 896]>, ser: S) -> Result<S::Ok, S::Error> {
+        data.as_ref().as_slice().serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u16; 896]>, D::Error> {
+        let v: Vec<u16> = Vec::deserialize(de)?;
+        if v.len() != 896 { return Err(serde::de::Error::custom("expected 896 u16")); }
+        let mut arr = Box::new([0u16; 896]);
+        arr.copy_from_slice(&v);
+        Ok(arr)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum PacketState {
     Idle,
     /// Waiting for data bits after RESET pulse
     ReceivingBits,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Sgb {
     // ── Packet protocol state ──
     state: PacketState,
@@ -51,16 +111,20 @@ pub struct Sgb {
 
     // ── System palettes (from PAL_TRN) ──
     /// 512 system palettes × 4 colors each
+    #[serde(with = "serde_boxed_u16_2048")]
     sys_palettes: Box<[u16; 512 * 4]>,
 
     // ── Attribute files (from ATTR_TRN) ──
     /// Up to 45 attribute files, each 90 bytes (20×18 / 4, packed 2 bits)
+    #[serde(with = "serde_boxed_attr_files")]
     attr_files: Box<[[u8; 90]; 45]>,
 
     // ── Border ──
     /// Border tile data: 256 tiles × 32 bytes (SNES 4bpp planar)
+    #[serde(with = "serde_boxed_u8_8192")]
     pub border_tiles: Box<[u8; 256 * 32]>,
     /// Border tilemap: 32×28 = 896 entries (u16 each)
+    #[serde(with = "serde_boxed_u16_896")]
     pub border_map: Box<[u16; 32 * 28]>,
     /// Border palettes: 4 palettes × 16 colors (RGB555)
     pub border_palettes: [[u16; 16]; 4],

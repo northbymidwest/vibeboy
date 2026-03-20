@@ -20,6 +20,8 @@ mod printer;
 mod serial;
 #[path = "../sgb.rs"]
 mod sgb;
+#[path = "../savestate.rs"]
+mod savestate;
 #[path = "../snapshot.rs"]
 mod snapshot;
 #[path = "../snes/mod.rs"]

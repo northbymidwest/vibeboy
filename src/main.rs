@@ -10,6 +10,7 @@ mod ppu;
 mod printer;
 mod serial;
 mod sgb;
+mod savestate;
 mod snapshot;
 mod snes;
 mod timer;
@@ -392,7 +393,16 @@ fn main() {
                 | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'running,
                 Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
                     emu.save_state(current_slot);
-                    eprintln!("State saved to slot {}", current_slot + 1);
+                    // Serialize to disk
+                    if let Some(data) = emu.save_state_to_bytes(current_slot) {
+                        let path = rom_path.with_extension(format!("{}.ss", current_slot + 1));
+                        match fs::write(&path, &data) {
+                            Ok(_) => eprintln!("State saved to slot {} ({})", current_slot + 1, path.display()),
+                            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", current_slot + 1, e),
+                        }
+                    } else {
+                        eprintln!("State saved to slot {}", current_slot + 1);
+                    }
                 }
                 Event::KeyDown { keycode: Some(Keycode::F9), .. } => {
                     // Screenshot: save raw PPU output and scaled GPU output
@@ -459,10 +469,20 @@ fn main() {
                     }
                 }
                 Event::KeyDown { keycode: Some(Keycode::F7), .. } => {
+                    // Try in-memory first, then disk
                     if emu.load_state(current_slot) {
                         eprintln!("State loaded from slot {}", current_slot + 1);
                     } else {
-                        eprintln!("Slot {} is empty", current_slot + 1);
+                        let path = rom_path.with_extension(format!("{}.ss", current_slot + 1));
+                        if let Ok(data) = fs::read(&path) {
+                            if emu.load_state_from_bytes(current_slot, &data) {
+                                eprintln!("State loaded from disk: {}", path.display());
+                            } else {
+                                eprintln!("Failed to load state from {}", path.display());
+                            }
+                        } else {
+                            eprintln!("Slot {} is empty", current_slot + 1);
+                        }
                     }
                 }
                 Event::KeyDown { keycode: Some(Keycode::Space), .. } => {

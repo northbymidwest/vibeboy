@@ -1,7 +1,7 @@
 /// SNES DMA controller — 8 channels of general-purpose DMA.
 /// Used by the SGB BIOS for VRAM/CGRAM bulk transfers.
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
     pub dmap: u8,    // $43x0: transfer mode / direction
     pub bbad: u8,    // $43x1: B-bus address ($21xx)
@@ -28,7 +28,7 @@ impl DmaChannel {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct DmaController {
     pub channels: [DmaChannel; 8],
 }

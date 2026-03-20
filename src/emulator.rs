@@ -207,6 +207,34 @@ impl Emulator {
         false
     }
 
+    /// Serialize the given slot to bytes for disk/network storage.
+    /// Returns None if the slot is empty.
+    pub fn save_state_to_bytes(&mut self, slot: usize) -> Option<Vec<u8>> {
+        if slot < 9 {
+            if let Some(ref snap) = self.save_slots[slot] {
+                return Some(crate::savestate::serialize(snap));
+            }
+        }
+        None
+    }
+
+    /// Load a save state from bytes into the given slot and restore it.
+    /// Returns true on success.
+    pub fn load_state_from_bytes(&mut self, slot: usize, data: &[u8]) -> bool {
+        match crate::savestate::deserialize(data) {
+            Ok(snap) => {
+                self.restore_snapshot(&snap);
+                self.save_slots[slot] = Some(Box::new(snap));
+                self.rewind_buffer.clear();
+                true
+            }
+            Err(e) => {
+                log::error!("Failed to load save state: {}", e);
+                false
+            }
+        }
+    }
+
     /// Run the SNES subsystem for one frame (LLE mode).
     fn step_snes_frame(&mut self) {
         let snes = self.snes.as_mut().unwrap();

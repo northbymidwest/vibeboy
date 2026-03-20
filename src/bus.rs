@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 ///     (false for fresh start → accessible; true for restart → still blocked)
 ///   - After first byte (progress>0 while active): always blocking
 ///   - After DMA finishes (active==false): never blocking
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct OamDma {
     active: bool,
     source: u16,        // source base address (source_page << 8)
@@ -51,7 +51,7 @@ impl OamDma {
 }
 
 /// HDMA state (0xFF51–0xFF55).
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Hdma {
     src: u16,
     dst: u16,

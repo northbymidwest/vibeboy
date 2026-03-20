@@ -50,7 +50,7 @@ pub struct Serial {
     pub serial_output: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SerialSnapshot {
     pub sb: u8,
     pub sc: u8,

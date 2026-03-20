@@ -10,6 +10,7 @@ mod printer;
 mod scaling;
 mod serial;
 mod sgb;
+mod savestate;
 mod snapshot;
 mod snes;
 mod timer;
@@ -926,6 +927,260 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 }
 ";
 
+/// Full GPU vectorize pipeline via Metal compute (6 stages).
+struct MetalVectorizePipeline {
+    sim_graph: ComputePipelineState,
+    resolve: ComputePipelineState,
+    cell_graph: ComputePipelineState,
+    optimizer: ComputePipelineState,
+    tjunction: ComputePipelineState,
+    rasterizer: ComputePipelineState,
+    // Cached buffers (allocated once, reused)
+    bufs: Option<MetalVecBufs>,
+}
+
+struct MetalVecBufs {
+    img_w: u32,
+    img_h: u32,
+    px_buf: Buffer,
+    graph_buf: Buffer,
+    graph_snapshot: Buffer,
+    pos_buf: Buffer,
+    nbr_buf: Buffer,
+    flag_buf: Buffer,
+    ecolor_buf: Buffer,
+    opt_out_buf: Buffer,
+    orig_pos_buf: Buffer,
+}
+
+impl MetalVectorizePipeline {
+    fn new(device: &Device) -> Option<Self> {
+        fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipelineState> {
+            let src = std::str::from_utf8(msl).ok()?;
+            let lib = device.new_library_with_source(src, &CompileOptions::new())
+                .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
+            let func = lib.get_function("main0", None)
+                .map_err(|e| eprintln!("MSL function error: {e}")).ok()?;
+            device.new_compute_pipeline_state_with_function(&func)
+                .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
+        }
+
+        // Use RAW spirv-cross MSL output (no build.rs remap).
+        // We generate it at runtime to avoid the SDL3 remap that build.rs applies.
+        fn load_spv_as_msl(device: &Device, spv: &[u8]) -> Option<ComputePipelineState> {
+            // Use pre-compiled MSL — bind according to its buffer indices
+            load_msl(device, spv)
+        }
+
+        Some(MetalVectorizePipeline {
+            sim_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")))?,
+            resolve: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")))?,
+            cell_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")))?,
+            optimizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")))?,
+            tjunction: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")))?,
+            rasterizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")))?,
+            bufs: None,
+        })
+    }
+
+    fn run(
+        &mut self,
+        device: &Device,
+        queue: &CommandQueue,
+        pixels: &[u32],
+        img_w: u32, img_h: u32,
+        out_w: u32, out_h: u32,
+        scale: f32,
+        out_tex: &Texture,
+    ) {
+        let graph_stride = 2 * img_w + 1;
+        let corners_w = img_w + 1;
+        let corners_h = img_h + 1;
+        let num_cps = corners_w * corners_h * 2;
+        let graph_elems = graph_stride * (2 * img_h + 1);
+
+        // Allocate/reuse buffers
+        if self.bufs.as_ref().map_or(true, |b| b.img_w != img_w || b.img_h != img_h) {
+            let mk = |sz: u64| device.new_buffer(sz.max(4), MTLResourceOptions::StorageModeShared);
+            self.bufs = Some(MetalVecBufs {
+                img_w, img_h,
+                px_buf: mk((img_w * img_h * 4) as u64),
+                graph_buf: mk((graph_elems * 4) as u64),
+                graph_snapshot: mk((graph_elems * 4) as u64),
+                pos_buf: mk((num_cps * 2 * 4) as u64),
+                nbr_buf: mk((num_cps * 4 * 4) as u64),
+                flag_buf: mk((num_cps * 4) as u64),
+                ecolor_buf: mk((num_cps * 4 * 4) as u64),
+                opt_out_buf: mk((num_cps * 2 * 4) as u64),
+                orig_pos_buf: mk((num_cps * 2 * 4) as u64),
+            });
+        }
+        let b = self.bufs.as_ref().unwrap();
+
+        // Upload pixels
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr() as *const u8,
+                b.px_buf.contents() as *mut u8,
+                (img_w * img_h * 4) as usize,
+            );
+        }
+
+        let tiles_w = (img_w + 1) / 2;
+        let tiles_h = (img_h + 1) / 2;
+
+        // Zero all buffers before pipeline starts (required for correctness)
+        let cmd = queue.new_command_buffer();
+        {
+            let enc = cmd.new_blit_command_encoder();
+            for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
+                        &b.flag_buf, &b.ecolor_buf, &b.opt_out_buf, &b.orig_pos_buf] {
+                enc.fill_buffer(buf, metal::NSRange::new(0, buf.length()), 0);
+            }
+            enc.end_encoding();
+        }
+
+        // Helper to create uniform buffer
+        let mk_uni = |data: &[u32]| -> Buffer {
+            let buf = device.new_buffer((data.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr() as *const u8,
+                    buf.contents() as *mut u8,
+                    data.len() * 4,
+                );
+            }
+            buf
+        };
+
+        // Stage 1: Similarity graph
+        {
+            let uni = mk_uni(&[img_w, img_h, graph_stride, 0]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.sim_graph);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(&b.px_buf), 0);
+            enc.set_buffer(2, Some(&b.graph_buf), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((img_w + 15) / 16) as u64, ((img_h + 15) / 16) as u64, 1),
+                MTLSize::new(16, 16, 1));
+            enc.end_encoding();
+        }
+
+        // Copy graph → graph_snapshot
+        {
+            let enc = cmd.new_blit_command_encoder();
+            enc.copy_from_buffer(&b.graph_buf, 0, &b.graph_snapshot, 0, (graph_elems * 4) as u64);
+            enc.end_encoding();
+        }
+
+        // Stage 2: Resolve crossings
+        {
+            let uni = mk_uni(&[img_w, img_h, graph_stride, 0]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.resolve);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(&b.graph_snapshot), 0);
+            enc.set_buffer(2, Some(&b.graph_buf), 0);
+            let rw = img_w.saturating_sub(1);
+            let rh = img_h.saturating_sub(1);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((rw + 15) / 16) as u64, ((rh + 15) / 16) as u64, 1),
+                MTLSize::new(16, 16, 1));
+            enc.end_encoding();
+        }
+
+        // Stage 3: Cell graph
+        {
+            let uni = mk_uni(&[img_w, img_h, graph_stride, corners_w]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.cell_graph);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(&b.graph_buf), 0);
+            enc.set_buffer(2, Some(&b.pos_buf), 0);
+            enc.set_buffer(3, Some(&b.nbr_buf), 0);
+            enc.set_buffer(4, Some(&b.flag_buf), 0);
+            enc.set_buffer(5, Some(&b.ecolor_buf), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((corners_w + 15) / 16) as u64, ((corners_h + 15) / 16) as u64, 1),
+                MTLSize::new(16, 16, 1));
+            enc.end_encoding();
+        }
+
+        // Copy pos → orig_pos
+        {
+            let enc = cmd.new_blit_command_encoder();
+            enc.copy_from_buffer(&b.pos_buf, 0, &b.orig_pos_buf, 0, (num_cps * 2 * 4) as u64);
+            enc.end_encoding();
+        }
+
+        // Stage 4: Optimize energy (2 iterations, ping-pong)
+        let pos_size = (num_cps * 2 * 4) as u64;
+        for iter in 0..2u32 {
+            let (src, dst) = if iter % 2 == 0 {
+                (&b.pos_buf, &b.opt_out_buf)
+            } else {
+                (&b.opt_out_buf, &b.pos_buf)
+            };
+            let uni = mk_uni(&[num_cps, f32::to_bits(0.01), f32::to_bits(0.25), f32::to_bits(2.5)]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.optimizer);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(src), 0);
+            enc.set_buffer(2, Some(&b.orig_pos_buf), 0);
+            enc.set_buffer(3, Some(&b.nbr_buf), 0);
+            enc.set_buffer(4, Some(&b.flag_buf), 0);
+            enc.set_buffer(5, Some(dst), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((num_cps + 255) / 256) as u64, 1, 1),
+                MTLSize::new(256, 1, 1));
+            enc.end_encoding();
+        }
+        // After 2 iterations, result is back in pos_buf
+
+        // Stage 4b: T-junction correction
+        // MSL buffer order (after remap): 0=uniforms, 1=neighbors, 2=flags, 3=positions
+        {
+            let uni = mk_uni(&[num_cps, 0, 0, 0]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.tjunction);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(&b.nbr_buf), 0);
+            enc.set_buffer(2, Some(&b.flag_buf), 0);
+            enc.set_buffer(3, Some(&b.pos_buf), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((num_cps + 255) / 256) as u64, 1, 1),
+                MTLSize::new(256, 1, 1));
+            enc.end_encoding();
+        }
+
+        // Stage 5: Cell rasterizer
+        // MSL buffer order (after remap): 0=uniforms, 1=pixels,
+        // 2=positions, 3=orig_positions, 4=flags, 5=neighbors, 6=edge_colors
+        {
+            let uni = mk_uni(&[img_w, img_h, out_w, out_h,
+                f32::to_bits(scale), corners_w, tiles_w, tiles_h]);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&self.rasterizer);
+            enc.set_buffer(0, Some(&uni), 0);
+            enc.set_buffer(1, Some(&b.px_buf), 0);
+            enc.set_buffer(2, Some(&b.pos_buf), 0);
+            enc.set_buffer(3, Some(&b.orig_pos_buf), 0);
+            enc.set_buffer(4, Some(&b.flag_buf), 0);
+            enc.set_buffer(5, Some(&b.nbr_buf), 0);
+            enc.set_buffer(6, Some(&b.ecolor_buf), 0);
+            enc.set_texture(0, Some(out_tex));
+            enc.dispatch_thread_groups(
+                MTLSize::new((tiles_w * tiles_h) as u64, 1, 1),
+                MTLSize::new(256, 1, 1));
+            enc.end_encoding();
+        }
+
+        cmd.commit();
+        cmd.wait_until_completed();
+    }
+}
+
 struct MetalRenderer {
     device: Device,
     layer: MetalLayer,
@@ -934,6 +1189,20 @@ struct MetalRenderer {
     texture: Texture,
     tex_w: u32,
     tex_h: u32,
+    // Compute scaling pipelines (lazily initialized)
+    scale_compute: [Option<ComputePipelineState>; 11],
+    compute_out_tex: Option<Texture>,
+    compute_out_w: u32,
+    compute_out_h: u32,
+    // Full GPU vectorize pipeline
+    vectorize_pipeline: Option<MetalVectorizePipeline>,
+    // GPU scanline rasterizer for vectorize filters
+    scanline_rasterizer: Option<ComputePipelineState>,
+    // Diffusion rasterizer (single-pass)
+    diffusion_pipeline: Option<ComputePipelineState>,
+    // Spline-diffusion (2-pass: vectorize_to_buf + spline_diffusion)
+    spline_diff_pass1: Option<ComputePipelineState>,
+    spline_diff_pass2: Option<ComputePipelineState>,
 }
 
 impl MetalRenderer {
@@ -983,7 +1252,439 @@ impl MetalRenderer {
             texture,
             tex_w,
             tex_h,
+            scale_compute: Default::default(),
+            compute_out_tex: None,
+            compute_out_w: 0,
+            compute_out_h: 0,
+            vectorize_pipeline: None,
+            scanline_rasterizer: None,
+            diffusion_pipeline: None,
+            spline_diff_pass1: None,
+            spline_diff_pass2: None,
         }
+    }
+
+    /// Run the GPU scanline rasterizer on pre-computed vectorize edges.
+    fn run_scanline_rasterize(
+        &mut self,
+        edges: &[vectorize::rasterize::GpuEdgeV2],
+        row_ranges: &[vectorize::rasterize::GpuRowRange],
+        edge_indices: &[u32],
+        out_w: u32, out_h: u32,
+        bg_color: u32,
+    ) -> Option<()> {
+        if out_w == 0 || out_h == 0 { return None; }
+        // Lazily init pipeline
+        if self.scanline_rasterizer.is_none() {
+            let msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.metal"));
+            let src = std::str::from_utf8(msl).ok()?;
+            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
+            let func = lib.get_function("main0", None).ok()?;
+            self.scanline_rasterizer = Some(
+                self.device.new_compute_pipeline_state_with_function(&func).ok()?
+            );
+        }
+        let pipeline = self.scanline_rasterizer.as_ref()?;
+
+        // Ensure output texture
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            let desc = TextureDescriptor::new();
+            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            desc.set_width(out_w as u64);
+            desc.set_height(out_h as u64);
+            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        // Upload edge data
+        let edge_bytes = unsafe {
+            std::slice::from_raw_parts(edges.as_ptr() as *const u8,
+                edges.len() * std::mem::size_of::<vectorize::rasterize::GpuEdgeV2>())
+        };
+        let row_bytes = unsafe {
+            std::slice::from_raw_parts(row_ranges.as_ptr() as *const u8,
+                row_ranges.len() * std::mem::size_of::<vectorize::rasterize::GpuRowRange>())
+        };
+        let idx_bytes = unsafe {
+            std::slice::from_raw_parts(edge_indices.as_ptr() as *const u8,
+                edge_indices.len() * 4)
+        };
+
+        let safe_buf = |dev: &Device, data: &[u8]| -> Buffer {
+            if data.is_empty() {
+                dev.new_buffer(4, MTLResourceOptions::StorageModeShared)
+            } else {
+                dev.new_buffer_with_data(data.as_ptr() as *const _, data.len() as u64, MTLResourceOptions::StorageModeShared)
+            }
+        };
+        let edge_buf = safe_buf(&self.device, edge_bytes);
+        let row_buf = safe_buf(&self.device, row_bytes);
+        let idx_buf = safe_buf(&self.device, idx_bytes);
+
+        // Uniforms: out_w, out_h, num_edges, bg_color
+        let uniforms: [u32; 4] = [out_w, out_h, edges.len() as u32, bg_color];
+        let uni_buf = self.device.new_buffer_with_data(
+            uniforms.as_ptr() as *const _, 16, MTLResourceOptions::StorageModeShared);
+
+        // Dispatch
+        // MSL buffer order (after remap): 0=uniforms, 1=edges, 2=row_ranges, 3=edge_indices
+        let cmd = self.command_queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(pipeline);
+        enc.set_buffer(0, Some(&uni_buf), 0);
+        enc.set_buffer(1, Some(&edge_buf), 0);
+        enc.set_buffer(2, Some(&row_buf), 0);
+        enc.set_buffer(3, Some(&idx_buf), 0);
+        enc.set_texture(0, Some(out_tex));
+        enc.dispatch_thread_groups(
+            MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
+            MTLSize::new(16, 16, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.tex_w = out_w;
+        self.tex_h = out_h;
+        self.texture = out_tex.clone();
+        Some(())
+    }
+
+    /// Get or create a compute pipeline for a scaling filter.
+    /// Run the diffusion rasterizer (single-pass Gaussian blending).
+    fn run_diffusion_rasterize(
+        &mut self,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        out_w: u32, out_h: u32,
+        scale: u32,
+    ) -> Option<()> {
+        if out_w == 0 || out_h == 0 { return None; }
+        use vectorize::rasterize::build_graph_regions;
+        use vectorize::graph;
+
+        // Lazily init pipeline
+        if self.diffusion_pipeline.is_none() {
+            let msl = include_bytes!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.metal"));
+            let src = std::str::from_utf8(msl).ok()?;
+            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
+            let func = lib.get_function("main0", None).ok()?;
+            self.diffusion_pipeline = Some(
+                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+        }
+        let pipeline = self.diffusion_pipeline.as_ref()?;
+
+        // Prepare data on CPU
+        let g = graph::build(pixels, src_w as usize, src_h as usize);
+        let regions = build_graph_regions(src_w as usize, src_h as usize, &g);
+        let mut diags = vec![0u32; (src_w * src_h) as usize];
+        for py in 0..src_h as usize {
+            for px in 0..src_w as usize {
+                let tl = Self::corner_diag(&g, px, py) as u32;
+                let tr = Self::corner_diag(&g, px + 1, py) as u32;
+                let br = Self::corner_diag(&g, px + 1, py + 1) as u32;
+                let bl = Self::corner_diag(&g, px, py + 1) as u32;
+                diags[py * src_w as usize + px] = tl | (tr << 2) | (br << 4) | (bl << 6);
+            }
+        }
+
+        // Ensure output texture
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            let desc = TextureDescriptor::new();
+            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            desc.set_width(out_w as u64);
+            desc.set_height(out_h as u64);
+            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        let px_buf = self.device.new_buffer_with_data(
+            pixels.as_ptr() as *const _, (pixels.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let reg_buf = self.device.new_buffer_with_data(
+            regions.as_ptr() as *const _, (regions.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let diag_buf = self.device.new_buffer_with_data(
+            diags.as_ptr() as *const _, (diags.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+
+        // MSL: buffer(0)=uniforms, buffer(1)=diag_states, buffer(2)=regions, buffer(3)=pixels
+        let inv_scale = 1.0f32 / scale as f32;
+        let uniforms: [u32; 8] = [out_w, out_h, src_w, src_h,
+            f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), 0];
+        let uni_buf = self.device.new_buffer_with_data(
+            uniforms.as_ptr() as *const _, 32, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.command_queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(pipeline);
+        enc.set_buffer(0, Some(&uni_buf), 0);
+        enc.set_buffer(1, Some(&diag_buf), 0);
+        enc.set_buffer(2, Some(&reg_buf), 0);
+        enc.set_buffer(3, Some(&px_buf), 0);
+        enc.set_texture(0, Some(out_tex));
+        enc.dispatch_thread_groups(
+            MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
+            MTLSize::new(16, 16, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.tex_w = out_w;
+        self.tex_h = out_h;
+        self.texture = out_tex.clone();
+        Some(())
+    }
+
+    fn corner_diag(g: &vectorize::graph::SimilarityGraph, cx: usize, cy: usize) -> u8 {
+        if cx == 0 || cy == 0 || cx >= g.width || cy >= g.height { return 0; }
+        if g.edge(cx - 1, cy - 1).down_right { return 1; }
+        if g.edge(cx, cy - 1).down_left { return 2; }
+        0
+    }
+
+    /// Run spline-diffusion (2-pass: vectorize_to_buf → spline_diffusion).
+    fn run_spline_diffusion(
+        &mut self,
+        edges: &[vectorize::rasterize::GpuEdgeV2],
+        row_ranges: &[vectorize::rasterize::GpuRowRange],
+        edge_indices: &[u32],
+        pixels: &[u32],
+        out_w: u32, out_h: u32,
+        src_w: u32, src_h: u32,
+        bg_color: u32,
+        scale: u32,
+    ) -> Option<()> {
+        // Lazily init pipelines
+        if self.spline_diff_pass1.is_none() {
+            let msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.metal"));
+            let src = std::str::from_utf8(msl).ok()?;
+            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
+            let func = lib.get_function("main0", None).ok()?;
+            self.spline_diff_pass1 = Some(
+                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+        }
+        if self.spline_diff_pass2.is_none() {
+            let msl = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.metal"));
+            let src = std::str::from_utf8(msl).ok()?;
+            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
+            let func = lib.get_function("main0", None).ok()?;
+            self.spline_diff_pass2 = Some(
+                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+        }
+        let p1 = self.spline_diff_pass1.as_ref()?;
+        let p2 = self.spline_diff_pass2.as_ref()?;
+
+        // Ensure output texture
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            let desc = TextureDescriptor::new();
+            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            desc.set_width(out_w as u64);
+            desc.set_height(out_h as u64);
+            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        // Upload buffers
+        let edge_bytes = unsafe { std::slice::from_raw_parts(
+            edges.as_ptr() as *const u8,
+            edges.len() * std::mem::size_of::<vectorize::rasterize::GpuEdgeV2>()) };
+        let row_bytes = unsafe { std::slice::from_raw_parts(
+            row_ranges.as_ptr() as *const u8,
+            row_ranges.len() * std::mem::size_of::<vectorize::rasterize::GpuRowRange>()) };
+        let idx_bytes = unsafe { std::slice::from_raw_parts(
+            edge_indices.as_ptr() as *const u8, edge_indices.len() * 4) };
+
+        let edge_buf = self.device.new_buffer_with_data(
+            edge_bytes.as_ptr() as *const _, edge_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
+        let row_buf = self.device.new_buffer_with_data(
+            row_bytes.as_ptr() as *const _, row_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
+        let idx_buf = self.device.new_buffer_with_data(
+            idx_bytes.as_ptr() as *const _, idx_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
+        let px_buf = self.device.new_buffer_with_data(
+            pixels.as_ptr() as *const _, (pixels.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+
+        // Intermediate region buffer
+        let region_buf = self.device.new_buffer(
+            (out_w * out_h * 4).max(4) as u64, MTLResourceOptions::StorageModeShared);
+
+        let cmd = self.command_queue.new_command_buffer();
+
+        // Pass 1: vectorize_to_buf — scanline rasterize edges → region_buf
+        // MSL: buffer(0)=uniforms, buffer(1)=edges(rw), buffer(2)=rows(rw),
+        //      buffer(3)=indices, buffer(4)=region_out(rw)
+        {
+            let uni1: [u32; 4] = [out_w, out_h, edges.len() as u32, bg_color];
+            let uni_buf = self.device.new_buffer_with_data(
+                uni1.as_ptr() as *const _, 16, MTLResourceOptions::StorageModeShared);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(p1);
+            enc.set_buffer(0, Some(&uni_buf), 0);
+            enc.set_buffer(1, Some(&edge_buf), 0);
+            enc.set_buffer(2, Some(&row_buf), 0);
+            enc.set_buffer(3, Some(&idx_buf), 0);
+            enc.set_buffer(4, Some(&region_buf), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
+                MTLSize::new(16, 16, 1));
+            enc.end_encoding();
+        }
+
+        // Pass 2: spline_diffusion — Gaussian blending from region_buf → output texture
+        // MSL: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors
+        {
+            let inv_scale = 1.0f32 / scale as f32;
+            let uni2: [u32; 8] = [out_w, out_h, src_w, src_h,
+                f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), scale];
+            let uni_buf = self.device.new_buffer_with_data(
+                uni2.as_ptr() as *const _, 32, MTLResourceOptions::StorageModeShared);
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(p2);
+            enc.set_buffer(0, Some(&uni_buf), 0);
+            enc.set_buffer(1, Some(&px_buf), 0);
+            enc.set_buffer(2, Some(&region_buf), 0);
+            enc.set_texture(0, Some(out_tex));
+            enc.dispatch_thread_groups(
+                MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
+                MTLSize::new(16, 16, 1));
+            enc.end_encoding();
+        }
+
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        self.tex_w = out_w;
+        self.tex_h = out_h;
+        self.texture = out_tex.clone();
+        Some(())
+    }
+
+    fn ensure_scale_compute(&mut self, idx: usize, msl: &[u8]) -> Option<&ComputePipelineState> {
+        if self.scale_compute[idx].is_none() && !msl.is_empty() {
+            let msl_str = std::str::from_utf8(msl).ok()?;
+            let lib = self.device.new_library_with_source(msl_str, &CompileOptions::new()).ok()?;
+            let func = lib.get_function("main0", None).ok()?;
+            let pipeline = self.device.new_compute_pipeline_state_with_function(&func).ok()?;
+            self.scale_compute[idx] = Some(pipeline);
+        }
+        self.scale_compute[idx].as_ref()
+    }
+
+    /// Run a compute scaling filter and return the output texture.
+    /// Returns (texture_ref, out_w, out_h) or None if the filter isn't GPU-accelerated.
+    fn run_scale_compute(
+        &mut self,
+        filter: scaling::ScaleFilter,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        disp_w: u32, disp_h: u32,
+    ) -> Option<(&Texture, u32, u32)> {
+        use scaling::ScaleFilter;
+
+        let (idx, msl): (usize, &[u8]) = match filter {
+            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute =>
+                (0, include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_comp.metal"))),
+            ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x =>
+                (1, include_bytes!(concat!(env!("OUT_DIR"), "/epx_comp.metal"))),
+            ScaleFilter::Eagle =>
+                (2, include_bytes!(concat!(env!("OUT_DIR"), "/eagle_comp.metal"))),
+            ScaleFilter::Scale3x =>
+                (3, include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_comp.metal"))),
+            ScaleFilter::Bicubic =>
+                (4, include_bytes!(concat!(env!("OUT_DIR"), "/bicubic_comp.metal"))),
+            ScaleFilter::AaNearestNeighbor =>
+                (5, include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_comp.metal"))),
+            ScaleFilter::Hqx(_) =>
+                (6, include_bytes!(concat!(env!("OUT_DIR"), "/hqx_comp.metal"))),
+            ScaleFilter::Xbr(_) =>
+                (7, include_bytes!(concat!(env!("OUT_DIR"), "/xbr_comp.metal"))),
+            ScaleFilter::Xbrz(_) =>
+                (8, include_bytes!(concat!(env!("OUT_DIR"), "/xbrz_comp.metal"))),
+            ScaleFilter::OmniScaleLegacy =>
+                (9, include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_legacy_comp.metal"))),
+            ScaleFilter::SuperXbr =>
+                (10, include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.metal"))),
+            _ => return None,
+        };
+
+        self.ensure_scale_compute(idx, msl)?;
+        let pipeline = self.scale_compute[idx].as_ref()?;
+
+        // Compute output dimensions (integer scale for fixed-factor filters)
+        let (out_w, out_h) = match filter {
+            ScaleFilter::Eagle | ScaleFilter::SuperXbr |
+            ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),
+            ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
+            ScaleFilter::Scale4x => (src_w * 4, src_h * 4),
+            ScaleFilter::Hqx(h) => { let f = h.factor(); (src_w * f, src_h * f) }
+            ScaleFilter::Xbr(x) => { let f = x.factor(); (src_w * f, src_h * f) }
+            ScaleFilter::Xbrz(x) => { let f = x.factor(); (src_w * f, src_h * f) }
+            _ => (disp_w, disp_h),
+        };
+
+        // Create/resize output texture
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            let desc = TextureDescriptor::new();
+            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            desc.set_width(out_w as u64);
+            desc.set_height(out_h as u64);
+            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        // Create pixel buffer
+        let px_buf = self.device.new_buffer_with_data(
+            pixels.as_ptr() as *const _,
+            (pixels.len() * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Build uniforms
+        let iscale = if src_w > 0 { out_w / src_w } else { 1 };
+        let extra = match filter {
+            ScaleFilter::OmniScale | ScaleFilter::OmniScaleCompute => {
+                let sx = src_w as f32 / out_w as f32;
+                let sy = src_h as f32 / out_h as f32;
+                f32::to_bits((sx * sx + sy * sy).sqrt())
+            }
+            ScaleFilter::Epx | ScaleFilter::Scale4x
+            | ScaleFilter::Hqx(_) | ScaleFilter::Xbr(_) | ScaleFilter::Xbrz(_) => iscale,
+            _ => 0,
+        };
+        let uniforms: [u32; 8] = [src_w, src_h, out_w, out_h, extra, 0, 0, 0];
+        let uni_buf = self.device.new_buffer_with_data(
+            uniforms.as_ptr() as *const _,
+            32,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Dispatch
+        let cmd = self.command_queue.new_command_buffer();
+        let encoder = cmd.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(&uni_buf), 0);
+        encoder.set_buffer(1, Some(&px_buf), 0);
+        encoder.set_texture(0, Some(out_tex));
+        let tw = MTLSize::new(16, 16, 1);
+        let tg = MTLSize::new(
+            ((out_w + 15) / 16) as u64,
+            ((out_h + 15) / 16) as u64,
+            1,
+        );
+        encoder.dispatch_thread_groups(tg, tw);
+        encoder.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        Some((self.compute_out_tex.as_ref()?, out_w, out_h))
     }
 
     fn update_texture(&self, pixels: &[u32]) {
@@ -1108,6 +1809,9 @@ fn filter_entries() -> Vec<(&'static str, scaling::ScaleFilter)> {
         ("Vectorize Diffusion", ScaleFilter::VectorizeDiffusion),
         ("Vectorize Spline Diffusion", ScaleFilter::VectorizeSplineDiffusion),
         ("Vectorize Spline Diff Adaptive", ScaleFilter::VectorizeSplineDiffusionAdaptive),
+        ("Vectorize", ScaleFilter::Vectorize),
+        ("Vectorize Adaptive", ScaleFilter::VectorizeAdaptive),
+        ("Vectorize GPU", ScaleFilter::VectorizeGpu),
     ]
 }
 
@@ -1118,8 +1822,8 @@ fn filter_tag_to_filter(tag: isize) -> Option<scaling::ScaleFilter> {
 
 fn update_filter_checkmarks(app: id, selected_tag: isize) {
     unsafe {
-        // Filter menu is at index 3 (VibeBoy, File, Emulation, Filter, ...)
-        let filter_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 3isize];
+        // Filter menu is at index 4 (VibeBoy, File, View, Emulation, Filter, ...)
+        let filter_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 4isize];
         let filter_submenu: id = msg_send![filter_menu_item, submenu];
         if filter_submenu == nil { return; }
         let count: isize = msg_send![filter_submenu, numberOfItems];
@@ -1282,7 +1986,7 @@ use ui_util::auto_detect_model;
 fn update_model_checkmarks(app: id, selected_tag: isize) {
     unsafe {
         // Emulation menu is at index 2, Hardware submenu is item 2 (0-indexed: after Pause, Reset)
-        let emu_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 2isize];
+        let emu_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 3isize];
         let emu_submenu: id = msg_send![emu_menu_item, submenu];
         let hw_item: id = msg_send![emu_submenu, itemAtIndex: 3isize]; // after pause, reset, separator
         let hw_submenu: id = msg_send![hw_item, submenu];
@@ -1366,6 +2070,17 @@ unsafe fn create_menu_bar(app: id) {
     let file_menu_item = NSMenuItem::new(nil).autorelease();
     let _: () = msg_send![file_menu_item, setSubmenu: file_menu];
     let _: () = msg_send![main_menu, addItem: file_menu_item];
+
+    // ── View menu ───────────────────────────────────────────────────────
+    let view_menu = NSMenu::new(nil).autorelease();
+    let _: () = msg_send![view_menu, setTitle: NSString::alloc(nil).init_str("View")];
+
+    let fps_item = menu_item_with_tag("Show FPS Overlay", sel!(menuAction:), "f", MENU_TAG_SHOW_FPS);
+    let _: () = msg_send![view_menu, addItem: fps_item];
+
+    let view_menu_item = NSMenuItem::new(nil).autorelease();
+    let _: () = msg_send![view_menu_item, setSubmenu: view_menu];
+    let _: () = msg_send![main_menu, addItem: view_menu_item];
 
     // ── Emulation menu ───────────────────────────────────────────────────
     let emu_menu = NSMenu::new(nil).autorelease();
@@ -1465,24 +2180,13 @@ unsafe fn create_menu_bar(app: id) {
     let _: () = msg_send![filter_menu_item, setSubmenu: filter_menu];
     let _: () = msg_send![main_menu, addItem: filter_menu_item];
 
-    // ── View menu ───────────────────────────────────────────────────────
-    let view_menu = NSMenu::new(nil).autorelease();
-    let _: () = msg_send![view_menu, setTitle: NSString::alloc(nil).init_str("View")];
-
-    let fps_item = menu_item_with_tag("Show FPS Overlay", sel!(menuAction:), "f", MENU_TAG_SHOW_FPS);
-    let _: () = msg_send![view_menu, addItem: fps_item];
-
-    let view_menu_item = NSMenuItem::new(nil).autorelease();
-    let _: () = msg_send![view_menu_item, setSubmenu: view_menu];
-    let _: () = msg_send![main_menu, addItem: view_menu_item];
-
     // ── State menu ───────────────────────────────────────────────────────
     let state_menu = NSMenu::new(nil).autorelease();
     let _: () = msg_send![state_menu, setTitle: NSString::alloc(nil).init_str("State")];
 
-    let save_item = menu_item_with_tag_and_key("Save State", sel!(menuAction:), MENU_TAG_SAVE_STATE, K_F5_EQUIV);
+    let save_item = menu_item_with_tag("Save State", sel!(menuAction:), "", MENU_TAG_SAVE_STATE);
     let _: () = msg_send![state_menu, addItem: save_item];
-    let load_item = menu_item_with_tag_and_key("Load State", sel!(menuAction:), MENU_TAG_LOAD_STATE, K_F7_EQUIV);
+    let load_item = menu_item_with_tag("Load State", sel!(menuAction:), "", MENU_TAG_LOAD_STATE);
     let _: () = msg_send![state_menu, addItem: load_item];
     let _: () = msg_send![state_menu, addItem: NSMenuItem::separatorItem(nil)];
 
@@ -2264,6 +2968,30 @@ fn main() {
         window.setTitle_(NSString::alloc(nil).init_str(&title));
         window.center();
 
+        // Create a custom NSView subclass that suppresses key repeat sounds
+        {
+            use objc::declare::ClassDecl;
+            use objc::runtime::{Class, Sel};
+            let class_name = "VBGameView";
+            if Class::get(class_name).is_none() {
+                let superclass = Class::get("NSView").unwrap();
+                let mut decl = ClassDecl::new(class_name, superclass).unwrap();
+                extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool { true }
+                extern "C" fn key_down(_this: &Object, _sel: Sel, _event: id) { /* swallow */ }
+                unsafe {
+                    decl.add_method(sel!(acceptsFirstResponder), accepts_first_responder as extern "C" fn(&Object, Sel) -> bool);
+                    decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+                }
+                decl.register();
+            }
+            let game_view_class = Class::get(class_name).unwrap();
+            let content_rect: NSRect = msg_send![window, frame];
+            let game_view: id = msg_send![game_view_class, alloc];
+            let game_view: id = msg_send![game_view, initWithFrame: content_rect];
+            let _: () = msg_send![window, setContentView: game_view];
+            let _: () = msg_send![window, makeFirstResponder: game_view];
+        }
+
         // Attach Metal layer to content view
         let content_view: id = msg_send![window, contentView];
         let _: () = msg_send![content_view, setWantsLayer: YES];
@@ -2401,7 +3129,7 @@ fn main() {
                     paused = !paused;
                     eprintln!("{}", if paused { "Paused" } else { "Resumed" });
                     // Update menu item title
-                    let emu_menu: id = msg_send![app.mainMenu(), itemAtIndex: 2isize];
+                    let emu_menu: id = msg_send![app.mainMenu(), itemAtIndex: 3isize];
                     let submenu: id = msg_send![emu_menu, submenu];
                     let pause_item: id = msg_send![submenu, itemWithTag: MENU_TAG_PAUSE];
                     let label = if paused { "Resume" } else { "Pause" };
@@ -2416,14 +3144,31 @@ fn main() {
 
                 if actions.save_state {
                     emu.save_state(current_slot);
-                    eprintln!("State saved to slot {}", current_slot + 1);
+                    if let Some(data) = emu.save_state_to_bytes(current_slot) {
+                        let path = current_rom_path.with_extension(format!("{}.ss", current_slot + 1));
+                        match std::fs::write(&path, &data) {
+                            Ok(_) => eprintln!("State saved to slot {} ({})", current_slot + 1, path.display()),
+                            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", current_slot + 1, e),
+                        }
+                    } else {
+                        eprintln!("State saved to slot {}", current_slot + 1);
+                    }
                 }
 
                 if actions.load_state {
                     if emu.load_state(current_slot) {
                         eprintln!("State loaded from slot {}", current_slot + 1);
                     } else {
-                        eprintln!("Slot {} is empty", current_slot + 1);
+                        let path = current_rom_path.with_extension(format!("{}.ss", current_slot + 1));
+                        if let Ok(data) = std::fs::read(&path) {
+                            if emu.load_state_from_bytes(current_slot, &data) {
+                                eprintln!("State loaded from disk: {}", path.display());
+                            } else {
+                                eprintln!("Failed to load state from {}", path.display());
+                            }
+                        } else {
+                            eprintln!("Slot {} is empty", current_slot + 1);
+                        }
                     }
                 }
 
@@ -2587,6 +3332,61 @@ fn main() {
                     emu.frame_buffer()
                 };
 
+                // Try GPU compute scaling first
+                let mut gpu_rendered = false;
+                // VectorizeGpu: full 6-stage Metal compute pipeline
+                if scale_filter == scaling::ScaleFilter::VectorizeGpu {
+                    if renderer.vectorize_pipeline.is_none() {
+                        renderer.vectorize_pipeline = MetalVectorizePipeline::new(&renderer.device);
+                    }
+                    if let Some(ref mut vp) = renderer.vectorize_pipeline {
+                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
+                        let gw = (src_w as f32 * s).round() as u32;
+                        let gh = (src_h as f32 * s).round() as u32;
+                        if renderer.compute_out_w != gw || renderer.compute_out_h != gh {
+                            let desc = TextureDescriptor::new();
+                            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                            desc.set_width(gw as u64);
+                            desc.set_height(gh as u64);
+                            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+                            renderer.compute_out_tex = Some(renderer.device.new_texture(&desc));
+                            renderer.compute_out_w = gw;
+                            renderer.compute_out_h = gh;
+                        }
+                        let out_tex = renderer.compute_out_tex.as_ref().unwrap();
+                        vp.run(&renderer.device, &renderer.command_queue, raw_src,
+                            src_w as u32, src_h as u32, gw, gh, s, out_tex);
+                        renderer.tex_w = gw;
+                        renderer.tex_h = gh;
+                        renderer.texture = out_tex.clone();
+                        renderer.render();
+                        gpu_rendered = true;
+                    }
+                }
+
+                if !gpu_rendered && !matches!(scale_filter,
+                    scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
+                    | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
+                    | scaling::ScaleFilter::VectorizeDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusion
+                    | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
+                    | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
+                    | scaling::ScaleFilter::VectorizeGpu)
+                {
+                    if let Some((_tex, gw, gh)) = renderer.run_scale_compute(
+                        scale_filter, raw_src, src_w as u32, src_h as u32,
+                        disp_w as u32, disp_h as u32,
+                    ) {
+                        renderer.tex_w = gw;
+                        renderer.tex_h = gh;
+                        renderer.texture = renderer.compute_out_tex.as_ref().unwrap().clone();
+                        renderer.render();
+                        gpu_rendered = true;
+                    }
+                }
+
+                // CPU fallback
+                if !gpu_rendered {
+
                 // Apply scaling filter
                 let mut vec_scaled: Vec<u32>;
                 let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
@@ -2598,27 +3398,63 @@ fn main() {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                         let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
                         let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                        let (raster, vw, vh) = cache.rasterize(raw_src, src_w, src_h, s);
-                        (raster, vw, vh)
+                        let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
+                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
+                        if ow > 0 && oh > 0 {
+                            renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
+                            renderer.render();
+                            gpu_rendered = true;
+                        }
+                        vec_scaled = Vec::new();
+                        (&[] as &[u32], 0, 0)
                     } else if scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let scale = s.round().max(1.0) as usize;
-                        let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(raw_src, src_w, src_h, scale);
-                        vec_scaled = buf;
-                        (&vec_scaled, dw, dh)
+                        let scale = s.round().max(1.0) as u32;
+                        let ow = src_w as u32 * scale;
+                        let oh = src_h as u32 * scale;
+                        renderer.run_diffusion_rasterize(raw_src, src_w as u32, src_h as u32, ow, oh, scale);
+                        renderer.render();
+                        gpu_rendered = true;
+                        vec_scaled = Vec::new();
+                        (&[] as &[u32], 0, 0)
                     } else if matches!(scale_filter,
                         scaling::ScaleFilter::VectorizeSplineDiffusion
                         | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive)
                     {
                         let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let scale = s.round().max(1.0) as usize;
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(false));
+                        let scale = s.round().max(1.0) as u32;
+                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive);
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
                         let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                        let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
-                            paths, raw_src, src_w, src_h, bg, scale,
-                        );
-                        vec_scaled = buf;
-                        (&vec_scaled, dw, dh)
+                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale as f64, src_w, src_h);
+                        if ow > 0 && oh > 0 {
+                            renderer.run_spline_diffusion(
+                                &gpu_edges, &row_ranges, &edge_indices, raw_src,
+                                ow, oh, src_w as u32, src_h as u32, bg, scale,
+                            );
+                            renderer.render();
+                            gpu_rendered = true;
+                        }
+                        vec_scaled = Vec::new();
+                        (&[] as &[u32], 0, 0)
+                    } else if matches!(scale_filter,
+                        scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+                    {
+                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
+                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
+                        let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
+                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
+                        if ow > 0 && oh > 0 {
+                            renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
+                            renderer.render();
+                            gpu_rendered = true;
+                        }
+                        vec_scaled = Vec::new();
+                        (&[] as &[u32], 0, 0)
                     } else if let Some((s, w, h)) = scaling::cpu_scale(
                         scale_filter, raw_src, src_w, src_h, disp_w, disp_h,
                     ) {
@@ -2629,7 +3465,7 @@ fn main() {
                     };
 
                 // Resize texture if dimensions changed
-                if frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h {
+                if !gpu_rendered && (frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h) {
                     let tex_desc = TextureDescriptor::new();
                     tex_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
                     tex_desc.set_width(frame_w as u64);
@@ -2658,8 +3494,11 @@ fn main() {
                     );
                 }
 
-                renderer.update_texture(&bgra_buf);
-                renderer.render();
+                if !gpu_rendered {
+                    renderer.update_texture(&bgra_buf);
+                    renderer.render();
+                }
+                } // end if !gpu_rendered
             }
 
             // ── FPS counter ──────────────────────────────────────────────────

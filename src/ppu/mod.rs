@@ -8,9 +8,30 @@
 ///   Total frame: 154 lines × 456 = 70224 T-cycles
 
 
+/// Serde helper for VRAM: [[u8; 0x2000]; 2] (two 8KB banks).
+mod serde_vram {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+
+    pub fn serialize<S: Serializer>(data: &[[u8; 0x2000]; 2], ser: S) -> Result<S::Ok, S::Error> {
+        let combined: Vec<u8> = data[0].iter().chain(data[1].iter()).copied().collect();
+        combined.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[[u8; 0x2000]; 2], D::Error> {
+        let combined: Vec<u8> = Vec::deserialize(de)?;
+        if combined.len() != 0x4000 {
+            return Err(serde::de::Error::custom("expected 16384 bytes for VRAM"));
+        }
+        let mut result = [[0u8; 0x2000]; 2];
+        result[0].copy_from_slice(&combined[..0x2000]);
+        result[1].copy_from_slice(&combined[0x2000..]);
+        Ok(result)
+    }
+}
+
 // ---- Pixel FIFO types ----
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct FifoPixel {
     color_index: u8,        // 2-bit tile color (0-3)
     palette: u8,            // CGB palette (0-7), 0 for DMG
@@ -23,7 +44,7 @@ struct FifoPixel {
     bg_palette: u8,         // original BG palette underneath sprite
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PixelFifo {
     buf: [FifoPixel; 16],
     head: usize,
@@ -73,7 +94,7 @@ impl PixelFifo {
 /// BG/Window tile fetcher states. Each state takes exactly 1 T-cycle.
 /// States come in pairs: T1 (latch/address) and T2 (VRAM read/execute).
 /// Push stalls (repeats) if the BG FIFO is not yet empty.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum FetcherState {
     GetTileT1,
     GetTileT2,
@@ -84,7 +105,7 @@ enum FetcherState {
     Push,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Fetcher {
     state: FetcherState,
     fetching_window: bool,
@@ -151,14 +172,16 @@ fn double_bits(nibble: u8) -> u8 {
     result
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Ppu {
     /// VRAM banks 0 and 1 (8 KiB each)
+    #[serde(with = "serde_vram")]
     pub vram: [[u8; 0x2000]; 2],
     /// Current VRAM bank (0 or 1), controlled by 0xFF4F (VBK)
     pub vram_bank: usize,
     /// Object Attribute Memory (40 sprites x 4 bytes = 160 bytes).
     /// Extended to 192 bytes to handle OAM bug corruption at accessed_oam_row > 152
+    #[serde(with = "serde_big_array::BigArray")]
     pub oam: [u8; 192],
 
     // PPU registers
@@ -180,8 +203,10 @@ pub struct Ppu {
 
     // GBC color palettes
     pub bcps: u8,      // 0xFF68: BG Color Palette Spec
+    #[serde(with = "serde_big_array::BigArray")]
     pub bcpd: [u8; 64], // 0xFF69: BG palette data (8 palettes x 4 colors x 2 bytes)
     pub ocps: u8,      // 0xFF6A: OBJ Color Palette Spec
+    #[serde(with = "serde_big_array::BigArray")]
     pub ocpd: [u8; 64], // 0xFF6B: OBJ palette data
 
     // Internal state
@@ -196,7 +221,7 @@ pub struct Ppu {
     stat_irq_line: bool,
 
     /// Sprites collected during Mode 2 OAM scan: (y, x, tile, attrs, oam_index)
-    scanline_sprites: Vec<(u8, u8, u8, u8, u8)>,
+    pub(crate) scanline_sprites: Vec<(u8, u8, u8, u8, u8)>,
 
     /// VRAM read accessible (false during Mode 3, and late Mode 2 on DMG)
     pub vram_accessible: bool,

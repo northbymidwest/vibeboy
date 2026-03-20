@@ -3,6 +3,39 @@
 /// A `Snapshot` captures the entire emulator state at one point in time.
 /// It can be restored to rewind gameplay or load a save state.
 
+/// Serde helper for WRAM: [[u8; 0x1000]; 8] (8 banks of 4KB).
+mod serde_wram {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &[[u8; 0x1000]; 8], ser: S) -> Result<S::Ok, S::Error> {
+        let flat: Vec<u8> = data.iter().flat_map(|bank| bank.iter().copied()).collect();
+        flat.serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[[u8; 0x1000]; 8], D::Error> {
+        let flat: Vec<u8> = Vec::deserialize(de)?;
+        if flat.len() != 0x1000 * 8 { return Err(serde::de::Error::custom("expected 32768 bytes for WRAM")); }
+        let mut result = [[0u8; 0x1000]; 8];
+        for (i, chunk) in flat.chunks_exact(0x1000).enumerate() {
+            result[i].copy_from_slice(chunk);
+        }
+        Ok(result)
+    }
+}
+
+/// Serde helper for HRAM: [u8; 0x7F] (127 bytes).
+mod serde_hram {
+    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    pub fn serialize<S: Serializer>(data: &[u8; 0x7F], ser: S) -> Result<S::Ok, S::Error> {
+        data.as_slice().serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 0x7F], D::Error> {
+        let v: Vec<u8> = Vec::deserialize(de)?;
+        if v.len() != 0x7F { return Err(serde::de::Error::custom("expected 127 bytes for HRAM")); }
+        let mut result = [0u8; 0x7F];
+        result.copy_from_slice(&v);
+        Ok(result)
+    }
+}
+
 use crate::apu::Apu;
 use crate::bus::{Hdma, OamDma};
 use crate::cpu::Cpu;
@@ -14,14 +47,16 @@ use crate::sgb::Sgb;
 use crate::timer::Timer;
 
 /// Full snapshot of the Bus (everything except ROM and the serial device).
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct BusSnapshot {
     pub ppu: Ppu,
     pub timer: Timer,
     pub joypad: Joypad,
     pub apu: Apu,
+    #[serde(with = "serde_wram")]
     pub wram: [[u8; 0x1000]; 8],
     pub wram_bank: usize,
+    #[serde(with = "serde_hram")]
     pub hram: [u8; 0x7F],
     pub if_: u8,
     pub ie: u8,
@@ -42,7 +77,7 @@ pub struct BusSnapshot {
 }
 
 /// Complete emulator snapshot.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub cpu: Cpu,
     pub bus: BusSnapshot,
@@ -51,7 +86,7 @@ pub struct Snapshot {
 }
 
 /// SNES subsystem snapshot (everything except the ROM, which is read-only).
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnesSnapshot {
     pub cpu: crate::snes::cpu::Cpu65816,
     pub bus_wram: Vec<u8>,

@@ -14,7 +14,7 @@ fn cgb_compat_regs(rom: Option<&[u8]>) -> (u8, u8, u8, u8) {
 }
 
 /// SM83 CPU register file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Registers {
     pub a: u8,
     pub f: u8, // Flags: Z(7) N(6) H(5) C(4), lower nibble always 0

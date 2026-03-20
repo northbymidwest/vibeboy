@@ -1,10 +1,12 @@
 /// SNES PPU register file — no rendering, just captures writes and stores VRAM/CGRAM/OAM.
 /// This is sufficient for SGB emulation where we extract palette/tile data from SNES memory.
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnesPpuRegs {
     pub vram: Vec<u8>,        // 64KB (word-addressed, stored as bytes)
+    #[serde(with = "serde_big_array::BigArray")]
     pub cgram: [u8; 512],     // 256 colors × 2 bytes (RGB555)
+    #[serde(with = "serde_big_array::BigArray")]
     pub oam: [u8; 544],       // 512 + 32 bytes
 
     // VRAM access

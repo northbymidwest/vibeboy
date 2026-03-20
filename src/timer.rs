@@ -8,7 +8,7 @@ use crate::model::GbModel;
 ///       On overflow, reloaded from TMA and Timer interrupt is requested.
 /// TMA: Reload value for TIMA.
 /// TAC: Bit 2 = timer enable, bits 1-0 = clock select.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Timer {
     /// Internal 16-bit counter (DIV = counter >> 8)
     counter: u16,

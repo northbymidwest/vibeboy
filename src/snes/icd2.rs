@@ -18,7 +18,7 @@
 /// scanlines (one tile row). The SNES reads the 3 completed slots, avoiding
 /// the one being written. Over 6 NMIs, all 18 tile rows are transferred.
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Icd2 {
     /// Ring buffer: 4 slots × 512 bytes (20 tiles × 16 bytes/tile = 320 used per slot)
     output: Vec<u8>,

@@ -9,7 +9,7 @@ APP_NAME="VibeBoy"
 APP_DIR="$PROJECT_DIR/target/${APP_NAME}.app"
 
 echo "Building vibeboy_cocoa (release)..."
-cargo build --release --bin vibeboy_cocoa --manifest-path "$PROJECT_DIR/Cargo.toml"
+cargo build --release --bin vibeboy_cocoa --features macos-ui --manifest-path "$PROJECT_DIR/Cargo.toml"
 
 echo "Creating ${APP_NAME}.app bundle..."
 rm -rf "$APP_DIR"

@@ -17,3 +17,4 @@ vectorize-tests/
 lib/
 pkg/
 web/pkg/
+*.ss

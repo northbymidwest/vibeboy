@@ -1146,7 +1146,15 @@ impl App {
                     if other == slot_save_id(i) {
                         if let Some(ref mut emu) = self.emu {
                             emu.save_state(i - 1);
-                            eprintln!("State saved to slot {}", i);
+                            if let (Some(ref rp), Some(data)) = (&self.rom_path, emu.save_state_to_bytes(i - 1)) {
+                                let path = rp.with_extension(format!("{}.ss", i));
+                                match std::fs::write(&path, &data) {
+                                    Ok(_) => eprintln!("State saved to slot {} ({})", i, path.display()),
+                                    Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", i, e),
+                                }
+                            } else {
+                                eprintln!("State saved to slot {}", i);
+                            }
                         }
                         return;
                     }
@@ -1154,6 +1162,17 @@ impl App {
                         if let Some(ref mut emu) = self.emu {
                             if emu.load_state(i - 1) {
                                 eprintln!("State loaded from slot {}", i);
+                            } else if let Some(ref rp) = self.rom_path {
+                                let path = rp.with_extension(format!("{}.ss", i));
+                                if let Ok(data) = std::fs::read(&path) {
+                                    if emu.load_state_from_bytes(i - 1, &data) {
+                                        eprintln!("State loaded from disk: {}", path.display());
+                                    } else {
+                                        eprintln!("Failed to load state from {}", path.display());
+                                    }
+                                } else {
+                                    eprintln!("Slot {} is empty", i);
+                                }
                             } else {
                                 eprintln!("Slot {} is empty", i);
                             }

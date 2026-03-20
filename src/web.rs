@@ -334,6 +334,17 @@ impl WasmEmulator {
         self.emu.bus.cart.load_ram(data);
     }
 
+    /// Save emulator state to slot and return serialized bytes for storage.
+    pub fn save_state_to_bytes(&mut self, slot: usize) -> Option<Vec<u8>> {
+        self.emu.save_state(slot);
+        self.emu.save_state_to_bytes(slot)
+    }
+
+    /// Load emulator state from serialized bytes into slot.
+    pub fn load_state_from_bytes(&mut self, slot: usize, data: &[u8]) -> bool {
+        self.emu.load_state_from_bytes(slot, data)
+    }
+
     /// Get a save key derived from the ROM title + checksum.
     pub fn save_key(&self) -> String {
         self.save_key.clone()
