@@ -1046,14 +1046,18 @@ pub fn gpu_full_pipeline_screenshot(
     // New command buffer for rasterizer
     let cmd = device.acquire_command_buffer().ok()?;
 
-    { let cp = device.begin_compute_pass(&cmd,
+    // Tile-based rasterizer: one workgroup per 2×2 source tile
+    { let tiles_w = (img_w + 1) / 2;
+      let tiles_h = (img_h + 1) / 2;
+      let total_tiles = tiles_w * tiles_h;
+      let cp = device.begin_compute_pass(&cmd,
           &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
           &[]).ok()?;
       cp.bind_compute_pipeline(&pipelines.rasterizer);
       cp.bind_compute_storage_buffers(0, &[px_buf.clone(), pos_buf.clone(), orig_pos_buf.clone(), flag_buf.clone(), nbr_buf.clone(), ecolor_buf.clone()]);
-      #[repr(C)] struct U{iw:u32,ih:u32,ow:u32,oh:u32,s:f32,cw:u32,p0:u32,p1:u32}
-      cmd.push_compute_uniform_data(0,&U{iw:img_w,ih:img_h,ow:out_w,oh:out_h,s:scale as f32,cw:corners_w,p0:0,p1:0});
-      cp.dispatch((out_w+15)/16,(out_h+15)/16,1); device.end_compute_pass(cp); }
+      #[repr(C)] struct U{iw:u32,ih:u32,ow:u32,oh:u32,s:f32,cw:u32,tw:u32,th:u32}
+      cmd.push_compute_uniform_data(0,&U{iw:img_w,ih:img_h,ow:out_w,oh:out_h,s:scale as f32,cw:corners_w,tw:tiles_w,th:tiles_h});
+      cp.dispatch(total_tiles,1,1); device.end_compute_pass(cp); }
 
     // Download from texture
     let dl_buf = device.create_transfer_buffer()
