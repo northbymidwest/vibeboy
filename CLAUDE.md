@@ -26,6 +26,11 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 cargo build --release
 cargo run --release -- path/to/rom.gbc
 
+# WebAssembly browser build (requires wasm-pack + nightly toolchain)
+PATH="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin:$PATH" \
+  wasm-pack build --target web --features web --no-default-features
+# Serve web/index.html with any static file server
+
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --bootrom bootroms/dmg_boot.bin
 
@@ -152,6 +157,13 @@ Pipeline: `pixels → graph::build → contour::extract_cells_smooth → rasteri
 ### Scaling filter infrastructure (`src/scaling/`)
 - `mod.rs`: `ScaleFilter` enum (38 filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 16 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `xbr`, `xbrz`.
 - `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, 11 graphics pipelines, 3+ compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` → `GpuRenderMode` enum (`Native`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
+- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` — full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
+
+### WebAssembly frontend (`src/web.rs`, `src/web_printer.rs`, `web/index.html`)
+- `lib.rs`: Library crate re-exporting core emulator modules. Gates `printer`, `scaling`, `vectorize` behind `#[cfg(not(wasm32))]`. Exposes `wgpu_vectorize` for the `web` feature.
+- `web.rs`: `WasmEmulator` struct with wasm-bindgen exports — constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence.
+- `web_printer.rs`: Filesystem-free Game Boy Printer — matches native printer protocol exactly, queues completed prints as RGBA pixel data for JS download.
+- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU vectorize rendering, resizable canvas wrapper, frame-rate independent emulation (~59.73fps via time accumulator), Web Audio at native 96kHz, webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, filter toggle button.
 
 ### GPU shaders (`src/shaders/`)
 
@@ -178,8 +190,9 @@ All shaders are authored in GLSL and cross-compiled at build time to multiple ba
 1. GLSL → SPIR-V via `glslc` (Vulkan backend, all platforms)
 2. SPIR-V → MSL via `spirv-cross --msl` (Metal backend, macOS) — requires per-shader `[[buffer(N)]]` index remapping (`msl_buffer_remap` in `ShaderInfo`) because MSL uses a single buffer namespace for all resource types
 3. SPIR-V → HLSL → DXIL via `spirv-cross --hlsl` + `dxc` (Direct3D 12 backend, Windows) — requires automated register/space normalization (`remap_hlsl_registers`) because spirv-cross assigns HLSL spaces based on SPIR-V descriptor sets, but SDL3 D3D12 expects type-based grouping: `t[n] space0` (SRVs), `u[n] space1` (UAVs), `b[n] space2` (CBVs)
+4. SPIR-V → WGSL via `naga` (WebGPU backend, browser/wgpu) — naga is a Rust build dependency; converts at build time. Note: `cell_rasterizer.comp` has barriers restructured for WGSL uniformity rules (naga copies `workgroup_id` to a private variable, losing uniformity proof).
 
-Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles.
+Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles. WGSL files are loaded via `include_str!` for wgpu/WebGPU backends.
 
 ## Tools & Scripts
 
@@ -273,12 +286,13 @@ open vectorize-tests/comparison.html
 
 ### Binaries
 
-The project produces four binaries (defined in `Cargo.toml`):
+The project produces four native binaries plus a WebAssembly library:
 
 - **`vibeboy`** (`src/main.rs`) — Main emulator with SDL3 window, audio, and input handling
 - **`vibeboy_cocoa`** (`src/cocoa_ui.rs`) — Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
 - **`vibeboy_winit`** (`src/winit_ui.rs`) — Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
 - **`test_runner`** (`src/test_runner/main.rs`) — Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
+- **WebAssembly** (`src/lib.rs` + `src/web.rs`) — Browser frontend via wasm-bindgen (requires `web` feature). Builds to `pkg/vibeboy_bg.wasm` + JS glue. Served from `web/index.html`. Deployed to GitHub Pages via the `gh-pages` branch.
 
 ## Conventions
 

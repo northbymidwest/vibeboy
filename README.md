@@ -6,10 +6,13 @@ Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GB
 
 ## Building
 
-Requires Rust 2024 edition and SDL3. Optional features: `macos-ui` (native Cocoa frontend), `winit-ui` (cross-platform winit/wgpu frontend), `gpu` (GPU compute), `sdl3-gpu-shaders` (enabled by default).
+Requires Rust 2024 edition and SDL3. Optional features: `macos-ui` (native Cocoa frontend), `winit-ui` (cross-platform winit/wgpu frontend), `gpu` (GPU compute), `sdl3-gpu-shaders` (enabled by default), `web` (WebAssembly browser frontend).
 
 ```bash
 cargo build --release
+
+# WebAssembly (browser) build
+wasm-pack build --target web --features web --no-default-features
 ```
 
 ## Usage
@@ -89,11 +92,12 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **SGB**: HLE command processing (palettes, attributes, borders)
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
 - **Save states**: 9 slots with rewind support (~10 seconds buffer)
-- **Camera**: Game Boy Camera support via webcam (macOS)
-- **Printer**: Game Boy Printer emulation (saves PNG to `prints/`)
+- **Camera**: Game Boy Camera support via webcam (macOS native, SDL3, browser getUserMedia)
+- **Printer**: Game Boy Printer emulation (saves PNG to `prints/`, or browser download)
 - **Scaling**: 38 filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, and more
 - **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
-- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu
+- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, WebAssembly/WebGPU browser
+- **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, WebGPU vectorize filter, Web Audio at 96kHz, webcam for Game Boy Camera, localStorage save persistence
 
 ## Test Status
 
@@ -147,14 +151,20 @@ src/
 ├── model.rs         GbModel enum and per-model configuration
 ├── scaling/         38 pixel scaling filters + GPU pipeline management
 │   ├── gpu_pipelines.rs  GpuPipelines: SDL3 GPU resources, lazy init
+│   ├── wgpu_vectorize.rs wgpu compute pipeline (6-stage, WebGPU-compatible)
 │   └── *.rs         EPX, HQx, xBR, xBRZ, OmniScale, NEDI, DCCI, EDI, ...
-├── shaders/         GPU shaders: 11 fragment filters + 9 compute shaders
+├── shaders/         GPU shaders: 11 fragment filters + 10 compute shaders
 ├── vectorize/       Kopf-Lischinski pixel-art vectorizer
 │   ├── graph.rs     Similarity graph (YUV thresholds, crossing heuristics)
 │   ├── contour/     Cell templates, edge chains, B-spline optimizer
 │   ├── rasterize/   Scanline, diffusion, spline-diffusion rasterizers
 │   └── svg.rs       SVG export
-└── test_runner/     Automated test ROM runner (modular harnesses)
+├── lib.rs           Library crate for WebAssembly builds
+├── web.rs           WebAssembly/wasm-bindgen frontend
+├── web_printer.rs   Browser-compatible Game Boy Printer
+├── test_runner/     Automated test ROM runner (modular harnesses)
+web/
+└── index.html       Browser UI (Canvas2D/WebGPU, Web Audio, drag-and-drop)
 ```
 
 The main loop: `Emulator::step_frame()` calls `Cpu::step()` per instruction. Each M-cycle, `Bus::tick_mcycle()` advances PPU (4 T-cycles), APU, Timer, Serial, OAM DMA, and HDMA.
