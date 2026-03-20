@@ -58,13 +58,32 @@
     text-align: center;
   }
   input[type="file"] { display: none; }
+  #rom-selector {
+    margin-bottom: 12px;
+  }
+  #rom-selector.hidden { display: none; }
+  #rom-selector select {
+    background: #2a2a4e;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-size: 0.95em;
+    cursor: pointer;
+  }
+  #rom-selector select:hover { border-color: #8be9fd; }
 </style>
 </head>
 <body>
   <h1>VibeBoy</h1>
+  <div id="rom-selector" class="hidden">
+    <select id="rom-select">
+      <option value="">-- Select a built-in ROM --</option>
+    </select>
+  </div>
   <div id="drop-zone">
     Drop a .gb / .gbc ROM here<br>
-    <small>or click to browse</small>
+    <small>or click to browse, or select a built-in ROM above</small>
     <input type="file" id="file-input" accept=".gb,.gbc,.sgb,.bin">
   </div>
   <div id="canvas-wrapper">
@@ -79,6 +98,72 @@
   <!-- Hidden elements for webcam capture -->
   <video id="cam-video" autoplay playsinline style="display:none;"></video>
   <canvas id="cam-canvas" width="128" height="112" style="display:none;"></canvas>
+
+<!-- ROM selector: runs immediately, independent of wasm loading -->
+<script>
+(function() {
+  var BUNDLED_ROMS = [
+    'Drymouth.gb',
+    'GB Lander.gb',
+    'Horrible Demon 3.gb',
+    'Hungry are the Dead.gbc',
+    'Iron Hike.gb',
+    'Jet Pak DX.gb',
+    'Mainblow.gbc',
+    'Marcbla 3D.gb',
+    'Megamania.gb',
+    'Moon Fighter.gbc',
+    'Mr. Dig.gbc',
+    'Poke Mission 97.gb',
+    'Q-Bert.gbc',
+    'Shutdown.gb',
+    'Skoardy.gb',
+    'Sokoban.gb',
+    'Sqrxz.gb',
+    'The Horrible Demon.gb',
+    'They Came From Outer Space.gb',
+    'Tic-Tac-Toe.gb',
+    'Ultima III.gb',
+    'Yars Revenge.gb',
+  ];
+
+  var romSelect = document.getElementById('rom-select');
+  var romSelector = document.getElementById('rom-selector');
+
+  // Probe a single ROM to detect if roms/ directory exists, then show all
+  fetch('roms/Sokoban.gb', { method: 'HEAD' }).then(function(r) {
+    if (!r.ok) return;
+    for (var i = 0; i < BUNDLED_ROMS.length; i++) {
+      var name = BUNDLED_ROMS[i];
+      var opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name.replace(/\.(gb|gbc)$/i, '');
+      romSelect.appendChild(opt);
+    }
+    romSelector.classList.remove('hidden');
+  }).catch(function() {});
+
+  // ROM selection handler — stores chosen ROM, the module script picks it up
+  window._pendingRom = null;
+  romSelect.addEventListener('change', function() {
+    var name = romSelect.value;
+    if (!name) return;
+    document.getElementById('status').textContent = 'Loading ' + name.replace(/\.(gb|gbc)$/i, '') + '...';
+    fetch('roms/' + encodeURIComponent(name)).then(function(resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.arrayBuffer();
+    }).then(function(buf) {
+      if (window._startEmulator) {
+        window._startEmulator(buf);
+      } else {
+        window._pendingRom = buf;
+      }
+    }).catch(function(e) {
+      document.getElementById('status').textContent = 'Failed to load ROM: ' + e.message;
+    });
+  });
+})();
+</script>
 
 <script type="module">
 import init, { WasmEmulator, wasm_memory, btn_a, btn_b, btn_up, btn_down, btn_left, btn_right, btn_start, btn_select } from './pkg/vibeboy.js';
@@ -120,6 +205,13 @@ const toggleBtn = document.getElementById('toggle-filter');
 // Load wasm eagerly
 let keyMap = {};
 await init();
+// Expose startEmulator for the ROM selector script
+window._startEmulator = startEmulator;
+// If a ROM was selected before wasm loaded, start it now
+if (window._pendingRom) {
+  startEmulator(window._pendingRom);
+  window._pendingRom = null;
+}
 keyMap = {
   'ArrowUp':    btn_up(),
   'ArrowDown':  btn_down(),
@@ -386,6 +478,7 @@ dropZone.addEventListener('drop', e => {
   dropZone.classList.remove('hover');
   if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
 });
+
 </script>
 </body>
 </html>
