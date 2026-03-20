@@ -638,23 +638,6 @@ impl Ppu {
             self.shade_buffer[fb_idx] = shade;
         }
 
-        // Record pixel metadata for retroactive correction (DMG only).
-        if !self.cgb_mode {
-            let (pal_type, cidx) = if draw_sprite {
-                let oam_px = oam.unwrap();
-                (if oam_px.sprite_dmg_palette == 1 { 2u8 } else { 1u8 }, oam_px.color_index)
-            } else if self.lcdc & 0x01 == 0 {
-                (0u8, 0u8) // BG disabled → color 0 through BGP
-            } else {
-                (0u8, bg.color_index)
-            };
-            self.pixel_history[self.pixel_history_next] = (fb_idx, pal_type, cidx, bg.color_index, draw_sprite);
-            self.pixel_history_next = 1 - self.pixel_history_next;
-            if self.pixel_history_count < 2 {
-                self.pixel_history_count += 1;
-            }
-        }
-
         // On real DMG, the LCD doesn't display the first frame after LCD enable.
         // Suppress pixel output (render white) for that frame.
         if self.lcd_first_frame {

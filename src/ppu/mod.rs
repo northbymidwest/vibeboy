@@ -382,17 +382,8 @@ pub struct Ppu {
     pub(crate) bgp_rendering: u8,
     pub(crate) obp0_rendering: u8,
     pub(crate) obp1_rendering: u8,
-    /// Ring buffer of last 2 pixel metadata for retroactive correction.
-    /// Each entry: (fb_idx, pal_type: 0=BGP/1=OBP0/2=OBP1, color_index, bg_color_index, is_sprite).
-    pixel_history: [(usize, u8, u8, u8, bool); 2],
-    /// Number of valid entries in pixel_history (0, 1, or 2).
-    pixel_history_count: u8,
-    /// Next write position in pixel_history (0 or 1).
-    pixel_history_next: usize,
     /// WX write conflict: suppresses WX+6 window trigger for 1T after WX write
     pub(crate) wx_just_changed: bool,
-    /// Skip retroactive LCDC fix: set when bus handler already applied glitch timing
-    pub(crate) skip_retroactive_lcdc_fix: bool,
     /// Junk zone: set when position_in_line is in [-16, -9] and SCX alignment
     /// hasn't matched yet. Used by hardware for mid-scanline SCX glitches.
     line_has_fractional_scrolling: bool,
@@ -509,11 +500,7 @@ impl Ppu {
             bgp_rendering: 0xFC,
             obp0_rendering: 0xFF,
             obp1_rendering: 0xFF,
-            pixel_history: [(0, 0, 0, 0, false); 2],
-            pixel_history_count: 0,
-            pixel_history_next: 0,
             wx_just_changed: false,
-            skip_retroactive_lcdc_fix: false,
             line_has_fractional_scrolling: false,
             window_is_being_fetched: false,
         }
@@ -576,9 +563,6 @@ impl Ppu {
         self.bgp_rendering = 0;
         self.obp0_rendering = 0xFF;
         self.obp1_rendering = 0xFF;
-        self.pixel_history = [(0, 0, 0, 0, false); 2];
-        self.pixel_history_count = 0;
-        self.pixel_history_next = 0;
         self.wx_just_changed = false;
     }
 

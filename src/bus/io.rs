@@ -252,7 +252,6 @@ impl Bus {
                     self.if_ |= flags;
                     self.ppu_deferred -= 1;
                     self.ppu.lcdc = saved_lcdc;
-                    self.ppu.skip_retroactive_lcdc_fix = true;
                     // Window disable during window fetch: set glitch flag
                     if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0
                         && self.ppu.fetcher_is_window()

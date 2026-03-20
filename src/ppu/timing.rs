@@ -672,8 +672,6 @@ impl Ppu {
         self.oam_write_accessible = false;
         self.vram_accessible = false;
         self.vram_write_accessible = false;
-        self.pixel_history_count = 0;
-        self.pixel_history_next = 0;
         self.init_fifo();
         self.update_stat_irq();
         // Run the first mode 3 tick on the transition dot itself.
