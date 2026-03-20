@@ -109,7 +109,7 @@
     </select>
   </div>
   <div id="controls">
-    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select
+    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Gamepad supported
   </div>
   <!-- Hidden elements for webcam capture -->
   <video id="cam-video" autoplay playsinline style="display:none;"></video>
@@ -408,6 +408,9 @@ function frame(timestamp) {
   // Cap catchup to avoid spiral of death (e.g. tab was backgrounded)
   if (emuTime > GB_FRAME_MS * 3) emuTime = GB_FRAME_MS * 3;
 
+  // Poll gamepad each frame
+  pollGamepad();
+
   // Step emulation at GB native rate, independent of display refresh
   let stepped = false;
   while (emuTime >= GB_FRAME_MS) {
@@ -466,7 +469,7 @@ function frame(timestamp) {
   requestAnimationFrame(frame);
 }
 
-// Input
+// Keyboard input
 document.addEventListener('keydown', e => {
   const btn = keyMap[e.code];
   if (btn !== undefined && emu) { emu.set_button(btn, true); e.preventDefault(); }
@@ -475,6 +478,60 @@ document.addEventListener('keyup', e => {
   const btn = keyMap[e.code];
   if (btn !== undefined && emu) { emu.set_button(btn, false); e.preventDefault(); }
 });
+
+// Gamepad input — polled each frame
+const STICK_DEADZONE = 0.4;
+const gpBtnMap = [
+  [0, btn_b()],       // South (A/Cross) → B
+  [1, btn_a()],       // East (B/Circle) → A
+  [8, btn_select()],  // Back/Select
+  [9, btn_start()],   // Start
+  [12, btn_up()],     // D-pad up
+  [13, btn_down()],   // D-pad down
+  [14, btn_left()],   // D-pad left
+  [15, btn_right()],  // D-pad right
+];
+let gpPrevState = {};
+
+function pollGamepad() {
+  if (!emu) return;
+  const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const gp of gamepads) {
+    if (!gp) continue;
+
+    // D-pad buttons
+    for (const [gi, emuBtn] of gpBtnMap) {
+      if (gi < gp.buttons.length) {
+        const pressed = gp.buttons[gi].pressed;
+        const key = gp.index + '_' + gi;
+        if (gpPrevState[key] !== pressed) {
+          emu.set_button(emuBtn, pressed);
+          gpPrevState[key] = pressed;
+        }
+      }
+    }
+
+    // Left stick → D-pad
+    if (gp.axes.length >= 2) {
+      const lx = gp.axes[0];
+      const ly = gp.axes[1];
+      const stickLeft = lx < -STICK_DEADZONE;
+      const stickRight = lx > STICK_DEADZONE;
+      const stickUp = ly < -STICK_DEADZONE;
+      const stickDown = ly > STICK_DEADZONE;
+
+      const sk = gp.index + '_s';
+      const prev = gpPrevState[sk] || {};
+      if (prev.l !== stickLeft)  { emu.set_button(btn_left(), stickLeft); }
+      if (prev.r !== stickRight) { emu.set_button(btn_right(), stickRight); }
+      if (prev.u !== stickUp)    { emu.set_button(btn_up(), stickUp); }
+      if (prev.d !== stickDown)  { emu.set_button(btn_down(), stickDown); }
+      gpPrevState[sk] = { l: stickLeft, r: stickRight, u: stickUp, d: stickDown };
+    }
+
+    break; // Use first connected gamepad only
+  }
+}
 
 // File loading
 function loadFile(file) {
