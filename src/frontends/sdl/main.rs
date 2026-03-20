@@ -1,4 +1,4 @@
-#[path = "../../apu.rs"]
+#[path = "../../apu/mod.rs"]
 mod apu;
 #[path = "../../bus/mod.rs"]
 mod bus;
