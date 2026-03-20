@@ -42,9 +42,9 @@
   #canvas-wrapper canvas {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
+    max-width: 100%;
+    max-height: 100%;
+    aspect-ratio: 10 / 9;
   }
   #status {
     margin-top: 8px;
@@ -321,15 +321,24 @@ function frame(timestamp) {
     }
   }
 
-  // Resize GPU surface to match wrapper size
+  // Resize GPU surface to match wrapper size, preserving 10:9 aspect ratio
   if (useGpu) {
     const wrapper = document.getElementById('canvas-wrapper');
     const cw = wrapper.clientWidth;
     const ch = wrapper.clientHeight;
-    if (cw > 0 && ch > 0 && (canvas.width !== cw || canvas.height !== ch)) {
-      canvas.width = cw;
-      canvas.height = ch;
-      emu.resize_gpu(cw, ch);
+    // Fit 10:9 aspect ratio within wrapper
+    let tw, th;
+    if (cw * 9 <= ch * 10) {
+      tw = cw;
+      th = Math.round(cw * 9 / 10);
+    } else {
+      th = ch;
+      tw = Math.round(ch * 10 / 9);
+    }
+    if (tw > 0 && th > 0 && (canvas.width !== tw || canvas.height !== th)) {
+      canvas.width = tw;
+      canvas.height = th;
+      emu.resize_gpu(tw, th);
     }
   }
 
