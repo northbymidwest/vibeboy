@@ -317,6 +317,7 @@ fn main() {
         let mut current_slot: usize = 0;
         let mut paused = false;
         let mut frame_start = Instant::now();
+        let mut emu_time_debt = Duration::ZERO;
         let mut fps_counter = ui_util::FpsCounter::new();
         let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
 
@@ -570,6 +571,10 @@ fn main() {
             let fast_forward = keys_down.contains(&K_TAB) || gamepad_state.r_shoulder;
             emu.set_rewinding(backspace_held);
 
+            // Accumulate elapsed time and step as many frames as needed
+            emu_time_debt += frame_start.elapsed();
+            frame_start = Instant::now();
+
             if !paused {
                 if backspace_held {
                     let mut all_audio = Vec::new();
@@ -582,13 +587,20 @@ fn main() {
                     if let Ok(mut ring) = audio_ring.lock() {
                         ring.write(&resampled);
                     }
+                    emu_time_debt = Duration::ZERO;
                 } else if fast_forward {
                     for _ in 0..4 {
                         emu.step_frame();
                     }
+                    emu_time_debt = Duration::ZERO;
                 } else {
-                    emu.step_frame();
+                    while emu_time_debt >= frame_dur {
+                        emu.step_frame();
+                        emu_time_debt -= frame_dur;
+                    }
                 }
+            } else {
+                emu_time_debt = Duration::ZERO;
             }
 
             // ── Rumble ───────────────────────────────────────────────────────
@@ -614,19 +626,27 @@ fn main() {
                 }
             }
 
+            // ── Check occlusion ──────────────────────────────────────────
+            let occluded = unsafe {
+                let state: objc2_app_kit::NSWindowOcclusionState = msg_send![window, occlusionState];
+                !state.contains(objc2_app_kit::NSWindowOcclusionState::Visible)
+            };
+
             // ── Update drawable size on resize ─────────────────────────────
             let (disp_w, disp_h);
             {
                 let bounds: NSRect = msg_send![content_view, bounds];
                 disp_w = bounds.size.width as usize;
                 disp_h = bounds.size.height as usize;
-                renderer.layer.setDrawableSize(NSSize::new(
-                    bounds.size.width, bounds.size.height,
-                ));
+                if !occluded {
+                    renderer.layer.setDrawableSize(NSSize::new(
+                        bounds.size.width, bounds.size.height,
+                    ));
+                }
             }
 
-            // ── Render ───────────────────────────────────────────────────────
-            {
+            // ── Render (skip when occluded to avoid nextDrawable blocking) ─
+            if !occluded {
                 let raw_src: &[u32] = if is_sgb {
                     emu.sgb_composited_frame()
                 } else {
@@ -798,7 +818,7 @@ fn main() {
                     renderer.render();
                 }
                 } // end if !gpu_rendered
-            }
+            } // end if !occluded
 
             // ── FPS counter ──────────────────────────────────────────────────
             let emu_time = frame_start.elapsed();
@@ -811,14 +831,13 @@ fn main() {
             sav_flusher.poll(&emu);
 
             // ── Frame rate cap ───────────────────────────────────────────────
-            let remaining = frame_dur.saturating_sub(frame_start.elapsed());
-            if remaining > Duration::from_millis(2) {
-                std::thread::sleep(remaining - Duration::from_millis(2));
+            // Sleep if we have no emulation debt to burn through
+            if emu_time_debt < frame_dur {
+                let remaining = frame_dur.saturating_sub(emu_time_debt);
+                if remaining > Duration::from_millis(2) {
+                    std::thread::sleep(remaining - Duration::from_millis(2));
+                }
             }
-            while frame_start.elapsed() < frame_dur {
-                std::hint::spin_loop();
-            }
-            frame_start = Instant::now();
         }
 
         // Cleanup
