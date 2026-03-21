@@ -1446,6 +1446,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdk4-macos"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42afa6569445e74c7a580eda5c1d0e9adbc9760ef5f05d9ceff46c77469c5c00"
+dependencies = [
+ "gdk4",
+ "gdk4-macos-sys",
+ "gio 0.22.2",
+ "glib 0.22.3",
+ "libc",
+]
+
+[[package]]
+name = "gdk4-macos-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a05900af362b667cc58e4270ad4367677bdcd190c76fb85f49236e072a17365"
+dependencies = [
+ "gdk4-sys",
+ "glib-sys 0.22.3",
+ "libc",
+ "system-deps 7.0.7",
+]
+
+[[package]]
 name = "gdk4-sys"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1459,6 +1484,55 @@ dependencies = [
  "libc",
  "pango-sys 0.22.0",
  "pkg-config",
+ "system-deps 7.0.7",
+]
+
+[[package]]
+name = "gdk4-wayland"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7027433b8f19075ab22f01d0e0ba4373e303ffdb4ce4f846a2763cb020ea9bdc"
+dependencies = [
+ "gdk4",
+ "gdk4-wayland-sys",
+ "gio 0.22.2",
+ "glib 0.22.3",
+ "libc",
+]
+
+[[package]]
+name = "gdk4-wayland-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "653cafb8715f2ac1c56edaf8060d9360ae3acbe3c6fb61b676a2917d42b668cf"
+dependencies = [
+ "glib-sys 0.22.3",
+ "libc",
+ "system-deps 7.0.7",
+]
+
+[[package]]
+name = "gdk4-x11"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13a00e4c617d6570633e44ba3ff221350669edf6cf3447a40f882dfb6f1dfdc3"
+dependencies = [
+ "gdk4",
+ "gdk4-x11-sys",
+ "gio 0.22.2",
+ "glib 0.22.3",
+ "libc",
+]
+
+[[package]]
+name = "gdk4-x11-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24d41f2e28f62378b081288914325d73bddbb6ccbbadb41aa6392afc71d27002"
+dependencies = [
+ "gdk4-sys",
+ "glib-sys 0.22.3",
+ "libc",
  "system-deps 7.0.7",
 ]
 
@@ -4575,6 +4649,9 @@ dependencies = [
  "cpal",
  "dispatch2",
  "env_logger",
+ "gdk4-macos",
+ "gdk4-wayland",
+ "gdk4-x11",
  "gilrs",
  "gtk4",
  "image",
@@ -4594,6 +4671,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pollster",
+ "raw-window-handle",
  "rfd",
  "sdl3",
  "serde",

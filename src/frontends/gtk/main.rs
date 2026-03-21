@@ -1,6 +1,7 @@
 use vibeboy::*;
 
 mod audio;
+mod gpu;
 
 use clap::Parser;
 use gtk4::prelude::*;
@@ -274,6 +275,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     // Shared emulator state (None until a ROM is loaded)
     let state: Rc<RefCell<Option<EmuState>>> = Rc::new(RefCell::new(None));
 
+    // GPU renderer (window-level, persists across ROM loads, initialized lazily)
+    let gpu: Rc<RefCell<Option<gpu::GpuRenderer>>> = Rc::new(RefCell::new(None));
+    let gpu_init_done: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+
     // Set up draw function
     let state_draw = Rc::clone(&state);
     drawing_area.set_draw_func(move |_da, cr, width, height| {
@@ -328,11 +333,17 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Helper: start the frame timer for emulation
     let da_for_timer = drawing_area.clone();
+    let win_for_timer = window.clone();
     let start_frame_timer = {
         let state = Rc::clone(&state);
+        let gpu = Rc::clone(&gpu);
+        let gpu_init_done = Rc::clone(&gpu_init_done);
         move || {
             let state_tick = Rc::clone(&state);
             let da = da_for_timer.clone();
+            let win = win_for_timer.clone();
+            let gpu = Rc::clone(&gpu);
+            let gpu_init_done = Rc::clone(&gpu_init_done);
 
             // Get frame duration from the loaded emulator's model
             let interval_ms = {
@@ -454,8 +465,29 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             } else {
                                 st.emu.frame_buffer()
                             };
-                            let da_w = da.width() as usize;
-                            let da_h = da.height() as usize;
+                            let (da_w, da_h) = if gpu.borrow().is_some() {
+                                // Use window size when GPU is active (DrawingArea may be hidden)
+                                (win.width() as usize, win.height() as usize)
+                            } else {
+                                (da.width() as usize, da.height() as usize)
+                            };
+
+                            // Try lazy GPU init (once)
+                            if !gpu_init_done.get() {
+                                gpu_init_done.set(true);
+                                if let Some(renderer) = gpu::GpuRenderer::from_gtk_window(&win) {
+                                    *gpu.borrow_mut() = Some(renderer);
+                                    // Make GTK4 fully transparent so it doesn't paint over the Metal layer
+                                    da.set_visible(false);
+                                    let css = gtk4::CssProvider::new();
+                                    css.load_from_data("window, .background { background: transparent; }");
+                                    gtk4::style_context_add_provider_for_display(
+                                        &gtk4::prelude::WidgetExt::display(&win),
+                                        &css,
+                                        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+                                    );
+                                }
+                            }
 
                             // Compute aspect-ratio-correct dimensions for filters
                             let scale_fit = (da_w as f64 / base_w as f64)
@@ -497,29 +529,37 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (fb, base_w, base_h)
                                 };
 
-                            // Update dimensions for draw function
-                            st.src_w = pw as u32;
-                            st.src_h = ph as u32;
-
-                            // Convert 0xRRGGBB -> Cairo ARgb32 (BGRA bytes on little-endian)
-                            let needed = pw * ph * 4;
-                            if st.rgba_buf.len() < needed {
-                                st.rgba_buf.resize(needed, 0);
-                            }
-                            for i in 0..pw * ph {
-                                let c = pixels[i];
-                                let r = (c >> 16) & 0xFF;
-                                let g = (c >> 8) & 0xFF;
-                                let b = c & 0xFF;
-                                let offset = i * 4;
-                                st.rgba_buf[offset] = b as u8;
-                                st.rgba_buf[offset + 1] = g as u8;
-                                st.rgba_buf[offset + 2] = r as u8;
-                                st.rgba_buf[offset + 3] = 0xFF;
+                            // Render: GPU path (direct to surface) or Cairo fallback
+                            let mut gpu_ref = gpu.borrow_mut();
+                            if let Some(ref mut gpu) = *gpu_ref {
+                                // Handle resize
+                                gpu.resize(da_w as u32, da_h as u32);
+                                // GPU blit — renders directly to the native surface
+                                gpu.render(pixels, pw as u32, ph as u32, base_w as u32, base_h as u32);
+                            } else {
+                                // Cairo fallback
+                                st.src_w = pw as u32;
+                                st.src_h = ph as u32;
+                                let needed = pw * ph * 4;
+                                if st.rgba_buf.len() < needed {
+                                    st.rgba_buf.resize(needed, 0);
+                                }
+                                for i in 0..pw * ph {
+                                    let c = pixels[i];
+                                    let r = (c >> 16) & 0xFF;
+                                    let g = (c >> 8) & 0xFF;
+                                    let b = c & 0xFF;
+                                    let offset = i * 4;
+                                    st.rgba_buf[offset] = b as u8;
+                                    st.rgba_buf[offset + 1] = g as u8;
+                                    st.rgba_buf[offset + 2] = r as u8;
+                                    st.rgba_buf[offset + 3] = 0xFF;
+                                }
+                                drop(gpu_ref);
+                                da.queue_draw();
                             }
                         }
                     }
-                    da.queue_draw();
                     glib::ControlFlow::Continue
                 },
             );
