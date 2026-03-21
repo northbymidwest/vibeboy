@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use objc2::{class, msg_send, sel};
-use objc2::rc::Retained;
+use objc2::{class, msg_send};
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSApplication, NSEvent, NSWindow};
+use objc2_app_kit::{NSApplication, NSControl, NSEvent, NSFont, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 use super::emulator::Emulator;
@@ -56,8 +55,8 @@ pub(super) fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
         let _: () = msg_send![header_label, setDrawsBackground: false];
         let _: () = msg_send![header_label, setEditable: false];
         let _: () = msg_send![header_label, setSelectable: false];
-        let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
-        let _: () = msg_send![header_label, setFont: font];
+        let font = NSFont::systemFontOfSize(11.0);
+        (*(header_label as *const NSControl)).setFont(Some(&font));
         let _: () = msg_send![content, addSubview: header_label];
 
         let mut key_labels: Vec<(u8, *mut AnyObject)> = Vec::new();
@@ -75,8 +74,8 @@ pub(super) fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
             let _: () = msg_send![name_label, setDrawsBackground: false];
             let _: () = msg_send![name_label, setEditable: false];
             let _: () = msg_send![name_label, setSelectable: false];
-            let bold_font: *mut AnyObject = msg_send![class!(NSFont), boldSystemFontOfSize: 13.0f64];
-            let _: () = msg_send![name_label, setFont: bold_font];
+            let bold_font = NSFont::boldSystemFontOfSize(13.0);
+            (*(name_label as *const NSControl)).setFont(Some(&bold_font));
             let _: () = msg_send![content, addSubview: name_label];
 
             // Key binding button
@@ -243,7 +242,7 @@ pub(super) fn open_rom_dialog() -> Option<PathBuf> {
         let path_str: *const i8 = msg_send![path, UTF8String];
         let path = std::ffi::CStr::from_ptr(path_str)
             .to_str()
-            .unwrap()
+            .ok()?
             .to_string();
         Some(PathBuf::from(path))
     }

@@ -52,7 +52,7 @@ pub(crate) enum AccelSource {
     /// IOKit HID (Apple Silicon built-in accelerometer)
     IoKit,
     /// CoreMotion CMMotionManager fallback
-    CoreMotion(*mut AnyObject),
+    CoreMotion(Retained<objc2_core_motion::CMMotionManager>),
 }
 
 pub(crate) const K_ESCAPE: u16 = 53;

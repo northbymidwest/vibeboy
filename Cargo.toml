@@ -55,9 +55,15 @@ bincode = { version = "2", features = ["serde"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSFont", "NSControl", "objc2-core-foundation"] }
 objc2-metal = "0.3"
 objc2-quartz-core = "0.3"
+objc2-game-controller = { version = "0.3", features = ["objc2-core-haptics"] }
+objc2-core-haptics = { version = "0.3", features = ["alloc", "CHHapticEngine", "CHHapticEvent", "CHHapticParameter", "CHHapticPattern", "CHHapticPatternPlayer"] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVCaptureOutputBase", "objc2-core-media"] }
+objc2-core-media = "0.3"
+objc2-core-motion = { version = "0.3", features = ["CMMotionManager", "CMAccelerometer", "CMLogItem"] }
+dispatch2 = "0.3"
 block2 = "0.6"
 
 [[bin]]

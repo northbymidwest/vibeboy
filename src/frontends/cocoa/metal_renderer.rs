@@ -8,6 +8,11 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use super::scaling;
 use super::vectorize;
+
+/// Gaussian blur kernel width for diffusion rasterizers.
+const GAUSS_K: f32 = 2.5;
+/// Gaussian blur radius for diffusion rasterizers.
+const GAUSS_RADIUS: f32 = 2.0;
 use super::vectorize_metal::MetalVectorizePipeline;
 
 pub(super) const METAL_SHADERS: &str = "
@@ -314,7 +319,7 @@ impl MetalRenderer {
 
         let inv_scale = 1.0f32 / scale as f32;
         let uniforms: [u32; 8] = [out_w, out_h, src_w, src_h,
-            f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), 0];
+            f32::to_bits(inv_scale), f32::to_bits(GAUSS_K), f32::to_bits(GAUSS_RADIUS), 0];
         let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 32);
 
         let cmd = self.command_queue.commandBuffer().unwrap();
@@ -427,7 +432,7 @@ impl MetalRenderer {
         {
             let inv_scale = 1.0f32 / scale as f32;
             let uni2: [u32; 8] = [out_w, out_h, src_w, src_h,
-                f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), scale];
+                f32::to_bits(inv_scale), f32::to_bits(GAUSS_K), f32::to_bits(GAUSS_RADIUS), scale];
             let uni_buf = make_buf(&self.device, uni2.as_ptr() as *const u8, 32);
             let enc = cmd.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(p2);
