@@ -104,7 +104,11 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
     let host = cpal::default_host();
     let device = host.default_output_device()?;
 
-    let err_fn = |err: cpal::StreamError| eprintln!("Audio error: {err}");
+    let err_fn = |err: cpal::StreamError| {
+        if !matches!(err, cpal::StreamError::BufferUnderrun) {
+            eprintln!("Audio error: {err}");
+        }
+    };
 
     let configs = [
         cpal::StreamConfig {

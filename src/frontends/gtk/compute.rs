@@ -30,10 +30,11 @@ impl GpuCompute {
             )?
         };
 
-        // Wrap in a wgpu Instance + Adapter
-        // We need a dummy instance for the gles backend
+        // Create a minimal wgpu Instance as container for the external adapter.
+        // Use Backends::empty() to avoid wgpu trying to init its own EGL display
+        // (which produces MESA warnings since GTK already owns the GL context).
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::GL,
+            backends: wgpu::Backends::empty(),
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             backend_options: wgpu::BackendOptions::default(),
