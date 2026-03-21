@@ -210,6 +210,30 @@ const SHADERS: &[ShaderInfo] = &[
         wgsl_name: "omniscale_legacy_comp.wgsl",
         msl_buffer_remap: &[],
     },
+    ShaderInfo {
+        glsl_src: "edi.comp",
+        spv_name: "edi_comp.spv",
+        msl_name: "edi_comp.metal",
+        dxil_name: "edi_comp.dxil",
+        wgsl_name: "edi_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "nedi.comp",
+        spv_name: "nedi_comp.spv",
+        msl_name: "nedi_comp.metal",
+        dxil_name: "nedi_comp.dxil",
+        wgsl_name: "nedi_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "dcci.comp",
+        spv_name: "dcci_comp.spv",
+        msl_name: "dcci_comp.metal",
+        dxil_name: "dcci_comp.dxil",
+        wgsl_name: "dcci_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
 ];
 
 fn main() {

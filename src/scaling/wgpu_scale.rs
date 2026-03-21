@@ -22,6 +22,9 @@ pub enum WgpuScaleFilter {
     Xbrz,
     SuperXbr,
     OmniScaleLegacy,
+    Edi,
+    Nedi,
+    Dcci,
 }
 
 impl WgpuScaleFilter {
@@ -39,13 +42,17 @@ impl WgpuScaleFilter {
             "xbrz" => Some(Self::Xbrz),
             "super-xbr" => Some(Self::SuperXbr),
             "omniscale-legacy" => Some(Self::OmniScaleLegacy),
+            "edi" => Some(Self::Edi),
+            "nedi" => Some(Self::Nedi),
+            "dcci" => Some(Self::Dcci),
             _ => None,
         }
     }
 
     pub fn all_names() -> &'static [&'static str] {
         &["nearest", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
-          "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy"]
+          "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
+          "edi", "nedi", "dcci"]
     }
 
     /// For integer-scale filters, compute the native output dimensions.
@@ -53,7 +60,8 @@ impl WgpuScaleFilter {
     pub fn native_size(&self, src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> (u32, u32) {
         match self {
             // Fixed 2x
-            Self::Eagle | Self::SuperXbr => (src_w * 2, src_h * 2),
+            Self::Eagle | Self::SuperXbr
+            | Self::Edi | Self::Nedi | Self::Dcci => (src_w * 2, src_h * 2),
             // Fixed 3x
             Self::Scale3x => (src_w * 3, src_h * 3),
             // 2x/3x/4x — pick best integer fit
@@ -116,6 +124,9 @@ pub struct WgpuScalePipeline {
     xbrz: wgpu::ComputePipeline,
     super_xbr: wgpu::ComputePipeline,
     omniscale_legacy: wgpu::ComputePipeline,
+    edi: wgpu::ComputePipeline,
+    nedi: wgpu::ComputePipeline,
+    dcci: wgpu::ComputePipeline,
     bufs: Option<ScaleBufs>,
 }
 
@@ -142,6 +153,9 @@ impl WgpuScalePipeline {
         let xbrz_wgsl = include_str!(concat!(env!("OUT_DIR"), "/xbrz_comp.wgsl"));
         let super_xbr_wgsl = include_str!(concat!(env!("OUT_DIR"), "/super_xbr_comp.wgsl"));
         let omniscale_legacy_wgsl = include_str!(concat!(env!("OUT_DIR"), "/omniscale_legacy_comp.wgsl"));
+        let edi_wgsl = include_str!(concat!(env!("OUT_DIR"), "/edi_comp.wgsl"));
+        let nedi_wgsl = include_str!(concat!(env!("OUT_DIR"), "/nedi_comp.wgsl"));
+        let dcci_wgsl = include_str!(concat!(env!("OUT_DIR"), "/dcci_comp.wgsl"));
 
         WgpuScalePipeline {
             epx: create_compute_pipeline(device, epx_wgsl, "epx"),
@@ -155,6 +169,9 @@ impl WgpuScalePipeline {
             xbrz: create_compute_pipeline(device, xbrz_wgsl, "xbrz"),
             super_xbr: create_compute_pipeline(device, super_xbr_wgsl, "super_xbr"),
             omniscale_legacy: create_compute_pipeline(device, omniscale_legacy_wgsl, "omniscale_legacy"),
+            edi: create_compute_pipeline(device, edi_wgsl, "edi"),
+            nedi: create_compute_pipeline(device, nedi_wgsl, "nedi"),
+            dcci: create_compute_pipeline(device, dcci_wgsl, "dcci"),
             bufs: None,
         }
     }
@@ -173,6 +190,9 @@ impl WgpuScalePipeline {
             WgpuScaleFilter::Xbrz => &self.xbrz,
             WgpuScaleFilter::SuperXbr => &self.super_xbr,
             WgpuScaleFilter::OmniScaleLegacy => &self.omniscale_legacy,
+            WgpuScaleFilter::Edi => &self.edi,
+            WgpuScaleFilter::Nedi => &self.nedi,
+            WgpuScaleFilter::Dcci => &self.dcci,
         }
     }
 

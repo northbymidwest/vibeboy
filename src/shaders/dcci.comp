@@ -1,0 +1,169 @@
+#version 450
+
+// DCCI — Directional Cubic Convolution Interpolation (2x upscaling).
+// Sobel-based edge direction detection with 1D cubic convolution along edges.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
+    uint pixels[];
+};
+
+layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
+
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint src_w;
+    uint src_h;
+    uint out_w;
+    uint out_h;
+    uint iscale;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+vec4 unpack(uint c) {
+    return vec4(
+        float((c >> 16u) & 0xFFu) / 255.0,
+        float((c >> 8u)  & 0xFFu) / 255.0,
+        float( c         & 0xFFu) / 255.0,
+        1.0
+    );
+}
+
+vec4 fetch(ivec2 coord) {
+    coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+}
+
+float luma(vec4 c) {
+    return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+}
+
+float luma_at(ivec2 coord) {
+    return luma(fetch(coord));
+}
+
+// Catmull-Rom cubic weight (a = -0.5)
+float cubic_weight(float d) {
+    d = abs(d);
+    if (d < 1.0) return (1.5 * d - 2.5) * d * d + 1.0;
+    if (d < 2.0) return ((-0.5 * d + 2.5) * d - 4.0) * d + 2.0;
+    return 0.0;
+}
+
+// Blend 4 colors with cubic weights (auto-normalized)
+vec4 cubic_blend4(vec4 c0, vec4 c1, vec4 c2, vec4 c3, float w0, float w1, float w2, float w3) {
+    float s = w0 + w1 + w2 + w3;
+    float inv = abs(s) > 0.001 ? 1.0 / s : 0.25;
+    return c0 * (w0 * inv) + c1 * (w1 * inv) + c2 * (w2 * inv) + c3 * (w3 * inv);
+}
+
+// Detect edge direction: 0=flat, 1=vertical edge (horiz interp),
+// 2=horizontal edge (vert interp), 3=main diagonal(\), 4=anti diagonal(/)
+int detect_direction(ivec2 p) {
+    // 3x3 Sobel on luma, centered on (p.x, p.y) to (p.x+1, p.y+1)
+    float tl = luma_at(p);
+    float tc = luma_at(p + ivec2(1, 0));
+    float tr = luma_at(p + ivec2(2, 0));
+    float ml = luma_at(p + ivec2(0, 1));
+    float mr = luma_at(p + ivec2(2, 1));
+    float bl = luma_at(p + ivec2(0, 2));
+    float bc = luma_at(p + ivec2(1, 2));
+    float br = luma_at(p + ivec2(2, 2));
+
+    float gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    float gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+
+    float strength = sqrt(gx * gx + gy * gy);
+    if (strength < 10.0) return 0;
+
+    float deg = degrees(atan(gy, gx));
+    float abs_deg = abs(deg);
+
+    if (abs_deg < 22.5 || abs_deg > 157.5) return 1;
+    if (abs_deg > 67.5 && abs_deg < 112.5) return 2;
+    if ((deg > 22.5 && deg < 67.5) || (deg < -112.5 && deg > -157.5)) return 4;
+    return 3;
+}
+
+vec4 diamond_interp(ivec2 p) {
+    int dir = detect_direction(p);
+
+    float w0 = cubic_weight(1.5);
+    float w1 = cubic_weight(0.5);
+
+    if (dir == 1) {
+        // Horizontal interpolation (vertical edge)
+        vec4 top = cubic_blend4(
+            fetch(p + ivec2(-1, 0)), fetch(p), fetch(p + ivec2(1, 0)), fetch(p + ivec2(2, 0)),
+            w0, w1, w1, w0);
+        vec4 bot = cubic_blend4(
+            fetch(p + ivec2(-1, 1)), fetch(p + ivec2(0, 1)), fetch(p + ivec2(1, 1)), fetch(p + ivec2(2, 1)),
+            w0, w1, w1, w0);
+        return mix(top, bot, 0.5);
+    }
+    if (dir == 2) {
+        // Vertical interpolation (horizontal edge)
+        vec4 left = cubic_blend4(
+            fetch(p + ivec2(0, -1)), fetch(p), fetch(p + ivec2(0, 1)), fetch(p + ivec2(0, 2)),
+            w0, w1, w1, w0);
+        vec4 right = cubic_blend4(
+            fetch(p + ivec2(1, -1)), fetch(p + ivec2(1, 0)), fetch(p + ivec2(1, 1)), fetch(p + ivec2(1, 2)),
+            w0, w1, w1, w0);
+        return mix(left, right, 0.5);
+    }
+    if (dir == 3) {
+        // Main diagonal (\)
+        return cubic_blend4(
+            fetch(p + ivec2(-1, -1)), fetch(p), fetch(p + ivec2(1, 1)), fetch(p + ivec2(2, 2)),
+            w0, w1, w1, w0);
+    }
+    if (dir == 4) {
+        // Anti-diagonal (/)
+        return cubic_blend4(
+            fetch(p + ivec2(2, -1)), fetch(p + ivec2(1, 0)), fetch(p + ivec2(0, 1)), fetch(p + ivec2(-1, 2)),
+            w0, w1, w1, w0);
+    }
+    // Flat: standard bilinear average
+    return mix(mix(fetch(p), fetch(p + ivec2(1, 0)), 0.5),
+               mix(fetch(p + ivec2(0, 1)), fetch(p + ivec2(1, 1)), 0.5), 0.5);
+}
+
+vec4 hedge_interp(ivec2 p) {
+    float w0 = cubic_weight(1.5);
+    float w1 = cubic_weight(0.5);
+    return cubic_blend4(
+        fetch(p + ivec2(-1, 0)), fetch(p), fetch(p + ivec2(1, 0)), fetch(p + ivec2(2, 0)),
+        w0, w1, w1, w0);
+}
+
+vec4 vedge_interp(ivec2 p) {
+    float w0 = cubic_weight(1.5);
+    float w1 = cubic_weight(0.5);
+    return cubic_blend4(
+        fetch(p + ivec2(0, -1)), fetch(p), fetch(p + ivec2(0, 1)), fetch(p + ivec2(0, 2)),
+        w0, w1, w1, w0);
+}
+
+void main() {
+    uint opx = gl_GlobalInvocationID.x;
+    uint opy = gl_GlobalInvocationID.y;
+    if (opx >= out_w || opy >= out_h) return;
+
+    ivec2 src_i = ivec2(opx / 2u, opy / 2u);
+    ivec2 sub = ivec2(opx & 1u, opy & 1u);
+
+    vec4 result;
+    if (sub.x == 0 && sub.y == 0) {
+        result = fetch(src_i);
+    } else if (sub.x == 1 && sub.y == 0) {
+        result = hedge_interp(src_i);
+    } else if (sub.x == 0 && sub.y == 1) {
+        result = vedge_interp(src_i);
+    } else {
+        result = diamond_interp(src_i);
+    }
+
+    imageStore(output_img, ivec2(opx, opy), result);
+}

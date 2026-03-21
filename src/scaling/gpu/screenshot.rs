@@ -34,6 +34,9 @@ pub fn gpu_screenshot(
         ScaleFilter::Xbrz(_) => init_xbrz_compute_pipeline,
         ScaleFilter::SuperXbr => init_super_xbr_compute_pipeline,
         ScaleFilter::OmniScaleLegacy => init_omniscale_legacy_compute_pipeline,
+        ScaleFilter::Edi => init_edi_compute_pipeline,
+        ScaleFilter::Nedi => init_nedi_compute_pipeline,
+        ScaleFilter::Dcci => init_dcci_compute_pipeline,
         _ => return None,
     };
 
