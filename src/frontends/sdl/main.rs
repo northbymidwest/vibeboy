@@ -92,6 +92,12 @@ struct Cli {
     /// Off by default; can produce artifacts in games with dithering/gradients.
     #[arg(long)]
     yuv_edges: bool,
+
+    /// Run-ahead frames to reduce input latency. Speculatively runs N frames
+    /// ahead and displays the result, so input is reflected sooner.
+    /// Costs ~N× CPU per frame. Typical values: 1-2.
+    #[arg(long, default_missing_value = "1", num_args = 0..=1)]
+    runahead: Option<u32>,
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -368,6 +374,10 @@ fn main() {
 
     let has_rumble = emu.has_rumble();
     let mut rumble_was_on = false;
+    let runahead = cli.runahead.unwrap_or(0);
+    if runahead > 0 {
+        eprintln!("  Run-ahead: {} frame{}", runahead, if runahead > 1 { "s" } else { "" });
+    }
 
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
     let mut paused = false;
@@ -631,7 +641,7 @@ fn main() {
             // Consume time but don't step emulation
             emu_time_debt = Duration::ZERO;
         } else if step_one_frame {
-            emu.step_frame();
+            emu.step_frame_runahead(runahead);
             frames_stepped = 1;
             step_one_frame = false;
             emu_time_debt = Duration::ZERO;
@@ -651,16 +661,20 @@ fn main() {
             frames_stepped = 4;
             emu_time_debt = Duration::ZERO;
         } else if slow_motion {
-            // Half speed: double the effective frame duration
             let slow_dur = frame_dur * 2;
             while emu_time_debt >= slow_dur {
-                emu.step_frame();
+                emu.step_frame_runahead(runahead);
                 frames_stepped += 1;
                 emu_time_debt -= slow_dur;
             }
         } else {
             while emu_time_debt >= frame_dur {
-                emu.step_frame();
+                // Only runahead on the last frame (the one we display)
+                if emu_time_debt - frame_dur < frame_dur {
+                    emu.step_frame_runahead(runahead);
+                } else {
+                    emu.step_frame();
+                }
                 frames_stepped += 1;
                 emu_time_debt -= frame_dur;
             }

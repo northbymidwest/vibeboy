@@ -183,7 +183,40 @@ pub struct Apu {
     is_cgb: bool,
 }
 
+/// Transient APU filter state not included in serde snapshots.
+/// Used by runahead to preserve audio continuity across save/restore.
+pub struct ApuFilterState {
+    pub prev_left: i32,
+    pub prev_right: i32,
+    pub hpf_left: f32,
+    pub hpf_right: f32,
+    pub hpf_prev_in_l: f32,
+    pub hpf_prev_in_r: f32,
+}
+
 impl Apu {
+    /// Save transient filter state (not captured by serde).
+    pub fn save_filter_state(&self) -> ApuFilterState {
+        ApuFilterState {
+            prev_left: self.prev_left,
+            prev_right: self.prev_right,
+            hpf_left: self.hpf_left,
+            hpf_right: self.hpf_right,
+            hpf_prev_in_l: self.hpf_prev_in_l,
+            hpf_prev_in_r: self.hpf_prev_in_r,
+        }
+    }
+
+    /// Restore transient filter state.
+    pub fn restore_filter_state(&mut self, state: &ApuFilterState) {
+        self.prev_left = state.prev_left;
+        self.prev_right = state.prev_right;
+        self.hpf_left = state.hpf_left;
+        self.hpf_right = state.hpf_right;
+        self.hpf_prev_in_l = state.hpf_prev_in_l;
+        self.hpf_prev_in_r = state.hpf_prev_in_r;
+    }
+
     pub fn new(cpu_clock_rate: u32, is_cgb: bool, is_sgb: bool) -> Self {
         let mut apu = Apu {
             ch1: SquareCh::new(),

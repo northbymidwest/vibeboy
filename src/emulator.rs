@@ -155,6 +155,61 @@ impl Emulator {
         }
     }
 
+    /// Run one frame, then speculatively run `ahead` frames to reduce input
+    /// latency. Displays the frame from `ahead` frames in the future but keeps
+    /// the emulator state at the current frame. Audio comes from the real frame.
+    pub fn step_frame_runahead(&mut self, ahead: u32) {
+        // Run the real frame (generates audio, pushes rewind snapshot)
+        self.step_frame();
+
+        if ahead == 0 {
+            return;
+        }
+
+        // Drain real audio before running ahead (preserve it across restore)
+        let real_audio = std::mem::take(&mut self.bus.apu.sample_buf);
+        let filter_state = self.bus.apu.save_filter_state();
+
+        // Save state before running ahead
+        let snap = self.save_snapshot();
+
+        // Run ahead frames silently (no audio, no rewind snapshots)
+        let was_headless = self.headless;
+        self.headless = true;
+        for _ in 0..ahead {
+            self.bus.clear_frame_ready();
+            self.frame_count += 1;
+            let mut cycles = 0u32;
+            while !self.bus.frame_ready() {
+                self.step();
+                cycles += 4;
+                if cycles >= CYCLES_PER_FRAME * 2 { break; }
+            }
+        }
+        self.headless = was_headless;
+
+        // Grab the ahead frame buffer
+        let ahead_fb = self.bus.ppu.frame_buffer.clone();
+        let ahead_shade = if self.bus.ppu.sgb_mode {
+            self.bus.ppu.shade_buffer.clone()
+        } else {
+            Vec::new()
+        };
+
+        // Restore real state
+        self.restore_snapshot(&snap);
+
+        // Restore APU filter state and audio buffer
+        self.bus.apu.sample_buf = real_audio;
+        self.bus.apu.restore_filter_state(&filter_state);
+
+        // Overwrite frame buffer with the ahead version for display
+        self.bus.ppu.frame_buffer = ahead_fb;
+        if self.bus.ppu.sgb_mode {
+            self.bus.ppu.shade_buffer = ahead_shade;
+        }
+    }
+
     // ── Snapshot / Rewind / Save State ─────────────────────────────────────────
 
     /// Capture the full emulator state into a Snapshot.
