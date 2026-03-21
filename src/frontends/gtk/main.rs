@@ -1,6 +1,7 @@
 use vibeboy::*;
 
 mod audio;
+mod compute;
 mod gpu;
 
 use clap::Parser;
@@ -288,13 +289,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     // Shared emulator state (None until a ROM is loaded)
     let state: Rc<RefCell<Option<EmuState>>> = Rc::new(RefCell::new(None));
 
-    // GL renderer state + pending frame for GLArea render signal
+    // GL renderer state + GPU compute + pending frame for GLArea render signal
     let gl_renderer: Rc<RefCell<Option<gpu::GlRenderer>>> = Rc::new(RefCell::new(None));
+    let gpu_compute: Rc<RefCell<Option<compute::GpuCompute>>> = Rc::new(RefCell::new(None));
     let pending_frame: Rc<RefCell<gpu::PendingFrame>> = Rc::new(RefCell::new(gpu::PendingFrame::default()));
 
-    // GLArea realize: init GL resources
+    // GLArea realize: init GL resources + wgpu compute (same GL context)
     gl_area.connect_realize({
         let gl_renderer = Rc::clone(&gl_renderer);
+        let gpu_compute = Rc::clone(&gpu_compute);
         let stack = stack.clone();
         move |area| {
             area.make_current();
@@ -306,6 +309,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 Some(r) => {
                     *gl_renderer.borrow_mut() = Some(r);
                     stack.set_visible_child_name("gl");
+                    // Init wgpu compute using the same GL context (zero-copy)
+                    match compute::GpuCompute::new(|s| gpu::gl_proc_address(s)) {
+                        Some(c) => *gpu_compute.borrow_mut() = Some(c),
+                        None => eprintln!("GPU compute init failed, will use CPU scaling"),
+                    }
                 }
                 None => eprintln!("GL renderer init failed, falling back to Cairo"),
             }
@@ -315,15 +323,18 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     // GLArea unrealize: drop GL resources while context is current
     gl_area.connect_unrealize({
         let gl_renderer = Rc::clone(&gl_renderer);
+        let gpu_compute = Rc::clone(&gpu_compute);
         move |area| {
             area.make_current();
+            gpu_compute.borrow_mut().take();
             gl_renderer.borrow_mut().take();
         }
     });
 
-    // GLArea render signal: draw the pending frame
+    // GLArea render signal: GPU compute + blit, or CPU pixel upload + blit
     gl_area.connect_render({
         let gl_renderer = Rc::clone(&gl_renderer);
+        let gpu_compute = Rc::clone(&gpu_compute);
         let pending = Rc::clone(&pending_frame);
         move |area, _ctx| {
             let mut r = gl_renderer.borrow_mut();
@@ -331,12 +342,34 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             if let Some(ref mut renderer) = *r {
                 if !f.pixels.is_empty() {
                     let scale = area.scale_factor();
+                    let vp_w = area.width() * scale;
+                    let vp_h = area.height() * scale;
+
+                    // Try GPU compute path (zero-copy: compute → GL texture → blit)
+                    if let Some(wgpu_filter) = f.gpu_filter {
+                        let mut gc = gpu_compute.borrow_mut();
+                        if let Some(ref mut compute) = *gc {
+                            if let Some((gl_tex, ow, oh)) = compute.scale(
+                                wgpu_filter,
+                                &f.pixels,
+                                f.frame_w,
+                                f.frame_h,
+                                f.fit_w,
+                                f.fit_h,
+                            ) {
+                                renderer.render_gl_texture(gl_tex, vp_w, vp_h, f.src_w, f.src_h);
+                                return glib::Propagation::Stop;
+                            }
+                        }
+                    }
+
+                    // CPU pixel upload path
                     renderer.render(
                         &f.pixels,
                         f.frame_w,
                         f.frame_h,
-                        area.width() * scale,
-                        area.height() * scale,
+                        vp_w,
+                        vp_h,
                         f.src_w,
                         f.src_h,
                     );
@@ -404,12 +437,14 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let start_frame_timer = {
         let state = Rc::clone(&state);
         let gl_renderer = Rc::clone(&gl_renderer);
+        let gpu_compute = Rc::clone(&gpu_compute);
         let pending_frame = Rc::clone(&pending_frame);
         move || {
             let state_tick = Rc::clone(&state);
             let da = da_for_timer.clone();
             let gl_area = gl_area_for_timer.clone();
             let gl_renderer = Rc::clone(&gl_renderer);
+            let gpu_compute = Rc::clone(&gpu_compute);
             let pending_frame = Rc::clone(&pending_frame);
 
             // Get frame duration from the loaded emulator's model
@@ -542,10 +577,17 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             let fit_w = (base_w as f64 * scale_fit).round() as usize;
                             let fit_h = (base_h as f64 * scale_fit).round() as usize;
 
-                            // Apply CPU scaling filter
-                            let (pixels, pw, ph): (&[u32], usize, usize) =
-                                if st.scale_filter == scaling::ScaleFilter::Nearest {
-                                    (fb, base_w, base_h)
+                            // Check if we can use GPU compute for this filter
+                            let wgpu_filter = compute::to_wgpu_filter(st.scale_filter);
+                            let use_gpu = wgpu_filter.is_some() && gpu_compute.borrow().is_some();
+
+                            // Apply scaling filter: GPU deferred to render callback, else CPU
+                            let (pixels, pw, ph, gpu_filter_for_render): (&[u32], usize, usize, Option<scaling::wgpu_scale::WgpuScaleFilter>) =
+                                if use_gpu {
+                                    // Send raw pixels to render callback for zero-copy GPU compute
+                                    (fb, base_w, base_h, wgpu_filter)
+                                } else if st.scale_filter == scaling::ScaleFilter::Nearest {
+                                    (fb, base_w, base_h, None)
                                 } else if matches!(
                                     st.scale_filter,
                                     scaling::ScaleFilter::VectorizeLegacy
@@ -560,7 +602,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     });
                                     let (raster, vw, vh) =
                                         cache.rasterize(fb, base_w, base_h, scale_fit);
-                                    (raster, vw, vh)
+                                    (raster, vw, vh, None)
                                 } else if let Some((scaled, w, h)) = scaling::cpu_scale(
                                     st.scale_filter,
                                     fb,
@@ -570,9 +612,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     fit_h,
                                 ) {
                                     st.scaled_buf = scaled;
-                                    (&st.scaled_buf, w as usize, h as usize)
+                                    (&st.scaled_buf, w as usize, h as usize, None)
                                 } else {
-                                    (fb, base_w, base_h)
+                                    (fb, base_w, base_h, None)
                                 };
 
                             // Render: GL path or Cairo fallback
@@ -584,6 +626,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 pf.frame_h = ph as u32;
                                 pf.src_w = base_w as u32;
                                 pf.src_h = base_h as u32;
+                                pf.gpu_filter = gpu_filter_for_render;
+                                pf.fit_w = fit_w as u32;
+                                pf.fit_h = fit_h as u32;
                                 drop(pf);
                                 gl_area.queue_render();
                             } else {

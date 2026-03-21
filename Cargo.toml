@@ -55,7 +55,7 @@ gdk4-macos = { version = "0.11.0", optional = true }
 raw-window-handle = { version = "0.6.2", optional = true }
 gdk4-wayland = { version = "0.11.0", optional = true }
 gdk4-x11 = { version = "0.11.0", optional = true }
-glow = { version = "0.16", optional = true }
+glow = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -96,7 +96,7 @@ macos-ui = []
 sdl3-gpu-shaders = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 winit-ui = ["winit", "wgpu", "bytemuck", "pollster", "muda", "cpal", "rfd", "nokhwa", "gilrs"]
-gtk-ui = ["gtk4", "cairo-rs", "clap", "env_logger", "cpal", "image", "svg", "gilrs", "glow"]
+gtk-ui = ["gtk4", "cairo-rs", "clap", "env_logger", "cpal", "image", "svg", "gilrs", "glow", "wgpu", "bytemuck", "pollster"]
 gtk-ui-linux = ["gtk-ui"]
 gtk-ui-macos = ["gtk-ui"]
 web = ["wgpu", "bytemuck", "wasm-bindgen", "web-sys", "js-sys", "console_log", "wasm-bindgen-futures", "console_error_panic_hook"]

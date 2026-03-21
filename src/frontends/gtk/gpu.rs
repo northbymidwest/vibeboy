@@ -8,7 +8,7 @@ use glow::HasContext;
 
 /// Resolve GL function pointers via dlsym. GTK4 loads the GL library
 /// (libGL/libGLESv2/OpenGL.framework) so core functions are resolvable.
-fn gl_proc_address(name: &str) -> *const std::ffi::c_void {
+pub(crate) fn gl_proc_address(name: &str) -> *const std::ffi::c_void {
     #[cfg(target_os = "macos")]
     const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
     #[cfg(not(target_os = "macos"))]
@@ -41,6 +41,11 @@ pub struct PendingFrame {
     pub frame_h: u32,
     pub src_w: u32,
     pub src_h: u32,
+    /// If set, the render callback runs this GPU compute filter on `pixels`
+    /// instead of uploading them directly. Enables zero-copy GPU→display.
+    pub gpu_filter: Option<crate::scaling::wgpu_scale::WgpuScaleFilter>,
+    pub fit_w: u32,
+    pub fit_h: u32,
 }
 
 fn compile_shader(gl: &glow::Context, ty: u32, src: &str) -> Option<glow::Shader> {
@@ -228,6 +233,48 @@ impl GlRenderer {
             gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Blit an existing GL texture (e.g., from wgpu compute output) to the framebuffer.
+    /// Zero-copy path — no pixel upload needed.
+    pub fn render_gl_texture(
+        &self,
+        texture: glow::Texture,
+        viewport_w: i32,
+        viewport_h: i32,
+        src_w: u32,
+        src_h: u32,
+    ) {
+        unsafe {
+            let gl = &self.gl;
+
+            // Clear full viewport to black
+            gl.viewport(0, 0, viewport_w, viewport_h);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+
+            // Aspect-ratio-correct sub-viewport
+            let scale =
+                (viewport_w as f32 / src_w as f32).min(viewport_h as f32 / src_h as f32);
+            let vp_w = (src_w as f32 * scale) as i32;
+            let vp_h = (src_h as f32 * scale) as i32;
+            let vp_x = (viewport_w - vp_w) / 2;
+            let vp_y = (viewport_h - vp_h) / 2;
+            gl.viewport(vp_x, vp_y, vp_w, vp_h);
+
+            // Bind the external texture and set nearest filtering
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+
+            // Draw fullscreen quad
+            gl.use_program(Some(self.program));
+            gl.bind_vertex_array(Some(self.vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Rebind our own texture so we don't hold a reference to the external one
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
         }
     }
 }
