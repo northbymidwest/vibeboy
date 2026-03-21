@@ -14,6 +14,7 @@ mod vectorize_metal;
 use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,6 +107,518 @@ struct Cli {
     filter: String,
 }
 
+// ── AppState ─────────────────────────────────────────────────────────────────
+
+struct AppState {
+    emu: Emulator,
+    rom: Vec<u8>,
+    rom_path: PathBuf,
+    model: GbModel,
+    forced_model: Option<GbModel>,
+    renderer: MetalRenderer,
+    scale_filter: scaling::ScaleFilter,
+    vec_cache: Option<vectorize::VectorizeCache>,
+    key_map: std::collections::HashMap<u16, u8>,
+    keys_down: HashSet<u16>,
+    gamepad: GamepadState,
+    audio_ring: SharedAudioBuffer,
+    camera: Option<CameraCapture>,
+    camera_buf: [u8; 128 * 112],
+    accel_source: AccelSource,
+    sav_flusher: ui_util::SavFlusher,
+    paused: bool,
+    current_slot: usize,
+    fps: ui_util::FpsCounter,
+    show_fps_overlay: bool,
+    overlay_fps: f64,
+    overlay_emu_ms: f64,
+    emu_time_debt: Duration,
+    frame_dur: Duration,
+    bgra_buf: Vec<u32>,
+    src_w: usize,
+    src_h: usize,
+    is_sgb: bool,
+}
+
+impl AppState {
+    /// Load a new ROM, resetting emulator state. Updates window title and recent ROMs.
+    unsafe fn load_rom(
+        &mut self,
+        path: PathBuf,
+        rom_data: Vec<u8>,
+        mtm: MainThreadMarker,
+        app: &NSApplication,
+        window: &NSWindow,
+    ) {
+        let title_str = format!("VibeBoy \u{2014} {}",
+            path.file_name().unwrap_or_default().to_string_lossy());
+        let title = NSString::from_str(&title_str);
+        window.setTitle(&title);
+        add_recent_rom(&path.to_string_lossy());
+        rebuild_recent_menu(mtm, app, &load_recent_roms());
+        self.rom = rom_data;
+        self.rom_path = path;
+        self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
+        self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+        ui_util::load_sav(&mut self.emu, &self.rom_path);
+        self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+        self.paused = false;
+        eprintln!("Loaded: {}", self.rom_path.display());
+    }
+
+    /// Handle all pending menu actions.
+    unsafe fn handle_menu_actions(
+        &mut self,
+        actions: MenuActions,
+        mtm: MainThreadMarker,
+        app: &NSApplication,
+        window: &NSWindow,
+    ) {
+        if actions.open_rom {
+            if let Some(path) = open_rom_dialog() {
+                if let Ok(rom_data) = fs::read(&path) {
+                    self.load_rom(path, rom_data, mtm, app, window);
+                }
+            }
+        }
+
+        if actions.pause_toggle {
+            self.paused = !self.paused;
+            eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
+            if let Some(main_menu) = app.mainMenu() {
+                if let Some(emu_menu) = main_menu.itemAtIndex(3) {
+                    if let Some(submenu) = emu_menu.submenu() {
+                        if let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE) {
+                            let label = if self.paused { "Resume" } else { "Pause" };
+                            pause_item.setTitle(&NSString::from_str(label));
+                        }
+                    }
+                }
+            }
+        }
+
+        if actions.reset {
+            self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+            ui_util::load_sav(&mut self.emu, &self.rom_path);
+            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+            self.paused = false;
+            eprintln!("Reset");
+        }
+
+        if actions.save_state {
+            ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
+        }
+
+        if actions.load_state {
+            ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
+        }
+
+        if let Some(slot) = actions.select_slot {
+            self.current_slot = slot;
+            eprintln!("Slot {} selected", self.current_slot + 1);
+        }
+
+        if let Some(tag) = actions.select_model {
+            if let Some(new_model) = model_tag_to_model(tag) {
+                self.forced_model = new_model;
+                self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
+                self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+                ui_util::load_sav(&mut self.emu, &self.rom_path);
+                self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+                update_model_checkmarks(app, tag);
+                self.paused = false;
+                let model_name = self.forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
+                eprintln!("Hardware model: {}", model_name);
+            }
+        }
+
+        if let Some(tag) = actions.select_filter {
+            if let Some(new_filter) = filter_tag_to_filter(tag) {
+                self.scale_filter = new_filter;
+                self.vec_cache = match self.scale_filter {
+                    scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+                    scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
+                    _ => None,
+                };
+                update_filter_checkmarks(app, tag);
+                eprintln!("Filter: {:?}", self.scale_filter);
+            }
+        }
+
+        if actions.toggle_printer {
+            let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
+            if is_printer {
+                self.emu.attach_serial_device(Box::new(serial::Disconnected));
+                eprintln!("Game Boy Printer disconnected");
+            } else {
+                let output_dir = std::path::Path::new("prints");
+                self.emu.attach_serial_device(
+                    Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+                );
+                eprintln!("Game Boy Printer connected");
+            }
+            if let Some(main_menu) = app.mainMenu() {
+                if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
+                    if let Some(emu_submenu) = emu_menu_item.submenu() {
+                        if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
+                            let state = if !is_printer { NSControlStateValueOn } else { NSControlStateValueOff };
+                            printer_menu_item.setState(state);
+                        }
+                    }
+                }
+            }
+        }
+
+        if actions.toggle_fps {
+            self.show_fps_overlay = !self.show_fps_overlay;
+            if let Some(main_menu) = app.mainMenu() {
+                if let Some(view_menu_item) = main_menu.itemAtIndex(4) {
+                    if let Some(view_submenu) = view_menu_item.submenu() {
+                        if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
+                            let state = if self.show_fps_overlay { NSControlStateValueOn } else { NSControlStateValueOff };
+                            fps_item.setState(state);
+                        }
+                    }
+                }
+            }
+        }
+
+        if actions.open_controls {
+            show_controls_panel(&mut self.key_map);
+        }
+
+        if let Some(idx) = actions.open_recent {
+            let recents = load_recent_roms();
+            if let Some(path_str) = recents.get(idx) {
+                let path = PathBuf::from(path_str);
+                if let Ok(rom_data) = fs::read(&path) {
+                    self.load_rom(path, rom_data, mtm, app, window);
+                } else {
+                    eprintln!("Failed to read: {}", path_str);
+                }
+            }
+        }
+
+        if actions.clear_recent {
+            save_recent_roms(&[]);
+            rebuild_recent_menu(mtm, app, &[]);
+            eprintln!("Recent ROMs cleared");
+        }
+    }
+
+    /// Update gamepad, camera, and accelerometer input.
+    unsafe fn update_input(&mut self) {
+        // Gamepad
+        self.gamepad.poll();
+        if self.emu.has_rumble() {
+            self.gamepad.ensure_haptics_ready();
+        }
+        self.gamepad.apply_to_emu(&mut self.emu, &self.key_map, &self.keys_down);
+
+        // Camera
+        if let Some(ref cam) = self.camera {
+            if cam.read_frame(&mut self.camera_buf) {
+                self.emu.set_camera_image(&self.camera_buf);
+            }
+        }
+
+        // Accelerometer
+        {
+            const CENTER: f32 = 0x81D0 as u16 as f32;
+            const RANGE: f32 = 0x70 as u16 as f32;
+            let accel_reading = self.gamepad.accel
+                .map(|(x, y, z)| (x, y, z))
+                .or_else(|| poll_accel(&self.accel_source));
+            if let Some((x, y, _z)) = accel_reading {
+                let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
+                let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
+                self.emu.set_accelerometer(mbc7_x, mbc7_y);
+            }
+        }
+    }
+
+    /// Step emulation: rewind, fast-forward, or normal frame stepping + audio drain.
+    unsafe fn step_emulation(&mut self, frame_start: &mut Instant) {
+        let backspace_held = self.keys_down.contains(&K_DELETE) || self.gamepad.l_shoulder;
+        let fast_forward = self.keys_down.contains(&K_TAB) || self.gamepad.r_shoulder;
+        self.emu.set_rewinding(backspace_held);
+
+        // Accumulate elapsed time
+        self.emu_time_debt += frame_start.elapsed();
+        *frame_start = Instant::now();
+
+        if !self.paused {
+            if backspace_held {
+                let mut all_audio = Vec::new();
+                for _ in 0..3 {
+                    self.emu.rewind_one_frame();
+                    all_audio.extend_from_slice(&self.emu.drain_audio_samples());
+                }
+                ui_util::reverse_audio(&mut all_audio);
+                let resampled = ui_util::downsample_audio(&all_audio, 3);
+                if let Ok(mut ring) = self.audio_ring.lock() {
+                    ring.write(&resampled);
+                }
+                self.emu_time_debt = Duration::ZERO;
+            } else if fast_forward {
+                for _ in 0..4 {
+                    self.emu.step_frame();
+                }
+                self.emu_time_debt = Duration::ZERO;
+            } else {
+                while self.emu_time_debt >= self.frame_dur {
+                    self.emu.step_frame();
+                    self.emu_time_debt -= self.frame_dur;
+                }
+            }
+        } else {
+            self.emu_time_debt = Duration::ZERO;
+        }
+
+        // Rumble
+        if self.emu.has_rumble() {
+            self.gamepad.set_rumble(self.emu.drain_rumble());
+        }
+
+        // Audio
+        let samples = self.emu.drain_audio_samples();
+        if !samples.is_empty() {
+            let to_write: std::borrow::Cow<[f32]> = if fast_forward {
+                std::borrow::Cow::Owned(ui_util::downsample_audio(&samples, 4))
+            } else {
+                let max_samples = 3200 * 2;
+                if samples.len() <= max_samples {
+                    std::borrow::Cow::Borrowed(&samples[..])
+                } else {
+                    std::borrow::Cow::Borrowed(&samples[samples.len() - max_samples..])
+                }
+            };
+            if let Ok(mut ring) = self.audio_ring.lock() {
+                ring.write(&to_write);
+            }
+        }
+    }
+
+    /// Render the current frame. Handles occlusion check, filter dispatch, and Metal rendering.
+    unsafe fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
+        let occluded = !window.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible);
+
+        // Update drawable size on resize
+        let (disp_w, disp_h);
+        {
+            let bounds = content_view.bounds();
+            disp_w = bounds.size.width as usize;
+            disp_h = bounds.size.height as usize;
+            if !occluded {
+                self.renderer.layer.setDrawableSize(NSSize::new(
+                    bounds.size.width, bounds.size.height,
+                ));
+            }
+        }
+
+        if occluded {
+            return;
+        }
+
+        // Copy frame data to a local buffer to avoid borrowing self.emu across &mut self calls.
+        let src_len = self.src_w * self.src_h;
+        let raw_src: &[u32] = if self.is_sgb {
+            self.emu.sgb_composited_frame()
+        } else {
+            self.emu.frame_buffer()
+        };
+        // Reuse bgra_buf temporarily as a frame copy buffer; it will be overwritten later if needed.
+        let mut frame_copy = Vec::with_capacity(src_len);
+        frame_copy.extend_from_slice(&raw_src[..src_len]);
+
+        let gpu_rendered = self.render_with_filter(&frame_copy, disp_w, disp_h);
+
+        if !gpu_rendered {
+            self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
+        }
+    }
+
+    /// Try GPU-accelerated rendering for the current filter.
+    /// Returns true if GPU-rendered (so CPU fallback can be skipped).
+    unsafe fn render_with_filter(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) -> bool {
+        let src_w = self.src_w;
+        let src_h = self.src_h;
+
+        // VectorizeGpu: full 6-stage Metal compute pipeline
+        if self.scale_filter == scaling::ScaleFilter::VectorizeGpu {
+            if self.renderer.vectorize_pipeline.is_none() {
+                self.renderer.vectorize_pipeline = MetalVectorizePipeline::new(&self.renderer.device);
+            }
+            if let Some(ref mut vp) = self.renderer.vectorize_pipeline {
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
+                let gw = (src_w as f32 * s).round() as u32;
+                let gh = (src_h as f32 * s).round() as u32;
+                if self.renderer.compute_out_w != gw || self.renderer.compute_out_h != gh {
+                    let desc = MTLTextureDescriptor::new();
+                    desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                    desc.setWidth(gw as usize);
+                    desc.setHeight(gh as usize);
+                    desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+                    self.renderer.compute_out_tex = Some(self.renderer.device.newTextureWithDescriptor(&desc).unwrap());
+                    self.renderer.compute_out_w = gw;
+                    self.renderer.compute_out_h = gh;
+                }
+                let out_tex = self.renderer.compute_out_tex.as_ref().unwrap();
+                vp.run(&self.renderer.device, &self.renderer.command_queue, raw_src,
+                    src_w as u32, src_h as u32, gw, gh, s, out_tex);
+                self.renderer.tex_w = gw;
+                self.renderer.tex_h = gh;
+                self.renderer.texture = out_tex.clone();
+                self.renderer.render();
+                return true;
+            }
+        }
+
+        // GPU compute scaling filters (not vectorize variants, not nearest/bilinear)
+        if !matches!(self.scale_filter,
+            scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
+            | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
+            | scaling::ScaleFilter::VectorizeDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusion
+            | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
+            | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
+            | scaling::ScaleFilter::VectorizeGpu)
+        {
+            if let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
+                self.scale_filter, raw_src, src_w as u32, src_h as u32,
+                disp_w as u32, disp_h as u32,
+            ) {
+                self.renderer.tex_w = gw;
+                self.renderer.tex_h = gh;
+                self.renderer.texture = self.renderer.compute_out_tex.as_ref().unwrap().clone();
+                self.renderer.render();
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// CPU fallback rendering path for filters not handled by the GPU.
+    unsafe fn render_cpu_fallback(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) {
+        let src_w = self.src_w;
+        let src_h = self.src_h;
+        let mut gpu_rendered = false;
+
+        let mut vec_scaled: Vec<u32>;
+        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
+            if self.scale_filter == scaling::ScaleFilter::Nearest {
+                (raw_src, src_w, src_h)
+            } else if matches!(self.scale_filter,
+                scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
+            {
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
+                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
+                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
+                if ow > 0 && oh > 0 {
+                    self.renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
+                    self.renderer.render();
+                    gpu_rendered = true;
+                }
+                vec_scaled = Vec::new();
+                (&[] as &[u32], 0, 0)
+            } else if self.scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                let scale = s.round().max(1.0) as u32;
+                let ow = src_w as u32 * scale;
+                let oh = src_h as u32 * scale;
+                self.renderer.run_diffusion_rasterize(raw_src, src_w as u32, src_h as u32, ow, oh, scale);
+                self.renderer.render();
+                gpu_rendered = true;
+                vec_scaled = Vec::new();
+                (&[] as &[u32], 0, 0)
+            } else if matches!(self.scale_filter,
+                scaling::ScaleFilter::VectorizeSplineDiffusion
+                | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive)
+            {
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                let scale = s.round().max(1.0) as u32;
+                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
+                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
+                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale as f64, src_w, src_h);
+                if ow > 0 && oh > 0 {
+                    self.renderer.run_spline_diffusion(
+                        &gpu_edges, &row_ranges, &edge_indices, raw_src,
+                        ow, oh, src_w as u32, src_h as u32, bg, scale,
+                    );
+                    self.renderer.render();
+                    gpu_rendered = true;
+                }
+                vec_scaled = Vec::new();
+                (&[] as &[u32], 0, 0)
+            } else if matches!(self.scale_filter,
+                scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+            {
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
+                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
+                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
+                if ow > 0 && oh > 0 {
+                    self.renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
+                    self.renderer.render();
+                    gpu_rendered = true;
+                }
+                vec_scaled = Vec::new();
+                (&[] as &[u32], 0, 0)
+            } else if let Some((s, w, h)) = scaling::cpu_scale(
+                self.scale_filter, raw_src, src_w, src_h, disp_w, disp_h,
+            ) {
+                vec_scaled = s;
+                (&vec_scaled, w as usize, h as usize)
+            } else {
+                (raw_src, src_w, src_h)
+            };
+
+        if gpu_rendered {
+            return;
+        }
+
+        // Resize texture if dimensions changed
+        if frame_w as u32 != self.renderer.tex_w || frame_h as u32 != self.renderer.tex_h {
+            let tex_desc = MTLTextureDescriptor::new();
+            tex_desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            tex_desc.setWidth(frame_w as usize);
+            tex_desc.setHeight(frame_h as usize);
+            tex_desc.setUsage(MTLTextureUsage::ShaderRead);
+            self.renderer.texture = self.renderer.device.newTextureWithDescriptor(&tex_desc).unwrap();
+            self.renderer.tex_w = frame_w as u32;
+            self.renderer.tex_h = frame_h as u32;
+        }
+
+        // Convert 0x00RRGGBB -> BGRA8Unorm (set alpha to 0xFF)
+        self.bgra_buf.resize(frame_w * frame_h, 0u32);
+        for i in 0..(frame_w * frame_h) {
+            self.bgra_buf[i] = 0xFF00_0000 | frame_pixels[i];
+        }
+
+        // Draw FPS overlay into pixel buffer
+        if self.show_fps_overlay {
+            let text = format!("FPS: {:.1}  {:.2}ms", self.overlay_fps, self.overlay_emu_ms);
+            let scale = ((frame_w / 160).max(1)).min(4);
+            let fg = 0xFF00FF00;
+            let bg = 0xC0000000;
+            tiny_font::draw_string(
+                &mut self.bgra_buf, frame_w, frame_h,
+                &text, 2 * scale, 2 * scale, fg, bg, scale,
+            );
+        }
+
+        self.renderer.update_texture(&self.bgra_buf);
+        self.renderer.render();
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -139,7 +652,7 @@ fn main() {
             std::process::exit(1);
         });
 
-        let mut forced_model: Option<GbModel> = cli.model;
+        let forced_model: Option<GbModel> = cli.model;
         let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
         let frame_dur = frame_duration(model);
 
@@ -174,18 +687,15 @@ fn main() {
         ui_util::print_controls();
         eprintln!();
 
-        let mut current_rom = rom;
-        let mut current_rom_path = rom_path;
-        let mut current_model = model;
-        let mut emu = Emulator::new(current_rom.clone(), boot_rom, current_model, snes_rom);
-        ui_util::load_sav(&mut emu, &current_rom_path);
-        let mut sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
+        let mut emu = Emulator::new(rom.clone(), boot_rom, model, snes_rom);
+        ui_util::load_sav(&mut emu, &rom_path);
+        let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
         // Load custom key mappings
-        let mut key_map = load_key_map();
+        let key_map = load_key_map();
 
         // Initialize recent ROMs list and populate menu
-        add_recent_rom(&current_rom_path.to_string_lossy());
+        add_recent_rom(&rom_path.to_string_lossy());
         rebuild_recent_menu(mtm, &app, &load_recent_roms());
 
         if cli.printer {
@@ -206,8 +716,8 @@ fn main() {
         }
 
         // Scaling filter
-        let mut scale_filter = string_to_filter(&cli.filter);
-        let mut vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
+        let scale_filter = string_to_filter(&cli.filter);
+        let vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
             scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
             scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
             _ => None,
@@ -226,11 +736,6 @@ fn main() {
             }
         }
 
-        // FPS overlay
-        let mut show_fps_overlay = false;
-        let mut overlay_fps: f64 = 0.0;
-        let mut overlay_emu_ms: f64 = 0.0;
-
         let is_sgb = emu.is_sgb();
         let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
         let src_w = tex_w as usize;
@@ -239,7 +744,7 @@ fn main() {
         let win_h = tex_h * SCALE;
 
         // ── Metal renderer ───────────────────────────────────────────────────
-        let mut renderer = MetalRenderer::new(tex_w, tex_h);
+        let renderer = MetalRenderer::new(tex_w, tex_h);
 
         // ── Window ───────────────────────────────────────────────────────────
         let style = NSWindowStyleMask::Titled
@@ -256,7 +761,7 @@ fn main() {
         );
 
         let title_str = format!("VibeBoy \u{2014} {}",
-            current_rom_path.file_name().unwrap_or_default().to_string_lossy());
+            rom_path.file_name().unwrap_or_default().to_string_lossy());
         let title = NSString::from_str(&title_str);
         window.setTitle(&title);
         window.center();
@@ -312,7 +817,6 @@ fn main() {
         } else {
             None
         };
-        let mut camera_buf = [0u8; 128 * 112];
 
         // ── Accelerometer ────────────────────────────────────────────────────
         let accel_source = if emu.has_accelerometer() {
@@ -321,16 +825,41 @@ fn main() {
             AccelSource::None
         };
 
-        // ── Key state + frame loop ───────────────────────────────────────────
-        let mut keys_down = std::collections::HashSet::<u16>::new();
-        let mut gamepad_state = GamepadState::new();
-        let mut current_slot: usize = 0;
-        let mut paused = false;
-        let mut frame_start = Instant::now();
-        let mut emu_time_debt = Duration::ZERO;
-        let mut fps_counter = ui_util::FpsCounter::new();
-        let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
+        // ── Build AppState ───────────────────────────────────────────────────
+        let mut state = AppState {
+            emu,
+            rom: rom,
+            rom_path,
+            model,
+            forced_model,
+            renderer,
+            scale_filter,
+            vec_cache,
+            key_map,
+            keys_down: HashSet::new(),
+            gamepad: GamepadState::new(),
+            audio_ring,
+            camera,
+            camera_buf: [0u8; 128 * 112],
+            accel_source,
+            sav_flusher,
+            paused: false,
+            current_slot: 0,
+            fps: ui_util::FpsCounter::new(),
+            show_fps_overlay: false,
+            overlay_fps: 0.0,
+            overlay_emu_ms: 0.0,
+            emu_time_debt: Duration::ZERO,
+            frame_dur,
+            bgra_buf: Vec::with_capacity((tex_w * tex_h) as usize),
+            src_w,
+            src_h,
+            is_sgb,
+        };
 
+        let mut frame_start = Instant::now();
+
+        // ── Main loop ────────────────────────────────────────────────────────
         'running: loop {
             let _pool = objc2_foundation::NSAutoreleasePool::new();
 
@@ -360,24 +889,24 @@ fn main() {
                         break 'running;
                     }
 
-                    keys_down.insert(keycode);
+                    state.keys_down.insert(keycode);
 
                     if keycode == K_F5 {
-                        ui_util::save_state_to_slot(&mut emu, &current_rom_path, current_slot);
+                        ui_util::save_state_to_slot(&mut state.emu, &state.rom_path, state.current_slot);
                     } else if keycode == K_F7 {
-                        ui_util::load_state_from_slot(&mut emu, &current_rom_path, current_slot);
+                        ui_util::load_state_from_slot(&mut state.emu, &state.rom_path, state.current_slot);
                     } else if let Some(slot) = keycode_to_slot(keycode) {
-                        current_slot = slot;
-                        eprintln!("Slot {} selected", current_slot + 1);
+                        state.current_slot = slot;
+                        eprintln!("Slot {} selected", state.current_slot + 1);
                     }
 
-                    if let Some(btn) = key_map.get(&keycode).copied() {
-                        emu.set_button(btn, true);
+                    if let Some(btn) = state.key_map.get(&keycode).copied() {
+                        state.emu.set_button(btn, true);
                     }
                 } else if event_type == NSEventType::KeyUp {
-                    keys_down.remove(&keycode);
-                    if let Some(btn) = key_map.get(&keycode).copied() {
-                        emu.set_button(btn, false);
+                    state.keys_down.remove(&keycode);
+                    if let Some(btn) = state.key_map.get(&keycode).copied() {
+                        state.emu.set_button(btn, false);
                     }
                 }
 
@@ -385,467 +914,37 @@ fn main() {
                 app.sendEvent(&event);
             }
 
-            // ── Handle menu actions ──────────────────────────────────────────
-            {
-                let actions = menu_actions.take_all();
-
-                if actions.open_rom {
-                    if let Some(path) = open_rom_dialog() {
-                        if let Ok(rom_data) = fs::read(&path) {
-                            let title_str = format!("VibeBoy \u{2014} {}",
-                                path.file_name().unwrap_or_default().to_string_lossy());
-                            let title = NSString::from_str(&title_str);
-                            window.setTitle(&title);
-                            add_recent_rom(&path.to_string_lossy());
-                            rebuild_recent_menu(mtm, &app, &load_recent_roms());
-                            current_rom = rom_data;
-                            current_rom_path = path;
-                            current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                            emu = Emulator::new(current_rom.clone(), None, current_model, None);
-                            ui_util::load_sav(&mut emu, &current_rom_path);
-                            sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
-                            paused = false;
-                            eprintln!("Loaded: {}", current_rom_path.display());
-                        }
-                    }
-                }
-
-                if actions.pause_toggle {
-                    paused = !paused;
-                    eprintln!("{}", if paused { "Paused" } else { "Resumed" });
-                    if let Some(main_menu) = app.mainMenu() {
-                        if let Some(emu_menu) = main_menu.itemAtIndex(3) {
-                            if let Some(submenu) = emu_menu.submenu() {
-                                if let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE) {
-                                    let label = if paused { "Resume" } else { "Pause" };
-                                    pause_item.setTitle(&NSString::from_str(label));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if actions.reset {
-                    emu = Emulator::new(current_rom.clone(), None, current_model, None);
-                    ui_util::load_sav(&mut emu, &current_rom_path);
-                    sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
-                    paused = false;
-                    eprintln!("Reset");
-                }
-
-                if actions.save_state {
-                    ui_util::save_state_to_slot(&mut emu, &current_rom_path, current_slot);
-                }
-
-                if actions.load_state {
-                    ui_util::load_state_from_slot(&mut emu, &current_rom_path, current_slot);
-                }
-
-                if let Some(slot) = actions.select_slot {
-                    current_slot = slot;
-                    eprintln!("Slot {} selected", current_slot + 1);
-                }
-
-                if let Some(tag) = actions.select_model {
-                    if let Some(new_model) = model_tag_to_model(tag) {
-                        forced_model = new_model;
-                        current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                        emu = Emulator::new(current_rom.clone(), None, current_model, None);
-                        ui_util::load_sav(&mut emu, &current_rom_path);
-                        sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
-                        update_model_checkmarks(&app, tag);
-                        paused = false;
-                        let model_name = forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
-                        eprintln!("Hardware model: {}", model_name);
-                    }
-                }
-
-                if let Some(tag) = actions.select_filter {
-                    if let Some(new_filter) = filter_tag_to_filter(tag) {
-                        scale_filter = new_filter;
-                        vec_cache = match scale_filter {
-                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-                            _ => None,
-                        };
-                        update_filter_checkmarks(&app, tag);
-                        eprintln!("Filter: {:?}", scale_filter);
-                    }
-                }
-
-                if actions.toggle_printer {
-                    let is_printer = emu.serial_device_as_any().is::<printer::Printer>();
-                    if is_printer {
-                        emu.attach_serial_device(Box::new(serial::Disconnected));
-                        eprintln!("Game Boy Printer disconnected");
-                    } else {
-                        let output_dir = std::path::Path::new("prints");
-                        emu.attach_serial_device(
-                            Box::new(printer::Printer::new(output_dir, current_model.cpu_clock_rate()))
-                        );
-                        eprintln!("Game Boy Printer connected");
-                    }
-                    // Update checkmark
-                    if let Some(main_menu) = app.mainMenu() {
-                        if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
-                            if let Some(emu_submenu) = emu_menu_item.submenu() {
-                                if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
-                                    let state = if !is_printer { NSControlStateValueOn } else { NSControlStateValueOff };
-                                    printer_menu_item.setState(state);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if actions.toggle_fps {
-                    show_fps_overlay = !show_fps_overlay;
-                    if let Some(main_menu) = app.mainMenu() {
-                        if let Some(view_menu_item) = main_menu.itemAtIndex(4) {
-                            if let Some(view_submenu) = view_menu_item.submenu() {
-                                if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
-                                    let state = if show_fps_overlay { NSControlStateValueOn } else { NSControlStateValueOff };
-                                    fps_item.setState(state);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if actions.open_controls {
-                    show_controls_panel(&mut key_map);
-                }
-
-                if let Some(idx) = actions.open_recent {
-                    let recents = load_recent_roms();
-                    if let Some(path_str) = recents.get(idx) {
-                        let path = PathBuf::from(path_str);
-                        if let Ok(rom_data) = fs::read(&path) {
-                            let title_str = format!("VibeBoy \u{2014} {}",
-                                path.file_name().unwrap_or_default().to_string_lossy());
-                            let title = NSString::from_str(&title_str);
-                            window.setTitle(&title);
-                            add_recent_rom(path_str);
-                            rebuild_recent_menu(mtm, &app, &load_recent_roms());
-                            current_rom = rom_data;
-                            current_rom_path = path;
-                            current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                            emu = Emulator::new(current_rom.clone(), None, current_model, None);
-                            ui_util::load_sav(&mut emu, &current_rom_path);
-                            sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
-                            paused = false;
-                            eprintln!("Loaded: {}", current_rom_path.display());
-                        } else {
-                            eprintln!("Failed to read: {}", path_str);
-                        }
-                    }
-                }
-
-                if actions.clear_recent {
-                    save_recent_roms(&[]);
-                    rebuild_recent_menu(mtm, &app, &[]);
-                    eprintln!("Recent ROMs cleared");
-                }
-            }
+            // Handle menu actions
+            let actions = menu_actions.take_all();
+            state.handle_menu_actions(actions, mtm, &app, &window);
 
             // Check if window was closed
             if !window.isVisible() {
                 break 'running;
             }
 
-            // ── Gamepad ──────────────────────────────────────────────────────
-            gamepad_state.poll();
-            if emu.has_rumble() {
-                gamepad_state.ensure_haptics_ready();
-            }
-            gamepad_state.apply_to_emu(&mut emu, &key_map, &keys_down);
+            // Update input (gamepad, camera, accelerometer)
+            state.update_input();
 
-            // ── Camera ───────────────────────────────────────────────────────
-            if let Some(ref cam) = camera {
-                if cam.read_frame(&mut camera_buf) {
-                    emu.set_camera_image(&camera_buf);
-                }
-            }
+            // Step emulation
+            state.step_emulation(&mut frame_start);
 
-            // ── Accelerometer ────────────────────────────────────────────────
-            {
-                const CENTER: f32 = 0x81D0 as u16 as f32;
-                const RANGE: f32 = 0x70 as u16 as f32;
-                let accel_reading = gamepad_state.accel
-                    .map(|(x, y, z)| (x, y, z))
-                    .or_else(|| poll_accel(&accel_source));
-                if let Some((x, y, _z)) = accel_reading {
-                    let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
-                    let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
-                    emu.set_accelerometer(mbc7_x, mbc7_y);
-                }
-            }
+            // Render
+            state.render(&window, &content_view);
 
-            // ── Rewind / Fast-forward ────────────────────────────────────────
-            let backspace_held = keys_down.contains(&K_DELETE) || gamepad_state.l_shoulder;
-            let fast_forward = keys_down.contains(&K_TAB) || gamepad_state.r_shoulder;
-            emu.set_rewinding(backspace_held);
-
-            // Accumulate elapsed time and step as many frames as needed
-            emu_time_debt += frame_start.elapsed();
-            frame_start = Instant::now();
-
-            if !paused {
-                if backspace_held {
-                    let mut all_audio = Vec::new();
-                    for _ in 0..3 {
-                        emu.rewind_one_frame();
-                        all_audio.extend_from_slice(&emu.drain_audio_samples());
-                    }
-                    ui_util::reverse_audio(&mut all_audio);
-                    let resampled = ui_util::downsample_audio(&all_audio, 3);
-                    if let Ok(mut ring) = audio_ring.lock() {
-                        ring.write(&resampled);
-                    }
-                    emu_time_debt = Duration::ZERO;
-                } else if fast_forward {
-                    for _ in 0..4 {
-                        emu.step_frame();
-                    }
-                    emu_time_debt = Duration::ZERO;
-                } else {
-                    while emu_time_debt >= frame_dur {
-                        emu.step_frame();
-                        emu_time_debt -= frame_dur;
-                    }
-                }
-            } else {
-                emu_time_debt = Duration::ZERO;
-            }
-
-            // ── Rumble ───────────────────────────────────────────────────────
-            if emu.has_rumble() {
-                gamepad_state.set_rumble(emu.drain_rumble());
-            }
-
-            // ── Audio ────────────────────────────────────────────────────────
-            let samples = emu.drain_audio_samples();
-            if !samples.is_empty() {
-                let to_write: std::borrow::Cow<[f32]> = if fast_forward {
-                    std::borrow::Cow::Owned(ui_util::downsample_audio(&samples, 4))
-                } else {
-                    let max_samples = 3200 * 2;
-                    if samples.len() <= max_samples {
-                        std::borrow::Cow::Borrowed(&samples[..])
-                    } else {
-                        std::borrow::Cow::Borrowed(&samples[samples.len() - max_samples..])
-                    }
-                };
-                if let Ok(mut ring) = audio_ring.lock() {
-                    ring.write(&to_write);
-                }
-            }
-
-            // ── Check occlusion ──────────────────────────────────────────
-            let occluded = !window.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible);
-
-            // ── Update drawable size on resize ─────────────────────────────
-            let (disp_w, disp_h);
-            {
-                let bounds = content_view.bounds();
-                disp_w = bounds.size.width as usize;
-                disp_h = bounds.size.height as usize;
-                if !occluded {
-                    renderer.layer.setDrawableSize(NSSize::new(
-                        bounds.size.width, bounds.size.height,
-                    ));
-                }
-            }
-
-            // ── Render (skip when occluded to avoid nextDrawable blocking) ─
-            if !occluded {
-                let raw_src: &[u32] = if is_sgb {
-                    emu.sgb_composited_frame()
-                } else {
-                    emu.frame_buffer()
-                };
-
-                let mut gpu_rendered = false;
-                // VectorizeGpu: full 6-stage Metal compute pipeline
-                if scale_filter == scaling::ScaleFilter::VectorizeGpu {
-                    if renderer.vectorize_pipeline.is_none() {
-                        renderer.vectorize_pipeline = MetalVectorizePipeline::new(&renderer.device);
-                    }
-                    if let Some(ref mut vp) = renderer.vectorize_pipeline {
-                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
-                        let gw = (src_w as f32 * s).round() as u32;
-                        let gh = (src_h as f32 * s).round() as u32;
-                        if renderer.compute_out_w != gw || renderer.compute_out_h != gh {
-                            let desc = MTLTextureDescriptor::new();
-                            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                            desc.setWidth(gw as usize);
-                            desc.setHeight(gh as usize);
-                            desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-                            renderer.compute_out_tex = Some(renderer.device.newTextureWithDescriptor(&desc).unwrap());
-                            renderer.compute_out_w = gw;
-                            renderer.compute_out_h = gh;
-                        }
-                        let out_tex = renderer.compute_out_tex.as_ref().unwrap();
-                        vp.run(&renderer.device, &renderer.command_queue, raw_src,
-                            src_w as u32, src_h as u32, gw, gh, s, out_tex);
-                        renderer.tex_w = gw;
-                        renderer.tex_h = gh;
-                        renderer.texture = out_tex.clone();
-                        renderer.render();
-                        gpu_rendered = true;
-                    }
-                }
-
-                if !gpu_rendered && !matches!(scale_filter,
-                    scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
-                    | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                    | scaling::ScaleFilter::VectorizeDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusion
-                    | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
-                    | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
-                    | scaling::ScaleFilter::VectorizeGpu)
-                {
-                    if let Some((_tex, gw, gh)) = renderer.run_scale_compute(
-                        scale_filter, raw_src, src_w as u32, src_h as u32,
-                        disp_w as u32, disp_h as u32,
-                    ) {
-                        renderer.tex_w = gw;
-                        renderer.tex_h = gh;
-                        renderer.texture = renderer.compute_out_tex.as_ref().unwrap().clone();
-                        renderer.render();
-                        gpu_rendered = true;
-                    }
-                }
-
-                // CPU fallback
-                if !gpu_rendered {
-
-                let mut vec_scaled: Vec<u32>;
-                let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
-                    if scale_filter == scaling::ScaleFilter::Nearest {
-                        (raw_src, src_w, src_h)
-                    } else if matches!(scale_filter,
-                        scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
-                    {
-                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                        let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
-                        if ow > 0 && oh > 0 {
-                            renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
-                            renderer.render();
-                            gpu_rendered = true;
-                        }
-                        vec_scaled = Vec::new();
-                        (&[] as &[u32], 0, 0)
-                    } else if scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
-                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let scale = s.round().max(1.0) as u32;
-                        let ow = src_w as u32 * scale;
-                        let oh = src_h as u32 * scale;
-                        renderer.run_diffusion_rasterize(raw_src, src_w as u32, src_h as u32, ow, oh, scale);
-                        renderer.render();
-                        gpu_rendered = true;
-                        vec_scaled = Vec::new();
-                        (&[] as &[u32], 0, 0)
-                    } else if matches!(scale_filter,
-                        scaling::ScaleFilter::VectorizeSplineDiffusion
-                        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive)
-                    {
-                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let scale = s.round().max(1.0) as u32;
-                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive);
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                        let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale as f64, src_w, src_h);
-                        if ow > 0 && oh > 0 {
-                            renderer.run_spline_diffusion(
-                                &gpu_edges, &row_ranges, &edge_indices, raw_src,
-                                ow, oh, src_w as u32, src_h as u32, bg, scale,
-                            );
-                            renderer.render();
-                            gpu_rendered = true;
-                        }
-                        vec_scaled = Vec::new();
-                        (&[] as &[u32], 0, 0)
-                    } else if matches!(scale_filter,
-                        scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
-                    {
-                        let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                        let adaptive = matches!(scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
-                        let cache = vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
-                        let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                        let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
-                        if ow > 0 && oh > 0 {
-                            renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
-                            renderer.render();
-                            gpu_rendered = true;
-                        }
-                        vec_scaled = Vec::new();
-                        (&[] as &[u32], 0, 0)
-                    } else if let Some((s, w, h)) = scaling::cpu_scale(
-                        scale_filter, raw_src, src_w, src_h, disp_w, disp_h,
-                    ) {
-                        vec_scaled = s;
-                        (&vec_scaled, w as usize, h as usize)
-                    } else {
-                        (raw_src, src_w, src_h)
-                    };
-
-                // Resize texture if dimensions changed
-                if !gpu_rendered && (frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h) {
-                    let tex_desc = MTLTextureDescriptor::new();
-                    tex_desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                    tex_desc.setWidth(frame_w as usize);
-                    tex_desc.setHeight(frame_h as usize);
-                    tex_desc.setUsage(MTLTextureUsage::ShaderRead);
-                    renderer.texture = renderer.device.newTextureWithDescriptor(&tex_desc).unwrap();
-                    renderer.tex_w = frame_w as u32;
-                    renderer.tex_h = frame_h as u32;
-                }
-
-                // Convert 0x00RRGGBB -> BGRA8Unorm (set alpha to 0xFF)
-                bgra_buf.resize(frame_w * frame_h, 0u32);
-                for i in 0..(frame_w * frame_h) {
-                    bgra_buf[i] = 0xFF00_0000 | frame_pixels[i];
-                }
-
-                // Draw FPS overlay into pixel buffer
-                if show_fps_overlay {
-                    let text = format!("FPS: {:.1}  {:.2}ms", overlay_fps, overlay_emu_ms);
-                    let scale = ((frame_w / 160).max(1)).min(4);
-                    let fg = 0xFF00FF00;
-                    let bg = 0xC0000000;
-                    tiny_font::draw_string(
-                        &mut bgra_buf, frame_w, frame_h,
-                        &text, 2 * scale, 2 * scale, fg, bg, scale,
-                    );
-                }
-
-                if !gpu_rendered {
-                    renderer.update_texture(&bgra_buf);
-                    renderer.render();
-                }
-                } // end if !gpu_rendered
-            } // end if !occluded
-
-            // ── FPS counter ──────────────────────────────────────────────────
+            // FPS counter
             let emu_time = frame_start.elapsed();
-            if let Some((f, ms)) = fps_counter.update(1, emu_time) {
-                overlay_fps = f;
-                overlay_emu_ms = ms;
+            if let Some((f, ms)) = state.fps.update(1, emu_time) {
+                state.overlay_fps = f;
+                state.overlay_emu_ms = ms;
             }
 
-            // ── Periodic save RAM flush ──────────────────────────────────────
-            sav_flusher.poll(&emu);
+            // Periodic save RAM flush
+            state.sav_flusher.poll(&state.emu);
 
-            // ── Frame rate cap ───────────────────────────────────────────────
-            // Sleep if we have no emulation debt to burn through
-            if emu_time_debt < frame_dur {
-                let remaining = frame_dur.saturating_sub(emu_time_debt);
+            // Frame rate cap
+            if state.emu_time_debt < state.frame_dur {
+                let remaining = state.frame_dur.saturating_sub(state.emu_time_debt);
                 if remaining > Duration::from_millis(2) {
                     std::thread::sleep(remaining - Duration::from_millis(2));
                 }
@@ -853,10 +952,10 @@ fn main() {
         }
 
         // Cleanup
-        close_accel(&accel_source);
-        drop(camera);
+        close_accel(&state.accel_source);
+        drop(state.camera.take());
 
-        sav_flusher.flush(&emu);
+        state.sav_flusher.flush(&state.emu);
         drop(Box::from_raw(menu_actions_ptr));
     }
 }
