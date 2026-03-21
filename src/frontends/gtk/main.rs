@@ -195,6 +195,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     emu_menu.append(Some("Pause"), Some("app.pause"));
     emu_menu.append(Some("Reset"), Some("app.reset"));
 
+    let peripheral_section = gtk4::gio::Menu::new();
+    peripheral_section.append(Some("Game Boy Printer"), Some("app.toggle-printer"));
+    emu_menu.append_section(None, &peripheral_section);
+
     // Save State submenu with slots
     let save_submenu = gtk4::gio::Menu::new();
     for slot in 1..=9 {
@@ -256,6 +260,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     app.set_menubar(Some(&menu));
     window.set_show_menubar(true);
+
+    // Keyboard accelerators
+    app.set_accels_for_action("app.open", &["<Control>o"]);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+    app.set_accels_for_action("app.pause", &["F6"]);
 
     // Layout
     let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -360,6 +369,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             }
                             if gs.rewind { st.emu.set_rewinding(true); }
                             st.fast_forward = st.fast_forward || gs.fast_forward;
+                            // Rumble
+                            if st.emu.has_rumble() {
+                                gp.ensure_rumble();
+                                gp.set_rumble(st.emu.drain_rumble());
+                            }
                         }
 
                         if st.emu.is_rewinding() {
@@ -836,6 +850,33 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         }
     });
     app.add_action(&action_filter);
+
+    // Printer toggle action
+    let state_printer = Rc::clone(&state);
+    let action_printer = gtk4::gio::SimpleAction::new_stateful(
+        "toggle-printer",
+        None,
+        &cli_rc.printer.to_variant(),
+    );
+    action_printer.connect_activate(move |action, _| {
+        let mut st = state_printer.borrow_mut();
+        if let Some(s) = st.as_mut() {
+            let currently_on = action.state().and_then(|v| v.get::<bool>()).unwrap_or(false);
+            let new_state = !currently_on;
+            action.set_state(&new_state.to_variant());
+            if new_state {
+                let output_dir = std::path::Path::new("prints");
+                s.emu.attach_serial_device(
+                    Box::new(printer::Printer::new(output_dir, s.model.cpu_clock_rate()))
+                );
+                eprintln!("Game Boy Printer connected");
+            } else {
+                s.emu.attach_serial_device(Box::new(serial::Disconnected));
+                eprintln!("Game Boy Printer disconnected");
+            }
+        }
+    });
+    app.add_action(&action_printer);
 
     window.present();
 

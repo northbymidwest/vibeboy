@@ -34,6 +34,7 @@ pub(super) const MENU_TAG_RECENT_BASE: isize = 500; // 500..509 for recent ROMs
 pub(super) const MENU_TAG_CLEAR_RECENT: isize = 510;
 pub(super) const MENU_TAG_FILTER_BASE: isize = 600; // 600..699 for filters
 pub(super) const MENU_TAG_SHOW_FPS: isize = 700;
+pub(super) const MENU_TAG_PRINTER: isize = 701;
 
 /// Helper to set the check state on a menu item using typed API.
 fn set_checkmark(item: &NSMenuItem, checked: bool) {
@@ -185,6 +186,7 @@ pub(super) struct MenuActions {
     pub select_model: Option<isize>, // tag of selected model
     pub select_filter: Option<isize>, // tag of selected filter
     pub toggle_fps: bool,
+    pub toggle_printer: bool,
     pub open_controls: bool,
     pub open_recent: Option<usize>, // index into recent ROMs list
     pub clear_recent: bool,
@@ -202,6 +204,7 @@ impl MenuActions {
             select_model: None,
             select_filter: None,
             toggle_fps: false,
+            toggle_printer: false,
             open_controls: false,
             open_recent: None,
             clear_recent: false,
@@ -268,6 +271,7 @@ define_class!(
                     actions.select_filter = Some(t);
                 }
                 MENU_TAG_SHOW_FPS => actions.toggle_fps = true,
+                MENU_TAG_PRINTER => actions.toggle_printer = true,
                 t if t >= MENU_TAG_RECENT_BASE && t < MENU_TAG_RECENT_BASE + 10 => {
                     actions.open_recent = Some((t - MENU_TAG_RECENT_BASE) as usize);
                 }
@@ -524,6 +528,12 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     hw_menu_item.setTitle(&NSString::from_str("Hardware"));
     hw_menu_item.setSubmenu(Some(&hw_submenu));
     emu_menu.addItem(&hw_menu_item);
+
+    emu_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let printer_item = menu_item_with_tag(
+        mtm, "Game Boy Printer", sel!(menuAction:), "", MENU_TAG_PRINTER,
+    );
+    emu_menu.addItem(&printer_item);
 
     emu_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let controls_item = menu_item_with_tag(

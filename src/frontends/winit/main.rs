@@ -35,6 +35,10 @@ pub(crate) struct Cli {
     /// Skip boot ROM
     #[arg(long)]
     pub no_boot: bool,
+
+    /// Connect a Game Boy Printer (saves PNGs to prints/ directory)
+    #[arg(long)]
+    pub printer: bool,
 }
 
 fn main() {

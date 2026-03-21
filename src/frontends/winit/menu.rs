@@ -9,6 +9,7 @@ pub(super) const ID_OPEN: &str = "open_rom";
 pub(super) const ID_QUIT: &str = "quit";
 pub(super) const ID_PAUSE: &str = "pause";
 pub(super) const ID_RESET: &str = "reset";
+pub(super) const ID_PRINTER: &str = "toggle_printer";
 
 pub(super) fn slot_save_id(n: usize) -> String {
     format!("slot_save_{}", n)
@@ -35,7 +36,7 @@ pub(super) fn filter_id_to_filter(id: &str) -> Option<scaling::ScaleFilter> {
     filter_entries().iter().find(|(mid, _, _)| *mid == id).map(|(_, _, f)| *f)
 }
 
-pub(super) fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>) {
+pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem) {
     let menu = Menu::new();
 
     // File menu
@@ -60,6 +61,9 @@ pub(super) fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>)
 
     // Emulation menu
     let emu_menu = Submenu::new("Emulation", true);
+    let printer_item = CheckMenuItem::with_id(
+        ID_PRINTER, "Game Boy Printer", true, printer_on, None::<Accelerator>,
+    );
     emu_menu
         .append_items(&[
             &MenuItem::with_id(
@@ -69,6 +73,8 @@ pub(super) fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>)
                 Some(Accelerator::new(None, Code::F6)),
             ),
             &MenuItem::with_id(ID_RESET, "Reset", true, None::<Accelerator>),
+            &PredefinedMenuItem::separator(),
+            &printer_item,
         ])
         .unwrap();
 
@@ -169,5 +175,5 @@ pub(super) fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>)
     menu.append_items(&[&file_menu, &emu_menu, &state_menu, &filter_menu, &help_menu])
         .unwrap();
 
-    (menu, filter_items)
+    (menu, filter_items, printer_item)
 }

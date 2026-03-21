@@ -16,11 +16,13 @@ use super::model::GbModel;
 use super::scaling;
 use super::vectorize;
 use super::ui_util::{self, frame_duration};
+use super::printer;
+use super::serial;
 use super::gpu::GpuRenderer;
 use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
 use super::menu::{
-    ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET,
+    ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET, ID_PRINTER,
     slot_save_id, slot_load_id, filter_id_to_filter, build_menu,
 };
 
@@ -33,6 +35,7 @@ pub(super) struct App {
     gpu: Option<GpuRenderer>,
     _menu: Option<Menu>,
     filter_items: Vec<(CheckMenuItem, scaling::ScaleFilter)>,
+    printer_item: Option<CheckMenuItem>,
     audio_ring: Arc<Mutex<AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     camera_thread: Option<CameraThread>,
@@ -74,6 +77,7 @@ impl App {
             gpu: None,
             _menu: None,
             filter_items: Vec::new(),
+            printer_item: None,
             audio_ring,
             _audio_stream: stream,
             camera_thread: None,
@@ -116,6 +120,14 @@ impl App {
         // Start camera thread if cart has camera (Pocket Camera)
         if emu.has_camera() && self.camera_thread.is_none() {
             self.camera_thread = CameraThread::start();
+        }
+
+        // Attach printer if enabled
+        if self.printer_item.as_ref().is_some_and(|p| p.is_checked()) {
+            let output_dir = std::path::Path::new("prints");
+            emu.attach_serial_device(
+                Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+            );
         }
 
         self.sav_flusher = Some(ui_util::SavFlusher::new(&emu, path));
@@ -163,6 +175,23 @@ impl App {
             ID_RESET => {
                 if let Some(path) = self.rom_path.clone() {
                     self.load_rom(&path);
+                }
+            }
+            ID_PRINTER => {
+                if let Some(ref item) = self.printer_item {
+                    let now_on = item.is_checked();
+                    if let Some(ref mut emu) = self.emu {
+                        if now_on {
+                            let output_dir = std::path::Path::new("prints");
+                            emu.attach_serial_device(
+                                Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+                            );
+                            eprintln!("Game Boy Printer connected");
+                        } else {
+                            emu.attach_serial_device(Box::new(serial::Disconnected));
+                            eprintln!("Game Boy Printer disconnected");
+                        }
+                    }
                 }
             }
             other => {
@@ -362,7 +391,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         // Set up menu bar
-        let (menu, filter_items) = build_menu();
+        let (menu, filter_items, printer_item) = build_menu(self.cli.printer);
         #[cfg(target_os = "macos")]
         {
             menu.init_for_nsapp();
@@ -386,6 +415,7 @@ impl ApplicationHandler for App {
 
         self._menu = Some(menu);
         self.filter_items = filter_items;
+        self.printer_item = Some(printer_item);
         self.window = Some(window);
         self.gpu = Some(gpu);
 

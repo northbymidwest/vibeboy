@@ -190,6 +190,12 @@ fn main() {
             emu.attach_serial_device(
                 Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
+            // Set checkmark on printer menu item
+            let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
+            let emu_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
+            let emu_submenu: *mut AnyObject = msg_send![emu_menu_item, submenu];
+            let printer_menu_item: *mut AnyObject = msg_send![emu_submenu, itemWithTag: MENU_TAG_PRINTER];
+            let _: () = msg_send![printer_menu_item, setState: 1isize];
         }
 
         // Scaling filter
@@ -456,6 +462,27 @@ fn main() {
                         update_filter_checkmarks(&app, tag);
                         eprintln!("Filter: {:?}", scale_filter);
                     }
+                }
+
+                if actions.toggle_printer {
+                    let is_printer = emu.serial_device_as_any().is::<printer::Printer>();
+                    if is_printer {
+                        emu.attach_serial_device(Box::new(serial::Disconnected));
+                        eprintln!("Game Boy Printer disconnected");
+                    } else {
+                        let output_dir = std::path::Path::new("prints");
+                        emu.attach_serial_device(
+                            Box::new(printer::Printer::new(output_dir, current_model.cpu_clock_rate()))
+                        );
+                        eprintln!("Game Boy Printer connected");
+                    }
+                    // Update checkmark
+                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
+                    let emu_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
+                    let emu_submenu: *mut AnyObject = msg_send![emu_menu_item, submenu];
+                    let printer_menu_item: *mut AnyObject = msg_send![emu_submenu, itemWithTag: MENU_TAG_PRINTER];
+                    let state: isize = if !is_printer { 1 } else { 0 };
+                    let _: () = msg_send![printer_menu_item, setState: state];
                 }
 
                 if actions.toggle_fps {
