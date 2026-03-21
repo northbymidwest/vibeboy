@@ -1,5 +1,6 @@
-use cocoa::base::id;
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::{class, msg_send, sel};
+use objc2::encode::{Encode, Encoding, RefEncode};
+use objc2::runtime::AnyObject;
 
 use super::AccelSource;
 
@@ -19,8 +20,8 @@ pub(super) fn init_accel() -> AccelSource {
     // Fallback: CMMotionManager
     unsafe {
         let cm_class = class!(CMMotionManager);
-        let manager: id = msg_send![cm_class, alloc];
-        let manager: id = msg_send![manager, init];
+        let manager: *mut AnyObject = msg_send![cm_class, alloc];
+        let manager: *mut AnyObject = msg_send![manager, init];
         if manager.is_null() {
             log::info!("CMMotionManager init failed — accelerometer disabled");
             return AccelSource::None;
@@ -45,17 +46,25 @@ pub(super) fn poll_accel(source: &AccelSource) -> Option<(f32, f32, f32)> {
         AccelSource::None => None,
         AccelSource::IoKit => super::macos_accel::poll(),
         AccelSource::CoreMotion(manager) => unsafe {
-            let data: id = msg_send![*manager, accelerometerData];
+            let data: *mut AnyObject = msg_send![*manager, accelerometerData];
             if data.is_null() {
                 return None;
             }
-            // CMAcceleration is a struct { x: f64, y: f64, z: f64 }
-            // -[CMAccelerometerData acceleration] returns it by value
             #[repr(C)]
+            #[derive(Copy, Clone)]
             struct CMAcceleration {
                 x: f64,
                 y: f64,
                 z: f64,
+            }
+            unsafe impl Encode for CMAcceleration {
+                const ENCODING: Encoding = Encoding::Struct(
+                    "CMAcceleration",
+                    &[Encoding::Double, Encoding::Double, Encoding::Double],
+                );
+            }
+            unsafe impl RefEncode for CMAcceleration {
+                const ENCODING_REF: Encoding = Encoding::Pointer(&CMAcceleration::ENCODING);
             }
             let accel: CMAcceleration = msg_send![data, acceleration];
             Some((accel.x as f32, accel.y as f32, accel.z as f32))

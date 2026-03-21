@@ -17,22 +17,17 @@ use model::GbModel;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cocoa::appkit::{
-    NSApp, NSApplication, NSApplicationActivationPolicy,
-    NSBackingStoreType, NSEvent, NSEventType, NSWindow, NSWindowStyleMask,
-    NSMenu, NSMenuItem,
-};
-use cocoa::base::{id, nil, YES, NO, SEL};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use core_graphics_types::geometry::CGSize;
-use metal::*;
-use objc::rc::autoreleasepool;
-use objc::runtime::Object;
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::{class, msg_send, sel, ClassType};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSWindow};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use objc2_metal::*;
 
 use ui_util::{frame_duration, parse_filter};
 
@@ -57,7 +52,7 @@ pub(crate) enum AccelSource {
     /// IOKit HID (Apple Silicon built-in accelerometer)
     IoKit,
     /// CoreMotion CMMotionManager fallback
-    CoreMotion(id),
+    CoreMotion(*mut AnyObject),
 }
 
 pub(crate) const K_ESCAPE: u16 = 53;
@@ -114,22 +109,25 @@ fn main() {
     env_logger::init();
     let cli = Cli::parse();
 
-    unsafe {
-        let _pool = NSAutoreleasePool::new(nil);
+    // SAFETY: we're on the main thread
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
 
-        let app = NSApp();
-        app.setActivationPolicy_(NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
+    unsafe {
+        let _pool = objc2_foundation::NSAutoreleasePool::new();
+
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
         // Set up menu bar and action handler
-        create_menu_bar(app);
-        let (_menu_handler, menu_actions_ptr) = menu_handler::create(app);
+        create_menu_bar(mtm, &app);
+        let (_menu_handler, menu_actions_ptr) = menu_handler::create(&app);
         let menu_actions = &mut *menu_actions_ptr;
 
         // Resolve ROM path
         let rom_path: PathBuf = if let Some(ref p) = cli.rom {
             p.clone()
         } else {
-            app.activateIgnoringOtherApps_(YES);
+            app.activateIgnoringOtherApps(true);
             open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
 
@@ -211,7 +209,7 @@ fn main() {
 
         // Initialize recent ROMs list and populate menu
         add_recent_rom(&current_rom_path.to_string_lossy());
-        rebuild_recent_menu(app, &load_recent_roms());
+        rebuild_recent_menu(mtm, &app, &load_recent_roms());
 
         if cli.printer {
             let output_dir = std::path::Path::new("prints");
@@ -235,7 +233,7 @@ fn main() {
             let entries = filter_entries();
             for (i, (_, f)) in entries.iter().enumerate() {
                 if *f == scale_filter {
-                    update_filter_checkmarks(app, MENU_TAG_FILTER_BASE + i as isize);
+                    update_filter_checkmarks(&app, MENU_TAG_FILTER_BASE + i as isize);
                     break;
                 }
             }
@@ -257,64 +255,61 @@ fn main() {
         let mut renderer = MetalRenderer::new(tex_w, tex_h);
 
         // ── Window ───────────────────────────────────────────────────────────
-        let style = NSWindowStyleMask::NSTitledWindowMask
-            | NSWindowStyleMask::NSClosableWindowMask
-            | NSWindowStyleMask::NSMiniaturizableWindowMask
-            | NSWindowStyleMask::NSResizableWindowMask;
+        // NSWindowStyleMask: Titled=1, Closable=2, Miniaturizable=4, Resizable=8
+        let style: usize = 1 | 2 | 4 | 8;
 
-        let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w as f64, win_h as f64)),
-            style,
-            NSBackingStoreType::NSBackingStoreBuffered,
-            NO,
-        );
+        let window: *mut AnyObject = msg_send![class!(NSWindow), alloc];
+        let window: *mut AnyObject = msg_send![window,
+            initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w as f64, win_h as f64))
+            styleMask: style
+            backing: 2usize  // NSBackingStoreBuffered
+            defer: false
+        ];
 
-        let title = format!("VibeBoy \u{2014} {}",
+        let title_str = format!("VibeBoy \u{2014} {}",
             current_rom_path.file_name().unwrap_or_default().to_string_lossy());
-        window.setTitle_(NSString::alloc(nil).init_str(&title));
-        window.center();
+        let title = NSString::from_str(&title_str);
+        let _: () = msg_send![window, setTitle: &*title];
+        let _: () = msg_send![window, center];
 
         // Create a custom NSView subclass that suppresses key repeat sounds
         {
-            use objc::declare::ClassDecl;
-            use objc::runtime::{Class, Sel};
-            let class_name = "VBGameView";
-            if Class::get(class_name).is_none() {
-                let superclass = Class::get("NSView").unwrap();
-                let mut decl = ClassDecl::new(class_name, superclass).unwrap();
-                extern "C" fn accepts_first_responder(_this: &Object, _sel: Sel) -> bool { true }
-                extern "C" fn key_down(_this: &Object, _sel: Sel, _event: id) { /* swallow */ }
+            let class_name = c"VBGameView";
+            if AnyClass::get(class_name).is_none() {
+                let superclass = AnyClass::get(c"NSView").unwrap();
+                let mut builder = ClassBuilder::new(class_name, superclass).unwrap();
+                unsafe extern "C" fn accepts_first_responder(_this: *mut AnyObject, _sel: Sel) -> Bool { Bool::YES }
+                unsafe extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) { /* swallow */ }
                 unsafe {
-                    decl.add_method(sel!(acceptsFirstResponder), accepts_first_responder as extern "C" fn(&Object, Sel) -> bool);
-                    decl.add_method(sel!(keyDown:), key_down as extern "C" fn(&Object, Sel, id));
+                    builder.add_method(sel!(acceptsFirstResponder), accepts_first_responder as unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool);
+                    builder.add_method(sel!(keyDown:), key_down as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
                 }
-                decl.register();
+                let _ = builder.register();
             }
-            let game_view_class = Class::get(class_name).unwrap();
+            let game_view_class = AnyClass::get(class_name).unwrap();
             let content_rect: NSRect = msg_send![window, frame];
-            let game_view: id = msg_send![game_view_class, alloc];
-            let game_view: id = msg_send![game_view, initWithFrame: content_rect];
+            let game_view: *mut AnyObject = msg_send![game_view_class, alloc];
+            let game_view: *mut AnyObject = msg_send![game_view, initWithFrame: content_rect];
             let _: () = msg_send![window, setContentView: game_view];
             let _: () = msg_send![window, makeFirstResponder: game_view];
         }
 
         // Attach Metal layer to content view
-        let content_view: id = msg_send![window, contentView];
-        let _: () = msg_send![content_view, setWantsLayer: YES];
+        let content_view: *mut AnyObject = msg_send![window, contentView];
+        let _: () = msg_send![content_view, setWantsLayer: true];
 
         // Set the Metal layer
-        let raw_layer: id = std::mem::transmute_copy(&renderer.layer);
+        let raw_layer: *mut AnyObject = Retained::as_ptr(&renderer.layer) as *mut AnyObject;
         let _: () = msg_send![content_view, setLayer: raw_layer];
 
-        // Set drawable size to logical points (not Retina backing pixels)
-        // to match SDL frontend behavior and avoid rendering at excessive resolution.
-        renderer.layer.set_drawable_size(CGSize::new(
+        // Set drawable size to logical points
+        renderer.layer.setDrawableSize(NSSize::new(
             win_w as f64,
             win_h as f64,
         ));
 
-        window.makeKeyAndOrderFront_(nil);
-        app.activateIgnoringOtherApps_(YES);
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        app.activateIgnoringOtherApps(true);
 
         // ── Audio ────────────────────────────────────────────────────────────
         let audio_ring: SharedAudioBuffer =
@@ -347,33 +342,36 @@ fn main() {
         let mut fps_emu_total = Duration::ZERO;
         let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
 
+        let mode = NSString::from_str("kCFRunLoopDefaultMode");
+
         'running: loop {
-            let _pool = NSAutoreleasePool::new(nil);
+            let _pool = objc2_foundation::NSAutoreleasePool::new();
 
             // Poll events
             loop {
-                let event: id = msg_send![app,
+                let event: *mut AnyObject = msg_send![&*app,
                     nextEventMatchingMask: u64::MAX
-                    untilDate: nil // don't wait
-                    inMode: NSString::alloc(nil).init_str("kCFRunLoopDefaultMode")
-                    dequeue: YES
+                    untilDate: std::ptr::null::<AnyObject>() // don't wait
+                    inMode: &*mode
+                    dequeue: true
                 ];
 
-                if event == nil {
+                if event.is_null() {
                     break;
                 }
 
                 let event_type: u64 = msg_send![event, type];
-                let keycode: u16 = if event_type == NSEventType::NSKeyDown as u64
-                    || event_type == NSEventType::NSKeyUp as u64
-                    || event_type == NSEventType::NSFlagsChanged as u64
+                // NSKeyDown=10, NSKeyUp=11, NSFlagsChanged=12
+                let keycode: u16 = if event_type == 10
+                    || event_type == 11
+                    || event_type == 12
                 {
                     msg_send![event, keyCode]
                 } else {
                     0
                 };
 
-                if event_type == NSEventType::NSKeyDown as u64 {
+                if event_type == 10 { // NSKeyDown
                     if keycode == K_ESCAPE {
                         break 'running;
                     }
@@ -397,7 +395,7 @@ fn main() {
                     if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, true);
                     }
-                } else if event_type == NSEventType::NSKeyUp as u64 {
+                } else if event_type == 11 { // NSKeyUp
                     keys_down.remove(&keycode);
                     if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, false);
@@ -405,7 +403,7 @@ fn main() {
                 }
 
                 // Always dispatch events so menus and window chrome work
-                let _: () = msg_send![app, sendEvent: event];
+                let _: () = msg_send![&*app, sendEvent: event];
             }
 
             // ── Handle menu actions ──────────────────────────────────────────
@@ -415,11 +413,12 @@ fn main() {
                 if actions.open_rom {
                     if let Some(path) = open_rom_dialog() {
                         if let Ok(rom_data) = fs::read(&path) {
-                            let title = format!("VibeBoy \u{2014} {}",
+                            let title_str = format!("VibeBoy \u{2014} {}",
                                 path.file_name().unwrap_or_default().to_string_lossy());
-                            window.setTitle_(NSString::alloc(nil).init_str(&title));
+                            let title = NSString::from_str(&title_str);
+                            let _: () = msg_send![window, setTitle: &*title];
                             add_recent_rom(&path.to_string_lossy());
-                            rebuild_recent_menu(app, &load_recent_roms());
+                            rebuild_recent_menu(mtm, &app, &load_recent_roms());
                             current_rom = rom_data;
                             current_rom_path = path;
                             current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
@@ -433,12 +432,13 @@ fn main() {
                 if actions.pause_toggle {
                     paused = !paused;
                     eprintln!("{}", if paused { "Paused" } else { "Resumed" });
-                    // Update menu item title
-                    let emu_menu: id = msg_send![app.mainMenu(), itemAtIndex: 3isize];
-                    let submenu: id = msg_send![emu_menu, submenu];
-                    let pause_item: id = msg_send![submenu, itemWithTag: MENU_TAG_PAUSE];
+                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
+                    let emu_menu: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
+                    let submenu: *mut AnyObject = msg_send![emu_menu, submenu];
+                    let pause_item: *mut AnyObject = msg_send![submenu, itemWithTag: MENU_TAG_PAUSE];
                     let label = if paused { "Resume" } else { "Pause" };
-                    let _: () = msg_send![pause_item, setTitle: NSString::alloc(nil).init_str(label)];
+                    let label_ns = NSString::from_str(label);
+                    let _: () = msg_send![pause_item, setTitle: &*label_ns];
                 }
 
                 if actions.reset {
@@ -487,7 +487,7 @@ fn main() {
                         forced_model = new_model;
                         current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
                         emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
-                        update_model_checkmarks(app, tag);
+                        update_model_checkmarks(&app, tag);
                         paused = false;
                         let model_name = forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
                         eprintln!("Hardware model: {}", model_name);
@@ -502,17 +502,17 @@ fn main() {
                             scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
                             _ => None,
                         };
-                        update_filter_checkmarks(app, tag);
+                        update_filter_checkmarks(&app, tag);
                         eprintln!("Filter: {:?}", scale_filter);
                     }
                 }
 
                 if actions.toggle_fps {
                     show_fps_overlay = !show_fps_overlay;
-                    // Update menu checkmark
-                    let view_menu_item: id = msg_send![app.mainMenu(), itemAtIndex: 4isize];
-                    let view_submenu: id = msg_send![view_menu_item, submenu];
-                    let fps_item: id = msg_send![view_submenu, itemWithTag: MENU_TAG_SHOW_FPS];
+                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
+                    let view_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 4isize];
+                    let view_submenu: *mut AnyObject = msg_send![view_menu_item, submenu];
+                    let fps_item: *mut AnyObject = msg_send![view_submenu, itemWithTag: MENU_TAG_SHOW_FPS];
                     let state: isize = if show_fps_overlay { 1 } else { 0 };
                     let _: () = msg_send![fps_item, setState: state];
                 }
@@ -526,11 +526,12 @@ fn main() {
                     if let Some(path_str) = recents.get(idx) {
                         let path = PathBuf::from(path_str);
                         if let Ok(rom_data) = fs::read(&path) {
-                            let title = format!("VibeBoy \u{2014} {}",
+                            let title_str = format!("VibeBoy \u{2014} {}",
                                 path.file_name().unwrap_or_default().to_string_lossy());
-                            window.setTitle_(NSString::alloc(nil).init_str(&title));
+                            let title = NSString::from_str(&title_str);
+                            let _: () = msg_send![window, setTitle: &*title];
                             add_recent_rom(path_str);
-                            rebuild_recent_menu(app, &load_recent_roms());
+                            rebuild_recent_menu(mtm, &app, &load_recent_roms());
                             current_rom = rom_data;
                             current_rom_path = path;
                             current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
@@ -545,7 +546,7 @@ fn main() {
 
                 if actions.clear_recent {
                     save_recent_roms(&[]);
-                    rebuild_recent_menu(app, &[]);
+                    rebuild_recent_menu(mtm, &app, &[]);
                     eprintln!("Recent ROMs cleared");
                 }
             }
@@ -574,7 +575,6 @@ fn main() {
             {
                 const CENTER: f32 = 0x81D0 as u16 as f32;
                 const RANGE: f32 = 0x70 as u16 as f32;
-                // Gamepad accelerometer takes priority
                 let accel_reading = gamepad_state.accel
                     .map(|(x, y, z)| (x, y, z))
                     .or_else(|| poll_accel(&accel_source));
@@ -592,13 +592,11 @@ fn main() {
 
             if !paused {
                 if backspace_held {
-                    // Rewind at 3x speed — collect audio from all 3 frames
                     let mut all_audio = Vec::new();
                     for _ in 0..3 {
                         emu.rewind_one_frame();
                         all_audio.extend_from_slice(&emu.drain_audio_samples());
                     }
-                    // Reverse entire stream then downsample 3x to fit one display frame
                     ui_util::reverse_audio(&mut all_audio);
                     let resampled = ui_util::downsample_audio(&all_audio, 3);
                     if let Ok(mut ring) = audio_ring.lock() {
@@ -642,7 +640,7 @@ fn main() {
                 let bounds: NSRect = msg_send![content_view, bounds];
                 disp_w = bounds.size.width as usize;
                 disp_h = bounds.size.height as usize;
-                renderer.layer.set_drawable_size(CGSize::new(
+                renderer.layer.setDrawableSize(NSSize::new(
                     bounds.size.width, bounds.size.height,
                 ));
             }
@@ -655,7 +653,6 @@ fn main() {
                     emu.frame_buffer()
                 };
 
-                // Try GPU compute scaling first
                 let mut gpu_rendered = false;
                 // VectorizeGpu: full 6-stage Metal compute pipeline
                 if scale_filter == scaling::ScaleFilter::VectorizeGpu {
@@ -667,12 +664,12 @@ fn main() {
                         let gw = (src_w as f32 * s).round() as u32;
                         let gh = (src_h as f32 * s).round() as u32;
                         if renderer.compute_out_w != gw || renderer.compute_out_h != gh {
-                            let desc = TextureDescriptor::new();
-                            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                            desc.set_width(gw as u64);
-                            desc.set_height(gh as u64);
-                            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-                            renderer.compute_out_tex = Some(renderer.device.new_texture(&desc));
+                            let desc = MTLTextureDescriptor::new();
+                            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                            desc.setWidth(gw as usize);
+                            desc.setHeight(gh as usize);
+                            desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+                            renderer.compute_out_tex = Some(renderer.device.newTextureWithDescriptor(&desc).unwrap());
                             renderer.compute_out_w = gw;
                             renderer.compute_out_h = gh;
                         }
@@ -710,7 +707,6 @@ fn main() {
                 // CPU fallback
                 if !gpu_rendered {
 
-                // Apply scaling filter
                 let mut vec_scaled: Vec<u32>;
                 let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
                     if scale_filter == scaling::ScaleFilter::Nearest {
@@ -789,12 +785,12 @@ fn main() {
 
                 // Resize texture if dimensions changed
                 if !gpu_rendered && (frame_w as u32 != renderer.tex_w || frame_h as u32 != renderer.tex_h) {
-                    let tex_desc = TextureDescriptor::new();
-                    tex_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                    tex_desc.set_width(frame_w as u64);
-                    tex_desc.set_height(frame_h as u64);
-                    tex_desc.set_usage(MTLTextureUsage::ShaderRead);
-                    renderer.texture = renderer.device.new_texture(&tex_desc);
+                    let tex_desc = MTLTextureDescriptor::new();
+                    tex_desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                    tex_desc.setWidth(frame_w as usize);
+                    tex_desc.setHeight(frame_h as usize);
+                    tex_desc.setUsage(MTLTextureUsage::ShaderRead);
+                    renderer.texture = renderer.device.newTextureWithDescriptor(&tex_desc).unwrap();
                     renderer.tex_w = frame_w as u32;
                     renderer.tex_h = frame_h as u32;
                 }
@@ -809,8 +805,8 @@ fn main() {
                 if show_fps_overlay {
                     let text = format!("FPS: {:.1}  {:.2}ms", overlay_fps, overlay_emu_ms);
                     let scale = ((frame_w / 160).max(1)).min(4);
-                    let fg = 0xFF00FF00; // green on BGRA LE = green
-                    let bg = 0xC0000000; // semi-transparent black
+                    let fg = 0xFF00FF00;
+                    let bg = 0xC0000000;
                     tiny_font::draw_string(
                         &mut bgra_buf, frame_w, frame_h,
                         &text, 2 * scale, 2 * scale, fg, bg, scale,

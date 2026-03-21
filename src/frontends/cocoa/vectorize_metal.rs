@@ -1,13 +1,24 @@
-use metal::*;
+use std::ptr::NonNull;
+
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::{NSRange, NSString, ns_string};
+use objc2_metal::*;
+
+type Device = ProtocolObject<dyn MTLDevice>;
+type CmdQueue = ProtocolObject<dyn MTLCommandQueue>;
+type Texture = ProtocolObject<dyn MTLTexture>;
+type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 /// Full GPU vectorize pipeline via Metal compute (6 stages).
 pub(super) struct MetalVectorizePipeline {
-    sim_graph: ComputePipelineState,
-    resolve: ComputePipelineState,
-    cell_graph: ComputePipelineState,
-    optimizer: ComputePipelineState,
-    tjunction: ComputePipelineState,
-    rasterizer: ComputePipelineState,
+    sim_graph: ComputePipeline,
+    resolve: ComputePipeline,
+    cell_graph: ComputePipeline,
+    optimizer: ComputePipeline,
+    tjunction: ComputePipeline,
+    rasterizer: ComputePipeline,
     // Cached buffers (allocated once, reused)
     bufs: Option<MetalVecBufs>,
 }
@@ -26,25 +37,23 @@ pub(super) struct MetalVecBufs {
     orig_pos_buf: Buffer,
 }
 
+fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
+    let src = std::str::from_utf8(msl).ok()?;
+    let ns_src = NSString::from_str(src);
+    let lib = device.newLibraryWithSource_options_error(&ns_src, None)
+        .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
+    let func = lib.newFunctionWithName(ns_string!("main0"))?;
+    device.newComputePipelineStateWithFunction_error(&func)
+        .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
+}
+
+fn mk_buf(device: &Device, sz: usize) -> Buffer {
+    device.newBufferWithLength_options(sz.max(4), MTLResourceOptions::StorageModeShared)
+        .expect("failed to create buffer")
+}
+
 impl MetalVectorizePipeline {
     pub fn new(device: &Device) -> Option<Self> {
-        fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipelineState> {
-            let src = std::str::from_utf8(msl).ok()?;
-            let lib = device.new_library_with_source(src, &CompileOptions::new())
-                .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
-            let func = lib.get_function("main0", None)
-                .map_err(|e| eprintln!("MSL function error: {e}")).ok()?;
-            device.new_compute_pipeline_state_with_function(&func)
-                .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
-        }
-
-        // Use RAW spirv-cross MSL output (no build.rs remap).
-        // We generate it at runtime to avoid the SDL3 remap that build.rs applies.
-        fn load_spv_as_msl(device: &Device, spv: &[u8]) -> Option<ComputePipelineState> {
-            // Use pre-compiled MSL — bind according to its buffer indices
-            load_msl(device, spv)
-        }
-
         Some(MetalVectorizePipeline {
             sim_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")))?,
             resolve: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")))?,
@@ -59,7 +68,7 @@ impl MetalVectorizePipeline {
     pub fn run(
         &mut self,
         device: &Device,
-        queue: &CommandQueue,
+        queue: &CmdQueue,
         pixels: &[u32],
         img_w: u32, img_h: u32,
         out_w: u32, out_h: u32,
@@ -74,18 +83,17 @@ impl MetalVectorizePipeline {
 
         // Allocate/reuse buffers
         if self.bufs.as_ref().map_or(true, |b| b.img_w != img_w || b.img_h != img_h) {
-            let mk = |sz: u64| device.new_buffer(sz.max(4), MTLResourceOptions::StorageModeShared);
             self.bufs = Some(MetalVecBufs {
                 img_w, img_h,
-                px_buf: mk((img_w * img_h * 4) as u64),
-                graph_buf: mk((graph_elems * 4) as u64),
-                graph_snapshot: mk((graph_elems * 4) as u64),
-                pos_buf: mk((num_cps * 2 * 4) as u64),
-                nbr_buf: mk((num_cps * 4 * 4) as u64),
-                flag_buf: mk((num_cps * 4) as u64),
-                ecolor_buf: mk((num_cps * 4 * 4) as u64),
-                opt_out_buf: mk((num_cps * 2 * 4) as u64),
-                orig_pos_buf: mk((num_cps * 2 * 4) as u64),
+                px_buf: mk_buf(device, (img_w * img_h * 4) as usize),
+                graph_buf: mk_buf(device, (graph_elems * 4) as usize),
+                graph_snapshot: mk_buf(device, (graph_elems * 4) as usize),
+                pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
+                nbr_buf: mk_buf(device, (num_cps * 4 * 4) as usize),
+                flag_buf: mk_buf(device, (num_cps * 4) as usize),
+                ecolor_buf: mk_buf(device, (num_cps * 4 * 4) as usize),
+                opt_out_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
+                orig_pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
             });
         }
         let b = self.bufs.as_ref().unwrap();
@@ -94,7 +102,7 @@ impl MetalVectorizePipeline {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 pixels.as_ptr() as *const u8,
-                b.px_buf.contents() as *mut u8,
+                b.px_buf.contents().as_ptr() as *mut u8,
                 (img_w * img_h * 4) as usize,
             );
         }
@@ -102,93 +110,111 @@ impl MetalVectorizePipeline {
         let tiles_w = (img_w + 1) / 2;
         let tiles_h = (img_h + 1) / 2;
 
-        // Zero all buffers before pipeline starts (required for correctness)
-        let cmd = queue.new_command_buffer();
-        {
-            let enc = cmd.new_blit_command_encoder();
-            for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
-                        &b.flag_buf, &b.ecolor_buf, &b.opt_out_buf, &b.orig_pos_buf] {
-                enc.fill_buffer(buf, metal::NSRange::new(0, buf.length()), 0);
-            }
-            enc.end_encoding();
-        }
-
         // Helper to create uniform buffer
         let mk_uni = |data: &[u32]| -> Buffer {
-            let buf = device.new_buffer((data.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+            let buf = mk_buf(device, data.len() * 4);
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     data.as_ptr() as *const u8,
-                    buf.contents() as *mut u8,
+                    buf.contents().as_ptr() as *mut u8,
                     data.len() * 4,
                 );
             }
             buf
         };
 
+        // Zero all buffers before pipeline starts
+        let cmd = queue.commandBuffer().unwrap();
+        {
+            let enc = cmd.blitCommandEncoder().unwrap();
+            for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
+                        &b.flag_buf, &b.ecolor_buf, &b.opt_out_buf, &b.orig_pos_buf] {
+                enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
+            }
+            enc.endEncoding();
+        }
+
         // Stage 1: Similarity graph
         {
             let uni = mk_uni(&[img_w, img_h, graph_stride, 0]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.sim_graph);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(&b.px_buf), 0);
-            enc.set_buffer(2, Some(&b.graph_buf), 0);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((img_w + 15) / 16) as u64, ((img_h + 15) / 16) as u64, 1),
-                MTLSize::new(16, 16, 1));
-            enc.end_encoding();
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.sim_graph);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.px_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 2);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((img_w + 15) / 16) as usize, height: ((img_h + 15) / 16) as usize, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         // Copy graph -> graph_snapshot
         {
-            let enc = cmd.new_blit_command_encoder();
-            enc.copy_from_buffer(&b.graph_buf, 0, &b.graph_snapshot, 0, (graph_elems * 4) as u64);
-            enc.end_encoding();
+            let enc = cmd.blitCommandEncoder().unwrap();
+            unsafe {
+                enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &b.graph_buf, 0, &b.graph_snapshot, 0, (graph_elems * 4) as usize,
+                );
+            }
+            enc.endEncoding();
         }
 
         // Stage 2: Resolve crossings
         {
             let uni = mk_uni(&[img_w, img_h, graph_stride, 0]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.resolve);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(&b.graph_snapshot), 0);
-            enc.set_buffer(2, Some(&b.graph_buf), 0);
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.resolve);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.graph_snapshot), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 2);
+            }
             let rw = img_w.saturating_sub(1);
             let rh = img_h.saturating_sub(1);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((rw + 15) / 16) as u64, ((rh + 15) / 16) as u64, 1),
-                MTLSize::new(16, 16, 1));
-            enc.end_encoding();
+            unsafe {
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((rw + 15) / 16) as usize, height: ((rh + 15) / 16) as usize, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         // Stage 3: Cell graph
         {
             let uni = mk_uni(&[img_w, img_h, graph_stride, corners_w]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.cell_graph);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(&b.graph_buf), 0);
-            enc.set_buffer(2, Some(&b.pos_buf), 0);
-            enc.set_buffer(3, Some(&b.nbr_buf), 0);
-            enc.set_buffer(4, Some(&b.flag_buf), 0);
-            enc.set_buffer(5, Some(&b.ecolor_buf), 0);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((corners_w + 15) / 16) as u64, ((corners_h + 15) / 16) as u64, 1),
-                MTLSize::new(16, 16, 1));
-            enc.end_encoding();
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.cell_graph);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
+                enc.setBuffer_offset_atIndex(Some(&b.ecolor_buf), 0, 5);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((corners_w + 15) / 16) as usize, height: ((corners_h + 15) / 16) as usize, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         // Copy pos -> orig_pos
         {
-            let enc = cmd.new_blit_command_encoder();
-            enc.copy_from_buffer(&b.pos_buf, 0, &b.orig_pos_buf, 0, (num_cps * 2 * 4) as u64);
-            enc.end_encoding();
+            let enc = cmd.blitCommandEncoder().unwrap();
+            unsafe {
+                enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &b.pos_buf, 0, &b.orig_pos_buf, 0, (num_cps * 2 * 4) as usize,
+                );
+            }
+            enc.endEncoding();
         }
 
         // Stage 4: Optimize energy (2 iterations, ping-pong)
-        let pos_size = (num_cps * 2 * 4) as u64;
         for iter in 0..2u32 {
             let (src, dst) = if iter % 2 == 0 {
                 (&b.pos_buf, &b.opt_out_buf)
@@ -196,60 +222,65 @@ impl MetalVectorizePipeline {
                 (&b.opt_out_buf, &b.pos_buf)
             };
             let uni = mk_uni(&[num_cps, f32::to_bits(0.01), f32::to_bits(0.25), f32::to_bits(2.5)]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.optimizer);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(src), 0);
-            enc.set_buffer(2, Some(&b.orig_pos_buf), 0);
-            enc.set_buffer(3, Some(&b.nbr_buf), 0);
-            enc.set_buffer(4, Some(&b.flag_buf), 0);
-            enc.set_buffer(5, Some(dst), 0);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((num_cps + 255) / 256) as u64, 1, 1),
-                MTLSize::new(256, 1, 1));
-            enc.end_encoding();
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.optimizer);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(src), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
+                enc.setBuffer_offset_atIndex(Some(dst), 0, 5);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
+                    MTLSize { width: 256, height: 1, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
-        // After 2 iterations, result is back in pos_buf
 
         // Stage 4b: T-junction correction
-        // MSL buffer order (after remap): 0=uniforms, 1=neighbors, 2=flags, 3=positions
         {
             let uni = mk_uni(&[num_cps, 0, 0, 0]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.tjunction);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(&b.nbr_buf), 0);
-            enc.set_buffer(2, Some(&b.flag_buf), 0);
-            enc.set_buffer(3, Some(&b.pos_buf), 0);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((num_cps + 255) / 256) as u64, 1, 1),
-                MTLSize::new(256, 1, 1));
-            enc.end_encoding();
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.tjunction);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
+                    MTLSize { width: 256, height: 1, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         // Stage 5: Cell rasterizer
-        // MSL buffer order (after remap): 0=uniforms, 1=pixels,
-        // 2=positions, 3=orig_positions, 4=flags, 5=neighbors, 6=edge_colors
         {
             let uni = mk_uni(&[img_w, img_h, out_w, out_h,
                 f32::to_bits(scale), corners_w, tiles_w, tiles_h]);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(&self.rasterizer);
-            enc.set_buffer(0, Some(&uni), 0);
-            enc.set_buffer(1, Some(&b.px_buf), 0);
-            enc.set_buffer(2, Some(&b.pos_buf), 0);
-            enc.set_buffer(3, Some(&b.orig_pos_buf), 0);
-            enc.set_buffer(4, Some(&b.flag_buf), 0);
-            enc.set_buffer(5, Some(&b.nbr_buf), 0);
-            enc.set_buffer(6, Some(&b.ecolor_buf), 0);
-            enc.set_texture(0, Some(out_tex));
-            enc.dispatch_thread_groups(
-                MTLSize::new((tiles_w * tiles_h) as u64, 1, 1),
-                MTLSize::new(256, 1, 1));
-            enc.end_encoding();
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.rasterizer);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.px_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 5);
+                enc.setBuffer_offset_atIndex(Some(&b.ecolor_buf), 0, 6);
+                enc.setTexture_atIndex(Some(out_tex), 0);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: (tiles_w * tiles_h) as usize, height: 1, depth: 1 },
+                    MTLSize { width: 256, height: 1, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         cmd.commit();
-        cmd.wait_until_completed();
+        cmd.waitUntilCompleted();
     }
 }

@@ -119,9 +119,12 @@ impl WasmEmulator {
 
     /// Initialize WebGPU rendering on the given canvas element.
     pub async fn init_gpu(&mut self, canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU,
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let surface_target = wgpu::SurfaceTarget::Canvas(canvas.clone());
@@ -132,7 +135,7 @@ impl WasmEmulator {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        }).await.ok_or_else(|| JsValue::from_str("No WebGPU adapter"))?;
+        }).await.map_err(|e| JsValue::from_str(&format!("No WebGPU adapter: {e}")))?;
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -141,7 +144,6 @@ impl WasmEmulator {
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 ..Default::default()
             },
-            None,
         ).await.map_err(|e| JsValue::from_str(&format!("Device error: {e}")))?;
 
         let caps = surface.get_capabilities(&adapter);
@@ -194,8 +196,8 @@ impl WasmEmulator {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&blit_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&blit_bind_group_layout)],
+            immediate_size: 0,
         });
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -223,7 +225,7 @@ impl WasmEmulator {
             },
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -482,8 +484,8 @@ impl WasmEmulator {
         };
 
         let frame = match gpu.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(_) => return false,
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            _ => return false,
         };
         let fb_view = frame.texture.create_view(&Default::default());
         let tex_view = out_tex.create_view(&Default::default());
@@ -508,6 +510,7 @@ impl WasmEmulator {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &fb_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

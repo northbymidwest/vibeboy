@@ -75,7 +75,8 @@ pub fn serialize(snap: &Snapshot) -> Vec<u8> {
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&VERSION.to_le_bytes());
 
-    let encoded = bincode::serialize(snap).expect("snapshot serialization failed");
+    let encoded = bincode::serde::encode_to_vec(snap, bincode::config::standard())
+        .expect("snapshot serialization failed");
     buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
     buf.extend_from_slice(&encoded);
     buf
@@ -98,6 +99,7 @@ pub fn deserialize(data: &[u8]) -> io::Result<Snapshot> {
     if data.len() < 16 + payload_len {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated save state"));
     }
-    bincode::deserialize(&data[16..16 + payload_len])
+    bincode::serde::decode_from_slice(&data[16..16 + payload_len], bincode::config::standard())
+        .map(|(snap, _)| snap)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize failed: {e}")))
 }

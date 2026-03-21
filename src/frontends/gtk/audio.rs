@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 use super::AUDIO_SAMPLE_RATE;
 
 /// 31-tap half-band low-pass FIR for 2:1 downsampling (96kHz -> 48kHz).
-/// Blackman-windowed sinc, cutoff at Nyquist/2 (24kHz), normalized to unit DC gain.
-/// Symmetric with zero-valued odd taps (half-band property).
-pub(super) const HALFBAND_FIR: [f32; 31] = [
+const HALFBAND_FIR: [f32; 31] = [
      0.0000000000,  0.0000000000,  0.0004103229,  0.0000000000,
     -0.0022302855,  0.0000000000,  0.0071008571,  0.0000000000,
     -0.0179170304,  0.0000000000,  0.0401074177,  0.0000000000,
@@ -22,9 +20,7 @@ pub(super) struct AudioRing {
     write_pos: usize,
     read_pos: usize,
     capacity: usize,
-    /// Ratio of APU sample rate to stream sample rate (e.g. 2 for 96k->48k).
     pub downsample_ratio: usize,
-    /// Per-channel FIR filter history for anti-aliased downsampling.
     fir_hist_l: Vec<f32>,
     fir_hist_r: Vec<f32>,
     fir_pos: usize,
@@ -63,7 +59,6 @@ impl AudioRing {
     }
 
     pub fn push(&mut self, samples: &[f32]) {
-        // If buffer is more than half full, skip ahead to stay low-latency
         if self.len() > self.capacity / 2 {
             self.read_pos = self.write_pos;
         }
@@ -72,19 +67,14 @@ impl AudioRing {
                 self.push_one(s);
             }
         } else {
-            // Anti-aliased 2:1 downsampling via half-band FIR filter.
-            // Feed every stereo sample into the FIR history, emit one
-            // filtered output for every `ratio` input pairs.
             let r = self.downsample_ratio;
             let fir_len = HALFBAND_FIR.len();
             let pair_count = samples.len() / 2;
             for i in 0..pair_count {
-                // Push into circular FIR history
                 self.fir_hist_l[self.fir_pos] = samples[i * 2];
                 self.fir_hist_r[self.fir_pos] = samples[i * 2 + 1];
                 self.fir_pos = (self.fir_pos + 1) % fir_len;
 
-                // Emit one output sample every `r` input samples
                 if (i + 1) % r == 0 {
                     let mut l = 0.0f32;
                     let mut rv = 0.0f32;
@@ -116,7 +106,6 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
 
     let err_fn = |err: cpal::StreamError| eprintln!("Audio error: {err}");
 
-    // Try 96kHz with fixed buffer, then default buffer, then device default sample rate
     let configs = [
         cpal::StreamConfig {
             channels: 2,

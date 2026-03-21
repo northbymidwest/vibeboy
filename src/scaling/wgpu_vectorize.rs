@@ -404,7 +404,7 @@ impl WgpuVectorizePipeline {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().ok()?.ok()?;
 
         let data = slice.get_mapped_range();

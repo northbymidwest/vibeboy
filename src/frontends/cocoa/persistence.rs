@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::{class, msg_send, sel};
+use objc2::runtime::AnyObject;
+use objc2_foundation::NSString;
 
 use super::emulator::Emulator;
 
@@ -38,18 +38,18 @@ pub(super) fn keycode_name(code: u16) -> &'static str {
 
 pub(super) fn load_key_map() -> HashMap<u16, u8> {
     unsafe {
-        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-        let key = NSString::alloc(nil).init_str("ControlMappings");
-        let dict: id = msg_send![defaults, dictionaryForKey: key];
-        if dict == nil {
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("ControlMappings");
+        let dict: *mut AnyObject = msg_send![defaults, dictionaryForKey: &*key];
+        if dict.is_null() {
             return default_key_map();
         }
         let mut map = HashMap::new();
-        let keys: id = msg_send![dict, allKeys];
+        let keys: *mut AnyObject = msg_send![dict, allKeys];
         let count: usize = msg_send![keys, count];
         for i in 0..count {
-            let k: id = msg_send![keys, objectAtIndex: i];
-            let v: id = msg_send![dict, objectForKey: k];
+            let k: *mut AnyObject = msg_send![keys, objectAtIndex: i];
+            let v: *mut AnyObject = msg_send![dict, objectForKey: k];
             let k_str: *const i8 = msg_send![k, UTF8String];
             let v_int: i64 = msg_send![v, integerValue];
             let k_val: u16 = std::ffi::CStr::from_ptr(k_str)
@@ -62,15 +62,15 @@ pub(super) fn load_key_map() -> HashMap<u16, u8> {
 
 pub(super) fn save_key_map(map: &HashMap<u16, u8>) {
     unsafe {
-        let dict: id = msg_send![class!(NSMutableDictionary), new];
+        let dict: *mut AnyObject = msg_send![class!(NSMutableDictionary), new];
         for (&keycode, &btn) in map {
-            let k = NSString::alloc(nil).init_str(&keycode.to_string());
-            let v: id = msg_send![class!(NSNumber), numberWithInteger: btn as isize];
-            let _: () = msg_send![dict, setObject: v forKey: k];
+            let k = NSString::from_str(&keycode.to_string());
+            let v: *mut AnyObject = msg_send![class!(NSNumber), numberWithInteger: btn as isize];
+            let _: () = msg_send![dict, setObject: v forKey: &*k];
         }
-        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-        let key = NSString::alloc(nil).init_str("ControlMappings");
-        let _: () = msg_send![defaults, setObject: dict forKey: key];
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("ControlMappings");
+        let _: () = msg_send![defaults, setObject: dict forKey: &*key];
         let _: () = msg_send![dict, release];
     }
 }
@@ -79,16 +79,16 @@ pub(super) fn save_key_map(map: &HashMap<u16, u8>) {
 
 pub(super) fn load_recent_roms() -> Vec<String> {
     unsafe {
-        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-        let key = NSString::alloc(nil).init_str("RecentROMs");
-        let arr: id = msg_send![defaults, arrayForKey: key];
-        if arr == nil {
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("RecentROMs");
+        let arr: *mut AnyObject = msg_send![defaults, arrayForKey: &*key];
+        if arr.is_null() {
             return Vec::new();
         }
         let count: usize = msg_send![arr, count];
         let mut result = Vec::new();
         for i in 0..count {
-            let s: id = msg_send![arr, objectAtIndex: i];
+            let s: *mut AnyObject = msg_send![arr, objectAtIndex: i];
             let cstr: *const i8 = msg_send![s, UTF8String];
             let path = std::ffi::CStr::from_ptr(cstr).to_str().unwrap_or("").to_string();
             if !path.is_empty() {
@@ -101,14 +101,14 @@ pub(super) fn load_recent_roms() -> Vec<String> {
 
 pub(super) fn save_recent_roms(roms: &[String]) {
     unsafe {
-        let arr: id = msg_send![class!(NSMutableArray), arrayWithCapacity: roms.len()];
+        let arr: *mut AnyObject = msg_send![class!(NSMutableArray), arrayWithCapacity: roms.len()];
         for path in roms {
-            let s = NSString::alloc(nil).init_str(path);
-            let _: () = msg_send![arr, addObject: s];
+            let s = NSString::from_str(path);
+            let _: () = msg_send![arr, addObject: &*s];
         }
-        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-        let key = NSString::alloc(nil).init_str("RecentROMs");
-        let _: () = msg_send![defaults, setObject: arr forKey: key];
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("RecentROMs");
+        let _: () = msg_send![defaults, setObject: arr forKey: &*key];
     }
 }
 

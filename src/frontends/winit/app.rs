@@ -423,8 +423,8 @@ impl App {
                 let pipeline = self.wgpu_vectorize.as_mut().unwrap();
                 let out_tex = pipeline.encode(&gpu.device, &gpu.queue, &mut encoder, fb, sw as u32, sh as u32, ow, oh, s as f32);
                 let frame = match gpu.surface.get_current_texture() {
-                    Ok(f) => f,
-                    Err(_) => return,
+                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                    _ => return,
                 };
                 let fb_view = frame.texture.create_view(&Default::default());
                 gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);

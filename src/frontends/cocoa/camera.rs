@@ -1,15 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cocoa::base::{id, nil, YES};
-use cocoa::foundation::NSString;
-use objc::runtime::Object;
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::{class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
+use objc2_foundation::NSString;
 
 pub(super) mod avf_camera {
     use super::*;
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Class, Object, Sel};
     use std::os::raw::c_void;
 
     // CoreMedia / CoreVideo FFI
@@ -31,10 +28,10 @@ pub(super) mod avf_camera {
         fn CVPixelBufferGetWidth(buf: CVPixelBufferRef) -> usize;
         fn CVPixelBufferGetHeight(buf: CVPixelBufferRef) -> usize;
         fn CVPixelBufferGetBytesPerRow(buf: CVPixelBufferRef) -> usize;
-        static kCVPixelBufferPixelFormatTypeKey: id;
+        static kCVPixelBufferPixelFormatTypeKey: *mut AnyObject;
     }
 
-    unsafe fn get_cv_pixel_format_key() -> id {
+    unsafe fn get_cv_pixel_format_key() -> *mut AnyObject {
         unsafe { kCVPixelBufferPixelFormatTypeKey }
     }
 
@@ -45,37 +42,38 @@ pub(super) mod avf_camera {
     }
 
     // Register a runtime ObjC class that implements the sample buffer delegate
-    fn register_delegate_class() -> &'static Class {
+    fn register_delegate_class() -> &'static AnyClass {
         use std::sync::Once;
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
-            let superclass = Class::get("NSObject").unwrap();
-            let mut decl = ClassDecl::new("VBCameraDelegate", superclass).unwrap();
+            let superclass = AnyClass::get(c"NSObject").unwrap();
+            let mut builder = ClassBuilder::new(c"VBCameraDelegate", superclass).unwrap();
 
-            decl.add_ivar::<*mut c_void>("_context");
+            builder.add_ivar::<*mut c_void>(c"_context");
 
             unsafe {
-                // captureOutput:didOutputSampleBuffer:fromConnection:
-                decl.add_method(
+                builder.add_method(
                     sel!(captureOutput:didOutputSampleBuffer:fromConnection:),
-                    capture_output as extern "C" fn(&Object, Sel, id, id, id),
+                    capture_output as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject),
                 );
             }
 
-            decl.register();
+            let _ = builder.register();
         });
-        Class::get("VBCameraDelegate").unwrap()
+        AnyClass::get(c"VBCameraDelegate").unwrap()
     }
 
-    extern "C" fn capture_output(
-        this: &Object,
+    unsafe extern "C" fn capture_output(
+        this: *mut AnyObject,
         _sel: Sel,
-        _output: id,
-        sample_buffer: id,
-        _connection: id,
+        _output: *mut AnyObject,
+        sample_buffer: *mut AnyObject,
+        _connection: *mut AnyObject,
     ) {
         unsafe {
-            let ctx_ptr: *mut c_void = *this.get_ivar("_context");
+            let class = AnyClass::get(c"VBCameraDelegate").unwrap();
+            let ivar = class.instance_variable(c"_context").unwrap();
+            let ctx_ptr: *mut c_void = *ivar.load_ptr::<*mut c_void>(&*this);
             if ctx_ptr.is_null() {
                 return;
             }
@@ -162,8 +160,8 @@ pub(super) mod avf_camera {
     pub struct CameraCapture {
         buffer: Arc<Mutex<[u8; 128 * 112]>>,
         has_new_frame: Arc<AtomicBool>,
-        session: id,          // AVCaptureSession (retained)
-        _delegate: id,        // VBCameraDelegate (retained)
+        session: *mut AnyObject,          // AVCaptureSession (retained)
+        _delegate: *mut AnyObject,        // VBCameraDelegate (retained)
         _context: *mut DelegateContext, // leaked; freed on drop
     }
 
@@ -173,30 +171,29 @@ pub(super) mod avf_camera {
         pub fn start() -> Option<Self> {
             unsafe {
                 // Get default video capture device
-                let av_capture_device = Class::get("AVCaptureDevice")?;
-                let device: id = msg_send![av_capture_device,
-                    defaultDeviceWithMediaType: NSString::alloc(nil).init_str("vide")];
-                if device == nil {
+                let av_capture_device = AnyClass::get(c"AVCaptureDevice")?;
+                let media_type = NSString::from_str("vide");
+                let device: *mut AnyObject = msg_send![av_capture_device,
+                    defaultDeviceWithMediaType: &*media_type];
+                if device.is_null() {
                     log::info!("No camera found — using noise generator for Pocket Camera");
                     return None;
                 }
 
                 // Create input
-                let av_capture_input = Class::get("AVCaptureDeviceInput")?;
-                let mut error: id = nil;
-                let input: id = msg_send![av_capture_input,
+                let av_capture_input = AnyClass::get(c"AVCaptureDeviceInput")?;
+                let mut error: *mut AnyObject = std::ptr::null_mut();
+                let input: *mut AnyObject = msg_send![av_capture_input,
                     deviceInputWithDevice: device error: &mut error];
-                if input == nil || error != nil {
+                if input.is_null() || !error.is_null() {
                     log::warn!("Failed to create camera input");
                     return None;
                 }
 
                 // Create session
-                let session: id = msg_send![Class::get("AVCaptureSession")?, new];
-                // AVCaptureSessionPreset640x480 = "AVCaptureSessionPreset640x480"
-                // The preset string literal IS the constant value on macOS
-                let _: () = msg_send![session, setSessionPreset:
-                    NSString::alloc(nil).init_str("AVCaptureSessionPreset640x480")];
+                let session: *mut AnyObject = msg_send![AnyClass::get(c"AVCaptureSession")?, new];
+                let preset = NSString::from_str("AVCaptureSessionPreset640x480");
+                let _: () = msg_send![session, setSessionPreset: &*preset];
 
                 let can_add_input: bool = msg_send![session, canAddInput: input];
                 if !can_add_input {
@@ -207,21 +204,20 @@ pub(super) mod avf_camera {
                 let _: () = msg_send![session, addInput: input];
 
                 // Create video data output
-                let output: id = msg_send![Class::get("AVCaptureVideoDataOutput")?, new];
+                let output: *mut AnyObject = msg_send![AnyClass::get(c"AVCaptureVideoDataOutput")?, new];
 
                 // Request BGRA pixel format
-                // kCVPixelBufferPixelFormatTypeKey = "PixelFormatType" (CoreVideo constant)
-                let pixel_format_key: id = get_cv_pixel_format_key();
-                let bgra_value: id = msg_send![Class::get("NSNumber")?,
+                let pixel_format_key = get_cv_pixel_format_key();
+                let bgra_value: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber")?,
                     numberWithUnsignedInt: 0x42475241u32]; // kCVPixelFormatType_32BGRA = 'BGRA'
-                let settings: id = msg_send![Class::get("NSDictionary")?,
+                let settings: *mut AnyObject = msg_send![AnyClass::get(c"NSDictionary")?,
                     dictionaryWithObject: bgra_value forKey: pixel_format_key];
                 let _: () = msg_send![output, setVideoSettings: settings];
-                let _: () = msg_send![output, setAlwaysDiscardsLateVideoFrames: YES];
+                let _: () = msg_send![output, setAlwaysDiscardsLateVideoFrames: true];
 
                 // Create delegate
                 let delegate_class = register_delegate_class();
-                let delegate: id = msg_send![delegate_class, new];
+                let delegate: *mut AnyObject = msg_send![delegate_class, new];
 
                 let buffer = Arc::new(Mutex::new([0u8; 128 * 112]));
                 let has_new_frame = Arc::new(AtomicBool::new(false));
@@ -230,11 +226,13 @@ pub(super) mod avf_camera {
                     buffer: Arc::clone(&buffer),
                     has_new_frame: Arc::clone(&has_new_frame),
                 }));
-                (*delegate).set_ivar("_context", context as *mut c_void);
+                let ivar = delegate_class.instance_variable(c"_context").unwrap();
+                let ptr = ivar.load_ptr::<*mut c_void>(&mut *delegate);
+                *ptr = context as *mut c_void;
 
                 // Create a dispatch queue for callbacks
                 let queue_label = b"com.vibeboy.camera\0".as_ptr() as *const i8;
-                let queue: id = dispatch_queue_create(queue_label, std::ptr::null());
+                let queue: *mut AnyObject = dispatch_queue_create(queue_label, std::ptr::null());
 
                 let _: () = msg_send![output, setSampleBufferDelegate: delegate queue: queue];
 
@@ -293,7 +291,7 @@ pub(super) mod avf_camera {
 
     #[link(name = "System", kind = "dylib")]
     unsafe extern "C" {
-        fn dispatch_queue_create(label: *const i8, attr: *const c_void) -> id;
+        fn dispatch_queue_create(label: *const i8, attr: *const c_void) -> *mut AnyObject;
     }
 }
 

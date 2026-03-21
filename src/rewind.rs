@@ -49,7 +49,8 @@ impl RewindBuffer {
 
     /// Push a snapshot into the rewind buffer.
     pub fn push(&mut self, snap: &Snapshot) {
-        let serialized = bincode::serialize(snap).expect("snapshot serialization failed");
+        let serialized = bincode::serde::encode_to_vec(snap, bincode::config::standard())
+            .expect("snapshot serialization failed");
 
         if self.head.is_empty() {
             // First frame — just store as the head
@@ -86,7 +87,9 @@ impl RewindBuffer {
         }
         // else: this was the last frame, head stays empty
 
-        bincode::deserialize(&bytes).ok()
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+            .map(|(snap, _)| snap)
+            .ok()
     }
 
     /// Approximate memory usage in bytes.

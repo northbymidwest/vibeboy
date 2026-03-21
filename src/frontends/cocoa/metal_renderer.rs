@@ -1,5 +1,10 @@
-use metal::*;
-use objc::rc::autoreleasepool;
+use std::ptr::NonNull;
+
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_foundation::{NSString, ns_string};
+use objc2_metal::*;
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use super::scaling;
 use super::vectorize;
@@ -44,76 +49,125 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 }
 ";
 
+type Device = Retained<ProtocolObject<dyn MTLDevice>>;
+type CmdQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
+type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
+type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+type RenderPipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+
 pub(super) struct MetalRenderer {
     pub device: Device,
-    pub layer: MetalLayer,
-    pub command_queue: CommandQueue,
-    pipeline_state: RenderPipelineState,
+    pub layer: Retained<CAMetalLayer>,
+    pub command_queue: CmdQueue,
+    pipeline_state: RenderPipeline,
     pub texture: Texture,
     pub tex_w: u32,
     pub tex_h: u32,
     // Compute scaling pipelines (lazily initialized)
-    scale_compute: [Option<ComputePipelineState>; 16],
+    scale_compute: [Option<ComputePipeline>; 16],
     pub compute_out_tex: Option<Texture>,
     pub compute_out_w: u32,
     pub compute_out_h: u32,
     // Full GPU vectorize pipeline
     pub vectorize_pipeline: Option<MetalVectorizePipeline>,
     // GPU scanline rasterizer for vectorize filters
-    scanline_rasterizer: Option<ComputePipelineState>,
+    scanline_rasterizer: Option<ComputePipeline>,
     // Diffusion rasterizer (single-pass)
-    diffusion_pipeline: Option<ComputePipelineState>,
+    diffusion_pipeline: Option<ComputePipeline>,
     // Spline-diffusion (2-pass: vectorize_to_buf + spline_diffusion)
-    spline_diff_pass1: Option<ComputePipelineState>,
-    spline_diff_pass2: Option<ComputePipelineState>,
+    spline_diff_pass1: Option<ComputePipeline>,
+    spline_diff_pass2: Option<ComputePipeline>,
 }
 
-fn safe_buf(dev: &Device, data: &[u8]) -> Buffer {
-    if data.is_empty() {
-        dev.new_buffer(4, MTLResourceOptions::StorageModeShared)
-    } else {
-        dev.new_buffer_with_data(data.as_ptr() as *const _, data.len() as u64, MTLResourceOptions::StorageModeShared)
+fn safe_buf(dev: &ProtocolObject<dyn MTLDevice>, data: &[u8]) -> Buffer {
+    unsafe {
+        if data.is_empty() {
+            dev.newBufferWithLength_options(4, MTLResourceOptions::StorageModeShared)
+                .expect("failed to create buffer")
+        } else {
+            dev.newBufferWithBytes_length_options(
+                NonNull::new_unchecked(data.as_ptr() as *mut _),
+                data.len(),
+                MTLResourceOptions::StorageModeShared,
+            ).expect("failed to create buffer")
+        }
     }
+}
+
+fn make_buf(dev: &ProtocolObject<dyn MTLDevice>, data: *const u8, len: usize) -> Buffer {
+    unsafe {
+        dev.newBufferWithBytes_length_options(
+            NonNull::new_unchecked(data as *mut _),
+            len,
+            MTLResourceOptions::StorageModeShared,
+        ).expect("failed to create buffer")
+    }
+}
+
+fn make_buf_empty(dev: &ProtocolObject<dyn MTLDevice>, len: usize) -> Buffer {
+    dev.newBufferWithLength_options(len.max(4), MTLResourceOptions::StorageModeShared)
+        .expect("failed to create buffer")
+}
+
+fn make_texture(dev: &ProtocolObject<dyn MTLDevice>, w: u32, h: u32, usage: MTLTextureUsage) -> Texture {
+    let desc = MTLTextureDescriptor::new();
+    desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    unsafe {
+        desc.setWidth(w as usize);
+        desc.setHeight(h as usize);
+    }
+    desc.setUsage(usage);
+    dev.newTextureWithDescriptor(&desc).expect("failed to create texture")
+}
+
+fn load_compute_pipeline(
+    dev: &ProtocolObject<dyn MTLDevice>,
+    msl: &[u8],
+) -> Option<ComputePipeline> {
+    let src = std::str::from_utf8(msl).ok()?;
+    let ns_src = NSString::from_str(src);
+    let lib = dev.newLibraryWithSource_options_error(&ns_src, None)
+        .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
+    let func_name = ns_string!("main0");
+    let func = lib.newFunctionWithName(func_name)?;
+    dev.newComputePipelineStateWithFunction_error(&func)
+        .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
 }
 
 impl MetalRenderer {
     pub fn new(tex_w: u32, tex_h: u32) -> Self {
-        let device = Device::system_default().expect("No Metal device found");
-        let layer = MetalLayer::new();
-        layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(false);
+        let device = MTLCreateSystemDefaultDevice().expect("No Metal device found");
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(&device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setPresentsWithTransaction(false);
 
-        let command_queue = device.new_command_queue();
+        let command_queue = device.newCommandQueue().expect("Failed to create command queue");
 
         // Compile shaders
+        let ns_src = NSString::from_str(METAL_SHADERS);
         let library = device
-            .new_library_with_source(METAL_SHADERS, &CompileOptions::new())
+            .newLibraryWithSource_options_error(&ns_src, None)
             .expect("Failed to compile Metal shaders");
-        let vert_fn = library.get_function("vertex_main", None).unwrap();
-        let frag_fn = library.get_function("fragment_main", None).unwrap();
+        let vert_fn = library.newFunctionWithName(ns_string!("vertex_main")).unwrap();
+        let frag_fn = library.newFunctionWithName(ns_string!("fragment_main")).unwrap();
 
-        let pipeline_desc = RenderPipelineDescriptor::new();
-        pipeline_desc.set_vertex_function(Some(&vert_fn));
-        pipeline_desc.set_fragment_function(Some(&frag_fn));
-        pipeline_desc
-            .color_attachments()
-            .object_at(0)
-            .unwrap()
-            .set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        let pipeline_desc = MTLRenderPipelineDescriptor::new();
+        pipeline_desc.setVertexFunction(Some(&vert_fn));
+        pipeline_desc.setFragmentFunction(Some(&frag_fn));
+        unsafe {
+            pipeline_desc
+                .colorAttachments()
+                .objectAtIndexedSubscript(0)
+                .setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        }
 
         let pipeline_state = device
-            .new_render_pipeline_state(&pipeline_desc)
+            .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
             .expect("Failed to create render pipeline state");
 
-        // Create framebuffer texture
-        let tex_desc = TextureDescriptor::new();
-        tex_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        tex_desc.set_width(tex_w as u64);
-        tex_desc.set_height(tex_h as u64);
-        tex_desc.set_usage(MTLTextureUsage::ShaderRead);
-
-        let texture = device.new_texture(&tex_desc);
+        let texture = make_texture(&device, tex_w, tex_h, MTLTextureUsage::ShaderRead);
 
         MetalRenderer {
             device,
@@ -148,23 +202,16 @@ impl MetalRenderer {
         // Lazily init pipeline
         if self.scanline_rasterizer.is_none() {
             let msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.metal"));
-            let src = std::str::from_utf8(msl).ok()?;
-            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
-            let func = lib.get_function("main0", None).ok()?;
-            self.scanline_rasterizer = Some(
-                self.device.new_compute_pipeline_state_with_function(&func).ok()?
-            );
+            self.scanline_rasterizer = load_compute_pipeline(&self.device, msl);
         }
         let pipeline = self.scanline_rasterizer.as_ref()?;
 
         // Ensure output texture
         if self.compute_out_w != out_w || self.compute_out_h != out_h {
-            let desc = TextureDescriptor::new();
-            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-            desc.set_width(out_w as u64);
-            desc.set_height(out_h as u64);
-            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
             self.compute_out_w = out_w;
             self.compute_out_h = out_h;
         }
@@ -190,25 +237,26 @@ impl MetalRenderer {
 
         // Uniforms: out_w, out_h, num_edges, bg_color
         let uniforms: [u32; 4] = [out_w, out_h, edges.len() as u32, bg_color];
-        let uni_buf = self.device.new_buffer_with_data(
-            uniforms.as_ptr() as *const _, 16, MTLResourceOptions::StorageModeShared);
+        let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 16);
 
         // Dispatch
-        // MSL buffer order (after remap): 0=uniforms, 1=edges, 2=row_ranges, 3=edge_indices
-        let cmd = self.command_queue.new_command_buffer();
-        let enc = cmd.new_compute_command_encoder();
-        enc.set_compute_pipeline_state(pipeline);
-        enc.set_buffer(0, Some(&uni_buf), 0);
-        enc.set_buffer(1, Some(&edge_buf), 0);
-        enc.set_buffer(2, Some(&row_buf), 0);
-        enc.set_buffer(3, Some(&idx_buf), 0);
-        enc.set_texture(0, Some(out_tex));
-        enc.dispatch_thread_groups(
-            MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
-            MTLSize::new(16, 16, 1));
-        enc.end_encoding();
+        let cmd = self.command_queue.commandBuffer().unwrap();
+        let enc = cmd.computeCommandEncoder().unwrap();
+        enc.setComputePipelineState(pipeline);
+        unsafe {
+            enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+            enc.setBuffer_offset_atIndex(Some(&edge_buf), 0, 1);
+            enc.setBuffer_offset_atIndex(Some(&row_buf), 0, 2);
+            enc.setBuffer_offset_atIndex(Some(&idx_buf), 0, 3);
+            enc.setTexture_atIndex(Some(out_tex), 0);
+            enc.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize { width: ((out_w + 15) / 16) as usize, height: ((out_h + 15) / 16) as usize, depth: 1 },
+                MTLSize { width: 16, height: 16, depth: 1 },
+            );
+        }
+        enc.endEncoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -231,11 +279,7 @@ impl MetalRenderer {
         // Lazily init pipeline
         if self.diffusion_pipeline.is_none() {
             let msl = include_bytes!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.metal"));
-            let src = std::str::from_utf8(msl).ok()?;
-            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
-            let func = lib.get_function("main0", None).ok()?;
-            self.diffusion_pipeline = Some(
-                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+            self.diffusion_pipeline = load_compute_pipeline(&self.device, msl);
         }
         let pipeline = self.diffusion_pipeline.as_ref()?;
 
@@ -255,45 +299,41 @@ impl MetalRenderer {
 
         // Ensure output texture
         if self.compute_out_w != out_w || self.compute_out_h != out_h {
-            let desc = TextureDescriptor::new();
-            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-            desc.set_width(out_w as u64);
-            desc.set_height(out_h as u64);
-            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
             self.compute_out_w = out_w;
             self.compute_out_h = out_h;
         }
         let out_tex = self.compute_out_tex.as_ref()?;
 
-        let px_buf = self.device.new_buffer_with_data(
-            pixels.as_ptr() as *const _, (pixels.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
-        let reg_buf = self.device.new_buffer_with_data(
-            regions.as_ptr() as *const _, (regions.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
-        let diag_buf = self.device.new_buffer_with_data(
-            diags.as_ptr() as *const _, (diags.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
+        let reg_buf = make_buf(&self.device, regions.as_ptr() as *const u8, regions.len() * 4);
+        let diag_buf = make_buf(&self.device, diags.as_ptr() as *const u8, diags.len() * 4);
 
-        // MSL: buffer(0)=uniforms, buffer(1)=diag_states, buffer(2)=regions, buffer(3)=pixels
         let inv_scale = 1.0f32 / scale as f32;
         let uniforms: [u32; 8] = [out_w, out_h, src_w, src_h,
             f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), 0];
-        let uni_buf = self.device.new_buffer_with_data(
-            uniforms.as_ptr() as *const _, 32, MTLResourceOptions::StorageModeShared);
+        let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 32);
 
-        let cmd = self.command_queue.new_command_buffer();
-        let enc = cmd.new_compute_command_encoder();
-        enc.set_compute_pipeline_state(pipeline);
-        enc.set_buffer(0, Some(&uni_buf), 0);
-        enc.set_buffer(1, Some(&diag_buf), 0);
-        enc.set_buffer(2, Some(&reg_buf), 0);
-        enc.set_buffer(3, Some(&px_buf), 0);
-        enc.set_texture(0, Some(out_tex));
-        enc.dispatch_thread_groups(
-            MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
-            MTLSize::new(16, 16, 1));
-        enc.end_encoding();
+        let cmd = self.command_queue.commandBuffer().unwrap();
+        let enc = cmd.computeCommandEncoder().unwrap();
+        enc.setComputePipelineState(pipeline);
+        unsafe {
+            enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+            enc.setBuffer_offset_atIndex(Some(&diag_buf), 0, 1);
+            enc.setBuffer_offset_atIndex(Some(&reg_buf), 0, 2);
+            enc.setBuffer_offset_atIndex(Some(&px_buf), 0, 3);
+            enc.setTexture_atIndex(Some(out_tex), 0);
+            enc.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize { width: ((out_w + 15) / 16) as usize, height: ((out_h + 15) / 16) as usize, depth: 1 },
+                MTLSize { width: 16, height: 16, depth: 1 },
+            );
+        }
+        enc.endEncoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -323,31 +363,21 @@ impl MetalRenderer {
         // Lazily init pipelines
         if self.spline_diff_pass1.is_none() {
             let msl = include_bytes!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.metal"));
-            let src = std::str::from_utf8(msl).ok()?;
-            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
-            let func = lib.get_function("main0", None).ok()?;
-            self.spline_diff_pass1 = Some(
-                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+            self.spline_diff_pass1 = load_compute_pipeline(&self.device, msl);
         }
         if self.spline_diff_pass2.is_none() {
             let msl = include_bytes!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.metal"));
-            let src = std::str::from_utf8(msl).ok()?;
-            let lib = self.device.new_library_with_source(src, &CompileOptions::new()).ok()?;
-            let func = lib.get_function("main0", None).ok()?;
-            self.spline_diff_pass2 = Some(
-                self.device.new_compute_pipeline_state_with_function(&func).ok()?);
+            self.spline_diff_pass2 = load_compute_pipeline(&self.device, msl);
         }
         let p1 = self.spline_diff_pass1.as_ref()?;
         let p2 = self.spline_diff_pass2.as_ref()?;
 
         // Ensure output texture
         if self.compute_out_w != out_w || self.compute_out_h != out_h {
-            let desc = TextureDescriptor::new();
-            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-            desc.set_width(out_w as u64);
-            desc.set_height(out_h as u64);
-            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
             self.compute_out_w = out_w;
             self.compute_out_h = out_h;
         }
@@ -363,63 +393,59 @@ impl MetalRenderer {
         let idx_bytes = unsafe { std::slice::from_raw_parts(
             edge_indices.as_ptr() as *const u8, edge_indices.len() * 4) };
 
-        let edge_buf = self.device.new_buffer_with_data(
-            edge_bytes.as_ptr() as *const _, edge_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
-        let row_buf = self.device.new_buffer_with_data(
-            row_bytes.as_ptr() as *const _, row_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
-        let idx_buf = self.device.new_buffer_with_data(
-            idx_bytes.as_ptr() as *const _, idx_bytes.len().max(4) as u64, MTLResourceOptions::StorageModeShared);
-        let px_buf = self.device.new_buffer_with_data(
-            pixels.as_ptr() as *const _, (pixels.len() * 4) as u64, MTLResourceOptions::StorageModeShared);
+        let edge_buf = safe_buf(&self.device, edge_bytes);
+        let row_buf = safe_buf(&self.device, row_bytes);
+        let idx_buf = safe_buf(&self.device, idx_bytes);
+        let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
 
         // Intermediate region buffer
-        let region_buf = self.device.new_buffer(
-            (out_w * out_h * 4).max(4) as u64, MTLResourceOptions::StorageModeShared);
+        let region_buf = make_buf_empty(&self.device, (out_w * out_h * 4).max(4) as usize);
 
-        let cmd = self.command_queue.new_command_buffer();
+        let cmd = self.command_queue.commandBuffer().unwrap();
 
-        // Pass 1: vectorize_to_buf — scanline rasterize edges -> region_buf
-        // MSL: buffer(0)=uniforms, buffer(1)=edges(rw), buffer(2)=rows(rw),
-        //      buffer(3)=indices, buffer(4)=region_out(rw)
+        // Pass 1: vectorize_to_buf
         {
             let uni1: [u32; 4] = [out_w, out_h, edges.len() as u32, bg_color];
-            let uni_buf = self.device.new_buffer_with_data(
-                uni1.as_ptr() as *const _, 16, MTLResourceOptions::StorageModeShared);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(p1);
-            enc.set_buffer(0, Some(&uni_buf), 0);
-            enc.set_buffer(1, Some(&edge_buf), 0);
-            enc.set_buffer(2, Some(&row_buf), 0);
-            enc.set_buffer(3, Some(&idx_buf), 0);
-            enc.set_buffer(4, Some(&region_buf), 0);
-            enc.dispatch_thread_groups(
-                MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
-                MTLSize::new(16, 16, 1));
-            enc.end_encoding();
+            let uni_buf = make_buf(&self.device, uni1.as_ptr() as *const u8, 16);
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(p1);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&edge_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&row_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&idx_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&region_buf), 0, 4);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((out_w + 15) / 16) as usize, height: ((out_h + 15) / 16) as usize, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
-        // Pass 2: spline_diffusion — Gaussian blending from region_buf -> output texture
-        // MSL: buffer(0)=uniforms, buffer(1)=pixels, buffer(2)=region_colors
+        // Pass 2: spline_diffusion
         {
             let inv_scale = 1.0f32 / scale as f32;
             let uni2: [u32; 8] = [out_w, out_h, src_w, src_h,
                 f32::to_bits(inv_scale), f32::to_bits(2.5), f32::to_bits(2.0), scale];
-            let uni_buf = self.device.new_buffer_with_data(
-                uni2.as_ptr() as *const _, 32, MTLResourceOptions::StorageModeShared);
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(p2);
-            enc.set_buffer(0, Some(&uni_buf), 0);
-            enc.set_buffer(1, Some(&px_buf), 0);
-            enc.set_buffer(2, Some(&region_buf), 0);
-            enc.set_texture(0, Some(out_tex));
-            enc.dispatch_thread_groups(
-                MTLSize::new(((out_w + 15) / 16) as u64, ((out_h + 15) / 16) as u64, 1),
-                MTLSize::new(16, 16, 1));
-            enc.end_encoding();
+            let uni_buf = make_buf(&self.device, uni2.as_ptr() as *const u8, 32);
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(p2);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&px_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&region_buf), 0, 2);
+                enc.setTexture_atIndex(Some(out_tex), 0);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((out_w + 15) / 16) as usize, height: ((out_h + 15) / 16) as usize, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            enc.endEncoding();
         }
 
         cmd.commit();
-        cmd.wait_until_completed();
+        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -427,26 +453,21 @@ impl MetalRenderer {
         Some(())
     }
 
-    pub fn ensure_scale_compute(&mut self, idx: usize, msl: &[u8]) -> Option<&ComputePipelineState> {
+    pub fn ensure_scale_compute(&mut self, idx: usize, msl: &[u8]) -> Option<&ProtocolObject<dyn MTLComputePipelineState>> {
         if self.scale_compute[idx].is_none() && !msl.is_empty() {
-            let msl_str = std::str::from_utf8(msl).ok()?;
-            let lib = self.device.new_library_with_source(msl_str, &CompileOptions::new()).ok()?;
-            let func = lib.get_function("main0", None).ok()?;
-            let pipeline = self.device.new_compute_pipeline_state_with_function(&func).ok()?;
-            self.scale_compute[idx] = Some(pipeline);
+            self.scale_compute[idx] = load_compute_pipeline(&self.device, msl);
         }
-        self.scale_compute[idx].as_ref()
+        self.scale_compute[idx].as_deref()
     }
 
     /// Run a compute scaling filter and return the output texture.
-    /// Returns (texture_ref, out_w, out_h) or None if the filter isn't GPU-accelerated.
     pub fn run_scale_compute(
         &mut self,
         filter: scaling::ScaleFilter,
         pixels: &[u32],
         src_w: u32, src_h: u32,
         disp_w: u32, disp_h: u32,
-    ) -> Option<(&Texture, u32, u32)> {
+    ) -> Option<(&ProtocolObject<dyn MTLTexture>, u32, u32)> {
         use scaling::ScaleFilter;
 
         let (idx, msl): (usize, &[u8]) = match filter {
@@ -486,9 +507,9 @@ impl MetalRenderer {
         };
 
         self.ensure_scale_compute(idx, msl)?;
-        let pipeline = self.scale_compute[idx].as_ref()?;
+        let pipeline = self.scale_compute[idx].as_deref()?;
 
-        // Compute output dimensions (integer scale for fixed-factor filters)
+        // Compute output dimensions
         let (out_w, out_h) = match filter {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr |
             ScaleFilter::Epx | ScaleFilter::Scale2x |
@@ -505,23 +526,16 @@ impl MetalRenderer {
 
         // Create/resize output texture
         if self.compute_out_w != out_w || self.compute_out_h != out_h {
-            let desc = TextureDescriptor::new();
-            desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-            desc.set_width(out_w as u64);
-            desc.set_height(out_h as u64);
-            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-            self.compute_out_tex = Some(self.device.new_texture(&desc));
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
             self.compute_out_w = out_w;
             self.compute_out_h = out_h;
         }
         let out_tex = self.compute_out_tex.as_ref()?;
 
-        // Create pixel buffer
-        let px_buf = self.device.new_buffer_with_data(
-            pixels.as_ptr() as *const _,
-            (pixels.len() * 4) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
 
         // Build uniforms
         let iscale = if src_w > 0 { out_w / src_w } else { 1 };
@@ -536,46 +550,50 @@ impl MetalRenderer {
             _ => 0,
         };
         let uniforms: [u32; 8] = [src_w, src_h, out_w, out_h, extra, 0, 0, 0];
-        let uni_buf = self.device.new_buffer_with_data(
-            uniforms.as_ptr() as *const _,
-            32,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 32);
 
         // Dispatch
-        let cmd = self.command_queue.new_command_buffer();
-        let encoder = cmd.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(0, Some(&uni_buf), 0);
-        encoder.set_buffer(1, Some(&px_buf), 0);
-        encoder.set_texture(0, Some(out_tex));
-        let tw = MTLSize::new(16, 16, 1);
-        let tg = MTLSize::new(
-            ((out_w + 15) / 16) as u64,
-            ((out_h + 15) / 16) as u64,
-            1,
-        );
-        encoder.dispatch_thread_groups(tg, tw);
-        encoder.end_encoding();
+        let cmd = self.command_queue.commandBuffer().unwrap();
+        let encoder = cmd.computeCommandEncoder().unwrap();
+        encoder.setComputePipelineState(pipeline);
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(&px_buf), 0, 1);
+            encoder.setTexture_atIndex(Some(out_tex), 0);
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: ((out_w + 15) / 16) as usize,
+                    height: ((out_h + 15) / 16) as usize,
+                    depth: 1,
+                },
+                MTLSize { width: 16, height: 16, depth: 1 },
+            );
+        }
+        encoder.endEncoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        cmd.waitUntilCompleted();
 
-        Some((self.compute_out_tex.as_ref()?, out_w, out_h))
+        Some((self.compute_out_tex.as_deref()?, out_w, out_h))
     }
 
     pub fn update_texture(&self, pixels: &[u32]) {
-        let region = MTLRegion::new_2d(0, 0, self.tex_w as u64, self.tex_h as u64);
-        self.texture.replace_region(
-            region,
-            0,
-            pixels.as_ptr() as *const _,
-            (self.tex_w * 4) as u64,
-        );
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize { width: self.tex_w as usize, height: self.tex_h as usize, depth: 1 },
+        };
+        unsafe {
+            self.texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region,
+                0,
+                NonNull::new_unchecked(pixels.as_ptr() as *mut _),
+                (self.tex_w * 4) as usize,
+            );
+        }
     }
 
     pub fn render(&self) {
-        autoreleasepool(|| {
-            let drawable = match self.layer.next_drawable() {
+        objc2::rc::autoreleasepool(|_| {
+            let drawable = match self.layer.nextDrawable() {
                 Some(d) => d,
                 None => return,
             };
@@ -588,37 +606,37 @@ impl MetalRenderer {
             let tex_aspect = self.tex_w as f32 / self.tex_h as f32;
             let dst_aspect = dst_w / dst_h;
             let (ndc_w, ndc_h) = if dst_aspect > tex_aspect {
-                // Window wider than texture: pillarbox
                 (2.0 * tex_aspect / dst_aspect, 2.0)
             } else {
-                // Window taller than texture: letterbox
                 (2.0, 2.0 * dst_aspect / tex_aspect)
             };
             let ndc_x = -ndc_w / 2.0;
             let ndc_y = -ndc_h / 2.0;
             let viewport: [f32; 4] = [ndc_x, ndc_y, ndc_w, ndc_h];
 
-            let rpd = RenderPassDescriptor::new();
-            let ca = rpd.color_attachments().object_at(0).unwrap();
-            ca.set_texture(Some(dst_tex));
-            ca.set_load_action(MTLLoadAction::Clear);
-            ca.set_store_action(MTLStoreAction::Store);
-            ca.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+            let rpd = MTLRenderPassDescriptor::new();
+            let ca = unsafe { rpd.colorAttachments().objectAtIndexedSubscript(0) };
+            ca.setTexture(Some(&dst_tex));
+            ca.setLoadAction(MTLLoadAction::Clear);
+            ca.setStoreAction(MTLStoreAction::Store);
+            ca.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
 
-            let cmd_buf = self.command_queue.new_command_buffer();
-            let encoder = cmd_buf.new_render_command_encoder(rpd);
+            let cmd_buf = self.command_queue.commandBuffer().unwrap();
+            let encoder = cmd_buf.renderCommandEncoderWithDescriptor(&rpd).unwrap();
 
-            encoder.set_render_pipeline_state(&self.pipeline_state);
-            encoder.set_vertex_bytes(
-                0,
-                std::mem::size_of::<[f32; 4]>() as u64,
-                viewport.as_ptr() as *const _,
-            );
-            encoder.set_fragment_texture(0, Some(&self.texture));
-            encoder.draw_primitives(MTLPrimitiveType::TriangleStrip, 0, 4);
-            encoder.end_encoding();
+            encoder.setRenderPipelineState(&self.pipeline_state);
+            unsafe {
+                encoder.setVertexBytes_length_atIndex(
+                    NonNull::new_unchecked(viewport.as_ptr() as *mut _),
+                    std::mem::size_of::<[f32; 4]>(),
+                    0,
+                );
+                encoder.setFragmentTexture_atIndex(Some(&self.texture), 0);
+            }
+            unsafe { encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4); }
+            encoder.endEncoding();
 
-            cmd_buf.present_drawable(&drawable);
+            cmd_buf.presentDrawable(ProtocolObject::from_ref(&*drawable));
             cmd_buf.commit();
         });
     }

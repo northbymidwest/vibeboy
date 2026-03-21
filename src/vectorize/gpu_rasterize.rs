@@ -26,9 +26,12 @@ pub struct GpuRasterizer {
 impl GpuRasterizer {
     /// Create a new GPU rasterizer. Returns None if no suitable GPU is available.
     pub fn new() -> Option<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -36,21 +39,20 @@ impl GpuRasterizer {
             compatible_surface: None,
             force_fallback_adapter: false,
         })) {
-            Some(a) => a,
-            None => {
-                eprintln!("GPU rasterizer: no suitable adapter found");
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("GPU rasterizer: no suitable adapter found: {e}");
                 return None;
             }
         };
 
-        let (device, queue) = match pollster::block_on(adapter.request_device(
+        let (device, queue): (wgpu::Device, wgpu::Queue) = match pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("vectorize-gpu"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             },
-            None,
         )) {
             Ok(dq) => dq,
             Err(e) => {
@@ -116,8 +118,8 @@ impl GpuRasterizer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rasterize-pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -229,7 +231,7 @@ impl GpuRasterizer {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).ok();
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
 
         let data = slice.get_mapped_range();

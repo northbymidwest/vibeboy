@@ -5,6 +5,7 @@ use super::scanline::extract_edges;
 
 /// GPU-ready edge data for compute shader upload.
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[repr(C)]
 pub struct GpuEdge {
     pub x0: f32,
@@ -19,6 +20,7 @@ pub struct GpuEdge {
 
 /// Per-path metadata for GPU compute shader.
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[repr(C)]
 pub struct GpuPathMeta {
     pub color: u32,
