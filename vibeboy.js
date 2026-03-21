@@ -18,6 +18,14 @@ export class WasmEmulator {
         wasm.wasmemulator_attach_printer(this.__wbg_ptr);
     }
     /**
+     * Downsample the internal audio buffer by an integer factor using a
+     * Blackman-windowed sinc low-pass filter.
+     * @param {number} factor
+     */
+    audio_downsample(factor) {
+        wasm.wasmemulator_audio_downsample(this.__wbg_ptr, factor);
+    }
+    /**
      * Drain audio samples into internal buffer; read via audio_ptr/audio_len.
      */
     audio_drain() {
@@ -36,6 +44,12 @@ export class WasmEmulator {
     audio_ptr() {
         const ret = wasm.wasmemulator_audio_ptr(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Reverse the internal audio buffer in-place (stereo pairs).
+     */
+    audio_reverse() {
+        wasm.wasmemulator_audio_reverse(this.__wbg_ptr);
     }
     /**
      * Get the name of the current filter.
@@ -105,6 +119,14 @@ export class WasmEmulator {
      */
     has_print() {
         const ret = wasm.wasmemulator_has_print(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Returns true if the cartridge has a rumble motor (MBC5+Rumble).
+     * @returns {boolean}
+     */
+    has_rumble() {
+        const ret = wasm.wasmemulator_has_rumble(this.__wbg_ptr);
         return ret !== 0;
     }
     /**
@@ -189,6 +211,22 @@ export class WasmEmulator {
      */
     resize_gpu(width, height) {
         wasm.wasmemulator_resize_gpu(this.__wbg_ptr, width, height);
+    }
+    /**
+     * Pop one rewind frame, regenerating the display. Returns true if rewound.
+     * @returns {boolean}
+     */
+    rewind_one_frame() {
+        const ret = wasm.wasmemulator_rewind_one_frame(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Returns true if the rumble motor is currently active.
+     * @returns {boolean}
+     */
+    rumble_active() {
+        const ret = wasm.wasmemulator_rumble_active(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Get cartridge save RAM as bytes (for persisting to localStorage).
@@ -287,6 +325,13 @@ export class WasmEmulator {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmemulator_set_model(this.__wbg_ptr, ptr0, len0);
         return ret !== 0;
+    }
+    /**
+     * Set rewind mode (call before rewind_one_frame).
+     * @param {boolean} active
+     */
+    set_rewinding(active) {
+        wasm.wasmemulator_set_rewinding(this.__wbg_ptr, active);
     }
     /**
      * Step one frame of emulation.
@@ -1240,7 +1285,7 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 244, function: Function { arguments: [Externref], shim_idx: 245, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 247, function: Function { arguments: [Externref], shim_idx: 248, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen_998a1f080b72a94d___closure__destroy___dyn_core_1d30e4ad3f208054___ops__function__FnMut__wasm_bindgen_998a1f080b72a94d___JsValue____Output___core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___, wasm_bindgen_998a1f080b72a94d___convert__closures_____invoke___wasm_bindgen_998a1f080b72a94d___JsValue__core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___true_);
             return ret;
         },
