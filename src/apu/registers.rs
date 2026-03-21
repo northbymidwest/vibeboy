@@ -107,14 +107,7 @@ impl Apu {
         match addr {
             // ── CH1 ────────────────────────────────────────────────────────
             0xFF10 => {
-                let old_neg = self.sweep.negate;
-                self.sweep.period = (val >> 4) & 0x07;
-                self.sweep.negate = val & 0x08 != 0;
-                self.sweep.shift  = val & 0x07;
-                // If negate was used and negate bit is cleared, disable CH1
-                if self.sweep.neg_used && old_neg && !self.sweep.negate {
-                    self.ch1.enabled = false;
-                }
+                self.sweep.write_nr10(val, &mut self.ch1);
             }
             0xFF11 => {
                 self.ch1.duty = (val >> 6) & 0x03;

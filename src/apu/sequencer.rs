@@ -35,7 +35,7 @@ impl Apu {
 
         // Sweep: when div_divider & 3 == 3 (every 4th event)
         if self.div_divider & 3 == 3 {
-            self.sweep.clock(&mut self.ch1);
+            self.sweep.clock_period(&mut self.ch1);
         }
 
         // Envelope volume_countdown: only on envelope steps (div_divider & 7 == 7)
@@ -138,15 +138,8 @@ impl Apu {
         }
         self.ch1.did_tick = false;
 
-        self.sweep.shadow   = self.ch1.freq;
-        self.sweep.neg_used = false;
-        self.sweep.timer    = if self.sweep.period == 0 { 8 } else { self.sweep.period };
-        self.sweep.enabled  = self.sweep.period != 0 || self.sweep.shift != 0;
-        if self.sweep.shift != 0 {
-            if self.sweep.calc().is_none() {
-                self.ch1.enabled = false;
-            }
-        }
+        let lf = self.write_lf();
+        self.sweep.trigger(&mut self.ch1, was_active, lf);
         if !self.ch1.dac_on {
             self.ch1.enabled = false;
         }

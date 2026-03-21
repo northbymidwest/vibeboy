@@ -355,7 +355,8 @@ impl Apu {
         let tick = self.sample_accum_tick;
         let thresh = self.sample_accum_thresh;
 
-        if (cycles >> 1) & 1 != 0 {
+        let lf_toggled = (cycles >> 1) & 1 != 0;
+        if lf_toggled {
             self.lf_div = !self.lf_div;
         }
 
@@ -373,6 +374,16 @@ impl Apu {
         self.ch3.tick_freq(cycles);
         self.ch4.alignment += cycles;
         self.ch4.tick_counter(cycles);
+
+        // Sweep calculation runs in 1MHz domain (one step per 2 T-cycles).
+        // Only step when there's a pending calculation (avoids unnecessary work
+        // and prevents restart_hold from counting down prematurely).
+        if self.sweep.calc_pending {
+            let sweep_steps = cycles / 2;
+            for _ in 0..sweep_steps {
+                self.sweep.step_1mhz(&mut self.ch1);
+            }
+        }
 
         self.record_mix_delta();
 
