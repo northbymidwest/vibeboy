@@ -35,7 +35,7 @@ use accel::{init_accel, enable_gamepad_sensors};
 use render::{display_size, compute_integer_scale, cpu_scale_frame};
 
 use ui_util::frame_duration;
-use ui_util::{parse_model, parse_filter};
+use ui_util::parse_model;
 
 /// Which accelerometer source is active.
 enum AccelSource {
@@ -80,7 +80,7 @@ struct Cli {
     printer: bool,
 
     /// Scaling filter
-    #[arg(long, default_value = "nearest", value_parser = parse_filter)]
+    #[arg(long, default_value = "nearest", value_parser = scaling::ScaleFilter::all_names())]
     filter: String,
 
     /// Force CPU-only scaling (disable GPU shader pipeline even if available)
@@ -98,6 +98,10 @@ struct Cli {
     /// Costs ~N× CPU per frame. Typical values: 1-2.
     #[arg(long, default_missing_value = "1", num_args = 0..=1)]
     runahead: Option<u32>,
+
+    /// Generate shell completions and exit (bash, zsh, fish, elvish, powershell)
+    #[arg(long, value_name = "SHELL", hide = true)]
+    completions: Option<clap_complete::Shell>,
 }
 
 /// Show an SDL3 file dialog to pick a ROM file. Exits if the user cancels.
@@ -161,6 +165,12 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
+
+    if let Some(shell) = cli.completions {
+        let mut cmd = <Cli as clap::CommandFactory>::command();
+        clap_complete::generate(shell, &mut cmd, "vibeboy", &mut std::io::stdout());
+        std::process::exit(0);
+    }
 
     if cli.yuv_edges || cli.filter.starts_with("vectorize-spline-diffusion") {
         vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);

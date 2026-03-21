@@ -23,6 +23,7 @@ log = "0.4"
 sdl3 = { version = "0.17", features = ["hidapi"], optional = true }
 env_logger = { version = "0.11", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
+clap_complete = { version = "4", optional = true }
 image = { version = "0.25", optional = true }
 svg = { version = "0.18.0", optional = true }
 wgpu = { version = "24", optional = true }
@@ -71,7 +72,7 @@ naga = { version = "24", features = ["spv-in", "wgsl-out"] }
 
 [features]
 default = ["native", "sdl3-gpu-shaders"]
-native = ["sdl3", "clap", "env_logger", "image", "svg"]
+native = ["sdl3", "clap", "clap_complete", "env_logger", "image", "svg"]
 macos-ui = []
 sdl3-gpu-shaders = []
 gpu = ["wgpu", "bytemuck", "pollster"]
