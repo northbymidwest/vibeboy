@@ -177,17 +177,27 @@ pub struct GamepadState {
     pub fast_forward: bool,
 }
 
-/// Polls a gilrs gamepad, handling connect/disconnect and button/stick mapping.
+/// Polls a gilrs gamepad, handling connect/disconnect, button/stick mapping,
+/// and rumble force-feedback.
 #[cfg(feature = "gilrs")]
 pub struct GamepadPoller {
     pub gilrs: gilrs::Gilrs,
     pub active_gamepad: Option<gilrs::GamepadId>,
+    rumble_effect: Option<gilrs::ff::Effect>,
+    rumble_gamepad: Option<gilrs::GamepadId>,
+    rumble_on: bool,
 }
 
 #[cfg(feature = "gilrs")]
 impl GamepadPoller {
     pub fn new() -> Option<Self> {
-        gilrs::Gilrs::new().ok().map(|g| Self { gilrs: g, active_gamepad: None })
+        gilrs::Gilrs::new().ok().map(|g| Self {
+            gilrs: g,
+            active_gamepad: None,
+            rumble_effect: None,
+            rumble_gamepad: None,
+            rumble_on: false,
+        })
     }
 
     /// Drain events and read current state. Returns the gamepad state.
@@ -207,6 +217,9 @@ impl GamepadPoller {
                 gilrs::EventType::Disconnected => {
                     if self.active_gamepad == Some(ev.id) {
                         self.active_gamepad = None;
+                        self.rumble_effect = None;
+                        self.rumble_gamepad = None;
+                        self.rumble_on = false;
                         eprintln!("Gamepad disconnected");
                     }
                 }
@@ -248,6 +261,66 @@ impl GamepadPoller {
             buttons: bits,
             rewind: gp.is_pressed(B::LeftTrigger),
             fast_forward: gp.is_pressed(B::RightTrigger),
+        }
+    }
+
+    /// Set up a rumble effect for the active gamepad (if force-feedback is supported).
+    /// Call once when a rumble-capable cart is loaded.
+    pub fn ensure_rumble(&mut self) {
+        use gilrs::ff::{EffectBuilder, BaseEffect, BaseEffectType, Replay, Repeat, Ticks};
+
+        let gp_id = match self.active_gamepad {
+            Some(id) => id,
+            None => return,
+        };
+        if self.rumble_gamepad == Some(gp_id) && self.rumble_effect.is_some() {
+            return;
+        }
+        // Drop old effect
+        self.rumble_effect = None;
+        self.rumble_gamepad = None;
+        self.rumble_on = false;
+
+        if !self.gilrs.gamepad(gp_id).is_ff_supported() {
+            return;
+        }
+
+        let effect = EffectBuilder::new()
+            .add_effect(BaseEffect {
+                kind: BaseEffectType::Strong { magnitude: 40_000 },
+                scheduling: Replay {
+                    play_for: Ticks::from_ms(u32::MAX),
+                    ..Default::default()
+                },
+                envelope: Default::default(),
+            })
+            .repeat(Repeat::Infinitely)
+            .gamepads(&[gp_id])
+            .finish(&mut self.gilrs);
+
+        match effect {
+            Ok(e) => {
+                self.rumble_effect = Some(e);
+                self.rumble_gamepad = Some(gp_id);
+            }
+            Err(e) => {
+                log::warn!("Failed to create rumble effect: {}", e);
+            }
+        }
+    }
+
+    /// Start or stop rumble. No-op if unchanged or no effect is loaded.
+    pub fn set_rumble(&mut self, on: bool) {
+        if on == self.rumble_on {
+            return;
+        }
+        self.rumble_on = on;
+        if let Some(ref effect) = self.rumble_effect {
+            if on {
+                let _ = effect.play();
+            } else {
+                let _ = effect.stop();
+            }
         }
     }
 }

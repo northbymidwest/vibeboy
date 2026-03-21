@@ -9,8 +9,6 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-use gilrs::{Gilrs, GamepadId, Button as GilButton, Axis as GilAxis};
-use gilrs::ff::{EffectBuilder, BaseEffect, BaseEffectType, Replay, Repeat, Ticks};
 
 use super::{Cli, SCALE, GB_W, GB_H, SGB_W, SGB_H, AUDIO_SAMPLE_RATE};
 use super::emulator::Emulator;
@@ -49,14 +47,10 @@ pub(super) struct App {
     src_w: u32,
     src_h: u32,
     fps: ui_util::FpsCounter,
-    gilrs: Option<Gilrs>,
-    active_gamepad: Option<GamepadId>,
+    gamepad: Option<ui_util::GamepadPoller>,
     kb_buttons: u8,  // bitmask of keyboard-pressed buttons
     gp_buttons: u8,  // bitmask of gamepad-pressed buttons
     fast_forward: bool,
-    rumble_effect: Option<gilrs::ff::Effect>,
-    rumble_gamepad: Option<GamepadId>, // which gamepad owns the effect
-    rumble_on: bool,
     sav_flusher: Option<ui_util::SavFlusher>,
 }
 
@@ -94,14 +88,10 @@ impl App {
             src_w: GB_W,
             src_h: GB_H,
             fps: ui_util::FpsCounter::new(),
-            gilrs: Gilrs::new().ok(),
-            active_gamepad: None,
+            gamepad: ui_util::GamepadPoller::new(),
             kb_buttons: 0,
             gp_buttons: 0,
             fast_forward: false,
-            rumble_effect: None,
-            rumble_gamepad: None,
-            rumble_on: false,
             sav_flusher: None,
         }
     }
@@ -146,63 +136,6 @@ impl App {
     fn update_filter_checkmarks(&self) {
         for (item, filter) in &self.filter_items {
             item.set_checked(*filter == self.scale_filter);
-        }
-    }
-
-    fn ensure_rumble_effect(&mut self, gp_id: GamepadId) {
-        if self.rumble_gamepad == Some(gp_id) && self.rumble_effect.is_some() {
-            return;
-        }
-        // Drop old effect
-        self.rumble_effect = None;
-        self.rumble_gamepad = None;
-        self.rumble_on = false;
-
-        let gilrs = match self.gilrs.as_mut() {
-            Some(g) => g,
-            None => return,
-        };
-
-        if !gilrs.gamepad(gp_id).is_ff_supported() {
-            return;
-        }
-
-        // Long continuous rumble effect — we start/stop it manually
-        let effect = EffectBuilder::new()
-            .add_effect(BaseEffect {
-                kind: BaseEffectType::Strong { magnitude: 40_000 },
-                scheduling: Replay {
-                    play_for: Ticks::from_ms(u32::MAX),
-                    ..Default::default()
-                },
-                envelope: Default::default(),
-            })
-            .repeat(Repeat::Infinitely)
-            .gamepads(&[gp_id])
-            .finish(gilrs);
-
-        match effect {
-            Ok(e) => {
-                self.rumble_effect = Some(e);
-                self.rumble_gamepad = Some(gp_id);
-            }
-            Err(e) => {
-                log::warn!("Failed to create rumble effect: {}", e);
-            }
-        }
-    }
-
-    fn update_rumble(&mut self, on: bool) {
-        if on == self.rumble_on {
-            return;
-        }
-        self.rumble_on = on;
-        if let Some(ref effect) = self.rumble_effect {
-            if on {
-                let _ = effect.play();
-            } else {
-                let _ = effect.stop();
-            }
         }
     }
 
@@ -574,102 +507,28 @@ impl ApplicationHandler for App {
         }
 
         // -- Gamepad polling --
-        if let Some(ref mut gilrs) = self.gilrs {
-            while let Some(ev) = gilrs.next_event() {
-                match ev.event {
-                    gilrs::EventType::Connected => {
-                        if self.active_gamepad.is_none() {
-                            self.active_gamepad = Some(ev.id);
-                            let gp = gilrs.gamepad(ev.id);
-                            eprintln!("Gamepad connected: {}", gp.name());
-                        }
-                    }
-                    gilrs::EventType::Disconnected => {
-                        if self.active_gamepad == Some(ev.id) {
-                            eprintln!("Gamepad disconnected");
-                            self.active_gamepad = None;
-                            self.rumble_effect = None;
-                            self.rumble_gamepad = None;
-                            self.rumble_on = false;
-                        }
-                    }
-                    _ => {}
+        if let Some(ref mut gp) = self.gamepad {
+            let gs = gp.poll();
+            self.gp_buttons = gs.buttons;
+
+            // Apply combined state (keyboard | gamepad)
+            if let Some(ref mut emu) = self.emu {
+                let combined = self.kb_buttons | self.gp_buttons;
+                for bit in 0..8u8 {
+                    let mask = 1 << bit;
+                    emu.set_button(mask, combined & mask != 0);
+                }
+                if gs.rewind { emu.set_rewinding(true); }
+                self.fast_forward = self.fast_forward || gs.fast_forward;
+
+                // Rumble
+                if emu.has_rumble() {
+                    gp.ensure_rumble();
+                    gp.set_rumble(emu.rumble_active());
                 }
             }
-
-            // Find first connected gamepad if none active
-            if self.active_gamepad.is_none() {
-                for (id, gp) in gilrs.gamepads() {
-                    if gp.is_connected() {
-                        self.active_gamepad = Some(id);
-                        eprintln!("Gamepad connected: {}", gp.name());
-                        break;
-                    }
-                }
-            }
-
-            if let Some(gp_id) = self.active_gamepad {
-                let gp = gilrs.gamepad(gp_id);
-                const DEADZONE: f32 = 0.3;
-
-                let gp_map: &[(GilButton, u8)] = &[
-                    (GilButton::East,      Emulator::BTN_A),
-                    (GilButton::South,     Emulator::BTN_B),
-                    (GilButton::Start,     Emulator::BTN_START),
-                    (GilButton::Select,    Emulator::BTN_SELECT),
-                    (GilButton::DPadUp,    Emulator::BTN_UP),
-                    (GilButton::DPadDown,  Emulator::BTN_DOWN),
-                    (GilButton::DPadLeft,  Emulator::BTN_LEFT),
-                    (GilButton::DPadRight, Emulator::BTN_RIGHT),
-                ];
-
-                // Left stick
-                let lx = gp.axis_data(GilAxis::LeftStickX).map_or(0.0, |a| a.value());
-                let ly = gp.axis_data(GilAxis::LeftStickY).map_or(0.0, |a| a.value());
-
-                let mut gp_bits: u8 = 0;
-                for &(gb, btn) in gp_map {
-                    let pressed = gp.is_pressed(gb);
-                    let stick = match btn {
-                        b if b == Emulator::BTN_RIGHT => lx > DEADZONE,
-                        b if b == Emulator::BTN_LEFT  => lx < -DEADZONE,
-                        b if b == Emulator::BTN_UP    => ly > DEADZONE,
-                        b if b == Emulator::BTN_DOWN  => ly < -DEADZONE,
-                        _ => false,
-                    };
-                    if pressed || stick {
-                        gp_bits |= btn;
-                    }
-                }
-                self.gp_buttons = gp_bits;
-
-                // Apply combined state
-                if let Some(ref mut emu) = self.emu {
-                    let combined = self.kb_buttons | self.gp_buttons;
-                    let all_btns: &[u8] = &[
-                        Emulator::BTN_RIGHT, Emulator::BTN_LEFT, Emulator::BTN_UP, Emulator::BTN_DOWN,
-                        Emulator::BTN_A, Emulator::BTN_B, Emulator::BTN_SELECT, Emulator::BTN_START,
-                    ];
-                    for &b in all_btns {
-                        emu.set_button(b, combined & b != 0);
-                    }
-
-                    // Shoulders for rewind / fast-forward (L1/R1)
-                    if gp.is_pressed(GilButton::LeftTrigger) {
-                        emu.set_rewinding(true);
-                    }
-                    self.fast_forward = self.fast_forward || gp.is_pressed(GilButton::RightTrigger);
-                }
-            } else {
-                self.gp_buttons = 0;
-            }
-
-            // Set up rumble effect for the active gamepad if cart supports it
-            if let Some(gp_id) = self.active_gamepad {
-                if self.emu.as_ref().is_some_and(|e| e.has_rumble()) {
-                    self.ensure_rumble_effect(gp_id);
-                }
-            }
+        } else {
+            self.gp_buttons = 0;
         }
 
         // Handle rewind (3x speed) with reverse audio
@@ -693,12 +552,6 @@ impl ApplicationHandler for App {
         self.step_and_render();
 
         // Update rumble after emulation step
-        if let Some(ref emu) = self.emu {
-            if emu.has_rumble() {
-                let on = emu.rumble_active();
-                self.update_rumble(on);
-            }
-        }
 
         // Frame rate cap
         let remaining = self.frame_dur.saturating_sub(self.frame_start.elapsed());
