@@ -857,5 +857,6 @@ fn main() {
         drop(camera);
 
         sav_flusher.flush(&emu);
+        drop(Box::from_raw(menu_actions_ptr));
     }
 }

@@ -245,7 +245,7 @@ impl MetalRenderer {
         let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 16);
 
         // Dispatch
-        let cmd = self.command_queue.commandBuffer().unwrap();
+        let cmd = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return None; } };
         let enc = cmd.computeCommandEncoder().unwrap();
         enc.setComputePipelineState(pipeline);
         unsafe {
@@ -322,7 +322,7 @@ impl MetalRenderer {
             f32::to_bits(inv_scale), f32::to_bits(GAUSS_K), f32::to_bits(GAUSS_RADIUS), 0];
         let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 32);
 
-        let cmd = self.command_queue.commandBuffer().unwrap();
+        let cmd = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return None; } };
         let enc = cmd.computeCommandEncoder().unwrap();
         enc.setComputePipelineState(pipeline);
         unsafe {
@@ -406,7 +406,7 @@ impl MetalRenderer {
         // Intermediate region buffer
         let region_buf = make_buf_empty(&self.device, (out_w * out_h * 4).max(4) as usize);
 
-        let cmd = self.command_queue.commandBuffer().unwrap();
+        let cmd = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return None; } };
 
         // Pass 1: vectorize_to_buf
         {
@@ -558,7 +558,7 @@ impl MetalRenderer {
         let uni_buf = make_buf(&self.device, uniforms.as_ptr() as *const u8, 32);
 
         // Dispatch
-        let cmd = self.command_queue.commandBuffer().unwrap();
+        let cmd = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return None; } };
         let encoder = cmd.computeCommandEncoder().unwrap();
         encoder.setComputePipelineState(pipeline);
         unsafe {
@@ -626,8 +626,8 @@ impl MetalRenderer {
             ca.setStoreAction(MTLStoreAction::Store);
             ca.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
 
-            let cmd_buf = self.command_queue.commandBuffer().unwrap();
-            let encoder = cmd_buf.renderCommandEncoderWithDescriptor(&rpd).unwrap();
+            let cmd_buf = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return; } };
+            let Some(encoder) = cmd_buf.renderCommandEncoderWithDescriptor(&rpd) else { return; };
 
             encoder.setRenderPipelineState(&self.pipeline_state);
             unsafe {

@@ -131,7 +131,6 @@ pub(super) mod avf_camera {
         buffer: &Arc<Mutex<[u8; 128 * 112]>>,
         has_new_frame: &Arc<AtomicBool>,
     ) {
-        // Build RGBA image from BGRA pixel buffer
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {
             for x in 0..w {
@@ -304,9 +303,12 @@ pub(super) mod avf_camera {
 
         pub fn read_frame(&self, buf: &mut [u8; 128 * 112]) -> bool {
             if self.has_new_frame.swap(false, Ordering::Acquire) {
-                let lock = self.buffer.lock().unwrap();
-                buf.copy_from_slice(&*lock);
-                true
+                if let Ok(lock) = self.buffer.lock() {
+                    buf.copy_from_slice(&*lock);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }

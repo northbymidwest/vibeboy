@@ -59,7 +59,7 @@ gdk4-x11 = { version = "0.11.0", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = ["NSFont", "NSControl", "NSWindow", "NSView", "NSEvent", "NSGraphics", "NSResponder", "NSMenu", "NSMenuItem", "NSApplication", "NSCell", "objc2-core-foundation", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3", features = ["NSFont", "NSControl", "NSWindow", "NSView", "NSEvent", "NSGraphics", "NSResponder", "NSMenu", "NSMenuItem", "NSApplication", "NSCell", "NSPanel", "NSSavePanel", "NSOpenPanel", "NSTextField", "NSButton", "NSButtonCell", "objc2-core-foundation", "objc2-quartz-core"] }
 objc2-metal = "0.3"
 objc2-quartz-core = "0.3"
 objc2-game-controller = { version = "0.3", features = ["objc2-core-haptics"] }
