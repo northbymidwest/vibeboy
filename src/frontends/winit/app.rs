@@ -711,10 +711,12 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Handle rewind
+        // Handle rewind (3x speed)
         if let Some(ref mut emu) = self.emu {
             if emu.is_rewinding() {
-                emu.rewind_one_frame();
+                for _ in 0..3 {
+                    emu.rewind_one_frame();
+                }
                 emu.drain_audio_samples();
             }
         }

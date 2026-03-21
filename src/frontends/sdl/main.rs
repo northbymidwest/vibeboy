@@ -636,17 +636,18 @@ fn main() {
             step_one_frame = false;
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
-            emu.rewind_one_frame();
+            // Rewind at 3x speed
+            for _ in 0..3 {
+                emu.rewind_one_frame();
+            }
             emu.drain_audio_samples();
             frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
         } else if fast_forward {
-            // Run 4 frames per wall-clock frame
-            for _ in 0..3 {
+            // Run 4 frames per wall-clock frame, accumulate all audio
+            for _ in 0..4 {
                 emu.step_frame();
-                emu.drain_audio_samples();
             }
-            emu.step_frame();
             frames_stepped = 4;
             emu_time_debt = Duration::ZERO;
         } else if slow_motion {
@@ -683,9 +684,8 @@ fn main() {
 
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.drain_audio_samples();
-        if !samples.is_empty() && !fast_forward {
+        if !samples.is_empty() {
             // If too much audio is queued, clear it to reduce latency.
-            // Target ~2 frames of buffer (stereo f32 at 96kHz/60fps ≈ 12800 bytes).
             let max_queued_bytes: i32 = 3200 * 2 * 4 * 2; // ~2 frames * stereo * sizeof(f32)
             if let Ok(queued) = audio_stream.queued_bytes() {
                 if queued > max_queued_bytes {
@@ -693,14 +693,18 @@ fn main() {
                 }
             }
 
-            // Cap audio per frame to ~1 frame worth (stereo f32 at 96000/60 ≈ 3200 floats).
-            // The first frame can generate excess audio during LCD-off init; discard excess.
-            let max_samples = 3200 * 2; // Allow up to ~2 frames of audio
-            if samples.len() <= max_samples {
-                let _ = audio_stream.put_data_f32(&samples);
+            if fast_forward {
+                // Resample 4 frames of audio down to 1 frame: low-pass filter + decimate
+                let resampled = ui_util::downsample_audio(&samples, 4);
+                let _ = audio_stream.put_data_f32(&resampled);
             } else {
-                // Push only the tail (most recent audio) to stay in sync
-                let _ = audio_stream.put_data_f32(&samples[samples.len() - max_samples..]);
+                // Cap audio per frame to ~1 frame worth (stereo f32 at 96000/60 ≈ 3200 floats).
+                let max_samples = 3200 * 2;
+                if samples.len() <= max_samples {
+                    let _ = audio_stream.put_data_f32(&samples);
+                } else {
+                    let _ = audio_stream.put_data_f32(&samples[samples.len() - max_samples..]);
+                }
             }
         }
 

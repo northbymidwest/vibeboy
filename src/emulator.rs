@@ -4,17 +4,17 @@ use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
 };
 use crate::model::GbModel;
+use crate::rewind::RewindBuffer;
 use crate::sgb::Sgb;
 use crate::snapshot::Snapshot;
 use crate::snes::SnesSys;
-use std::collections::VecDeque;
 use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
 pub const CYCLES_PER_FRAME: u32 = 70_224;
 
-/// Maximum rewind buffer depth (~10 seconds at 60fps).
-const REWIND_BUFFER_CAPACITY: usize = 600;
+/// Maximum rewind buffer depth (~10 minutes at 60fps).
+const REWIND_BUFFER_CAPACITY: usize = 36_000;
 
 pub struct Emulator {
     /// CPU state — use facade methods for normal access. Direct access
@@ -32,8 +32,8 @@ pub struct Emulator {
     /// Packets queued while SNES BIOS was initializing (with shade buffer snapshots)
     snes_packet_queue: Vec<([u8; 16], Vec<u8>)>,
     frame_count: u64,
-    /// Ring buffer of snapshots for rewind (most recent at back).
-    rewind_buffer: VecDeque<Snapshot>,
+    /// Delta-compressed rewind buffer.
+    rewind_buffer: RewindBuffer,
     /// In-memory save state slots (1-9, index 0 = slot 1).
     save_slots: [Option<Box<Snapshot>>; 9],
     /// True while the user is holding the rewind key.
@@ -105,7 +105,7 @@ impl Emulator {
             snes,
             snes_packet_queue: Vec::new(),
             frame_count: 0,
-            rewind_buffer: VecDeque::with_capacity(REWIND_BUFFER_CAPACITY),
+            rewind_buffer: RewindBuffer::new(REWIND_BUFFER_CAPACITY),
             save_slots: Default::default(),
             rewinding: false,
             headless: false,
@@ -119,13 +119,14 @@ impl Emulator {
 
     /// Run until one full frame has been rendered (VBlank).
     pub fn step_frame(&mut self) {
-        // Push a snapshot for rewind (before emulating this frame)
+        // Push a snapshot for rewind (before emulating this frame).
+        // Strip frame_buffer/shade_buffer before serializing — they're output
+        // data regenerated each frame, not state. Saves ~92KB per delta.
         if !self.rewinding && !self.headless {
-            let snap = self.save_snapshot();
-            if self.rewind_buffer.len() >= REWIND_BUFFER_CAPACITY {
-                self.rewind_buffer.pop_front();
-            }
-            self.rewind_buffer.push_back(snap);
+            let mut snap = self.save_snapshot();
+            snap.bus.ppu.frame_buffer.clear();
+            snap.bus.ppu.shade_buffer.clear();
+            self.rewind_buffer.push(&snap);
         }
 
         self.bus.clear_frame_ready();
@@ -180,9 +181,27 @@ impl Emulator {
     }
 
     /// Pop one frame from the rewind buffer and restore it. Returns true if rewound.
+    /// Runs one frame after restoring to regenerate the frame buffer (which is
+    /// excluded from rewind snapshots to save memory).
     pub fn rewind_one_frame(&mut self) -> bool {
-        if let Some(snap) = self.rewind_buffer.pop_back() {
+        if let Some(snap) = self.rewind_buffer.pop() {
             self.restore_snapshot(&snap);
+            // Re-allocate output buffers (cleared before serialization to save space)
+            let (w, h) = if self.bus.ppu.sgb_mode { (256, 224) } else { (160, 144) };
+            if self.bus.ppu.frame_buffer.len() != w * h {
+                self.bus.ppu.frame_buffer.resize(w * h, 0);
+            }
+            if self.bus.ppu.sgb_mode && self.bus.ppu.shade_buffer.len() != 160 * 144 {
+                self.bus.ppu.shade_buffer.resize(160 * 144, 0);
+            }
+            // Regenerate frame buffer from restored VRAM/PPU state
+            self.bus.clear_frame_ready();
+            let mut cycles = 0u32;
+            while !self.bus.frame_ready() {
+                self.step();
+                cycles += 4;
+                if cycles >= CYCLES_PER_FRAME * 2 { break; }
+            }
             true
         } else {
             false
@@ -514,4 +533,5 @@ impl Emulator {
 
     pub fn set_rewinding(&mut self, active: bool) { self.rewinding = active; }
     pub fn is_rewinding(&self) -> bool { self.rewinding }
+    pub fn rewind_memory_usage(&self) -> usize { self.rewind_buffer.memory_usage() }
 }

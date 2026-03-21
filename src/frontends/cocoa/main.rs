@@ -592,14 +592,15 @@ fn main() {
 
             if !paused {
                 if backspace_held {
-                    emu.rewind_one_frame();
+                    // Rewind at 3x speed
+                    for _ in 0..3 {
+                        emu.rewind_one_frame();
+                    }
                     emu.drain_audio_samples();
                 } else if fast_forward {
-                    for _ in 0..3 {
+                    for _ in 0..4 {
                         emu.step_frame();
-                        emu.drain_audio_samples();
                     }
-                    emu.step_frame();
                 } else {
                     emu.step_frame();
                 }
@@ -612,15 +613,19 @@ fn main() {
 
             // ── Audio ────────────────────────────────────────────────────────
             let samples = emu.drain_audio_samples();
-            if !samples.is_empty() && !fast_forward {
-                let max_samples = 3200 * 2;
-                let to_write = if samples.len() <= max_samples {
-                    &samples[..]
+            if !samples.is_empty() {
+                let to_write: std::borrow::Cow<[f32]> = if fast_forward {
+                    std::borrow::Cow::Owned(ui_util::downsample_audio(&samples, 4))
                 } else {
-                    &samples[samples.len() - max_samples..]
+                    let max_samples = 3200 * 2;
+                    if samples.len() <= max_samples {
+                        std::borrow::Cow::Borrowed(&samples[..])
+                    } else {
+                        std::borrow::Cow::Borrowed(&samples[samples.len() - max_samples..])
+                    }
                 };
                 if let Ok(mut ring) = audio_ring.lock() {
-                    ring.write(to_write);
+                    ring.write(&to_write);
                 }
             }
 

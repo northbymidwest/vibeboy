@@ -8,6 +8,7 @@ pub mod model;
 pub mod ppu;
 pub mod serial;
 pub mod sgb;
+pub mod rewind;
 pub mod savestate;
 pub mod snapshot;
 pub mod snes;
