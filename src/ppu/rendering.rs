@@ -29,7 +29,7 @@ impl Ppu {
         // Hardware pipeline priming delay. tick_mode3() runs on the
         // transition dot itself, so the delay counter starts decrementing
         // immediately. DMG=5T, CGB=4T (CGB begins rendering 1T earlier).
-        self.mode3_start_delay = if self.cgb_mode { 4 } else { 5 };
+        self.mode3_start_delay = 5;
     }
 
     /// One T-cycle of Mode 3 pixel FIFO processing
@@ -195,38 +195,58 @@ impl Ppu {
         None
     }
 
-    /// Start a sprite fetch for the given sprite index
+    /// Start a sprite fetch for the given sprite index.
+    ///
+    /// The alignment penalty is fetcher-state-based: hardware pauses pixel output
+    /// and waits for the BG fetcher to reach the end of its current 6-dot tile
+    /// fetch cycle (GetTileDataHighT2), then does an extra fetcher advance before
+    /// starting the 5-dot sprite data read. The wait duration depends on where
+    /// in its cycle the fetcher was when the sprite triggered.
     fn start_sprite_fetch(&mut self, sprite_idx: usize) {
         self.sprite_fetch_active = true;
         self.sprite_fetch_step = 0;
         self.sprite_fetch_tick = 0;
         self.sprite_fetch_entry = sprite_idx;
         self.sprites_fetched |= 1 << sprite_idx;
-        // Compute alignment penalty based on tile slot grouping
-        let sprite_x = self.scanline_sprites[sprite_idx].1;
-        let adjusted = sprite_x.wrapping_add(self.scx);
-        let slot = (adjusted >> 3) as i16;
-        if slot == self.last_sprite_slot {
-            // Same tile slot as previous sprite: just 6T fetch, no alignment penalty
-            self.sprite_alignment_delay = 0;
+
+        // Sprite alignment penalty.
+        //
+        // CGB: fetcher-state-based. Hardware pauses pixel output and waits
+        // for the BG fetcher to complete its 6-dot tile fetch cycle.
+        // cycle_tick tracks this phase independently of Push stalls.
+        //
+        // DMG: formula-based. Penalty = 5 - min(5, (sprite_x + SCX) & 7),
+        // with X=0 always getting 5. Uses tile slot grouping where
+        // consecutive sprites in the same slot skip the alignment penalty.
+        if self.cgb_mode {
+            let phase = self.fetcher.cycle_tick as u32;
+            let wait = if phase == 0 { 0 } else { 6 - phase };
+            self.sprite_alignment_delay = (wait + 1) as u8;
         } else {
-            // New slot: full alignment penalty
-            let alignment = (adjusted & 7) as u8;
-            self.sprite_alignment_delay = 5 - std::cmp::min(5, alignment);
-            // Special case: sprite at OAM X=0 (completely off-screen left) always
-            // gets full 5T alignment penalty regardless of SCX.
-            if sprite_x == 0 {
-                self.sprite_alignment_delay = 5;
+            let sprite_x = self.scanline_sprites[sprite_idx].1;
+            let adjusted = sprite_x.wrapping_add(self.scx);
+            let slot = (adjusted >> 3) as i16;
+            if slot == self.last_sprite_slot {
+                self.sprite_alignment_delay = 0;
+            } else {
+                let alignment = (adjusted & 7) as u8;
+                self.sprite_alignment_delay = 5 - std::cmp::min(5, alignment);
+                if sprite_x == 0 {
+                    self.sprite_alignment_delay = 5;
+                }
+                self.last_sprite_slot = slot;
             }
-            self.last_sprite_slot = slot;
         }
     }
 
-    /// Advance the sprite fetch state machine (6T total: 2T tile_id, 2T data_lo, 2T data_hi)
+    /// Advance the sprite fetch state machine.
+    /// DMG: 6T total (2T per step). CGB: 5T (2T+2T+1T).
     fn tick_sprite_fetch(&mut self) {
         self.sprite_fetch_tick += 1;
-        if self.sprite_fetch_tick < 2 {
-            return; // each step takes 2T
+        // DMG: all steps 2T. CGB: steps 0-1 are 2T, step 2 is 1T.
+        let threshold = if self.cgb_mode && self.sprite_fetch_step == 2 { 1 } else { 2 };
+        if self.sprite_fetch_tick < threshold {
+            return;
         }
         self.sprite_fetch_tick = 0;
 
@@ -345,15 +365,14 @@ impl Ppu {
     }
 
     /// Advance the BG/window tile fetcher by one T-cycle.
-    /// 7-state pipeline: each state is exactly 1T.
-    ///   GetTileT1: CGB latches fetcher_y, TILE_SEL, map address
-    ///   GetTileT2: reads tile ID (and CGB attributes) from VRAM
-    ///   GetTileDataLowT1: CGB latches TILE_SEL, tile data address
-    ///   GetTileDataLowT2: reads low byte of tile data from VRAM
-    ///   GetTileDataHighT1: CGB latches TILE_SEL, tile data address
-    ///   GetTileDataHighT2: reads high byte of tile data from VRAM
-    ///   Push: pushes 8 pixels to BG FIFO (stalls if FIFO not empty)
+    /// The fetcher has a 6-dot cycle (T1,T2,LowT1,LowT2,HighT1,HighT2)
+    /// plus a Push wait state that stalls when the FIFO is full.
+    /// cycle_tick tracks the 6-dot phase independently of Push stalls.
     fn tick_bg_fetcher(&mut self) {
+        // Track 6-dot cycle phase for sprite alignment. Increments every
+        // tick including Push stalls — on hardware the fetcher's cycle
+        // counter advances continuously regardless of FIFO state.
+        self.fetcher.cycle_tick = (self.fetcher.cycle_tick + 1) % 6;
         match self.fetcher.state {
             super::FetcherState::GetTileT1 => {
                 // CGB (≥CGB-D): latch registers at T1

@@ -127,6 +127,9 @@ struct Fetcher {
     /// CGB: BG map address latched at GetTileT1
     /// (cached at GET_TILE T1, used at T2 for VRAM read)
     latched_map_addr: usize,
+    /// Tick counter modulo 6: tracks position in the 6-dot fetch cycle
+    /// independent of Push stalls. Used for sprite alignment penalty.
+    cycle_tick: u8,
 }
 
 impl Fetcher {
@@ -144,6 +147,7 @@ impl Fetcher {
             fetcher_y: 0,
             latched_tile_sel: false,
             latched_map_addr: 0,
+            cycle_tick: 0,
         }
     }
 
@@ -160,6 +164,7 @@ impl Fetcher {
         self.fetcher_y = 0;
         self.latched_tile_sel = false;
         self.latched_map_addr = 0;
+        self.cycle_tick = 0;
     }
 }
 
