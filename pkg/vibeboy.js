@@ -108,6 +108,14 @@ export class WasmEmulator {
         return ret !== 0;
     }
     /**
+     * Returns true if the cartridge has a rumble motor (MBC5+Rumble).
+     * @returns {boolean}
+     */
+    has_rumble() {
+        const ret = wasm.wasmemulator_has_rumble(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @returns {number}
      */
     height() {
@@ -189,6 +197,14 @@ export class WasmEmulator {
      */
     resize_gpu(width, height) {
         wasm.wasmemulator_resize_gpu(this.__wbg_ptr, width, height);
+    }
+    /**
+     * Returns true if the rumble motor is currently active.
+     * @returns {boolean}
+     */
+    rumble_active() {
+        const ret = wasm.wasmemulator_rumble_active(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Get cartridge save RAM as bytes (for persisting to localStorage).
@@ -1240,7 +1256,7 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 244, function: Function { arguments: [Externref], shim_idx: 245, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 247, function: Function { arguments: [Externref], shim_idx: 248, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen_998a1f080b72a94d___closure__destroy___dyn_core_1d30e4ad3f208054___ops__function__FnMut__wasm_bindgen_998a1f080b72a94d___JsValue____Output___core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___, wasm_bindgen_998a1f080b72a94d___convert__closures_____invoke___wasm_bindgen_998a1f080b72a94d___JsValue__core_1d30e4ad3f208054___result__Result_____wasm_bindgen_998a1f080b72a94d___JsError___true_);
             return ret;
         },
