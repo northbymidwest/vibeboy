@@ -63,26 +63,39 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 # Voronoi diffusion rasterizer
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format diffusion --scale 4
 
+# Apply any scaling filter (same names as SDL --filter)
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter hq4x --scale 4
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter vectorize-gpu --scale 4
+
+# Use GPU shader for the filter
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter vectorize-legacy --scale 4 --gpu
+
 # Simulate button presses (frame:button pairs)
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 --keys "100:start,200:a"
 ```
 
 ### Vectorize Command
 
-Vectorize a standalone PNG image using the Kopf-Lischinski algorithm.
+Vectorize a standalone PNG image. Uses `--filter` to select the vectorize pipeline variant and `--cpu-filter` to force CPU-only rendering.
 
 ```bash
-# Vectorize to SVG
+# Vectorize to SVG (filter doesn't matter for SVG output)
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
 
-# Vectorize and rasterize at 8x scale (default 4x)
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8
+# Shared-chain vectorize at 8x scale (default filter: vectorize)
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8
 
-# Different rasterizer formats: raster (default), diffusion, spline-diffusion
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8
+# GPU vectorize pipeline (CPU fallback)
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-gpu --scale 8
 
-# Use GPU rasterizer (spline-diffusion only)
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8 --gpu
+# Spline-diffusion rasterizer
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-spline-diffusion --scale 8
+
+# Legacy vectorize with GPU rasterizer
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-legacy --scale 8 --gpu
+
+# Force CPU-only (no GPU shaders)
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 4 --cpu-filter
 ```
 
 ### Other Commands

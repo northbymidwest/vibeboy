@@ -85,9 +85,10 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 
 # Vectorize a standalone PNG image
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --format raster --scale 8
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --format spline-diffusion --scale 8 --gpu
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter raster --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8 --gpu
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8 --cpu-filter
 
 # Force a specific model
 cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
@@ -124,7 +125,7 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 ### Memory ownership
 - VRAM (2 banks), OAM (160 bytes) -> owned by `Ppu`
 - WRAM (8 banks), HRAM, IO registers -> owned by `Bus`
-- Cart ROM/RAM -> owned by `Cartridge` trait objects in `Bus`
+- Cart ROM/RAM -> owned by `Cartridge` trait objects in `Bus`. MBC5+Rumble supported with haptic feedback across SDL (set_rumble), Cocoa (CoreHaptics), and web (vibrationActuator).
 
 ### SGB subsystem
 - `sgb.rs`: HLE command processing (palettes, attributes, borders, masking)
@@ -155,8 +156,9 @@ Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
 - `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum (38 filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 16 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `xbr`, `xbrz`.
-- `gpu_pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
+- `mod.rs`: `ScaleFilter` enum (41+ filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 19 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu_cpu`, `xbr`, `xbrz`. Available on all platforms (no longer gated behind `not(wasm32)`).
+- `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
+- `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
 - `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
 
 ### Printer (`src/printer.rs`)
@@ -165,20 +167,21 @@ Unified Game Boy Printer implementation with `PrintOutput` enum:
 - `PrintOutput::Memory` -- queues completed prints as RGBA pixel data in memory (used by WebAssembly frontend for browser download)
 
 ### Save states (`src/savestate.rs`, `src/snapshot.rs`)
-- `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state, rewind ring buffer (VecDeque)
+- `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state, rewind with reverse-delta compression (~10-minute capacity at ~21MB). Rewind plays at 3x speed with reverse audio.
 - `savestate.rs`: Serialization via serde + bincode with magic header (`VIBEBOY\0`), layout version hash for compatibility detection. Produces/consumes `Vec<u8>` that frontends write as `rom.N.ss` files (native) or localStorage (web).
 
 ### Frontends (`src/frontends/`)
 
 **SDL3 frontend** (`src/frontends/sdl/`):
-- `main.rs`: SDL3 window loop, audio callback, input handling, file dialog
+- `main.rs`: SDL3 window loop, audio callback, input handling, file dialog. Supports `--runahead N` for reduced input latency and `--completions zsh/bash/fish/powershell` for shell completions (via clap_complete).
 - `render.rs`: GPU rendering via `GpuPipelines` (SDL3 GPU API)
-- `input.rs`: Keyboard/gamepad input mapping
+- `input.rs`: Keyboard/gamepad input mapping. Backspace=Rewind, Tab=Fast-forward, gamepad L1=Rewind, R1=Fast-forward.
 - `camera.rs`: SDL3 webcam capture for Game Boy Camera
 - `accel.rs`: Accelerometer input for MBC7
+- Rumble: MBC5+Rumble cartridge support with gamepad haptic feedback (SDL set_rumble)
 
 **Cocoa frontend** (`src/frontends/cocoa/`):
-- `main.rs`: Native macOS Cocoa event loop, Metal rendering
+- `main.rs`: Native macOS Cocoa event loop, Metal rendering. Uses logical points for Metal drawable size (not Retina backing pixels). CoreHaptics rumble support for MBC5+Rumble.
 - `metal_renderer.rs`: Metal GPU compute pipeline for all filters including the 6-stage vectorize pipeline, GPU scanline rasterizer, diffusion rasterizer, and spline-diffusion 2-pass pipeline
 - `vectorize_metal.rs`: `MetalVectorizePipeline` -- Metal-native full GPU vectorize (similarity graph through rasterization)
 - `menu.rs`: Native macOS menu bar (File, Emulation, Filter, Help)
@@ -196,16 +199,16 @@ Unified Game Boy Printer implementation with `PrintOutput` enum:
 - `menu.rs`: Native menu integration
 
 **WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/index.html`):
-- `lib.rs`: Library crate re-exporting core emulator modules. Gates `printer`, `scaling`, `vectorize` behind `#[cfg(not(wasm32))]`. Exposes `wgpu_vectorize` for the `web` feature.
-- `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence.
-- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU rendering with all GPU filters (vectorize, OmniScale, HQx, xBR, xBRZ, Super xBR, EPX, Eagle, Scale3x, bicubic, AA nearest) via filter dropdown, model select dropdown, built-in ROM selector with public domain games, gamepad support (Gamepad API), accelerometer (DeviceMotion API for MBC7), frame-rate independent emulation (~59.73fps via time accumulator), AudioWorklet at native 96kHz, webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, favicon.
+- `lib.rs`: Library crate re-exporting core emulator modules. Exposes `wgpu_vectorize` for the `web` feature. `scaling` module available on all platforms (no longer gated behind `not(wasm32)`).
+- `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence. Rumble support via vibrationActuator.
+- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU rendering with all GPU filters (vectorize, OmniScale, HQx, xBR, xBRZ, Super xBR, EPX, Eagle, Scale3x, bicubic, AA nearest) via filter dropdown, model select dropdown, built-in ROM selector with public domain games, gamepad support (Gamepad API, L1=Rewind, R1=Fast-forward), accelerometer (DeviceMotion API for MBC7), frame-rate independent emulation (~59.73fps via time accumulator), AudioWorklet at native 96kHz with reverse/downsample audio processing, rewind (Backspace) and fast-forward (Tab), webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, favicon.
 
 ### GPU shaders (`src/shaders/`)
 
 All shaders are compute shaders authored in GLSL 4.50. Fragment shaders have been removed; all scaling filters now use compute pipelines.
 
 **Compute shaders (scaling filters):**
-- `aa_nearest.comp`, `bicubic.comp`, `eagle.comp`, `epx.comp`, `hqx.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
+- `aa_nearest.comp`, `bicubic.comp`, `dcci.comp`, `eagle.comp`, `edi.comp`, `epx.comp`, `hqx.comp`, `lcd_grid.comp`, `mmpx.comp`, `nedi.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
 
 **Compute shaders (rasterization):**
 - `vectorize_raster.comp`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
@@ -335,7 +338,8 @@ The project produces four native binaries plus a WebAssembly library:
 
 - Models are `GbModel` enum in `model.rs`. Use `model.is_cgb()` to check CGB/AGB, `model.is_sgb()` for SGB/SGB2
 - Double-speed mode: `bus_cycles = cpu_cycles / 2` -- Bus handles this in `tick_mcycle()`
-- Snapshots (`snapshot.rs`) support rewind (VecDeque ring buffer) and save states (F5/F7, slots 1-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
+- Snapshots (`snapshot.rs`) support rewind (reverse-delta compression, ~10-minute capacity at ~21MB, 3x playback with reverse audio) and save states (F5/F7, slots 1-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
+- Fast-forward audio: all frontends downsample 4x audio through a Blackman-windowed sinc FIR filter. Rewind has reverse audio with the same filter.
 - OAM DMA is instant (0xA0 byte copy); HDMA mode 0 instant, mode 1 per-HBlank
 - Boot ROMs are in `bootroms/` directory; test runner loads them with `--boot` flag
 - DMG models use classic green Game Boy LCD palette (shades: `#9BBC0F`, `#8BAC0F`, `#306230`, `#0F380F`)
