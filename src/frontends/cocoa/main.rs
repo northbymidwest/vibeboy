@@ -14,19 +14,22 @@ mod vectorize_metal;
 use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use objc2::{class, msg_send, sel, ClassType};
+use objc2::{msg_send, sel, MainThreadOnly};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSWindow};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSControlStateValueOff,
+    NSControlStateValueOn, NSEventMask, NSEventType, NSWindow, NSWindowStyleMask,
+};
+use objc2_foundation::{
+    MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString,
+};
 use objc2_metal::*;
 
 use ui_util::{frame_duration, parse_filter};
@@ -191,11 +194,15 @@ fn main() {
                 Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
             // Set checkmark on printer menu item
-            let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
-            let emu_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
-            let emu_submenu: *mut AnyObject = msg_send![emu_menu_item, submenu];
-            let printer_menu_item: *mut AnyObject = msg_send![emu_submenu, itemWithTag: MENU_TAG_PRINTER];
-            let _: () = msg_send![printer_menu_item, setState: 1isize];
+            if let Some(main_menu) = app.mainMenu() {
+                if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
+                    if let Some(emu_submenu) = emu_menu_item.submenu() {
+                        if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
+                            printer_menu_item.setState(NSControlStateValueOn);
+                        }
+                    }
+                }
+            }
         }
 
         // Scaling filter
@@ -235,22 +242,24 @@ fn main() {
         let mut renderer = MetalRenderer::new(tex_w, tex_h);
 
         // ── Window ───────────────────────────────────────────────────────────
-        // NSWindowStyleMask: Titled=1, Closable=2, Miniaturizable=4, Resizable=8
-        let style: usize = 1 | 2 | 4 | 8;
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
 
-        let window: *mut AnyObject = msg_send![class!(NSWindow), alloc];
-        let window: *mut AnyObject = msg_send![window,
-            initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w as f64, win_h as f64))
-            styleMask: style
-            backing: 2usize  // NSBackingStoreBuffered
-            defer: false
-        ];
+        let window = NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w as f64, win_h as f64)),
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        );
 
         let title_str = format!("VibeBoy \u{2014} {}",
             current_rom_path.file_name().unwrap_or_default().to_string_lossy());
         let title = NSString::from_str(&title_str);
-        let _: () = msg_send![window, setTitle: &*title];
-        let _: () = msg_send![window, center];
+        window.setTitle(&title);
+        window.center();
 
         // Create a custom NSView subclass that suppresses key repeat sounds
         {
@@ -260,27 +269,28 @@ fn main() {
                 let mut builder = ClassBuilder::new(class_name, superclass).unwrap();
                 unsafe extern "C" fn accepts_first_responder(_this: *mut AnyObject, _sel: Sel) -> Bool { Bool::YES }
                 unsafe extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) { /* swallow */ }
-                unsafe {
-                    builder.add_method(sel!(acceptsFirstResponder), accepts_first_responder as unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool);
-                    builder.add_method(sel!(keyDown:), key_down as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
-                }
+                builder.add_method(sel!(acceptsFirstResponder), accepts_first_responder as unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool);
+                builder.add_method(sel!(keyDown:), key_down as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
                 let _ = builder.register();
             }
             let game_view_class = AnyClass::get(class_name).unwrap();
-            let content_rect: NSRect = msg_send![window, frame];
+            let content_rect = window.frame();
             let game_view: *mut AnyObject = msg_send![game_view_class, alloc];
             let game_view: *mut AnyObject = msg_send![game_view, initWithFrame: content_rect];
-            let _: () = msg_send![window, setContentView: game_view];
-            let _: () = msg_send![window, makeFirstResponder: game_view];
+            // Cast to NSView for typed setContentView/makeFirstResponder
+            let game_view_ref: &objc2_app_kit::NSView = &*(game_view as *const objc2_app_kit::NSView);
+            window.setContentView(Some(game_view_ref));
+            window.makeFirstResponder(Some(game_view_ref));
         }
 
         // Attach Metal layer to content view
-        let content_view: *mut AnyObject = msg_send![window, contentView];
-        let _: () = msg_send![content_view, setWantsLayer: true];
+        let content_view = window.contentView().expect("window must have a content view");
+        content_view.setWantsLayer(true);
 
         // Set the Metal layer
-        let raw_layer: *mut AnyObject = Retained::as_ptr(&renderer.layer) as *mut AnyObject;
-        let _: () = msg_send![content_view, setLayer: raw_layer];
+        use objc2_quartz_core::CALayer;
+        let layer_ref: &CALayer = &renderer.layer;
+        content_view.setLayer(Some(layer_ref));
 
         // Set drawable size to logical points
         renderer.layer.setDrawableSize(NSSize::new(
@@ -288,7 +298,7 @@ fn main() {
             win_h as f64,
         ));
 
-        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        window.makeKeyAndOrderFront(None);
         app.activateIgnoringOtherApps(true);
 
         // ── Audio ────────────────────────────────────────────────────────────
@@ -321,36 +331,31 @@ fn main() {
         let mut fps_counter = ui_util::FpsCounter::new();
         let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
 
-        let mode = NSString::from_str("kCFRunLoopDefaultMode");
-
         'running: loop {
             let _pool = objc2_foundation::NSAutoreleasePool::new();
 
             // Poll events
             loop {
-                let event: *mut AnyObject = msg_send![&*app,
-                    nextEventMatchingMask: u64::MAX
-                    untilDate: std::ptr::null::<AnyObject>() // don't wait
-                    inMode: &*mode
-                    dequeue: true
-                ];
-
-                if event.is_null() {
+                let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    NSEventMask::Any,
+                    None, // don't wait
+                    NSDefaultRunLoopMode,
+                    true,
+                ) else {
                     break;
-                }
+                };
 
-                let event_type: u64 = msg_send![event, type];
-                // NSKeyDown=10, NSKeyUp=11, NSFlagsChanged=12
-                let keycode: u16 = if event_type == 10
-                    || event_type == 11
-                    || event_type == 12
+                let event_type = event.r#type();
+                let keycode: u16 = if event_type == NSEventType::KeyDown
+                    || event_type == NSEventType::KeyUp
+                    || event_type == NSEventType::FlagsChanged
                 {
-                    msg_send![event, keyCode]
+                    event.keyCode()
                 } else {
                     0
                 };
 
-                if event_type == 10 { // NSKeyDown
+                if event_type == NSEventType::KeyDown {
                     if keycode == K_ESCAPE {
                         break 'running;
                     }
@@ -369,7 +374,7 @@ fn main() {
                     if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, true);
                     }
-                } else if event_type == 11 { // NSKeyUp
+                } else if event_type == NSEventType::KeyUp {
                     keys_down.remove(&keycode);
                     if let Some(btn) = key_map.get(&keycode).copied() {
                         emu.set_button(btn, false);
@@ -377,7 +382,7 @@ fn main() {
                 }
 
                 // Always dispatch events so menus and window chrome work
-                let _: () = msg_send![&*app, sendEvent: event];
+                app.sendEvent(&event);
             }
 
             // ── Handle menu actions ──────────────────────────────────────────
@@ -390,7 +395,7 @@ fn main() {
                             let title_str = format!("VibeBoy \u{2014} {}",
                                 path.file_name().unwrap_or_default().to_string_lossy());
                             let title = NSString::from_str(&title_str);
-                            let _: () = msg_send![window, setTitle: &*title];
+                            window.setTitle(&title);
                             add_recent_rom(&path.to_string_lossy());
                             rebuild_recent_menu(mtm, &app, &load_recent_roms());
                             current_rom = rom_data;
@@ -408,13 +413,16 @@ fn main() {
                 if actions.pause_toggle {
                     paused = !paused;
                     eprintln!("{}", if paused { "Paused" } else { "Resumed" });
-                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
-                    let emu_menu: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
-                    let submenu: *mut AnyObject = msg_send![emu_menu, submenu];
-                    let pause_item: *mut AnyObject = msg_send![submenu, itemWithTag: MENU_TAG_PAUSE];
-                    let label = if paused { "Resume" } else { "Pause" };
-                    let label_ns = NSString::from_str(label);
-                    let _: () = msg_send![pause_item, setTitle: &*label_ns];
+                    if let Some(main_menu) = app.mainMenu() {
+                        if let Some(emu_menu) = main_menu.itemAtIndex(3) {
+                            if let Some(submenu) = emu_menu.submenu() {
+                                if let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE) {
+                                    let label = if paused { "Resume" } else { "Pause" };
+                                    pause_item.setTitle(&NSString::from_str(label));
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if actions.reset {
@@ -478,22 +486,30 @@ fn main() {
                         eprintln!("Game Boy Printer connected");
                     }
                     // Update checkmark
-                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
-                    let emu_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 3isize];
-                    let emu_submenu: *mut AnyObject = msg_send![emu_menu_item, submenu];
-                    let printer_menu_item: *mut AnyObject = msg_send![emu_submenu, itemWithTag: MENU_TAG_PRINTER];
-                    let state: isize = if !is_printer { 1 } else { 0 };
-                    let _: () = msg_send![printer_menu_item, setState: state];
+                    if let Some(main_menu) = app.mainMenu() {
+                        if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
+                            if let Some(emu_submenu) = emu_menu_item.submenu() {
+                                if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
+                                    let state = if !is_printer { NSControlStateValueOn } else { NSControlStateValueOff };
+                                    printer_menu_item.setState(state);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if actions.toggle_fps {
                     show_fps_overlay = !show_fps_overlay;
-                    let main_menu: *mut AnyObject = msg_send![&*app, mainMenu];
-                    let view_menu_item: *mut AnyObject = msg_send![main_menu, itemAtIndex: 4isize];
-                    let view_submenu: *mut AnyObject = msg_send![view_menu_item, submenu];
-                    let fps_item: *mut AnyObject = msg_send![view_submenu, itemWithTag: MENU_TAG_SHOW_FPS];
-                    let state: isize = if show_fps_overlay { 1 } else { 0 };
-                    let _: () = msg_send![fps_item, setState: state];
+                    if let Some(main_menu) = app.mainMenu() {
+                        if let Some(view_menu_item) = main_menu.itemAtIndex(4) {
+                            if let Some(view_submenu) = view_menu_item.submenu() {
+                                if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
+                                    let state = if show_fps_overlay { NSControlStateValueOn } else { NSControlStateValueOff };
+                                    fps_item.setState(state);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if actions.open_controls {
@@ -508,7 +524,7 @@ fn main() {
                             let title_str = format!("VibeBoy \u{2014} {}",
                                 path.file_name().unwrap_or_default().to_string_lossy());
                             let title = NSString::from_str(&title_str);
-                            let _: () = msg_send![window, setTitle: &*title];
+                            window.setTitle(&title);
                             add_recent_rom(path_str);
                             rebuild_recent_menu(mtm, &app, &load_recent_roms());
                             current_rom = rom_data;
@@ -533,8 +549,7 @@ fn main() {
             }
 
             // Check if window was closed
-            let visible: bool = msg_send![window, isVisible];
-            if !visible {
+            if !window.isVisible() {
                 break 'running;
             }
 
@@ -627,15 +642,12 @@ fn main() {
             }
 
             // ── Check occlusion ──────────────────────────────────────────
-            let occluded = unsafe {
-                let ns_win = &*(window as *const objc2_app_kit::NSWindow);
-                !ns_win.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible)
-            };
+            let occluded = !window.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible);
 
             // ── Update drawable size on resize ─────────────────────────────
             let (disp_w, disp_h);
             {
-                let bounds: NSRect = msg_send![content_view, bounds];
+                let bounds = content_view.bounds();
                 disp_w = bounds.size.width as usize;
                 disp_h = bounds.size.height as usize;
                 if !occluded {
