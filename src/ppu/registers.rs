@@ -165,10 +165,10 @@ impl Ppu {
                 self.stat = (self.stat & 0x07) | (val & 0x78);
                 if self.lcdc & 0x80 != 0 {
                     if self.cgb_mode {
-                        // CGB: STAT writes re-evaluate IRQ, but mode sources
-                        // (bits 3-5) are suppressed during mode 2/3. Only LYC
-                        // source (bit 6) triggers during mode 2/3.
-                        self.update_stat_irq_on_write();
+                        // CGB: STAT writes go through the normal IRQ update path.
+                        // No blanket mode suppression — the normal edge detection
+                        // via mode_for_interrupt handles which sources fire.
+                        self.update_stat_irq();
                     } else {
                         // DMG STAT write glitch (Pan Docs): behaves as if $FF
                         // is written for one cycle, then the real value takes

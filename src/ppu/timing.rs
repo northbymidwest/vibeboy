@@ -117,11 +117,8 @@ impl Ppu {
                     self.vram_accessible = false;
                     self.vram_write_accessible = false;
                     self.init_fifo();
-                    if self.cgb_mode {
-                        self.mode3_stat_dot = self.dot + 1;
-                    } else {
-                        self.stat = (self.stat & !0x03) | 0x03;
-                    }
+                    // STAT mode bits update immediately on both DMG and CGB
+                    self.stat = (self.stat & !0x03) | 0x03;
                     self.update_stat_irq();
                     // Run the first mode 3 tick on the transition dot itself.
                     // The 5T priming delay includes this dot as tick 1, so
@@ -130,11 +127,6 @@ impl Ppu {
                 }
             }
             3 => {
-                // CGB: delayed STAT mode bits update for Mode 2→3
-                if self.cgb_mode && self.mode3_stat_dot > 0 && self.dot >= self.mode3_stat_dot {
-                    self.mode3_stat_dot = 0;
-                    self.stat = (self.stat & !0x03) | 0x03;
-                }
                 // CGB: palette RAM blocked 3T after mode 3 start
                 if self.cgb_mode && !self.cgb_palettes_blocked && self.dot >= 87 {
                     self.cgb_palettes_blocked = true;
@@ -523,19 +515,7 @@ impl Ppu {
                     self.visible_ly = self.ly;
                 }
                 2 => {
-                    if self.ly == 144 && self.mode != 1 {
-                        // VBlank entry at dot 2: mode 0→1, VBlank IF.
-                        self.stat = (self.stat & !0x03) | 0x01;
-                        self.mode = 1;
-                        self.if_flags |= 0x01; // VBlank IF
-                        self.mode_for_interrupt = 1;
-                        self.oam_accessible = true;
-                        self.oam_write_accessible = true;
-                        self.vram_accessible = true;
-                        self.vram_write_accessible = true;
-                        self.lcd_first_frame = false;
-                        self.update_stat_irq();
-                    }
+                    // Idle
                 }
                 3 => {
                     // Clear ly_for_comparison briefly (creates coincidence gap)
@@ -562,6 +542,19 @@ impl Ppu {
                     // Line 153: start extended sequence
                     if self.ly == 153 {
                         self.line_153_phase = 1;
+                    }
+                    // VBlank entry at dot 4 (after ly_for_comparison set).
+                    if self.ly == 144 && self.mode != 1 {
+                        self.stat = (self.stat & !0x03) | 0x01;
+                        self.mode = 1;
+                        self.if_flags |= 0x01; // VBlank IF
+                        self.mode_for_interrupt = 1;
+                        self.oam_accessible = true;
+                        self.oam_write_accessible = true;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.lcd_first_frame = false;
+                        self.update_stat_irq();
                     }
                 }
                 5 => {
