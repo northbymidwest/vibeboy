@@ -24,6 +24,7 @@ pub use compute::{
     init_super_xbr_compute_pipeline, init_omniscale_legacy_compute_pipeline,
     init_edi_compute_pipeline, init_nedi_compute_pipeline, init_dcci_compute_pipeline,
     init_mmpx_compute_pipeline,
+    init_lcd_grid_compute_pipeline,
 };
 pub use screenshot::{
     gpu_screenshot,

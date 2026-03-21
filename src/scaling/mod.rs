@@ -8,6 +8,7 @@ pub mod eagle;
 pub mod edi;
 pub mod epx;
 pub mod hqx;
+pub mod lcd_grid;
 pub mod mmpx;
 pub mod nedi;
 pub mod omniscale;
@@ -150,6 +151,7 @@ pub enum ScaleFilter {
     Dcci,
     Edi,
     Mmpx,
+    LcdGrid,
     /// Arbitrary-resolution OmniScale (scales to display size).
     OmniScale,
     /// Arbitrary-resolution OmniScale legacy variant (scales to display size).
@@ -216,6 +218,7 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Dcci,             cli_name: "dcci",         display_name: "DCCI",           factor: 2 },
     FilterInfo { filter: ScaleFilter::Edi,              cli_name: "edi",          display_name: "EDI",            factor: 2 },
     FilterInfo { filter: ScaleFilter::Mmpx,             cli_name: "mmpx",         display_name: "MMPX",           factor: 2 },
+    FilterInfo { filter: ScaleFilter::LcdGrid,          cli_name: "lcd-grid",     display_name: "LCD Grid",       factor: 4 },
     FilterInfo { filter: ScaleFilter::OmniScale,        cli_name: "omniscale",    display_name: "OmniScale",      factor: 0 },
     FilterInfo { filter: ScaleFilter::OmniScaleLegacy,  cli_name: "omniscale-legacy", display_name: "OmniScale Legacy", factor: 0 },
     FilterInfo { filter: ScaleFilter::AaNearestNeighbor, cli_name: "aa-nearest",  display_name: "AA Nearest",     factor: 0 },
@@ -387,6 +390,10 @@ pub fn cpu_scale(
         ScaleFilter::Mmpx => {
             let s = mmpx::scale(src, sw, sh);
             (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::LcdGrid => {
+            let s = lcd_grid::scale(src, sw, sh, 4);
+            (s, sw as u32 * 4, sh as u32 * 4)
         }
         ScaleFilter::OmniScale => {
             let s = omniscale::scale_to(src, sw, sh, disp_w, disp_h);

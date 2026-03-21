@@ -26,6 +26,7 @@ pub enum WgpuScaleFilter {
     Nedi,
     Dcci,
     Mmpx,
+    LcdGrid,
 }
 
 impl WgpuScaleFilter {
@@ -47,6 +48,7 @@ impl WgpuScaleFilter {
             "nedi" => Some(Self::Nedi),
             "dcci" => Some(Self::Dcci),
             "mmpx" => Some(Self::Mmpx),
+            "lcd-grid" => Some(Self::LcdGrid),
             _ => None,
         }
     }
@@ -54,7 +56,7 @@ impl WgpuScaleFilter {
     pub fn all_names() -> &'static [&'static str] {
         &["nearest", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
           "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
-          "edi", "nedi", "dcci", "mmpx"]
+          "edi", "nedi", "dcci", "mmpx", "lcd-grid"]
     }
 
     /// For integer-scale filters, compute the native output dimensions.
@@ -64,6 +66,7 @@ impl WgpuScaleFilter {
             // Fixed 2x
             Self::Eagle | Self::SuperXbr
             | Self::Edi | Self::Nedi | Self::Dcci | Self::Mmpx => (src_w * 2, src_h * 2),
+            Self::LcdGrid => (src_w * 4, src_h * 4),
             // Fixed 3x
             Self::Scale3x => (src_w * 3, src_h * 3),
             // 2x/3x/4x — pick best integer fit
@@ -130,6 +133,7 @@ pub struct WgpuScalePipeline {
     nedi: wgpu::ComputePipeline,
     dcci: wgpu::ComputePipeline,
     mmpx: wgpu::ComputePipeline,
+    lcd_grid: wgpu::ComputePipeline,
     bufs: Option<ScaleBufs>,
 }
 
@@ -160,6 +164,7 @@ impl WgpuScalePipeline {
         let nedi_wgsl = include_str!(concat!(env!("OUT_DIR"), "/nedi_comp.wgsl"));
         let dcci_wgsl = include_str!(concat!(env!("OUT_DIR"), "/dcci_comp.wgsl"));
         let mmpx_wgsl = include_str!(concat!(env!("OUT_DIR"), "/mmpx_comp.wgsl"));
+        let lcd_grid_wgsl = include_str!(concat!(env!("OUT_DIR"), "/lcd_grid_comp.wgsl"));
 
         WgpuScalePipeline {
             epx: create_compute_pipeline(device, epx_wgsl, "epx"),
@@ -177,6 +182,7 @@ impl WgpuScalePipeline {
             nedi: create_compute_pipeline(device, nedi_wgsl, "nedi"),
             dcci: create_compute_pipeline(device, dcci_wgsl, "dcci"),
             mmpx: create_compute_pipeline(device, mmpx_wgsl, "mmpx"),
+            lcd_grid: create_compute_pipeline(device, lcd_grid_wgsl, "lcd_grid"),
             bufs: None,
         }
     }
@@ -199,6 +205,7 @@ impl WgpuScalePipeline {
             WgpuScaleFilter::Nedi => &self.nedi,
             WgpuScaleFilter::Dcci => &self.dcci,
             WgpuScaleFilter::Mmpx => &self.mmpx,
+            WgpuScaleFilter::LcdGrid => &self.lcd_grid,
         }
     }
 
@@ -277,7 +284,8 @@ impl WgpuScalePipeline {
         let iscale = out_w / src_w;
         let uni_data: [u32; 8] = match filter {
             WgpuScaleFilter::Epx | WgpuScaleFilter::Hqx
-            | WgpuScaleFilter::Xbr | WgpuScaleFilter::Xbrz => {
+            | WgpuScaleFilter::Xbr | WgpuScaleFilter::Xbrz
+            | WgpuScaleFilter::LcdGrid => {
                 [src_w, src_h, out_w, out_h, iscale, 0, 0, 0]
             }
             WgpuScaleFilter::OmniScale => {

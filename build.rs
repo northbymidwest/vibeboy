@@ -235,6 +235,14 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "lcd_grid.comp",
+        spv_name: "lcd_grid_comp.spv",
+        msl_name: "lcd_grid_comp.metal",
+        dxil_name: "lcd_grid_comp.dxil",
+        wgsl_name: "lcd_grid_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "mmpx.comp",
         spv_name: "mmpx_comp.spv",
         msl_name: "mmpx_comp.metal",

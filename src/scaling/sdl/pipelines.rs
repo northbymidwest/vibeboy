@@ -24,6 +24,7 @@ const SP_EDI: usize = 11;
 const SP_NEDI: usize = 12;
 const SP_DCCI: usize = 13;
 const SP_MMPX: usize = 14;
+const SP_LCD_GRID: usize = 15;
 
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
@@ -39,7 +40,7 @@ pub struct GpuPipelines {
     // All scaling filters now use compute pipelines instead.
 
     // Lazily-initialized compute pipelines (scaling filters)
-    scale_pipelines: [Option<gpu::ComputePipeline>; 15],
+    scale_pipelines: [Option<gpu::ComputePipeline>; 16],
 
     // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
@@ -163,6 +164,8 @@ impl GpuPipelines {
                 Some((SP_DCCI, super::init_dcci_compute_pipeline)),
             ScaleFilter::Mmpx =>
                 Some((SP_MMPX, super::init_mmpx_compute_pipeline)),
+            ScaleFilter::LcdGrid =>
+                Some((SP_LCD_GRID, super::init_lcd_grid_compute_pipeline)),
             _ => None,
         };
 
@@ -264,6 +267,7 @@ impl GpuPipelines {
             ScaleFilter::Nedi => SP_NEDI,
             ScaleFilter::Dcci => SP_DCCI,
             ScaleFilter::Mmpx => SP_MMPX,
+            ScaleFilter::LcdGrid => SP_LCD_GRID,
             _ => return,
         };
 
@@ -272,6 +276,7 @@ impl GpuPipelines {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr
             | ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci
             | ScaleFilter::Mmpx => (src_w * 2, src_h * 2),
+            ScaleFilter::LcdGrid => (src_w * 4, src_h * 4),
             ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
             ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),
             ScaleFilter::Scale4x => (src_w * 4, src_h * 4),
@@ -302,7 +307,8 @@ impl GpuPipelines {
                 f32::to_bits((sx * sx + sy * sy).sqrt())
             }
             ScaleFilter::Epx | ScaleFilter::Scale4x
-            | ScaleFilter::Hqx(_) | ScaleFilter::Xbr(_) | ScaleFilter::Xbrz(_) => {
+            | ScaleFilter::Hqx(_) | ScaleFilter::Xbr(_) | ScaleFilter::Xbrz(_)
+            | ScaleFilter::LcdGrid => {
                 out_w / src_w
             }
             _ => 0,
