@@ -5,7 +5,6 @@ mod audio;
 use clap::Parser;
 use gtk4::prelude::*;
 use gtk4::glib;
-use gilrs::{Gilrs, GamepadId, Button as GilButton, Axis as GilAxis};
 use model::GbModel;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -67,11 +66,8 @@ struct EmuState {
     _audio_stream: Option<cpal::Stream>,
     vec_cache: Option<vectorize::VectorizeCache>,
     frame_timer: Option<glib::SourceId>,
-    fps_count: u32,
-    fps_emu_total: Duration,
-    fps_timer: Instant,
-    gilrs: Option<Gilrs>,
-    active_gamepad: Option<GamepadId>,
+    fps: ui_util::FpsCounter,
+    gamepad: Option<ui_util::GamepadPoller>,
     model_override: Option<GbModel>,
     slow_tick: u32,
     sav_flusher: ui_util::SavFlusher,
@@ -96,23 +92,7 @@ fn main() {
 }
 
 fn load_boot_rom(model: GbModel, cli: &Cli) -> Option<Vec<u8>> {
-    if cli.no_boot {
-        return None;
-    }
-    if let Some(ref p) = cli.bootrom {
-        return std::fs::read(p).ok();
-    }
-    let path = match model {
-        GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
-        GbModel::Dmg => "bootroms/dmg_boot.bin",
-        GbModel::Mgb => "bootroms/mgb_boot.bin",
-        GbModel::Sgb => "bootroms/sgb_boot.bin",
-        GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
-        GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
-        GbModel::Cgb => "bootroms/cgb_boot.bin",
-        GbModel::Agb => "bootroms/cgb_agb_boot.bin",
-    };
-    std::fs::read(path).ok()
+    ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot)
 }
 
 fn create_emu_state(
@@ -127,19 +107,7 @@ fn create_emu_state(
         .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
     let boot_rom = load_boot_rom(model, cli);
 
-    eprintln!("\nControls:");
-    eprintln!("  Arrow keys  — D-pad         Gamepad D-pad / Left stick");
-    eprintln!("  Z / X       — B / A         Gamepad South / East");
-    eprintln!("  Enter       — Start         Gamepad Start");
-    eprintln!("  Right Shift — Select        Gamepad Back");
-    eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
-    eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
-    eprintln!("  Minus       — Slow motion   (hold for half speed)");
-    eprintln!("  Space       — Pause         (toggle)");
-    eprintln!("  Period      — Frame advance  (step one frame while paused)");
-    eprintln!("  F5 / F7     — Save / Load state");
-    eprintln!("  1-9         — Select state slot");
-    eprintln!("  Escape      — Quit");
+    ui_util::print_controls();
     if initial_filter != scaling::ScaleFilter::Nearest {
         eprintln!("  Filter: {:?}", initial_filter);
     }
@@ -190,11 +158,8 @@ fn create_emu_state(
         _audio_stream,
         vec_cache: None,
         frame_timer: None,
-        fps_count: 0,
-        fps_emu_total: Duration::ZERO,
-        fps_timer: Instant::now(),
-        gilrs: Gilrs::new().ok(),
-        active_gamepad: None,
+        fps: ui_util::FpsCounter::new(),
+        gamepad: ui_util::GamepadPoller::new(),
         model_override,
         slow_tick: 0,
         sav_flusher,
@@ -269,39 +234,23 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Filter submenu (grouped like Cocoa/Winit: HQx, xBR, xBRZ, Edge submenus)
     let filter_menu = gtk4::gio::Menu::new();
-    let hqx_menu = gtk4::gio::Menu::new();
-    let xbr_menu = gtk4::gio::Menu::new();
-    let xbrz_menu = gtk4::gio::Menu::new();
-    let edge_menu = gtk4::gio::Menu::new();
+    let mut sub_menus = std::collections::BTreeMap::new();
 
     for (display_name, filter) in scaling::ScaleFilter::menu_entries() {
-        let cli = filter.cli_name();
-        let action_name = format!("app.filter::{}", cli);
-        match filter {
-            scaling::ScaleFilter::Hqx(_) => {
-                hqx_menu.append(Some(display_name), Some(&action_name));
-            }
-            scaling::ScaleFilter::Xbr(_) | scaling::ScaleFilter::SuperXbr => {
-                xbr_menu.append(Some(display_name), Some(&action_name));
-            }
-            scaling::ScaleFilter::Xbrz(_) => {
-                xbrz_menu.append(Some(display_name), Some(&action_name));
-            }
-            scaling::ScaleFilter::Nedi
-            | scaling::ScaleFilter::Dcci
-            | scaling::ScaleFilter::Edi => {
-                edge_menu.append(Some(display_name), Some(&action_name));
-            }
-            _ => {
-                filter_menu.append(Some(display_name), Some(&action_name));
-            }
+        let action_name = format!("app.filter::{}", filter.cli_name());
+        let group = filter.menu_group();
+        if group == scaling::FilterMenuGroup::Main {
+            filter_menu.append(Some(display_name), Some(&action_name));
+        } else {
+            sub_menus.entry(group.label())
+                .or_insert_with(gtk4::gio::Menu::new)
+                .append(Some(display_name), Some(&action_name));
         }
     }
     let sub_section = gtk4::gio::Menu::new();
-    sub_section.append_submenu(Some("HQx"), &hqx_menu);
-    sub_section.append_submenu(Some("xBR"), &xbr_menu);
-    sub_section.append_submenu(Some("xBRZ"), &xbrz_menu);
-    sub_section.append_submenu(Some("Edge Detect"), &edge_menu);
+    for (label, submenu) in &sub_menus {
+        sub_section.append_submenu(Some(label), submenu);
+    }
     filter_menu.append_section(None, &sub_section);
     menu.append_submenu(Some("Filter"), &filter_menu);
 
@@ -395,7 +344,23 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         };
 
                         // Poll gamepad
-                        poll_gamepad(st);
+                        if let Some(ref mut gp) = st.gamepad {
+                            let gs = gp.poll();
+                            // Merge gamepad buttons with keyboard
+                            let old = st.gp_buttons;
+                            st.gp_buttons = gs.buttons;
+                            let pressed = gs.buttons & !old;
+                            let released = old & !gs.buttons;
+                            for bit in 0..8u8 {
+                                let mask = 1 << bit;
+                                if pressed & mask != 0 { st.emu.set_button(mask, true); }
+                                if released & mask != 0 && st.kb_buttons & mask == 0 {
+                                    st.emu.set_button(mask, false);
+                                }
+                            }
+                            if gs.rewind { st.emu.set_rewinding(true); }
+                            st.fast_forward = st.fast_forward || gs.fast_forward;
+                        }
 
                         if st.emu.is_rewinding() {
                             let mut all_audio = Vec::new();
@@ -461,18 +426,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             let emu_elapsed = emu_start.elapsed();
 
                             // FPS counter
-                            st.fps_count += frames_stepped;
-                            st.fps_emu_total += emu_elapsed;
-                            let fps_elapsed = st.fps_timer.elapsed();
-                            if fps_elapsed >= Duration::from_secs(1) {
-                                let fps = st.fps_count as f64 / fps_elapsed.as_secs_f64();
-                                let avg_emu_ms = st.fps_emu_total.as_secs_f64() * 1000.0
-                                    / st.fps_count as f64;
-                                eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
-                                st.fps_count = 0;
-                                st.fps_emu_total = Duration::ZERO;
-                                st.fps_timer = Instant::now();
-                            }
+                            st.fps.update(frames_stepped, emu_elapsed);
 
                             // Periodic save RAM flush
                             st.sav_flusher.poll(&st.emu);
@@ -637,11 +591,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 }
                 gtk4::gdk::Key::F5 => {
                     let slot = st.current_slot;
-                    save_state(st, slot);
+                    ui_util::save_state_to_slot(&mut st.emu, &st.rom_path, slot);
                 }
                 gtk4::gdk::Key::F7 => {
                     let slot = st.current_slot;
-                    load_state(st, slot);
+                    ui_util::load_state_from_slot(&mut st.emu, &st.rom_path, slot);
                 }
                 gtk4::gdk::Key::space => {
                     st.paused = !st.paused;
@@ -769,7 +723,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     let mut st = state_save.borrow_mut();
                     if let Some(st) = st.as_mut() {
                         let slot = slot_num - 1;
-                        save_state(st, slot);
+                        ui_util::save_state_to_slot(&mut st.emu, &st.rom_path, slot);
                     }
                 }
             }
@@ -789,7 +743,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     let mut st = state_load.borrow_mut();
                     if let Some(st) = st.as_mut() {
                         let slot = slot_num - 1;
-                        load_state(st, slot);
+                        ui_util::load_state_from_slot(&mut st.emu, &st.rom_path, slot);
                     }
                 }
             }
@@ -928,111 +882,3 @@ fn key_to_button(keyval: gtk4::gdk::Key) -> Option<u8> {
     }
 }
 
-fn save_state(st: &mut EmuState, slot: usize) {
-    st.emu.save_state(slot);
-    if let Some(data) = st.emu.save_state_to_bytes(slot) {
-        let path = st.rom_path.with_extension(format!("{}.ss", slot + 1));
-        match std::fs::write(&path, &data) {
-            Ok(_) => eprintln!("State saved to slot {} ({})", slot + 1, path.display()),
-            Err(e) => eprintln!("Save failed: {}", e),
-        }
-    }
-}
-
-fn load_state(st: &mut EmuState, slot: usize) {
-    if !st.emu.load_state(slot) {
-        let path = st.rom_path.with_extension(format!("{}.ss", slot + 1));
-        if let Ok(data) = std::fs::read(&path) {
-            if st.emu.load_state_from_bytes(slot, &data) {
-                eprintln!("State loaded from disk: {}", path.display());
-            }
-        } else {
-            eprintln!("Slot {} is empty", slot + 1);
-        }
-    }
-}
-
-fn poll_gamepad(st: &mut EmuState) {
-    let gilrs = match st.gilrs.as_mut() {
-        Some(g) => g,
-        None => return,
-    };
-
-    // Drain events to detect connections
-    while let Some(ev) = gilrs.next_event() {
-        match ev.event {
-            gilrs::EventType::Connected => {
-                if st.active_gamepad.is_none() {
-                    st.active_gamepad = Some(ev.id);
-                    eprintln!("Gamepad connected: {}", gilrs.gamepad(ev.id).name());
-                }
-            }
-            gilrs::EventType::Disconnected => {
-                if st.active_gamepad == Some(ev.id) {
-                    st.active_gamepad = None;
-                    eprintln!("Gamepad disconnected");
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let gp_id = match st.active_gamepad {
-        Some(id) => id,
-        None => {
-            st.gp_buttons = 0;
-            return;
-        }
-    };
-
-    let gp = gilrs.gamepad(gp_id);
-    const DEADZONE: f32 = 0.3;
-
-    let gp_map: &[(GilButton, u8)] = &[
-        (GilButton::East,      emulator::Emulator::BTN_A),
-        (GilButton::South,     emulator::Emulator::BTN_B),
-        (GilButton::Start,     emulator::Emulator::BTN_START),
-        (GilButton::Select,    emulator::Emulator::BTN_SELECT),
-        (GilButton::DPadUp,    emulator::Emulator::BTN_UP),
-        (GilButton::DPadDown,  emulator::Emulator::BTN_DOWN),
-        (GilButton::DPadLeft,  emulator::Emulator::BTN_LEFT),
-        (GilButton::DPadRight, emulator::Emulator::BTN_RIGHT),
-    ];
-
-    // Left stick
-    let lx = gp.axis_data(GilAxis::LeftStickX).map_or(0.0, |a| a.value());
-    let ly = gp.axis_data(GilAxis::LeftStickY).map_or(0.0, |a| a.value());
-
-    let mut gp_bits: u8 = 0;
-    for &(gb, btn) in gp_map {
-        if gp.is_pressed(gb) {
-            gp_bits |= btn;
-        }
-    }
-    // Left stick → D-pad
-    if lx < -DEADZONE { gp_bits |= emulator::Emulator::BTN_LEFT; }
-    if lx > DEADZONE  { gp_bits |= emulator::Emulator::BTN_RIGHT; }
-    if ly < -DEADZONE { gp_bits |= emulator::Emulator::BTN_DOWN; }
-    if ly > DEADZONE  { gp_bits |= emulator::Emulator::BTN_UP; }
-
-    // Update buttons (merged with keyboard)
-    let old = st.gp_buttons;
-    st.gp_buttons = gp_bits;
-    let pressed = gp_bits & !old;
-    let released = old & !gp_bits;
-    for bit in 0..8u8 {
-        let mask = 1 << bit;
-        if pressed & mask != 0 {
-            st.emu.set_button(mask, true);
-        }
-        if released & mask != 0 && st.kb_buttons & mask == 0 {
-            st.emu.set_button(mask, false);
-        }
-    }
-
-    // Shoulders for rewind / fast-forward
-    if gp.is_pressed(GilButton::LeftTrigger) {
-        st.emu.set_rewinding(true);
-    }
-    st.fast_forward = st.fast_forward || gp.is_pressed(GilButton::RightTrigger);
-}

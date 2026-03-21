@@ -48,9 +48,7 @@ pub(super) struct App {
     current_slot: usize,
     src_w: u32,
     src_h: u32,
-    fps_timer: Instant,
-    fps_count: u32,
-    fps_emu_total: Duration,
+    fps: ui_util::FpsCounter,
     gilrs: Option<Gilrs>,
     active_gamepad: Option<GamepadId>,
     kb_buttons: u8,  // bitmask of keyboard-pressed buttons
@@ -95,9 +93,7 @@ impl App {
             current_slot: 0,
             src_w: GB_W,
             src_h: GB_H,
-            fps_timer: Instant::now(),
-            fps_count: 0,
-            fps_emu_total: Duration::ZERO,
+            fps: ui_util::FpsCounter::new(),
             gilrs: Gilrs::new().ok(),
             active_gamepad: None,
             kb_buttons: 0,
@@ -119,23 +115,7 @@ impl App {
             return;
         }
 
-        let boot_rom: Option<Vec<u8>> = if self.cli.no_boot {
-            None
-        } else if let Some(ref p) = self.cli.bootrom {
-            fs::read(p).ok()
-        } else {
-            let path = match self.model {
-                GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
-                GbModel::Dmg => "bootroms/dmg_boot.bin",
-                GbModel::Mgb => "bootroms/mgb_boot.bin",
-                GbModel::Sgb => "bootroms/sgb_boot.bin",
-                GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
-                GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
-                GbModel::Cgb => "bootroms/cgb_boot.bin",
-                GbModel::Agb => "bootroms/cgb_agb_boot.bin",
-            };
-            fs::read(path).ok()
-        };
+        let boot_rom = ui_util::load_boot_rom(self.model, self.cli.bootrom.as_deref(), self.cli.no_boot);
 
         let mut emu = Emulator::new(rom, boot_rom, self.model, None);
         ui_util::load_sav(&mut emu, path);
@@ -272,38 +252,14 @@ impl App {
 
                 for i in 1..=9 {
                     if other == slot_save_id(i) {
-                        if let Some(ref mut emu) = self.emu {
-                            emu.save_state(i - 1);
-                            if let (Some(rp), Some(data)) = (&self.rom_path, emu.save_state_to_bytes(i - 1)) {
-                                let path = rp.with_extension(format!("{}.ss", i));
-                                match std::fs::write(&path, &data) {
-                                    Ok(_) => eprintln!("State saved to slot {} ({})", i, path.display()),
-                                    Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", i, e),
-                                }
-                            } else {
-                                eprintln!("State saved to slot {}", i);
-                            }
+                        if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
+                            ui_util::save_state_to_slot(emu, rp, i - 1);
                         }
                         return;
                     }
                     if other == slot_load_id(i) {
-                        if let Some(ref mut emu) = self.emu {
-                            if emu.load_state(i - 1) {
-                                eprintln!("State loaded from slot {}", i);
-                            } else if let Some(ref rp) = self.rom_path {
-                                let path = rp.with_extension(format!("{}.ss", i));
-                                if let Ok(data) = std::fs::read(&path) {
-                                    if emu.load_state_from_bytes(i - 1, &data) {
-                                        eprintln!("State loaded from disk: {}", path.display());
-                                    } else {
-                                        eprintln!("Failed to load state from {}", path.display());
-                                    }
-                                } else {
-                                    eprintln!("Slot {} is empty", i);
-                                }
-                            } else {
-                                eprintln!("Slot {} is empty", i);
-                            }
+                        if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
+                            ui_util::load_state_from_slot(emu, rp, i - 1);
                         }
                         return;
                     }
@@ -446,17 +402,7 @@ impl App {
 
         // FPS counter
         let emu_time = self.frame_start.elapsed();
-        self.fps_count += 1;
-        self.fps_emu_total += emu_time;
-        let elapsed = self.fps_timer.elapsed();
-        if elapsed >= Duration::from_secs(1) {
-            let fps = self.fps_count as f64 / elapsed.as_secs_f64();
-            let avg_emu_ms = self.fps_emu_total.as_secs_f64() * 1000.0 / self.fps_count as f64;
-            eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
-            self.fps_count = 0;
-            self.fps_emu_total = Duration::ZERO;
-            self.fps_timer = Instant::now();
-        }
+        self.fps.update(1, emu_time);
 
         // Periodic save RAM flush
         if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
@@ -593,24 +539,13 @@ impl ApplicationHandler for App {
                                 event_loop.exit();
                             }
                             KeyCode::F5 => {
-                                if let Some(ref mut emu) = self.emu {
-                                    emu.save_state(self.current_slot);
-                                    eprintln!(
-                                        "State saved to slot {}",
-                                        self.current_slot + 1
-                                    );
+                                if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
+                                    ui_util::save_state_to_slot(emu, rp, self.current_slot);
                                 }
                             }
                             KeyCode::F7 => {
-                                if let Some(ref mut emu) = self.emu {
-                                    if emu.load_state(self.current_slot) {
-                                        eprintln!(
-                                            "State loaded from slot {}",
-                                            self.current_slot + 1
-                                        );
-                                    } else {
-                                        eprintln!("Slot {} is empty", self.current_slot + 1);
-                                    }
+                                if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
+                                    ui_util::load_state_from_slot(emu, rp, self.current_slot);
                                 }
                             }
                             KeyCode::Digit1 => self.current_slot = 0,

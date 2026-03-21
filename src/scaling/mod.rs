@@ -306,6 +306,40 @@ impl ScaleFilter {
             .filter(|e| e.filter != ScaleFilter::Scale2x)
             .map(|e| (e.display_name, e.filter))
     }
+
+    /// Which submenu group a filter belongs to, for building grouped menus.
+    pub fn menu_group(self) -> FilterMenuGroup {
+        match self {
+            ScaleFilter::Hqx(_) => FilterMenuGroup::Hqx,
+            ScaleFilter::Xbr(_) | ScaleFilter::SuperXbr => FilterMenuGroup::Xbr,
+            ScaleFilter::Xbrz(_) => FilterMenuGroup::Xbrz,
+            ScaleFilter::Nedi | ScaleFilter::Dcci | ScaleFilter::Edi => FilterMenuGroup::EdgeDetect,
+            _ => FilterMenuGroup::Main,
+        }
+    }
+}
+
+/// Submenu grouping for filter menus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterMenuGroup {
+    Main,
+    Hqx,
+    Xbr,
+    Xbrz,
+    EdgeDetect,
+}
+
+impl FilterMenuGroup {
+    /// Display name for the submenu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Main => "Filter",
+            Self::Hqx => "HQx",
+            Self::Xbr => "xBR",
+            Self::Xbrz => "xBRZ",
+            Self::EdgeDetect => "Edge Detect",
+        }
+    }
 }
 
 /// Apply a CPU scaling filter to a frame buffer.

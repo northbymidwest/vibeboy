@@ -140,26 +140,7 @@ fn main() {
         let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
         let frame_dur = frame_duration(model);
 
-        let boot_rom: Option<Vec<u8>> = if cli.no_boot {
-            None
-        } else if let Some(ref p) = cli.bootrom {
-            Some(fs::read(p).unwrap_or_else(|e| {
-                eprintln!("Failed to read boot ROM '{}': {}", p.display(), e);
-                std::process::exit(1);
-            }))
-        } else {
-            let path = match model {
-                GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
-                GbModel::Dmg => "bootroms/dmg_boot.bin",
-                GbModel::Mgb => "bootroms/mgb_boot.bin",
-                GbModel::Sgb => "bootroms/sgb_boot.bin",
-                GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
-                GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
-                GbModel::Cgb => "bootroms/cgb_boot.bin",
-                GbModel::Agb => "bootroms/cgb_agb_boot.bin",
-            };
-            fs::read(path).ok()
-        };
+        let boot_rom = ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot);
 
         if boot_rom.is_some() {
             eprintln!("Boot ROM loaded — executing boot sequence.");
@@ -187,16 +168,7 @@ fn main() {
             eprintln!("SNES program ROM loaded — SGB LLE mode active.");
         }
 
-        eprintln!("\nControls:");
-        eprintln!("  Arrow keys  — D-pad");
-        eprintln!("  Z / X       — A / B");
-        eprintln!("  Enter       — Start");
-        eprintln!("  Right Shift — Select");
-        eprintln!("  Backspace   — Rewind");
-        eprintln!("  Tab         — Fast forward (4x)");
-        eprintln!("  F5 / F7     — Save / Load state");
-        eprintln!("  1-9         — Select state slot");
-        eprintln!("  Escape      — Quit");
+        ui_util::print_controls();
         eprintln!();
 
         let mut current_rom = rom;
@@ -339,9 +311,7 @@ fn main() {
         let mut current_slot: usize = 0;
         let mut paused = false;
         let mut frame_start = Instant::now();
-        let mut fps_timer = Instant::now();
-        let mut fps_count = 0u32;
-        let mut fps_emu_total = Duration::ZERO;
+        let mut fps_counter = ui_util::FpsCounter::new();
         let mut bgra_buf: Vec<u32> = Vec::with_capacity((tex_w * tex_h) as usize);
 
         let mode = NSString::from_str("kCFRunLoopDefaultMode");
@@ -381,14 +351,9 @@ fn main() {
                     keys_down.insert(keycode);
 
                     if keycode == K_F5 {
-                        emu.save_state(current_slot);
-                        eprintln!("State saved to slot {}", current_slot + 1);
+                        ui_util::save_state_to_slot(&mut emu, &current_rom_path, current_slot);
                     } else if keycode == K_F7 {
-                        if emu.load_state(current_slot) {
-                            eprintln!("State loaded from slot {}", current_slot + 1);
-                        } else {
-                            eprintln!("Slot {} is empty", current_slot + 1);
-                        }
+                        ui_util::load_state_from_slot(&mut emu, &current_rom_path, current_slot);
                     } else if let Some(slot) = keycode_to_slot(keycode) {
                         current_slot = slot;
                         eprintln!("Slot {} selected", current_slot + 1);
@@ -454,33 +419,11 @@ fn main() {
                 }
 
                 if actions.save_state {
-                    emu.save_state(current_slot);
-                    if let Some(data) = emu.save_state_to_bytes(current_slot) {
-                        let path = current_rom_path.with_extension(format!("{}.ss", current_slot + 1));
-                        match std::fs::write(&path, &data) {
-                            Ok(_) => eprintln!("State saved to slot {} ({})", current_slot + 1, path.display()),
-                            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", current_slot + 1, e),
-                        }
-                    } else {
-                        eprintln!("State saved to slot {}", current_slot + 1);
-                    }
+                    ui_util::save_state_to_slot(&mut emu, &current_rom_path, current_slot);
                 }
 
                 if actions.load_state {
-                    if emu.load_state(current_slot) {
-                        eprintln!("State loaded from slot {}", current_slot + 1);
-                    } else {
-                        let path = current_rom_path.with_extension(format!("{}.ss", current_slot + 1));
-                        if let Ok(data) = std::fs::read(&path) {
-                            if emu.load_state_from_bytes(current_slot, &data) {
-                                eprintln!("State loaded from disk: {}", path.display());
-                            } else {
-                                eprintln!("Failed to load state from {}", path.display());
-                            }
-                        } else {
-                            eprintln!("Slot {} is empty", current_slot + 1);
-                        }
-                    }
+                    ui_util::load_state_from_slot(&mut emu, &current_rom_path, current_slot);
                 }
 
                 if let Some(slot) = actions.select_slot {
@@ -832,18 +775,9 @@ fn main() {
 
             // ── FPS counter ──────────────────────────────────────────────────
             let emu_time = frame_start.elapsed();
-            fps_count += 1;
-            fps_emu_total += emu_time;
-            let fps_elapsed = fps_timer.elapsed();
-            if fps_elapsed >= Duration::from_secs(1) {
-                let fps = fps_count as f64 / fps_elapsed.as_secs_f64();
-                let avg_emu_ms = fps_emu_total.as_secs_f64() * 1000.0 / fps_count as f64;
-                overlay_fps = fps;
-                overlay_emu_ms = avg_emu_ms;
-                eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
-                fps_count = 0;
-                fps_emu_total = Duration::ZERO;
-                fps_timer = Instant::now();
+            if let Some((f, ms)) = fps_counter.update(1, emu_time) {
+                overlay_fps = f;
+                overlay_emu_ms = ms;
             }
 
             // ── Periodic save RAM flush ──────────────────────────────────────

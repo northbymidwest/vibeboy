@@ -194,26 +194,7 @@ fn main() {
     let frame_dur = frame_duration(model);
 
     // Resolve boot ROM: explicit path, or auto-detect by model
-    let boot_rom: Option<Vec<u8>> = if cli.no_boot {
-        None
-    } else if let Some(ref p) = cli.bootrom {
-        Some(fs::read(p).unwrap_or_else(|e| {
-            eprintln!("Failed to read boot ROM '{}': {}", p.display(), e);
-            std::process::exit(1);
-        }))
-    } else {
-        let path = match model {
-            GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
-            GbModel::Dmg => "bootroms/dmg_boot.bin",
-            GbModel::Mgb => "bootroms/mgb_boot.bin",
-            GbModel::Sgb => "bootroms/sgb_boot.bin",
-            GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
-            GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
-            GbModel::Cgb => "bootroms/cgb_boot.bin",
-            GbModel::Agb => "bootroms/cgb_agb_boot.bin",
-        };
-        fs::read(path).ok()
-    };
+    let boot_rom = ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot);
 
     if boot_rom.is_some() {
         eprintln!("Boot ROM loaded — executing boot sequence.");
@@ -247,20 +228,7 @@ fn main() {
     let scale_filter = scaling::ScaleFilter::from_name(&cli.filter)
         .expect("filter validated by parse_filter");
 
-    eprintln!("\nControls:");
-    eprintln!("  Arrow keys  — D-pad         Gamepad D-pad / Left stick");
-    eprintln!("  Z / X       — B / A         Gamepad South / East");
-    eprintln!("  Enter       — Start         Gamepad Start");
-    eprintln!("  Right Shift — Select        Gamepad Back");
-    eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
-    eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
-    eprintln!("  Minus       — Slow motion   (hold for half speed)");
-    eprintln!("  Space       — Pause         (toggle)");
-    eprintln!("  Period      — Frame advance  (step one frame while paused)");
-    eprintln!("  F5 / F7     — Save / Load state");
-    eprintln!("  F9          — Screenshot (raw + scaled)");
-    eprintln!("  1-9         — Select state slot");
-    eprintln!("  Escape      — Quit");
+    ui_util::print_controls();
     if scale_filter != scaling::ScaleFilter::Nearest {
         eprintln!("  Filter: {:?}", scale_filter);
     }
@@ -397,9 +365,7 @@ fn main() {
 
     let mut frame_start = Instant::now();
     let mut emu_time_debt = Duration::ZERO; // accumulated emulation time for vsync decoupling
-    let mut fps_timer = Instant::now();
-    let mut fps_count = 0u32;
-    let mut fps_emu_total = Duration::ZERO;
+    let mut fps = ui_util::FpsCounter::new();
 
     'running: loop {
         // ── Events ────────────────────────────────────────────────────────────
@@ -408,17 +374,7 @@ fn main() {
                 Event::Quit { .. }
                 | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'running,
                 Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
-                    emu.save_state(current_slot);
-                    // Serialize to disk
-                    if let Some(data) = emu.save_state_to_bytes(current_slot) {
-                        let path = rom_path.with_extension(format!("{}.ss", current_slot + 1));
-                        match fs::write(&path, &data) {
-                            Ok(_) => eprintln!("State saved to slot {} ({})", current_slot + 1, path.display()),
-                            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", current_slot + 1, e),
-                        }
-                    } else {
-                        eprintln!("State saved to slot {}", current_slot + 1);
-                    }
+                    ui_util::save_state_to_slot(&mut emu, &rom_path, current_slot);
                 }
                 Event::KeyDown { keycode: Some(Keycode::F9), .. } => {
                     // Screenshot: save raw PPU output and scaled GPU output
@@ -485,21 +441,7 @@ fn main() {
                     }
                 }
                 Event::KeyDown { keycode: Some(Keycode::F7), .. } => {
-                    // Try in-memory first, then disk
-                    if emu.load_state(current_slot) {
-                        eprintln!("State loaded from slot {}", current_slot + 1);
-                    } else {
-                        let path = rom_path.with_extension(format!("{}.ss", current_slot + 1));
-                        if let Ok(data) = fs::read(&path) {
-                            if emu.load_state_from_bytes(current_slot, &data) {
-                                eprintln!("State loaded from disk: {}", path.display());
-                            } else {
-                                eprintln!("Failed to load state from {}", path.display());
-                            }
-                        } else {
-                            eprintln!("Slot {} is empty", current_slot + 1);
-                        }
-                    }
+                    ui_util::load_state_from_slot(&mut emu, &rom_path, current_slot);
                 }
                 Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
                     paused = !paused;
@@ -896,19 +838,7 @@ fn main() {
         }
 
         // ── FPS counter ───────────────────────────────────────────────────────
-        fps_count += frames_stepped;
-        if frames_stepped > 0 {
-            fps_emu_total += emu_elapsed;
-        }
-        let fps_elapsed = fps_timer.elapsed();
-        if fps_elapsed >= Duration::from_secs(1) {
-            let fps = fps_count as f64 / fps_elapsed.as_secs_f64();
-            let avg_emu_ms = fps_emu_total.as_secs_f64() * 1000.0 / fps_count as f64;
-            eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_emu_ms);
-            fps_count = 0;
-            fps_emu_total = Duration::ZERO;
-            fps_timer = Instant::now();
-        }
+        fps.update(frames_stepped, emu_elapsed);
 
         // ── Periodic save RAM flush ──────────────────────────────────────────
         sav_flusher.poll(&emu);

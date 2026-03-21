@@ -6,7 +6,7 @@ use crate::model::GbModel;
 use crate::scaling;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Target frame time: 70224 T-cycles / cpu_clock_rate.
 /// Standard: ~16.74ms (~59.73 fps). SGB1: ~16.35ms (~61.17 fps).
@@ -35,6 +35,224 @@ pub fn auto_detect_model(rom: &[u8]) -> GbModel {
         GbModel::Dmg
     }
 }
+
+// ── Boot ROM loading ──────────────────────────────────────────────────────
+
+/// Default boot ROM path for each hardware model.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn boot_rom_path(model: GbModel) -> &'static str {
+    match model {
+        GbModel::Dmg0 => "bootroms/dmg0_boot.bin",
+        GbModel::Dmg => "bootroms/dmg_boot.bin",
+        GbModel::Mgb => "bootroms/mgb_boot.bin",
+        GbModel::Sgb => "bootroms/sgb_boot.bin",
+        GbModel::Sgb2 => "bootroms/sgb2_boot.bin",
+        GbModel::Cgb0 => "bootroms/cgb0_boot.bin",
+        GbModel::Cgb => "bootroms/cgb_boot.bin",
+        GbModel::Agb => "bootroms/cgb_agb_boot.bin",
+    }
+}
+
+/// Load a boot ROM: explicit path > auto-detect by model > None.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_boot_rom(model: GbModel, bootrom_path: Option<&Path>, no_boot: bool) -> Option<Vec<u8>> {
+    if no_boot {
+        return None;
+    }
+    if let Some(p) = bootrom_path {
+        return std::fs::read(p).ok();
+    }
+    std::fs::read(boot_rom_path(model)).ok()
+}
+
+// ── Controls printout ─────────────────────────────────────────────────────
+
+/// Print the standard controls help to stderr.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn print_controls() {
+    eprintln!("\nControls:");
+    eprintln!("  Arrow keys  — D-pad         Gamepad D-pad / Left stick");
+    eprintln!("  Z / X       — B / A         Gamepad South / East");
+    eprintln!("  Enter       — Start         Gamepad Start");
+    eprintln!("  Right Shift — Select        Gamepad Back");
+    eprintln!("  Backspace   — Rewind        Gamepad L Shoulder");
+    eprintln!("  Tab         — Fast fwd (4x) Gamepad R Shoulder");
+    eprintln!("  Minus       — Slow motion   (hold for half speed)");
+    eprintln!("  Space       — Pause         (toggle)");
+    eprintln!("  Period      — Frame advance  (step one frame while paused)");
+    eprintln!("  F5 / F7     — Save / Load state");
+    eprintln!("  F9          — Screenshot (raw + scaled)");
+    eprintln!("  1-9         — Select state slot");
+    eprintln!("  Escape      — Quit");
+}
+
+// ── FPS counter ───────────────────────────────────────────────────────────
+
+/// Tracks frame rate and average emulation time, printing once per second.
+pub struct FpsCounter {
+    timer: Instant,
+    count: u32,
+    emu_total: Duration,
+}
+
+impl FpsCounter {
+    pub fn new() -> Self {
+        Self { timer: Instant::now(), count: 0, emu_total: Duration::ZERO }
+    }
+
+    /// Record frames and emulation time. Prints and resets every second.
+    /// Returns `Some((fps, avg_emu_ms))` on print, `None` otherwise.
+    pub fn update(&mut self, frames_stepped: u32, emu_elapsed: Duration) -> Option<(f64, f64)> {
+        self.count += frames_stepped;
+        if frames_stepped > 0 {
+            self.emu_total += emu_elapsed;
+        }
+        let elapsed = self.timer.elapsed();
+        if elapsed >= Duration::from_secs(1) && self.count > 0 {
+            let fps = self.count as f64 / elapsed.as_secs_f64();
+            let avg_ms = self.emu_total.as_secs_f64() * 1000.0 / self.count as f64;
+            eprintln!("FPS: {:.1}  emu: {:.2}ms/frame", fps, avg_ms);
+            self.count = 0;
+            self.emu_total = Duration::ZERO;
+            self.timer = Instant::now();
+            Some((fps, avg_ms))
+        } else {
+            None
+        }
+    }
+}
+
+// ── Save state management ─────────────────────────────────────────────────
+
+/// Save/load emulator state to/from numbered `.ss` files on disk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_state_to_slot(
+    emu: &mut crate::emulator::Emulator,
+    rom_path: &Path,
+    slot: usize,
+) {
+    emu.save_state(slot);
+    if let Some(data) = emu.save_state_to_bytes(slot) {
+        let path = rom_path.with_extension(format!("{}.ss", slot + 1));
+        match std::fs::write(&path, &data) {
+            Ok(_) => eprintln!("State saved to slot {} ({})", slot + 1, path.display()),
+            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", slot + 1, e),
+        }
+    }
+}
+
+/// Load state from slot: tries in-memory first, then disk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_state_from_slot(
+    emu: &mut crate::emulator::Emulator,
+    rom_path: &Path,
+    slot: usize,
+) {
+    if emu.load_state(slot) {
+        eprintln!("State loaded from slot {}", slot + 1);
+    } else {
+        let path = rom_path.with_extension(format!("{}.ss", slot + 1));
+        if let Ok(data) = std::fs::read(&path) {
+            if emu.load_state_from_bytes(slot, &data) {
+                eprintln!("State loaded from disk: {}", path.display());
+            } else {
+                eprintln!("Failed to load state from {}", path.display());
+            }
+        } else {
+            eprintln!("Slot {} is empty", slot + 1);
+        }
+    }
+}
+
+// ── Gamepad polling ───────────────────────────────────────────────────────
+
+/// Result of polling the gamepad each frame.
+#[cfg(feature = "gilrs")]
+pub struct GamepadState {
+    /// Bitmask of Game Boy buttons currently held on the gamepad.
+    pub buttons: u8,
+    /// Whether L shoulder is pressed (rewind).
+    pub rewind: bool,
+    /// Whether R shoulder is pressed (fast-forward).
+    pub fast_forward: bool,
+}
+
+/// Polls a gilrs gamepad, handling connect/disconnect and button/stick mapping.
+#[cfg(feature = "gilrs")]
+pub struct GamepadPoller {
+    pub gilrs: gilrs::Gilrs,
+    pub active_gamepad: Option<gilrs::GamepadId>,
+}
+
+#[cfg(feature = "gilrs")]
+impl GamepadPoller {
+    pub fn new() -> Option<Self> {
+        gilrs::Gilrs::new().ok().map(|g| Self { gilrs: g, active_gamepad: None })
+    }
+
+    /// Drain events and read current state. Returns the gamepad state.
+    pub fn poll(&mut self) -> GamepadState {
+        use gilrs::{Button as B, Axis as A};
+        use crate::emulator::Emulator;
+
+        // Drain events
+        while let Some(ev) = self.gilrs.next_event() {
+            match ev.event {
+                gilrs::EventType::Connected => {
+                    if self.active_gamepad.is_none() {
+                        self.active_gamepad = Some(ev.id);
+                        eprintln!("Gamepad connected: {}", self.gilrs.gamepad(ev.id).name());
+                    }
+                }
+                gilrs::EventType::Disconnected => {
+                    if self.active_gamepad == Some(ev.id) {
+                        self.active_gamepad = None;
+                        eprintln!("Gamepad disconnected");
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let gp_id = match self.active_gamepad {
+            Some(id) => id,
+            None => return GamepadState { buttons: 0, rewind: false, fast_forward: false },
+        };
+
+        let gp = self.gilrs.gamepad(gp_id);
+        const DEADZONE: f32 = 0.3;
+
+        let lx = gp.axis_data(A::LeftStickX).map_or(0.0, |a| a.value());
+        let ly = gp.axis_data(A::LeftStickY).map_or(0.0, |a| a.value());
+
+        let mut bits: u8 = 0;
+        let map: &[(B, u8)] = &[
+            (B::East,      Emulator::BTN_A),
+            (B::South,     Emulator::BTN_B),
+            (B::Start,     Emulator::BTN_START),
+            (B::Select,    Emulator::BTN_SELECT),
+            (B::DPadUp,    Emulator::BTN_UP),
+            (B::DPadDown,  Emulator::BTN_DOWN),
+            (B::DPadLeft,  Emulator::BTN_LEFT),
+            (B::DPadRight, Emulator::BTN_RIGHT),
+        ];
+        for &(gb, btn) in map {
+            if gp.is_pressed(gb) { bits |= btn; }
+        }
+        if lx < -DEADZONE { bits |= Emulator::BTN_LEFT; }
+        if lx > DEADZONE  { bits |= Emulator::BTN_RIGHT; }
+        if ly < -DEADZONE { bits |= Emulator::BTN_DOWN; }
+        if ly > DEADZONE  { bits |= Emulator::BTN_UP; }
+
+        GamepadState {
+            buttons: bits,
+            rewind: gp.is_pressed(B::LeftTrigger),
+            fast_forward: gp.is_pressed(B::RightTrigger),
+        }
+    }
+}
+
+// ── Audio ─────────────────────────────────────────────────────────────────
 
 /// Reverse stereo interleaved audio in-place.
 /// Swaps stereo sample pairs so the audio plays backward.

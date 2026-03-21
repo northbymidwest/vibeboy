@@ -544,50 +544,30 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     filter_menu.setTitle(&NSString::from_str("Filter"));
 
     let entries = filter_entries();
-    let hqx_sub = NSMenu::new(mtm);
-    hqx_sub.setTitle(&NSString::from_str("HQx"));
-    let xbr_sub = NSMenu::new(mtm);
-    xbr_sub.setTitle(&NSString::from_str("xBR"));
-    let xbrz_sub = NSMenu::new(mtm);
-    xbrz_sub.setTitle(&NSString::from_str("xBRZ"));
-    let edge_sub = NSMenu::new(mtm);
-    edge_sub.setTitle(&NSString::from_str("Edge Detect"));
+    let mut sub_menus: std::collections::BTreeMap<&str, objc2::rc::Retained<NSMenu>> =
+        std::collections::BTreeMap::new();
 
     for (i, (name, f)) in entries.iter().enumerate() {
         let tag = MENU_TAG_FILTER_BASE + i as isize;
         let item = menu_item_with_tag(mtm, name, sel!(menuAction:), "", tag);
-
-        match f {
-            scaling::ScaleFilter::Hqx(_) => {
-                hqx_sub.addItem(&item);
-            }
-            scaling::ScaleFilter::Xbr(_) | scaling::ScaleFilter::SuperXbr => {
-                xbr_sub.addItem(&item);
-            }
-            scaling::ScaleFilter::Xbrz(_) => {
-                xbrz_sub.addItem(&item);
-            }
-            scaling::ScaleFilter::Nedi
-            | scaling::ScaleFilter::Dcci
-            | scaling::ScaleFilter::Edi => {
-                edge_sub.addItem(&item);
-            }
-            _ => {
-                filter_menu.addItem(&item);
-            }
+        let group = f.menu_group();
+        if group == scaling::FilterMenuGroup::Main {
+            filter_menu.addItem(&item);
+        } else {
+            sub_menus.entry(group.label())
+                .or_insert_with(|| {
+                    let m = NSMenu::new(mtm);
+                    m.setTitle(&NSString::from_str(group.label()));
+                    m
+                })
+                .addItem(&item);
         }
     }
 
-    // Add submenus
     filter_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    for (sub_menu, sub_title) in [
-        (&*hqx_sub, "HQx"),
-        (&*xbr_sub, "xBR"),
-        (&*xbrz_sub, "xBRZ"),
-        (&*edge_sub, "Edge Detect"),
-    ] {
+    for (label, sub_menu) in &sub_menus {
         let sub_item = NSMenuItem::new(mtm);
-        sub_item.setTitle(&NSString::from_str(sub_title));
+        sub_item.setTitle(&NSString::from_str(label));
         sub_item.setSubmenu(Some(sub_menu));
         filter_menu.addItem(&sub_item);
     }

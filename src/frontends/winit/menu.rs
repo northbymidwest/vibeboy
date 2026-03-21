@@ -110,29 +110,27 @@ pub(super) fn build_menu() -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>)
     let filter_menu = Submenu::new("Filter", true);
     let mut filter_items = Vec::new();
     {
-        let hqx_sub = Submenu::new("HQx", true);
-        let xbr_sub = Submenu::new("xBR", true);
-        let xbrz_sub = Submenu::new("xBRZ", true);
-        let edge_sub = Submenu::new("Edge-Directed", true);
+        use scaling::FilterMenuGroup;
+        let mut sub_menus = std::collections::BTreeMap::new();
 
         for (id, name, filter) in filter_entries() {
             let checked = filter == scaling::ScaleFilter::Nearest;
             let item = CheckMenuItem::with_id(id, name, true, checked, None::<Accelerator>);
-            match filter {
-                scaling::ScaleFilter::Hqx(_) => { hqx_sub.append(&item).unwrap(); }
-                scaling::ScaleFilter::Xbr(_)
-                | scaling::ScaleFilter::SuperXbr => { xbr_sub.append(&item).unwrap(); }
-                scaling::ScaleFilter::Xbrz(_) => { xbrz_sub.append(&item).unwrap(); }
-                scaling::ScaleFilter::Nedi
-                | scaling::ScaleFilter::Dcci
-                | scaling::ScaleFilter::Edi => { edge_sub.append(&item).unwrap(); }
-                _ => { filter_menu.append(&item).unwrap(); }
+            let group = filter.menu_group();
+            if group == FilterMenuGroup::Main {
+                filter_menu.append(&item).unwrap();
+            } else {
+                sub_menus.entry(group.label())
+                    .or_insert_with(|| Submenu::new(group.label(), true))
+                    .append(&item).unwrap();
             }
             filter_items.push((item, filter));
         }
 
         filter_menu.append(&PredefinedMenuItem::separator()).unwrap();
-        filter_menu.append_items(&[&hqx_sub, &xbr_sub, &xbrz_sub, &edge_sub]).unwrap();
+        for (_, sub) in &sub_menus {
+            filter_menu.append(sub).unwrap();
+        }
     }
 
     // Help menu
