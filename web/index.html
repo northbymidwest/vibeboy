@@ -123,7 +123,7 @@
     </select>
   </div>
   <div id="controls">
-    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 1-9: Slot &nbsp; | &nbsp; Gamepad
+    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Backspace: Rewind &nbsp; Tab: Fast-fwd &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 1-9: Slot &nbsp; | &nbsp; Gamepad
   </div>
   <!-- Hidden elements for webcam capture -->
   <video id="cam-video" autoplay playsinline style="display:none;"></video>
@@ -318,17 +318,22 @@ registerProcessor('emu-audio', EmuAudioProcessor);
   }
 }
 
-function pushAudioSamples() {
+// Send current audio buffer contents to the worklet (assumes audio_drain already called)
+function pushAudioFromBuf() {
   if (!emu || !audioWorklet) return;
-  emu.audio_drain();
   const ptr = emu.audio_ptr();
   const len = emu.audio_len();
   if (len === 0) return;
   const samples = new Float32Array(wasm_memory().buffer, ptr, len);
-  // Copy and send to worklet (can't transfer wasm memory views)
   const copy = new Float32Array(len);
   copy.set(samples);
   audioWorklet.port.postMessage(copy, [copy.buffer]);
+}
+
+function pushAudioSamples() {
+  if (!emu) return;
+  emu.audio_drain();
+  pushAudioFromBuf();
 }
 
 // Webcam for Pocket Camera
@@ -464,21 +469,52 @@ function frame(timestamp) {
 
   // Step emulation at GB native rate, independent of display refresh
   let stepped = false;
-  while (emuTime >= GB_FRAME_MS) {
-    if (cameraActive) feedCameraFrame();
-    emu.step_frame();
-    if (audioWorklet) pushAudioSamples();
-    emuTime -= GB_FRAME_MS;
+
+  if (rewindHeld) {
+    // Rewind at 3x speed with reverse audio
+    for (let i = 0; i < 3; i++) {
+      emu.rewind_one_frame();
+    }
+    if (audioWorklet) {
+      emu.audio_drain();
+      emu.audio_reverse();
+      emu.audio_downsample(3);
+      pushAudioFromBuf();
+    }
+    emuTime = 0;
+    stepped = true;
+  } else if (fastForwardHeld) {
+    // Fast-forward at 4x speed with downsampled audio
+    for (let i = 0; i < 4; i++) {
+      if (cameraActive) feedCameraFrame();
+      emu.step_frame();
+    }
+    if (audioWorklet) {
+      emu.audio_drain();
+      emu.audio_downsample(4);
+      pushAudioFromBuf();
+    }
+    emuTime = 0;
     stepped = true;
     checkForPrint();
-    saveCounter++;
     updateRumble();
-    if (saveCounter >= 60 && emu.has_battery()) {
-      saveCounter = 0;
-      const data = emu.save_data();
-      let bin = '';
-      for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
-      localStorage.setItem(emu.save_key(), btoa(bin));
+  } else {
+    while (emuTime >= GB_FRAME_MS) {
+      if (cameraActive) feedCameraFrame();
+      emu.step_frame();
+      if (audioWorklet) pushAudioSamples();
+      emuTime -= GB_FRAME_MS;
+      stepped = true;
+      checkForPrint();
+      saveCounter++;
+      updateRumble();
+      if (saveCounter >= 60 && emu.has_battery()) {
+        saveCounter = 0;
+        const data = emu.save_data();
+        let bin = '';
+        for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
+        localStorage.setItem(emu.save_key(), btoa(bin));
+      }
     }
   }
 
@@ -598,9 +634,13 @@ function loadState() {
 }
 
 // Keyboard input
+let rewindHeld = false;
+let fastForwardHeld = false;
+let kbRewindHeld = false;
+let kbFastFwdHeld = false;
+
 document.addEventListener('keydown', e => {
   if (!emu) return;
-  // Save state slots: 1-9 select slot, F5 save, F7 load
   if (e.code >= 'Digit1' && e.code <= 'Digit9') {
     currentSlot = parseInt(e.code.charAt(5)) - 1;
     status.textContent = 'Slot ' + (currentSlot + 1) + ' selected';
@@ -608,11 +648,14 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'F5') { saveState(); e.preventDefault(); return; }
   if (e.code === 'F7') { loadState(); e.preventDefault(); return; }
-
+  if (e.code === 'Backspace') { kbRewindHeld = true; rewindHeld = true; emu.set_rewinding(true); e.preventDefault(); return; }
+  if (e.code === 'Tab') { kbFastFwdHeld = true; fastForwardHeld = true; e.preventDefault(); return; }
   const btn = keyMap[e.code];
   if (btn !== undefined) { emu.set_button(btn, true); e.preventDefault(); }
 });
 document.addEventListener('keyup', e => {
+  if (e.code === 'Backspace') { kbRewindHeld = false; rewindHeld = false; if (emu) emu.set_rewinding(false); e.preventDefault(); return; }
+  if (e.code === 'Tab') { kbFastFwdHeld = false; fastForwardHeld = false; e.preventDefault(); return; }
   const btn = keyMap[e.code];
   if (btn !== undefined && emu) { emu.set_button(btn, false); e.preventDefault(); }
 });
@@ -635,8 +678,15 @@ let rumbleWasOn = false;
 function pollGamepad() {
   if (!emu) return;
   const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gpRewind = false, gpFastFwd = false;
   for (const gp of gamepads) {
     if (!gp) continue;
+
+    // L1/R1 shoulders → rewind / fast-forward
+    if (gp.buttons.length > 5) {
+      gpRewind = gp.buttons[4].pressed;
+      gpFastFwd = gp.buttons[5].pressed;
+    }
 
     // D-pad buttons
     for (const [gi, emuBtn] of gpBtnMap) {
@@ -670,6 +720,11 @@ function pollGamepad() {
 
     break; // Use first connected gamepad only
   }
+  // Apply gamepad shoulder state (OR'd with keyboard held state)
+  if (gpRewind && !rewindHeld) { rewindHeld = true; emu.set_rewinding(true); }
+  if (!gpRewind && rewindHeld && !kbRewindHeld) { rewindHeld = false; emu.set_rewinding(false); }
+  if (gpFastFwd) fastForwardHeld = true;
+  if (!gpFastFwd && !kbFastFwdHeld) fastForwardHeld = false;
 }
 
 function updateRumble() {

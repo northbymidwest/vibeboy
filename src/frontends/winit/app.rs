@@ -17,7 +17,7 @@ use super::emulator::Emulator;
 use super::model::GbModel;
 use super::scaling;
 use super::vectorize;
-use super::ui_util::frame_duration;
+use super::ui_util::{self, frame_duration};
 use super::gpu::GpuRenderer;
 use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
@@ -55,6 +55,7 @@ pub(super) struct App {
     active_gamepad: Option<GamepadId>,
     kb_buttons: u8,  // bitmask of keyboard-pressed buttons
     gp_buttons: u8,  // bitmask of gamepad-pressed buttons
+    fast_forward: bool,
     rumble_effect: Option<gilrs::ff::Effect>,
     rumble_gamepad: Option<GamepadId>, // which gamepad owns the effect
     rumble_on: bool,
@@ -100,6 +101,7 @@ impl App {
             active_gamepad: None,
             kb_buttons: 0,
             gp_buttons: 0,
+            fast_forward: false,
             rumble_effect: None,
             rumble_gamepad: None,
             rumble_on: false,
@@ -323,13 +325,24 @@ impl App {
             }
         }
 
-        emu.step_frame();
-
-        // Push audio samples directly to ring buffer (96kHz stereo, matching APU output)
-        let samples = emu.drain_audio_samples();
-        if !samples.is_empty() {
-            let mut ring = self.audio_ring.lock().unwrap();
-            ring.push(&samples);
+        if self.fast_forward {
+            // Run 4 frames, downsample audio to fit 1 frame
+            for _ in 0..4 {
+                emu.step_frame();
+            }
+            let samples = emu.drain_audio_samples();
+            if !samples.is_empty() {
+                let resampled = ui_util::downsample_audio(&samples, 4);
+                let mut ring = self.audio_ring.lock().unwrap();
+                ring.push(&resampled);
+            }
+        } else {
+            emu.step_frame();
+            let samples = emu.drain_audio_samples();
+            if !samples.is_empty() {
+                let mut ring = self.audio_ring.lock().unwrap();
+                ring.push(&samples);
+            }
         }
 
         // Render via wgpu
@@ -557,6 +570,9 @@ impl ApplicationHandler for App {
                         if key == KeyCode::Backspace {
                             emu.set_rewinding(pressed);
                         }
+                        if key == KeyCode::Tab {
+                            self.fast_forward = pressed;
+                        }
                     }
 
                     if pressed {
@@ -694,10 +710,11 @@ impl ApplicationHandler for App {
                         emu.set_button(b, combined & b != 0);
                     }
 
-                    // Shoulders for rewind
+                    // Shoulders for rewind / fast-forward (L1/R1)
                     if gp.is_pressed(GilButton::LeftTrigger) {
                         emu.set_rewinding(true);
                     }
+                    self.fast_forward = self.fast_forward || gp.is_pressed(GilButton::RightTrigger);
                 }
             } else {
                 self.gp_buttons = 0;
@@ -711,13 +728,20 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Handle rewind (3x speed)
+        // Handle rewind (3x speed) with reverse audio
         if let Some(ref mut emu) = self.emu {
             if emu.is_rewinding() {
+                let mut all_audio = Vec::new();
                 for _ in 0..3 {
                     emu.rewind_one_frame();
+                    all_audio.extend_from_slice(&emu.drain_audio_samples());
                 }
-                emu.drain_audio_samples();
+                ui_util::reverse_audio(&mut all_audio);
+                let resampled = ui_util::downsample_audio(&all_audio, 3);
+                if !resampled.is_empty() {
+                    let mut ring = self.audio_ring.lock().unwrap();
+                    ring.push(&resampled);
+                }
             }
         }
 

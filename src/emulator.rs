@@ -240,7 +240,10 @@ impl Emulator {
     /// excluded from rewind snapshots to save memory).
     pub fn rewind_one_frame(&mut self) -> bool {
         if let Some(snap) = self.rewind_buffer.pop() {
+            // Preserve APU filter state across restore for clean audio
+            let filter_state = self.bus.apu.save_filter_state();
             self.restore_snapshot(&snap);
+            self.bus.apu.restore_filter_state(&filter_state);
             // Re-allocate output buffers (cleared before serialization to save space)
             let (w, h) = if self.bus.ppu.sgb_mode { (256, 224) } else { (160, 144) };
             if self.bus.ppu.frame_buffer.len() != w * h {
@@ -249,7 +252,7 @@ impl Emulator {
             if self.bus.ppu.sgb_mode && self.bus.ppu.shade_buffer.len() != 160 * 144 {
                 self.bus.ppu.shade_buffer.resize(160 * 144, 0);
             }
-            // Regenerate frame buffer from restored VRAM/PPU state
+            // Regenerate frame buffer (and audio) from restored VRAM/PPU state
             self.bus.clear_frame_ready();
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
