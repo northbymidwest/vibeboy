@@ -18,6 +18,14 @@ export class WasmEmulator {
         wasm.wasmemulator_attach_printer(this.__wbg_ptr);
     }
     /**
+     * Downsample the internal audio buffer by an integer factor using a
+     * Blackman-windowed sinc low-pass filter.
+     * @param {number} factor
+     */
+    audio_downsample(factor) {
+        wasm.wasmemulator_audio_downsample(this.__wbg_ptr, factor);
+    }
+    /**
      * Drain audio samples into internal buffer; read via audio_ptr/audio_len.
      */
     audio_drain() {
@@ -36,6 +44,12 @@ export class WasmEmulator {
     audio_ptr() {
         const ret = wasm.wasmemulator_audio_ptr(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Reverse the internal audio buffer in-place (stereo pairs).
+     */
+    audio_reverse() {
+        wasm.wasmemulator_audio_reverse(this.__wbg_ptr);
     }
     /**
      * Get the name of the current filter.
@@ -199,6 +213,14 @@ export class WasmEmulator {
         wasm.wasmemulator_resize_gpu(this.__wbg_ptr, width, height);
     }
     /**
+     * Pop one rewind frame, regenerating the display. Returns true if rewound.
+     * @returns {boolean}
+     */
+    rewind_one_frame() {
+        const ret = wasm.wasmemulator_rewind_one_frame(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Returns true if the rumble motor is currently active.
      * @returns {boolean}
      */
@@ -303,6 +325,13 @@ export class WasmEmulator {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmemulator_set_model(this.__wbg_ptr, ptr0, len0);
         return ret !== 0;
+    }
+    /**
+     * Set rewind mode (call before rewind_one_frame).
+     * @param {boolean} active
+     */
+    set_rewinding(active) {
+        wasm.wasmemulator_set_rewinding(this.__wbg_ptr, active);
     }
     /**
      * Step one frame of emulation.
