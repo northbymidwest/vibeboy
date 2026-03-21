@@ -36,14 +36,31 @@ fn gambatte_digit_index(c: char) -> Option<usize> {
 }
 
 /// Check if framebuffer tile at (tile_x * 8, 0) matches expected digit pattern.
+/// Uses relative brightness instead of absolute color values so it works
+/// with any palette (grayscale, DMG green, CGB colors).
 fn gambatte_tile_matches(fb: &[u32], tile_x: usize, digit: usize) -> bool {
     let pattern = &GAMBATTE_DIGITS[digit];
+    // Determine the darkest and lightest pixel values in the tile
+    // to classify pixels as "black" or "white" relative to the palette.
+    let mut darkest = u32::MAX;
+    let mut lightest = 0u32;
     for y in 0..8 {
         for x in 0..8 {
-            let pixel = fb[y * GB_FB_WIDTH + tile_x * 8 + x];
-            let masked = pixel & 0xF8F8F8;
+            let pixel = fb[y * GB_FB_WIDTH + tile_x * 8 + x] & 0x00FFFFFF;
+            let luma = (pixel >> 16) & 0xFF; // use red channel as brightness proxy
+            if luma < (darkest & 0xFF) { darkest = luma; }
+            if luma > (lightest & 0xFF) { lightest = luma; }
+        }
+    }
+    if darkest == lightest { return false; } // uniform tile — can't match any digit
+    let threshold = (darkest + lightest) / 2;
+
+    for y in 0..8 {
+        for x in 0..8 {
+            let pixel = fb[y * GB_FB_WIDTH + tile_x * 8 + x] & 0x00FFFFFF;
+            let luma = (pixel >> 16) & 0xFF;
             let expected_black = (pattern[y] >> (7 - x)) & 1 == 1;
-            let is_black = masked == 0;
+            let is_black = luma <= threshold;
             if expected_black != is_black {
                 return false;
             }
