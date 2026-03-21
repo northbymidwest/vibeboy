@@ -239,15 +239,14 @@ impl Ppu {
                         // to the line-start handler. ly_for_comparison and coincidence
                         // update happen at dot 3-4, not at the wrap.
                         //
-                        // CGB VBlank line wraps (144-152): use direct IF injection
-                        // for Mode 2 STAT source instead of mode_for_interrupt pulse.
-                        // Pulsing mode_for_interrupt through 2→-1 would disturb
-                        // stat_irq_line, creating spurious rising edges when the
-                        // line-start handler restores mode_for_interrupt to 1.
+                        // CGB VBlank line wraps (144-152): pulse mode_for_interrupt
+                        // through 2 to create a proper rising edge for mode 2 STAT
+                        // even when mode 1 is holding stat_irq_line high.
                         if self.ly >= 144 && self.ly <= 152 {
-                            if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                                self.if_flags |= 0x02;
-                            }
+                            self.mode_for_interrupt = 2;
+                            self.update_stat_irq();
+                            self.mode_for_interrupt = -1;
+                            self.update_stat_irq();
                         }
                         self.line_start_pending = true;
                         self.line_start_is_vblank = self.ly >= 144;
@@ -315,12 +314,14 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            // CGB VBlank line wraps (145-152): direct IF injection
-                            // for Mode 2 source. Same rationale as line 144 wrap.
+                            // CGB VBlank line wraps (145-152): pulse mode_for_interrupt
+                            // through 2 to create a proper rising edge for mode 2 STAT
+                            // even when mode 1 is holding stat_irq_line high.
                             if self.ly >= 145 && self.ly <= 152 {
-                                if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                                    self.if_flags |= 0x02;
-                                }
+                                self.mode_for_interrupt = 2;
+                                self.update_stat_irq();
+                                self.mode_for_interrupt = 1;
+                                self.update_stat_irq();
                             }
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
@@ -522,15 +523,12 @@ impl Ppu {
                     self.ly_for_comparison = -1;
                     self.update_coincidence();
                     // Mode 2 STAT source: direct IF injection for VBlank lines
-                    // 145-151. Line 144's mode 2 comes from the early injection
-                    // at line 143 dot line_end-2. Lines 152-153 do not fire mode 2.
-                    // Uses direct injection instead of mode_for_interrupt pulse
-                    // to avoid disturbing stat_irq_line (which would create
-                    // spurious rising edges).
+                    // Mode 2 STAT source for VBlank lines 145-151.
+                    // Uses mode_for_interrupt pulse for proper edge detection.
                     if self.ly >= 145 && self.ly <= 151 {
-                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                            self.if_flags |= 0x02;
-                        }
+                        self.mode_for_interrupt = 2;
+                        self.update_stat_irq();
+                        self.mode_for_interrupt = 1;
                     }
                     self.update_stat_irq();
                 }
