@@ -306,12 +306,11 @@ fn main() {
         let raw_layer: id = std::mem::transmute_copy(&renderer.layer);
         let _: () = msg_send![content_view, setLayer: raw_layer];
 
-        // Set drawable size to match window backing pixels
-        let backing_size: NSSize = msg_send![content_view,
-            convertSizeToBacking: NSSize::new(win_w as f64, win_h as f64)];
+        // Set drawable size to logical points (not Retina backing pixels)
+        // to match SDL frontend behavior and avoid rendering at excessive resolution.
         renderer.layer.set_drawable_size(CGSize::new(
-            backing_size.width,
-            backing_size.height,
+            win_w as f64,
+            win_h as f64,
         ));
 
         window.makeKeyAndOrderFront_(nil);
@@ -629,12 +628,10 @@ fn main() {
             let (disp_w, disp_h);
             {
                 let bounds: NSRect = msg_send![content_view, bounds];
-                let backing: NSSize = msg_send![content_view,
-                    convertSizeToBacking: bounds.size];
-                disp_w = backing.width as usize;
-                disp_h = backing.height as usize;
+                disp_w = bounds.size.width as usize;
+                disp_h = bounds.size.height as usize;
                 renderer.layer.set_drawable_size(CGSize::new(
-                    backing.width, backing.height,
+                    bounds.size.width, bounds.size.height,
                 ));
             }
 
