@@ -10,7 +10,7 @@ use model::GbModel;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(crate) const SCALE: u32 = 3;
 pub(crate) const GB_W: u32 = 160;
@@ -267,17 +267,84 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     app.set_accels_for_action("app.pause", &["F6"]);
 
+    // GL area for GPU-accelerated rendering
+    let gl_area = gtk4::GLArea::new();
+    gl_area.set_required_version(3, 3);
+    gl_area.set_auto_render(false);
+    gl_area.set_hexpand(true);
+    gl_area.set_vexpand(true);
+
+    // Stack: GL area (preferred) with Cairo DrawingArea fallback
+    let stack = gtk4::Stack::new();
+    stack.add_named(&drawing_area, Some("cairo"));
+    stack.add_named(&gl_area, Some("gl"));
+    stack.set_visible_child_name("cairo");
+
     // Layout
     let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    vbox.append(&drawing_area);
+    vbox.append(&stack);
     window.set_child(Some(&vbox));
 
     // Shared emulator state (None until a ROM is loaded)
     let state: Rc<RefCell<Option<EmuState>>> = Rc::new(RefCell::new(None));
 
-    // GPU renderer (window-level, persists across ROM loads, initialized lazily)
-    let gpu: Rc<RefCell<Option<gpu::GpuRenderer>>> = Rc::new(RefCell::new(None));
-    let gpu_init_done: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    // GL renderer state + pending frame for GLArea render signal
+    let gl_renderer: Rc<RefCell<Option<gpu::GlRenderer>>> = Rc::new(RefCell::new(None));
+    let pending_frame: Rc<RefCell<gpu::PendingFrame>> = Rc::new(RefCell::new(gpu::PendingFrame::default()));
+
+    // GLArea realize: init GL resources
+    gl_area.connect_realize({
+        let gl_renderer = Rc::clone(&gl_renderer);
+        let stack = stack.clone();
+        move |area| {
+            area.make_current();
+            if area.error().is_some() {
+                eprintln!("GLArea error, falling back to Cairo");
+                return;
+            }
+            match gpu::GlRenderer::new() {
+                Some(r) => {
+                    *gl_renderer.borrow_mut() = Some(r);
+                    stack.set_visible_child_name("gl");
+                }
+                None => eprintln!("GL renderer init failed, falling back to Cairo"),
+            }
+        }
+    });
+
+    // GLArea unrealize: drop GL resources while context is current
+    gl_area.connect_unrealize({
+        let gl_renderer = Rc::clone(&gl_renderer);
+        move |area| {
+            area.make_current();
+            gl_renderer.borrow_mut().take();
+        }
+    });
+
+    // GLArea render signal: draw the pending frame
+    gl_area.connect_render({
+        let gl_renderer = Rc::clone(&gl_renderer);
+        let pending = Rc::clone(&pending_frame);
+        move |area, _ctx| {
+            let mut r = gl_renderer.borrow_mut();
+            let f = pending.borrow();
+            if let Some(ref mut renderer) = *r {
+                if !f.pixels.is_empty() {
+                    let scale = area.scale_factor();
+                    renderer.render(
+                        &f.pixels,
+                        f.frame_w,
+                        f.frame_h,
+                        area.width() * scale,
+                        area.height() * scale,
+                        f.src_w,
+                        f.src_h,
+                    );
+                }
+            }
+            glib::Propagation::Stop
+        }
+    });
 
     // Set up draw function
     let state_draw = Rc::clone(&state);
@@ -333,17 +400,17 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Helper: start the frame timer for emulation
     let da_for_timer = drawing_area.clone();
-    let win_for_timer = window.clone();
+    let gl_area_for_timer = gl_area.clone();
     let start_frame_timer = {
         let state = Rc::clone(&state);
-        let gpu = Rc::clone(&gpu);
-        let gpu_init_done = Rc::clone(&gpu_init_done);
+        let gl_renderer = Rc::clone(&gl_renderer);
+        let pending_frame = Rc::clone(&pending_frame);
         move || {
             let state_tick = Rc::clone(&state);
             let da = da_for_timer.clone();
-            let win = win_for_timer.clone();
-            let gpu = Rc::clone(&gpu);
-            let gpu_init_done = Rc::clone(&gpu_init_done);
+            let gl_area = gl_area_for_timer.clone();
+            let gl_renderer = Rc::clone(&gl_renderer);
+            let pending_frame = Rc::clone(&pending_frame);
 
             // Get frame duration from the loaded emulator's model
             let interval_ms = {
@@ -465,29 +532,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             } else {
                                 st.emu.frame_buffer()
                             };
-                            let (da_w, da_h) = if gpu.borrow().is_some() {
-                                // Use window size when GPU is active (DrawingArea may be hidden)
-                                (win.width() as usize, win.height() as usize)
-                            } else {
-                                (da.width() as usize, da.height() as usize)
-                            };
-
-                            // Try lazy GPU init (once)
-                            if !gpu_init_done.get() {
-                                gpu_init_done.set(true);
-                                if let Some(renderer) = gpu::GpuRenderer::from_gtk_window(&win) {
-                                    *gpu.borrow_mut() = Some(renderer);
-                                    // Make GTK4 fully transparent so it doesn't paint over the Metal layer
-                                    da.set_visible(false);
-                                    let css = gtk4::CssProvider::new();
-                                    css.load_from_data("window, .background { background: transparent; }");
-                                    gtk4::style_context_add_provider_for_display(
-                                        &gtk4::prelude::WidgetExt::display(&win),
-                                        &css,
-                                        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-                                    );
-                                }
-                            }
+                            let da_w = da.width().max(1) as usize;
+                            let da_h = da.height().max(1) as usize;
 
                             // Compute aspect-ratio-correct dimensions for filters
                             let scale_fit = (da_w as f64 / base_w as f64)
@@ -529,13 +575,17 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (fb, base_w, base_h)
                                 };
 
-                            // Render: GPU path (direct to surface) or Cairo fallback
-                            let mut gpu_ref = gpu.borrow_mut();
-                            if let Some(ref mut gpu) = *gpu_ref {
-                                // Handle resize
-                                gpu.resize(da_w as u32, da_h as u32);
-                                // GPU blit — renders directly to the native surface
-                                gpu.render(pixels, pw as u32, ph as u32, base_w as u32, base_h as u32);
+                            // Render: GL path or Cairo fallback
+                            if gl_renderer.borrow().is_some() {
+                                let mut pf = pending_frame.borrow_mut();
+                                pf.pixels.clear();
+                                pf.pixels.extend_from_slice(pixels);
+                                pf.frame_w = pw as u32;
+                                pf.frame_h = ph as u32;
+                                pf.src_w = base_w as u32;
+                                pf.src_h = base_h as u32;
+                                drop(pf);
+                                gl_area.queue_render();
                             } else {
                                 // Cairo fallback
                                 st.src_w = pw as u32;
@@ -555,7 +605,6 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     st.rgba_buf[offset + 2] = r as u8;
                                     st.rgba_buf[offset + 3] = 0xFF;
                                 }
-                                drop(gpu_ref);
                                 da.queue_draw();
                             }
                         }
