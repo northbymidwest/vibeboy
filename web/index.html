@@ -469,6 +469,7 @@ function frame(timestamp) {
     stepped = true;
     checkForPrint();
     saveCounter++;
+    updateRumble();
     if (saveCounter >= 60 && emu.has_battery()) {
       saveCounter = 0;
       const data = emu.save_data();
@@ -626,6 +627,7 @@ const gpBtnMap = [
   [15, btn_right()],  // D-pad right
 ];
 let gpPrevState = {};
+let rumbleWasOn = false;
 
 function pollGamepad() {
   if (!emu) return;
@@ -664,6 +666,27 @@ function pollGamepad() {
     }
 
     break; // Use first connected gamepad only
+  }
+}
+
+function updateRumble() {
+  if (!emu || !emu.has_rumble()) return;
+  const on = emu.rumble_active();
+  if (on === rumbleWasOn) return;
+  rumbleWasOn = on;
+  const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const gp of gamepads) {
+    if (!gp || !gp.vibrationActuator) continue;
+    if (on) {
+      gp.vibrationActuator.playEffect('dual-rumble', {
+        duration: 200,
+        strongMagnitude: 0.6,
+        weakMagnitude: 0.4,
+      }).catch(() => {});
+    } else {
+      gp.vibrationActuator.reset().catch(() => {});
+    }
+    break;
   }
 }
 

@@ -72,6 +72,10 @@ pub trait Cartridge: Send {
     fn has_camera(&self) -> bool { false }
     /// Feed a 128×112 grayscale image from a webcam into the camera sensor.
     fn set_camera_image(&mut self, _grayscale: &[u8; 128 * 112]) {}
+    /// Returns true if this cartridge has a rumble motor (MBC5+Rumble).
+    fn has_rumble(&self) -> bool { false }
+    /// Returns true if the rumble motor is currently active.
+    fn rumble_active(&self) -> bool { false }
     /// Returns true if this cartridge has an accelerometer (MBC7).
     fn has_accelerometer(&self) -> bool { false }
     /// Feed accelerometer values in MBC7 u16 format (center = 0x81D0).
@@ -129,7 +133,8 @@ pub fn make_cartridge(rom: Vec<u8>) -> Box<dyn Cartridge> {
         }
         0x19..=0x1E => {
             let battery = matches!(cart_type, 0x1B | 0x1E);
-            Box::new(Mbc5::new(rom, ram_size, battery))
+            let has_rumble = matches!(cart_type, 0x1C | 0x1D | 0x1E);
+            Box::new(Mbc5::new(rom, ram_size, battery, has_rumble))
         }
         0x20 => Box::new(Mbc6::new(rom, ram_size)),
         0x22 => Box::new(Mbc7::new(rom)),

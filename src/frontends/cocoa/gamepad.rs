@@ -1,12 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
-use cocoa::base::id;
+use cocoa::base::{id, nil};
+use cocoa::foundation::NSString;
 use objc::{class, msg_send, sel, sel_impl};
 
 use super::emulator::Emulator;
 
 #[link(name = "GameController", kind = "framework")]
 unsafe extern "C" {}
+
+#[link(name = "CoreHaptics", kind = "framework")]
+unsafe extern "C" {
+    static CHHapticEventTypeHapticContinuous: id;
+    static CHHapticEventParameterIDHapticIntensity: id;
+    static CHHapticEventParameterIDHapticSharpness: id;
+}
 
 pub(super) struct GamepadState {
     // Button state from the most recently polled controller
@@ -28,6 +36,11 @@ pub(super) struct GamepadState {
     pub r_shoulder: bool,
     // Accelerometer data (x, y, z in g)
     pub accel: Option<(f32, f32, f32)>,
+    // Rumble: CoreHaptics engine + pattern player, retained per-controller
+    haptic_engine: id,
+    haptic_player: id,
+    haptic_controller: id, // track which controller owns the engine
+    rumble_on: bool,
 }
 
 impl GamepadState {
@@ -38,6 +51,140 @@ impl GamepadState {
             stick_up: false, stick_down: false, stick_left: false, stick_right: false,
             l_shoulder: false, r_shoulder: false,
             accel: None,
+            haptic_engine: nil,
+            haptic_player: nil,
+            haptic_controller: nil,
+            rumble_on: false,
+        }
+    }
+
+    /// Set up CoreHaptics engine and continuous rumble player for the given controller.
+    /// No-op if already set up for this controller.
+    unsafe fn ensure_haptics(&mut self, controller: id) {
+        if controller == self.haptic_controller && self.haptic_engine != nil {
+            return;
+        }
+        self.teardown_haptics();
+
+        // GCController.haptics -> GCDeviceHaptics (nil if controller doesn't support haptics)
+        let haptics: id = msg_send![controller, haptics];
+        if haptics.is_null() {
+            return;
+        }
+
+        // Create engine for default locality (whole controller)
+        let locality = NSString::alloc(nil).init_str("Default");
+        let engine: id = msg_send![haptics, createEngineWithLocality: locality];
+        if engine.is_null() {
+            return;
+        }
+
+        // Retain the engine (createEngineWithLocality returns autoreleased)
+        let engine: id = msg_send![engine, retain];
+
+        // Start the engine synchronously (startAndReturnError:)
+        let mut error: id = nil;
+        let ok: bool = msg_send![engine, startAndReturnError: &mut error];
+        if !ok {
+            let _: () = msg_send![engine, release];
+            return;
+        }
+
+        // Build a continuous haptic pattern:
+        //   CHHapticEvent(type: .hapticContinuous, intensity: 0.6, sharpness: 0.4, duration: 30s)
+        // 30s is long enough that the game will re-assert before it expires.
+        let intensity_param: id = msg_send![class!(CHHapticEventParameter), alloc];
+        let intensity_param: id = msg_send![intensity_param,
+            initWithParameterID: CHHapticEventParameterIDHapticIntensity
+            value: 0.6f32];
+
+        let sharpness_param: id = msg_send![class!(CHHapticEventParameter), alloc];
+        let sharpness_param: id = msg_send![sharpness_param,
+            initWithParameterID: CHHapticEventParameterIDHapticSharpness
+            value: 0.4f32];
+
+        let params: id = msg_send![class!(NSArray), arrayWithObjects: &[intensity_param, sharpness_param][0]
+            count: 2usize];
+
+        let event: id = msg_send![class!(CHHapticEvent), alloc];
+        let event: id = msg_send![event,
+            initWithEventType: CHHapticEventTypeHapticContinuous
+            parameters: params
+            relativeTime: 0.0f64
+            duration: 30.0f64];
+
+        let events: id = msg_send![class!(NSArray), arrayWithObject: event];
+        let empty_params: id = msg_send![class!(NSArray), array];
+
+        let pattern: id = msg_send![class!(CHHapticPattern), alloc];
+        let pattern: id = msg_send![pattern,
+            initWithEvents: events
+            parameters: empty_params
+            error: &mut error];
+        if pattern.is_null() {
+            let _: () = msg_send![engine, release];
+            return;
+        }
+
+        let player: id = msg_send![engine,
+            createPlayerWithPattern: pattern
+            error: &mut error];
+        if player.is_null() {
+            let _: () = msg_send![pattern, release];
+            let _: () = msg_send![engine, release];
+            return;
+        }
+
+        let player: id = msg_send![player, retain];
+
+        // Clean up intermediate objects
+        let _: () = msg_send![event, release];
+        let _: () = msg_send![intensity_param, release];
+        let _: () = msg_send![sharpness_param, release];
+        let _: () = msg_send![pattern, release];
+
+        self.haptic_engine = engine;
+        self.haptic_player = player;
+        self.haptic_controller = controller;
+    }
+
+    unsafe fn teardown_haptics(&mut self) {
+        if self.haptic_player != nil {
+            if self.rumble_on {
+                let _: () = msg_send![self.haptic_player, stopAtTime: 0.0f64 error: std::ptr::null_mut::<id>()];
+            }
+            let _: () = msg_send![self.haptic_player, release];
+            self.haptic_player = nil;
+        }
+        if self.haptic_engine != nil {
+            let _: () = msg_send![self.haptic_engine, stopWithCompletionHandler: nil];
+            let _: () = msg_send![self.haptic_engine, release];
+            self.haptic_engine = nil;
+        }
+        self.haptic_controller = nil;
+        self.rumble_on = false;
+    }
+
+    /// Start or stop rumble. Only sends commands on state transitions.
+    pub fn set_rumble(&mut self, on: bool) {
+        if on == self.rumble_on {
+            return;
+        }
+        self.rumble_on = on;
+        if self.haptic_player == nil {
+            return;
+        }
+        unsafe {
+            let mut error: id = nil;
+            if on {
+                let _: bool = msg_send![self.haptic_player,
+                    startAtTime: 0.0f64
+                    error: &mut error];
+            } else {
+                let _: bool = msg_send![self.haptic_player,
+                    stopAtTime: 0.0f64
+                    error: &mut error];
+            }
         }
     }
 
@@ -48,14 +195,16 @@ impl GamepadState {
             let controllers: id = msg_send![gc_class, controllers];
             let count: usize = msg_send![controllers, count];
             if count == 0 {
-                *self = Self::new();
+                self.teardown_haptics();
+                self.clear_buttons();
                 return false;
             }
 
             let controller: id = msg_send![controllers, objectAtIndex: 0usize];
             let gamepad: id = msg_send![controller, extendedGamepad];
             if gamepad.is_null() {
-                *self = Self::new();
+                self.teardown_haptics();
+                self.clear_buttons();
                 return false;
             }
 
@@ -119,6 +268,35 @@ impl GamepadState {
         }
     }
 
+    /// Lazily initialize haptics for the current controller (call after poll()).
+    /// Only attempts setup once per controller connection.
+    pub fn ensure_haptics_ready(&mut self) {
+        if self.haptic_controller != nil {
+            return; // already set up (or attempted) for this controller
+        }
+        unsafe {
+            let gc_class = class!(GCController);
+            let controllers: id = msg_send![gc_class, controllers];
+            let count: usize = msg_send![controllers, count];
+            if count == 0 {
+                return;
+            }
+            let controller: id = msg_send![controllers, objectAtIndex: 0usize];
+            self.ensure_haptics(controller);
+        }
+    }
+
+    fn clear_buttons(&mut self) {
+        self.dpad_up = false; self.dpad_down = false;
+        self.dpad_left = false; self.dpad_right = false;
+        self.btn_a = false; self.btn_b = false;
+        self.btn_start = false; self.btn_select = false;
+        self.stick_up = false; self.stick_down = false;
+        self.stick_left = false; self.stick_right = false;
+        self.l_shoulder = false; self.r_shoulder = false;
+        self.accel = None;
+    }
+
     pub fn apply_to_emu(&self, emu: &mut Emulator, key_map: &HashMap<u16, u8>, keys_down: &HashSet<u16>) {
         // For each GB button, OR keyboard + gamepad state
         let kb_state = |btn: u8| -> bool {
@@ -139,5 +317,11 @@ impl GamepadState {
         for &(btn, gp_pressed) in btns {
             emu.set_button(btn, kb_state(btn) || gp_pressed);
         }
+    }
+}
+
+impl Drop for GamepadState {
+    fn drop(&mut self) {
+        unsafe { self.teardown_haptics(); }
     }
 }

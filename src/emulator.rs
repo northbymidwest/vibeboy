@@ -478,6 +478,8 @@ impl Emulator {
 
     pub fn has_camera(&self) -> bool { self.bus.cart.has_camera() }
     pub fn has_accelerometer(&self) -> bool { self.bus.cart.has_accelerometer() }
+    pub fn has_rumble(&self) -> bool { self.bus.cart.has_rumble() }
+    pub fn rumble_active(&self) -> bool { self.bus.cart.rumble_active() }
     pub fn has_battery(&self) -> bool { self.bus.cart.has_battery() }
 
     pub fn set_camera_image(&mut self, data: &[u8; 128 * 112]) { self.bus.cart.set_camera_image(data); }

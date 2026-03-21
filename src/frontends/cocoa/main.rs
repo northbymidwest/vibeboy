@@ -559,6 +559,9 @@ fn main() {
 
             // ── Gamepad ──────────────────────────────────────────────────────
             gamepad_state.poll();
+            if emu.has_rumble() {
+                gamepad_state.ensure_haptics_ready();
+            }
             gamepad_state.apply_to_emu(&mut emu, &key_map, &keys_down);
 
             // ── Camera ───────────────────────────────────────────────────────
@@ -601,6 +604,11 @@ fn main() {
                 } else {
                     emu.step_frame();
                 }
+            }
+
+            // ── Rumble ───────────────────────────────────────────────────────
+            if emu.has_rumble() {
+                gamepad_state.set_rumble(emu.rumble_active());
             }
 
             // ── Audio ────────────────────────────────────────────────────────

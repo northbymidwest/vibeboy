@@ -310,6 +310,16 @@ impl WasmEmulator {
         self.emu.has_accelerometer()
     }
 
+    /// Returns true if the cartridge has a rumble motor (MBC5+Rumble).
+    pub fn has_rumble(&self) -> bool {
+        self.emu.has_rumble()
+    }
+
+    /// Returns true if the rumble motor is currently active.
+    pub fn rumble_active(&self) -> bool {
+        self.emu.rumble_active()
+    }
+
     /// Feed accelerometer data. gx/gy are in g-force units (±1.0 = ±1g).
     pub fn set_accelerometer(&mut self, gx: f32, gy: f32) {
         const CENTER: f32 = 0x81D0 as f32;

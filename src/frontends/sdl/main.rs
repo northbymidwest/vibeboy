@@ -366,6 +366,9 @@ fn main() {
         AccelSource::None
     };
 
+    let has_rumble = emu.has_rumble();
+    let mut rumble_was_on = false;
+
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
     let mut paused = false;
     let mut step_one_frame = false;
@@ -662,6 +665,21 @@ fn main() {
             }
         }
         let emu_elapsed = emu_start.elapsed();
+
+        // ── Rumble ────────────────────────────────────────────────────────────
+        if has_rumble {
+            let rumble_on = emu.rumble_active();
+            if rumble_on != rumble_was_on {
+                if let Some(ref mut gp) = gamepad {
+                    if rumble_on {
+                        let _ = gp.set_rumble(0xAAAA, 0xAAAA, 100);
+                    } else {
+                        let _ = gp.set_rumble(0, 0, 0);
+                    }
+                }
+                rumble_was_on = rumble_on;
+            }
+        }
 
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.drain_audio_samples();

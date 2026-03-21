@@ -10,6 +10,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use gilrs::{Gilrs, GamepadId, Button as GilButton, Axis as GilAxis};
+use gilrs::ff::{EffectBuilder, BaseEffect, BaseEffectType, Replay, Repeat, Ticks};
 
 use super::{Cli, SCALE, GB_W, GB_H, SGB_W, SGB_H, AUDIO_SAMPLE_RATE};
 use super::emulator::Emulator;
@@ -54,6 +55,9 @@ pub(super) struct App {
     active_gamepad: Option<GamepadId>,
     kb_buttons: u8,  // bitmask of keyboard-pressed buttons
     gp_buttons: u8,  // bitmask of gamepad-pressed buttons
+    rumble_effect: Option<gilrs::ff::Effect>,
+    rumble_gamepad: Option<GamepadId>, // which gamepad owns the effect
+    rumble_on: bool,
 }
 
 impl App {
@@ -96,6 +100,9 @@ impl App {
             active_gamepad: None,
             kb_buttons: 0,
             gp_buttons: 0,
+            rumble_effect: None,
+            rumble_gamepad: None,
+            rumble_on: false,
         }
     }
 
@@ -153,6 +160,63 @@ impl App {
     fn update_filter_checkmarks(&self) {
         for (item, filter) in &self.filter_items {
             item.set_checked(*filter == self.scale_filter);
+        }
+    }
+
+    fn ensure_rumble_effect(&mut self, gp_id: GamepadId) {
+        if self.rumble_gamepad == Some(gp_id) && self.rumble_effect.is_some() {
+            return;
+        }
+        // Drop old effect
+        self.rumble_effect = None;
+        self.rumble_gamepad = None;
+        self.rumble_on = false;
+
+        let gilrs = match self.gilrs.as_mut() {
+            Some(g) => g,
+            None => return,
+        };
+
+        if !gilrs.gamepad(gp_id).is_ff_supported() {
+            return;
+        }
+
+        // Long continuous rumble effect — we start/stop it manually
+        let effect = EffectBuilder::new()
+            .add_effect(BaseEffect {
+                kind: BaseEffectType::Strong { magnitude: 40_000 },
+                scheduling: Replay {
+                    play_for: Ticks::from_ms(u32::MAX),
+                    ..Default::default()
+                },
+                envelope: Default::default(),
+            })
+            .repeat(Repeat::Infinitely)
+            .gamepads(&[gp_id])
+            .finish(gilrs);
+
+        match effect {
+            Ok(e) => {
+                self.rumble_effect = Some(e);
+                self.rumble_gamepad = Some(gp_id);
+            }
+            Err(e) => {
+                log::warn!("Failed to create rumble effect: {}", e);
+            }
+        }
+    }
+
+    fn update_rumble(&mut self, on: bool) {
+        if on == self.rumble_on {
+            return;
+        }
+        self.rumble_on = on;
+        if let Some(ref effect) = self.rumble_effect {
+            if on {
+                let _ = effect.play();
+            } else {
+                let _ = effect.stop();
+            }
         }
     }
 
@@ -564,6 +628,9 @@ impl ApplicationHandler for App {
                         if self.active_gamepad == Some(ev.id) {
                             eprintln!("Gamepad disconnected");
                             self.active_gamepad = None;
+                            self.rumble_effect = None;
+                            self.rumble_gamepad = None;
+                            self.rumble_on = false;
                         }
                     }
                     _ => {}
@@ -635,6 +702,13 @@ impl ApplicationHandler for App {
             } else {
                 self.gp_buttons = 0;
             }
+
+            // Set up rumble effect for the active gamepad if cart supports it
+            if let Some(gp_id) = self.active_gamepad {
+                if self.emu.as_ref().is_some_and(|e| e.has_rumble()) {
+                    self.ensure_rumble_effect(gp_id);
+                }
+            }
         }
 
         // Handle rewind
@@ -647,6 +721,14 @@ impl ApplicationHandler for App {
 
         // Step emulation
         self.step_and_render();
+
+        // Update rumble after emulation step
+        if let Some(ref emu) = self.emu {
+            if emu.has_rumble() {
+                let on = emu.rumble_active();
+                self.update_rumble(on);
+            }
+        }
 
         // Frame rate cap
         let remaining = self.frame_dur.saturating_sub(self.frame_start.elapsed());
