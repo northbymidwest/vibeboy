@@ -369,17 +369,19 @@ impl NoiseCh {
         NOISE_DIVISORS[self.divisor_code as usize]
     }
 
-    /// Perform one LFSR step with XNOR feedback.
+    /// Perform one LFSR step: XOR bits 0 and 1, shift right, put result
+    /// in the high bit (14). In narrow mode, also write to bit 6.
+    /// Output is the inverse of bit 0 after the shift.
     fn step_lfsr(&mut self) {
         let bit0 = self.lfsr & 1;
         let bit1 = (self.lfsr >> 1) & 1;
-        let feedback = !(bit0 ^ bit1) & 1;
+        let feedback = bit0 ^ bit1;
         self.lfsr >>= 1;
         self.lfsr |= feedback << 14;
         if self.lfsr_narrow {
             self.lfsr = (self.lfsr & !0x40) | (feedback << 6);
         }
-        // Output high when bit 0 is NOT set (inverted)
+        // Output is inverted bit 0 (Pan Docs)
         self.lfsr_sample = self.lfsr & 1 == 0;
     }
 

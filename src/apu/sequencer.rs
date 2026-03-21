@@ -255,9 +255,9 @@ impl Apu {
         self.ch4.envelope_clock.locked = false;
         self.ch4.envelope_clock.clock = false;
 
-        // Reset LFSR to 0 (hardware starts at all-zeros with XNOR feedback)
-        self.ch4.lfsr = 0;
-        self.ch4.lfsr_sample = false;
+        // Reset LFSR to all 1s on trigger (Pan Docs: "all bits are set to 1")
+        self.ch4.lfsr = 0x7FFF;
+        self.ch4.lfsr_sample = true;
 
         let raw_div = self.ch4.divisor_code as u32;
         let was_active = self.ch4.counter_active;
