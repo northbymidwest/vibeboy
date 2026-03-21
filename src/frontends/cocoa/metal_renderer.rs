@@ -53,7 +53,7 @@ pub(super) struct MetalRenderer {
     pub tex_w: u32,
     pub tex_h: u32,
     // Compute scaling pipelines (lazily initialized)
-    scale_compute: [Option<ComputePipelineState>; 14],
+    scale_compute: [Option<ComputePipelineState>; 15],
     pub compute_out_tex: Option<Texture>,
     pub compute_out_w: u32,
     pub compute_out_h: u32,
@@ -478,6 +478,8 @@ impl MetalRenderer {
                 (12, include_bytes!(concat!(env!("OUT_DIR"), "/nedi_comp.metal"))),
             ScaleFilter::Dcci =>
                 (13, include_bytes!(concat!(env!("OUT_DIR"), "/dcci_comp.metal"))),
+            ScaleFilter::Mmpx =>
+                (14, include_bytes!(concat!(env!("OUT_DIR"), "/mmpx_comp.metal"))),
             _ => return None,
         };
 
@@ -488,7 +490,8 @@ impl MetalRenderer {
         let (out_w, out_h) = match filter {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr |
             ScaleFilter::Epx | ScaleFilter::Scale2x |
-            ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci => (src_w * 2, src_h * 2),
+            ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci
+            | ScaleFilter::Mmpx => (src_w * 2, src_h * 2),
             ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
             ScaleFilter::Scale4x => (src_w * 4, src_h * 4),
             ScaleFilter::Hqx(h) => { let f = h.factor(); (src_w * f, src_h * f) }

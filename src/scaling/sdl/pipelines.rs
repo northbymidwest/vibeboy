@@ -23,6 +23,7 @@ const SP_OMNISCALE_LEGACY: usize = 10;
 const SP_EDI: usize = 11;
 const SP_NEDI: usize = 12;
 const SP_DCCI: usize = 13;
+const SP_MMPX: usize = 14;
 
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
@@ -38,7 +39,7 @@ pub struct GpuPipelines {
     // All scaling filters now use compute pipelines instead.
 
     // Lazily-initialized compute pipelines (scaling filters)
-    scale_pipelines: [Option<gpu::ComputePipeline>; 14],
+    scale_pipelines: [Option<gpu::ComputePipeline>; 15],
 
     // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
@@ -160,6 +161,8 @@ impl GpuPipelines {
                 Some((SP_NEDI, super::init_nedi_compute_pipeline)),
             ScaleFilter::Dcci =>
                 Some((SP_DCCI, super::init_dcci_compute_pipeline)),
+            ScaleFilter::Mmpx =>
+                Some((SP_MMPX, super::init_mmpx_compute_pipeline)),
             _ => None,
         };
 
@@ -260,13 +263,15 @@ impl GpuPipelines {
             ScaleFilter::Edi => SP_EDI,
             ScaleFilter::Nedi => SP_NEDI,
             ScaleFilter::Dcci => SP_DCCI,
+            ScaleFilter::Mmpx => SP_MMPX,
             _ => return,
         };
 
         // Integer-scale filters render at native dimensions
         let (out_w, out_h) = match filter {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr
-            | ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci => (src_w * 2, src_h * 2),
+            | ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci
+            | ScaleFilter::Mmpx => (src_w * 2, src_h * 2),
             ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
             ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),
             ScaleFilter::Scale4x => (src_w * 4, src_h * 4),

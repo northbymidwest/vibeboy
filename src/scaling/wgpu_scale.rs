@@ -25,6 +25,7 @@ pub enum WgpuScaleFilter {
     Edi,
     Nedi,
     Dcci,
+    Mmpx,
 }
 
 impl WgpuScaleFilter {
@@ -45,6 +46,7 @@ impl WgpuScaleFilter {
             "edi" => Some(Self::Edi),
             "nedi" => Some(Self::Nedi),
             "dcci" => Some(Self::Dcci),
+            "mmpx" => Some(Self::Mmpx),
             _ => None,
         }
     }
@@ -52,7 +54,7 @@ impl WgpuScaleFilter {
     pub fn all_names() -> &'static [&'static str] {
         &["nearest", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
           "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
-          "edi", "nedi", "dcci"]
+          "edi", "nedi", "dcci", "mmpx"]
     }
 
     /// For integer-scale filters, compute the native output dimensions.
@@ -61,7 +63,7 @@ impl WgpuScaleFilter {
         match self {
             // Fixed 2x
             Self::Eagle | Self::SuperXbr
-            | Self::Edi | Self::Nedi | Self::Dcci => (src_w * 2, src_h * 2),
+            | Self::Edi | Self::Nedi | Self::Dcci | Self::Mmpx => (src_w * 2, src_h * 2),
             // Fixed 3x
             Self::Scale3x => (src_w * 3, src_h * 3),
             // 2x/3x/4x — pick best integer fit
@@ -127,6 +129,7 @@ pub struct WgpuScalePipeline {
     edi: wgpu::ComputePipeline,
     nedi: wgpu::ComputePipeline,
     dcci: wgpu::ComputePipeline,
+    mmpx: wgpu::ComputePipeline,
     bufs: Option<ScaleBufs>,
 }
 
@@ -156,6 +159,7 @@ impl WgpuScalePipeline {
         let edi_wgsl = include_str!(concat!(env!("OUT_DIR"), "/edi_comp.wgsl"));
         let nedi_wgsl = include_str!(concat!(env!("OUT_DIR"), "/nedi_comp.wgsl"));
         let dcci_wgsl = include_str!(concat!(env!("OUT_DIR"), "/dcci_comp.wgsl"));
+        let mmpx_wgsl = include_str!(concat!(env!("OUT_DIR"), "/mmpx_comp.wgsl"));
 
         WgpuScalePipeline {
             epx: create_compute_pipeline(device, epx_wgsl, "epx"),
@@ -172,6 +176,7 @@ impl WgpuScalePipeline {
             edi: create_compute_pipeline(device, edi_wgsl, "edi"),
             nedi: create_compute_pipeline(device, nedi_wgsl, "nedi"),
             dcci: create_compute_pipeline(device, dcci_wgsl, "dcci"),
+            mmpx: create_compute_pipeline(device, mmpx_wgsl, "mmpx"),
             bufs: None,
         }
     }
@@ -193,6 +198,7 @@ impl WgpuScalePipeline {
             WgpuScaleFilter::Edi => &self.edi,
             WgpuScaleFilter::Nedi => &self.nedi,
             WgpuScaleFilter::Dcci => &self.dcci,
+            WgpuScaleFilter::Mmpx => &self.mmpx,
         }
     }
 

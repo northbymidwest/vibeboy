@@ -37,6 +37,7 @@ pub fn gpu_screenshot(
         ScaleFilter::Edi => init_edi_compute_pipeline,
         ScaleFilter::Nedi => init_nedi_compute_pipeline,
         ScaleFilter::Dcci => init_dcci_compute_pipeline,
+        ScaleFilter::Mmpx => init_mmpx_compute_pipeline,
         _ => return None,
     };
 

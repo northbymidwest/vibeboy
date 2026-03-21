@@ -8,6 +8,7 @@ pub mod eagle;
 pub mod edi;
 pub mod epx;
 pub mod hqx;
+pub mod mmpx;
 pub mod nedi;
 pub mod omniscale;
 pub mod omniscale_legacy;
@@ -148,6 +149,7 @@ pub enum ScaleFilter {
     Nedi,
     Dcci,
     Edi,
+    Mmpx,
     /// Arbitrary-resolution OmniScale (scales to display size).
     OmniScale,
     /// Arbitrary-resolution OmniScale legacy variant (scales to display size).
@@ -213,6 +215,7 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Nedi,             cli_name: "nedi",         display_name: "NEDI",           factor: 2 },
     FilterInfo { filter: ScaleFilter::Dcci,             cli_name: "dcci",         display_name: "DCCI",           factor: 2 },
     FilterInfo { filter: ScaleFilter::Edi,              cli_name: "edi",          display_name: "EDI",            factor: 2 },
+    FilterInfo { filter: ScaleFilter::Mmpx,             cli_name: "mmpx",         display_name: "MMPX",           factor: 2 },
     FilterInfo { filter: ScaleFilter::OmniScale,        cli_name: "omniscale",    display_name: "OmniScale",      factor: 0 },
     FilterInfo { filter: ScaleFilter::OmniScaleLegacy,  cli_name: "omniscale-legacy", display_name: "OmniScale Legacy", factor: 0 },
     FilterInfo { filter: ScaleFilter::AaNearestNeighbor, cli_name: "aa-nearest",  display_name: "AA Nearest",     factor: 0 },
@@ -379,6 +382,10 @@ pub fn cpu_scale(
         }
         ScaleFilter::Edi => {
             let s = edi::scale(src, sw, sh);
+            (s, sw as u32 * 2, sh as u32 * 2)
+        }
+        ScaleFilter::Mmpx => {
+            let s = mmpx::scale(src, sw, sh);
             (s, sw as u32 * 2, sh as u32 * 2)
         }
         ScaleFilter::OmniScale => {

@@ -277,6 +277,7 @@ init_scale_pipeline!(init_omniscale_legacy_compute_pipeline, "omniscale_legacy")
 init_scale_pipeline!(init_edi_compute_pipeline, "edi");
 init_scale_pipeline!(init_nedi_compute_pipeline, "nedi");
 init_scale_pipeline!(init_dcci_compute_pipeline, "dcci");
+init_scale_pipeline!(init_mmpx_compute_pipeline, "mmpx");
 
 /// Dispatch a scaling compute shader and blit to the swapchain.
 /// `uniforms` must be exactly 32 bytes (8 × u32) matching the shader's uniform block.

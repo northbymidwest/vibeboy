@@ -234,6 +234,14 @@ const SHADERS: &[ShaderInfo] = &[
         wgsl_name: "dcci_comp.wgsl",
         msl_buffer_remap: &[],
     },
+    ShaderInfo {
+        glsl_src: "mmpx.comp",
+        spv_name: "mmpx_comp.spv",
+        msl_name: "mmpx_comp.metal",
+        dxil_name: "mmpx_comp.dxil",
+        wgsl_name: "mmpx_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
 ];
 
 fn main() {
