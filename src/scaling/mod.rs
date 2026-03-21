@@ -16,6 +16,7 @@ pub mod omniscale_legacy;
 pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
+pub mod vectorize_gpu_cpu;
 pub mod xbr;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
@@ -176,6 +177,7 @@ pub enum ScaleFilter {
     /// Adaptive shared-chain: skips optimization on complex frames.
     VectorizeAdaptive,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
+    /// Falls back to CPU implementation (vectorize_gpu_cpu) when GPU is unavailable.
     VectorizeGpu,
 }
 
@@ -406,6 +408,13 @@ pub fn cpu_scale(
         ScaleFilter::AaNearestNeighbor => {
             let s = aa_nearest::scale(src, sw, sh, disp_w, disp_h);
             (s, disp_w as u32, disp_h as u32)
+        }
+        ScaleFilter::VectorizeGpu => {
+            let scale_f = (disp_w as f32 / sw as f32).min(disp_h as f32 / sh as f32);
+            let ow = (sw as f32 * scale_f).round() as usize;
+            let oh = (sh as f32 * scale_f).round() as usize;
+            let s = vectorize_gpu_cpu::scale(src, sw, sh, scale_f);
+            (s, ow as u32, oh as u32)
         }
         // Nearest, Vectorize handled elsewhere (GPU blit / compute)
         _ => return None,

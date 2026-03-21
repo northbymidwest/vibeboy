@@ -131,6 +131,13 @@ fn vectorize_and_save(
                 || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
             )
         }
+        "vectorize-gpu-cpu" => {
+            let scale_f = scale as f32;
+            let out_w = (width as f32 * scale_f).round() as usize;
+            let out_h = (height as f32 * scale_f).round() as usize;
+            let r = vibeboy::scaling::vectorize_gpu_cpu::scale(pixels, width, height, scale_f);
+            (r, out_w, out_h)
+        }
         _ => {
             // "raster" or default
             vectorize::vectorize_to_raster(pixels, width, height, scale)
