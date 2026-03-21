@@ -308,7 +308,7 @@ fn main() {
     // Without: use SDL 2D canvas renderer with CPU-only scaling.
 
     #[cfg(feature = "sdl3-gpu-shaders")]
-    let mut gpu = scaling::gpu_pipelines::GpuPipelines::new(&window, src_w, src_h);
+    let mut gpu = scaling::sdl::pipelines::GpuPipelines::new(&window, src_w, src_h);
 
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
     let mut canvas = window.into_canvas();
@@ -646,11 +646,16 @@ fn main() {
             step_one_frame = false;
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
-            // Rewind at 3x speed
+            // Rewind at 3x speed — collect audio from all 3 frames
+            let mut all_audio = Vec::new();
             for _ in 0..3 {
                 emu.rewind_one_frame();
+                all_audio.extend_from_slice(&emu.drain_audio_samples());
             }
-            emu.drain_audio_samples();
+            // Reverse entire stream then downsample 3x to fit one display frame
+            ui_util::reverse_audio(&mut all_audio);
+            let resampled = ui_util::downsample_audio(&all_audio, 3);
+            let _ = audio_stream.put_data_f32(&resampled);
             frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
         } else if fast_forward {
@@ -740,7 +745,7 @@ fn main() {
 
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
-                use scaling::gpu_pipelines::GpuRenderMode;
+                use scaling::sdl::pipelines::GpuRenderMode;
                 let mode = gpu.ensure_pipeline(scale_filter, &window, cli.cpu_filter);
 
                 match mode {
@@ -762,7 +767,7 @@ fn main() {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
                         let (src_pixels, src_regions, diag_states, out_w, out_h) =
-                            scaling::gpu::prepare_diffusion_data(raw_src, sw, sh, scale);
+                            scaling::sdl::prepare_diffusion_data(raw_src, sw, sh, scale);
                         if out_w > 0 && out_h > 0 {
                             gpu.render_diffusion_to_window(
                                 &window, &src_pixels, &src_regions, &diag_states,

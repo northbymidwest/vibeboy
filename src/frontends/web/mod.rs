@@ -4,8 +4,8 @@ use wasm_bindgen_futures::JsFuture;
 use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
-use crate::wgpu_vectorize::WgpuVectorizePipeline;
-use crate::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
+use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
+use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 
 fn auto_detect_model(rom: &[u8]) -> GbModel {
     if rom.len() > 0x143 && (rom[0x143] & 0x80) != 0 {
@@ -264,6 +264,16 @@ impl WasmEmulator {
     /// Step one frame of emulation.
     pub fn step_frame(&mut self) {
         self.emu.step_frame();
+    }
+
+    /// Set rewind mode (call before rewind_one_frame).
+    pub fn set_rewinding(&mut self, active: bool) {
+        self.emu.set_rewinding(active);
+    }
+
+    /// Pop one rewind frame, regenerating the display. Returns true if rewound.
+    pub fn rewind_one_frame(&mut self) -> bool {
+        self.emu.rewind_one_frame()
     }
 
     /// Enable or disable audio sample generation. Disabling saves CPU.
@@ -563,6 +573,17 @@ impl WasmEmulator {
     /// Drain audio samples into internal buffer; read via audio_ptr/audio_len.
     pub fn audio_drain(&mut self) {
         self.audio_buf = self.emu.drain_audio_samples();
+    }
+
+    /// Reverse the internal audio buffer in-place (stereo pairs).
+    pub fn audio_reverse(&mut self) {
+        crate::ui_util::reverse_audio(&mut self.audio_buf);
+    }
+
+    /// Downsample the internal audio buffer by an integer factor using a
+    /// Blackman-windowed sinc low-pass filter.
+    pub fn audio_downsample(&mut self, factor: usize) {
+        self.audio_buf = crate::ui_util::downsample_audio(&self.audio_buf, factor);
     }
 
     pub fn audio_ptr(&self) -> *const f32 {

@@ -17,11 +17,11 @@ pub mod super_xbr;
 pub mod xbr;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
-pub mod gpu;
-#[cfg(feature = "sdl3-gpu-shaders")]
-pub mod gpu_pipelines;
-#[cfg(any(feature = "gpu", feature = "winit-ui"))]
+pub mod sdl;
+#[cfg(any(feature = "gpu", feature = "winit-ui", feature = "web"))]
 pub mod wgpu_vectorize;
+#[cfg(feature = "web")]
+pub mod wgpu_scale;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]

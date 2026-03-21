@@ -2,6 +2,7 @@
 //! and the test runner.
 
 use crate::model::GbModel;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::scaling;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ pub fn parse_model(s: &str) -> Result<GbModel, String> {
 }
 
 /// Parse a filter string for clap value_parser.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_filter(s: &str) -> Result<String, String> {
     scaling::ScaleFilter::validate_name(s)
 }

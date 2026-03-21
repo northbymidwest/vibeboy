@@ -95,7 +95,7 @@ fn vectorize_and_save(
                 || {
                     #[cfg(feature = "sdl3-gpu-shaders")]
                     {
-                        vibeboy::scaling::gpu::gpu_vectorize_shared_screenshot(
+                        vibeboy::scaling::sdl::gpu_vectorize_shared_screenshot(
                             pixels, width, height, scale,
                         )
                     }
@@ -119,7 +119,7 @@ fn vectorize_and_save(
                 || {
                     #[cfg(feature = "sdl3-gpu-shaders")]
                     {
-                        vibeboy::scaling::gpu::gpu_full_pipeline_screenshot(
+                        vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(
                             pixels, width, height, scale,
                         )
                     }
@@ -149,7 +149,7 @@ fn spline_diffusion_with_fallback(
 ) -> Vec<u32> {
     #[cfg(feature = "sdl3-gpu-shaders")]
     if use_gpu {
-        if let Some((px, _, _)) = scaling::gpu::gpu_spline_diffusion_screenshot(pixels, width, height, scale) {
+        if let Some((px, _, _)) = scaling::sdl::gpu_spline_diffusion_screenshot(pixels, width, height, scale) {
             return px;
         }
         eprintln!("GPU 'spline-diffusion' failed, falling back to CPU rasterization");
@@ -181,7 +181,7 @@ fn try_gpu_filter(
     {
         if is_vectorize {
             let s = scale as f64;
-            if let Some((pix, w, h)) = scaling::gpu::gpu_vectorize_screenshot(
+            if let Some((pix, w, h)) = scaling::sdl::gpu_vectorize_screenshot(
                 raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s, is_adaptive,
             ) {
                 return Some((pix, w as usize, h as usize));
@@ -190,7 +190,7 @@ fn try_gpu_filter(
                 "GPU vectorize screenshot failed for filter '{}', falling back to CPU",
                 filter_name
             );
-        } else if let Some((s, w, h)) = scaling::gpu::gpu_screenshot(
+        } else if let Some((s, w, h)) = scaling::sdl::gpu_screenshot(
             raw_fb, GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32, sf,
         ) {
             return Some((s, w as usize, h as usize));

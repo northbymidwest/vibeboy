@@ -5,7 +5,7 @@
 //! that previously lived in `main.rs`.
 
 use sdl3::gpu;
-use super::ScaleFilter;
+use crate::scaling::ScaleFilter;
 use crate::vectorize::rasterize::{GpuEdgeV2, GpuRowRange};
 
 /// Index into `scale_pipelines` array for each compute-based scaling filter.
@@ -44,7 +44,7 @@ pub struct GpuPipelines {
     vectorize_compute: Option<gpu::ComputePipeline>,
     diffusion_compute: Option<gpu::ComputePipeline>,
     spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
-    full_vectorize: Option<super::gpu::GpuVectorizePipelines>,
+    full_vectorize: Option<super::GpuVectorizePipelines>,
 }
 
 impl GpuPipelines {
@@ -64,7 +64,7 @@ impl GpuPipelines {
             gpu::PresentMode::Vsync,
             gpu::SwapchainComposition::Sdr,
         );
-        let tex = super::gpu::create_texture(&dev, src_w, src_h);
+        let tex = super::create_texture(&dev, src_w, src_h);
         let max_xfer = src_w * src_h * 4;
         let xfer = dev
             .create_transfer_buffer()
@@ -101,7 +101,7 @@ impl GpuPipelines {
         if w != self.tex_w || h != self.tex_h {
             self.tex_w = w;
             self.tex_h = h;
-            self.tex = super::gpu::create_texture(&self.device, w, h);
+            self.tex = super::create_texture(&self.device, w, h);
         }
     }
 
@@ -133,33 +133,33 @@ impl GpuPipelines {
         // Map scaling filters to compute pipeline index + init function
         let scale_idx: Option<(usize, fn(&gpu::Device) -> Option<gpu::ComputePipeline>)> = match filter {
             ScaleFilter::OmniScale =>
-                Some((SP_OMNISCALE, super::gpu::init_omniscale_compute_pipeline)),
+                Some((SP_OMNISCALE, super::init_omniscale_compute_pipeline)),
             ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x =>
-                Some((SP_EPX, super::gpu::init_epx_compute_pipeline)),
+                Some((SP_EPX, super::init_epx_compute_pipeline)),
             ScaleFilter::Eagle =>
-                Some((SP_EAGLE, super::gpu::init_eagle_compute_pipeline)),
+                Some((SP_EAGLE, super::init_eagle_compute_pipeline)),
             ScaleFilter::Scale3x =>
-                Some((SP_SCALE3X, super::gpu::init_scale3x_compute_pipeline)),
+                Some((SP_SCALE3X, super::init_scale3x_compute_pipeline)),
             ScaleFilter::Bicubic =>
-                Some((SP_BICUBIC, super::gpu::init_bicubic_compute_pipeline)),
+                Some((SP_BICUBIC, super::init_bicubic_compute_pipeline)),
             ScaleFilter::AaNearestNeighbor =>
-                Some((SP_AA_NEAREST, super::gpu::init_aa_nearest_compute_pipeline)),
+                Some((SP_AA_NEAREST, super::init_aa_nearest_compute_pipeline)),
             ScaleFilter::Hqx(_) =>
-                Some((SP_HQX, super::gpu::init_hqx_compute_pipeline)),
+                Some((SP_HQX, super::init_hqx_compute_pipeline)),
             ScaleFilter::Xbr(_) =>
-                Some((SP_XBR, super::gpu::init_xbr_compute_pipeline)),
+                Some((SP_XBR, super::init_xbr_compute_pipeline)),
             ScaleFilter::Xbrz(_) =>
-                Some((SP_XBRZ, super::gpu::init_xbrz_compute_pipeline)),
+                Some((SP_XBRZ, super::init_xbrz_compute_pipeline)),
             ScaleFilter::SuperXbr =>
-                Some((SP_SUPER_XBR, super::gpu::init_super_xbr_compute_pipeline)),
+                Some((SP_SUPER_XBR, super::init_super_xbr_compute_pipeline)),
             ScaleFilter::OmniScaleLegacy =>
-                Some((SP_OMNISCALE_LEGACY, super::gpu::init_omniscale_legacy_compute_pipeline)),
+                Some((SP_OMNISCALE_LEGACY, super::init_omniscale_legacy_compute_pipeline)),
             ScaleFilter::Edi =>
-                Some((SP_EDI, super::gpu::init_edi_compute_pipeline)),
+                Some((SP_EDI, super::init_edi_compute_pipeline)),
             ScaleFilter::Nedi =>
-                Some((SP_NEDI, super::gpu::init_nedi_compute_pipeline)),
+                Some((SP_NEDI, super::init_nedi_compute_pipeline)),
             ScaleFilter::Dcci =>
-                Some((SP_DCCI, super::gpu::init_dcci_compute_pipeline)),
+                Some((SP_DCCI, super::init_dcci_compute_pipeline)),
             _ => None,
         };
 
@@ -179,7 +179,7 @@ impl GpuPipelines {
             ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
-                        super::gpu::init_vectorize_compute_pipeline(&self.device);
+                        super::init_vectorize_compute_pipeline(&self.device);
                 }
                 if self.vectorize_compute.is_some() {
                     GpuRenderMode::Vectorize
@@ -190,7 +190,7 @@ impl GpuPipelines {
             ScaleFilter::VectorizeDiffusion => {
                 if self.diffusion_compute.is_none() {
                     self.diffusion_compute =
-                        super::gpu::init_diffusion_compute_pipeline(&self.device);
+                        super::init_diffusion_compute_pipeline(&self.device);
                 }
                 if self.diffusion_compute.is_some() {
                     GpuRenderMode::Diffusion
@@ -202,7 +202,7 @@ impl GpuPipelines {
             | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
                 if self.spline_diff.is_none() {
                     self.spline_diff =
-                        super::gpu::init_spline_diffusion_pipelines(&self.device);
+                        super::init_spline_diffusion_pipelines(&self.device);
                 }
                 if self.spline_diff.is_some() {
                     GpuRenderMode::SplineDiffusion
@@ -213,7 +213,7 @@ impl GpuPipelines {
             ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =
-                        super::gpu::init_vectorize_compute_pipeline(&self.device);
+                        super::init_vectorize_compute_pipeline(&self.device);
                 }
                 if self.vectorize_compute.is_some() {
                     GpuRenderMode::VectorizeSharedChain
@@ -223,7 +223,7 @@ impl GpuPipelines {
             }
             ScaleFilter::VectorizeGpu => {
                 if self.full_vectorize.is_none() {
-                    self.full_vectorize = super::gpu::init_full_gpu_pipeline(&self.device);
+                    self.full_vectorize = super::init_full_gpu_pipeline(&self.device);
                 }
                 if self.full_vectorize.is_some() {
                     GpuRenderMode::FullGpuVectorize
@@ -281,7 +281,7 @@ impl GpuPipelines {
 
         // Super xBR uses a special 3-pass dispatch
         if matches!(filter, ScaleFilter::SuperXbr) {
-            super::gpu::super_xbr_compute_and_blit(
+            super::super_xbr_compute_and_blit(
                 &self.device, window, &self.tex, pipeline,
                 pixels, src_w, src_h, out_w, out_h,
             );
@@ -304,7 +304,7 @@ impl GpuPipelines {
         };
         let uniforms = [src_w, src_h, out_w, out_h, extra, 0, 0, 0];
 
-        super::gpu::scale_compute_and_blit(
+        super::scale_compute_and_blit(
             &self.device, window, &self.tex, pipeline,
             pixels, out_w, out_h, &uniforms,
         );
@@ -321,7 +321,7 @@ impl GpuPipelines {
         self.resize_texture(src_w, src_h);
         let needed = src_w * src_h * 4;
         self.ensure_transfer_buf(needed);
-        super::gpu::upload_and_blit(
+        super::upload_and_blit(
             &self.device, window, &self.tex, &self.transfer_buf,
             pixels, src_w, src_h, filter_mode,
         );
@@ -339,7 +339,7 @@ impl GpuPipelines {
         bg_color: u32,
     ) {
         self.resize_texture(out_w, out_h);
-        super::gpu::vectorize_and_blit(
+        super::vectorize_and_blit(
             &self.device,
             window,
             &self.tex,
@@ -363,12 +363,12 @@ impl GpuPipelines {
         scale: f32,
     ) {
         if self.full_vectorize.is_none() {
-            self.full_vectorize = super::gpu::init_full_gpu_pipeline(&self.device);
+            self.full_vectorize = super::init_full_gpu_pipeline(&self.device);
         }
         self.resize_texture(out_w, out_h);
         // Need to borrow pipelines and tex separately from self
         let pipelines = self.full_vectorize.as_mut().unwrap();
-        super::gpu::gpu_vectorize_full_pipeline(
+        super::gpu_vectorize_full_pipeline(
             &self.device, window, &self.tex, pipelines,
             pixels, img_w, img_h, out_w, out_h, scale,
         );
@@ -388,7 +388,7 @@ impl GpuPipelines {
         scale: f32,
     ) {
         self.resize_texture(out_w, out_h);
-        super::gpu::diffusion_and_blit(
+        super::diffusion_and_blit(
             &self.device,
             window,
             &self.tex,
@@ -421,7 +421,7 @@ impl GpuPipelines {
     ) {
         self.resize_texture(out_w, out_h);
         let (p1, p2) = self.spline_diff.as_ref().unwrap();
-        super::gpu::spline_diffusion_and_blit(
+        super::spline_diffusion_and_blit(
             &self.device,
             window,
             &self.tex,
@@ -451,7 +451,7 @@ impl GpuPipelines {
         self.resize_texture(w, h);
         let needed = w * h * 4;
         self.ensure_transfer_buf(needed);
-        super::gpu::upload_and_blit(
+        super::upload_and_blit(
             &self.device,
             window,
             &self.tex,

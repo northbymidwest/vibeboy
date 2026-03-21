@@ -6,6 +6,7 @@
 
 mod common;
 mod compute;
+pub mod pipelines;
 mod screenshot;
 
 pub use common::{create_texture, upload_and_blit};

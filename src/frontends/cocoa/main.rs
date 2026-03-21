@@ -592,11 +592,18 @@ fn main() {
 
             if !paused {
                 if backspace_held {
-                    // Rewind at 3x speed
+                    // Rewind at 3x speed — collect audio from all 3 frames
+                    let mut all_audio = Vec::new();
                     for _ in 0..3 {
                         emu.rewind_one_frame();
+                        all_audio.extend_from_slice(&emu.drain_audio_samples());
                     }
-                    emu.drain_audio_samples();
+                    // Reverse entire stream then downsample 3x to fit one display frame
+                    ui_util::reverse_audio(&mut all_audio);
+                    let resampled = ui_util::downsample_audio(&all_audio, 3);
+                    if let Ok(mut ring) = audio_ring.lock() {
+                        ring.write(&resampled);
+                    }
                 } else if fast_forward {
                     for _ in 0..4 {
                         emu.step_frame();
