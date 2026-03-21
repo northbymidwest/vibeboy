@@ -101,18 +101,6 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, WebAssembly/WebGPU browser
 - **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, built-in ROM selector with public domain games, all GPU filters via dropdown, model selection, gamepad support, accelerometer (DeviceMotion for MBC7), AudioWorklet at 96kHz, webcam for Game Boy Camera, localStorage save persistence
 
-## Test Status
-
-| Suite | Result |
-|-------|--------|
-| Mooneye acceptance | 75/75 |
-| Blargg | 57/58 |
-| SameSuite APU | 55/70 |
-| dmg-acid2 | Pass |
-| cgb-acid2 | Pass |
-| cgb-acid-hell | Pass |
-| bully | Pass (DMG + CGB) |
-
 ## Test Runner
 
 A built-in test runner with explicit subcommands for each test harness. See [`src/test_runner/README.md`](src/test_runner/README.md) for full documentation.
