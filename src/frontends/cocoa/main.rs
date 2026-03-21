@@ -628,8 +628,8 @@ fn main() {
 
             // ── Check occlusion ──────────────────────────────────────────
             let occluded = unsafe {
-                let state: objc2_app_kit::NSWindowOcclusionState = msg_send![window, occlusionState];
-                !state.contains(objc2_app_kit::NSWindowOcclusionState::Visible)
+                let ns_win = &*(window as *const objc2_app_kit::NSWindow);
+                !ns_win.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible)
             };
 
             // ── Update drawable size on resize ─────────────────────────────
