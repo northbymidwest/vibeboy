@@ -642,7 +642,7 @@ fn main() {
 
         // ── Rumble ────────────────────────────────────────────────────────────
         if has_rumble {
-            let rumble_on = emu.rumble_active();
+            let rumble_on = emu.drain_rumble();
             if rumble_on != rumble_was_on {
                 if let Some(ref mut gp) = gamepad {
                     if rumble_on {

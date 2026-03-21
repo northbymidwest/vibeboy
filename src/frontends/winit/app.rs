@@ -524,7 +524,7 @@ impl ApplicationHandler for App {
                 // Rumble
                 if emu.has_rumble() {
                     gp.ensure_rumble();
-                    gp.set_rumble(emu.rumble_active());
+                    gp.set_rumble(emu.drain_rumble());
                 }
             }
         } else {

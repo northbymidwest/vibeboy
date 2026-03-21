@@ -566,7 +566,7 @@ fn main() {
 
             // ── Rumble ───────────────────────────────────────────────────────
             if emu.has_rumble() {
-                gamepad_state.set_rumble(emu.rumble_active());
+                gamepad_state.set_rumble(emu.drain_rumble());
             }
 
             // ── Audio ────────────────────────────────────────────────────────

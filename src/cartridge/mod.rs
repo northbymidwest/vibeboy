@@ -74,8 +74,11 @@ pub trait Cartridge: Send {
     fn set_camera_image(&mut self, _grayscale: &[u8; 128 * 112]) {}
     /// Returns true if this cartridge has a rumble motor (MBC5+Rumble).
     fn has_rumble(&self) -> bool { false }
-    /// Returns true if the rumble motor is currently active.
+    /// Returns true if the rumble motor is currently on.
     fn rumble_active(&self) -> bool { false }
+    /// Returns true if rumble was active at any point since the last call, then clears
+    /// the latch. Call once per frame to check for rumble pulses.
+    fn drain_rumble(&mut self) -> bool { false }
     /// Returns true if this cartridge has an accelerometer (MBC7).
     fn has_accelerometer(&self) -> bool { false }
     /// Feed accelerometer values in MBC7 u16 format (center = 0x81D0).

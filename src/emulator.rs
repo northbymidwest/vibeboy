@@ -550,6 +550,8 @@ impl Emulator {
     pub fn has_accelerometer(&self) -> bool { self.bus.cart.has_accelerometer() }
     pub fn has_rumble(&self) -> bool { self.bus.cart.has_rumble() }
     pub fn rumble_active(&self) -> bool { self.bus.cart.rumble_active() }
+    /// Returns true if rumble was active at any point since the last call, then clears.
+    pub fn drain_rumble(&mut self) -> bool { self.bus.cart.drain_rumble() }
     pub fn has_battery(&self) -> bool { self.bus.cart.has_battery() }
 
     pub fn set_camera_image(&mut self, data: &[u8; 128 * 112]) { self.bus.cart.set_camera_image(data); }

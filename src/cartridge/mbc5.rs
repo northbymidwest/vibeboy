@@ -9,6 +9,8 @@ pub struct Mbc5 {
     battery: bool,
     has_rumble: bool,
     rumble_on: bool,
+    /// Sticky flag: set whenever rumble_on transitions to true, cleared by the frontend.
+    rumble_latched: bool,
 }
 
 impl Mbc5 {
@@ -22,6 +24,7 @@ impl Mbc5 {
             battery,
             has_rumble,
             rumble_on: false,
+            rumble_latched: false,
         }
     }
 }
@@ -43,7 +46,9 @@ impl Cartridge for Mbc5 {
             0x3000..=0x3FFF => self.rom_bank = (self.rom_bank & 0xFF) | (((val & 0x01) as usize) << 8),
             0x4000..=0x5FFF => {
                 if self.has_rumble {
-                    self.rumble_on = val & 0x08 != 0;
+                    let on = val & 0x08 != 0;
+                    if on { self.rumble_latched = true; }
+                    self.rumble_on = on;
                     self.ram_bank = (val & 0x07) as usize;
                 } else {
                     self.ram_bank = (val & 0x0F) as usize;
@@ -68,6 +73,11 @@ impl Cartridge for Mbc5 {
     fn has_battery(&self) -> bool { self.battery }
     fn has_rumble(&self) -> bool { self.has_rumble }
     fn rumble_active(&self) -> bool { self.rumble_on }
+    fn drain_rumble(&mut self) -> bool {
+        let active = self.rumble_on || self.rumble_latched;
+        self.rumble_latched = false;
+        active
+    }
     fn ram_data(&self) -> &[u8] { &self.ram }
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());

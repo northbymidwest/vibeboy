@@ -327,9 +327,9 @@ impl WasmEmulator {
         self.emu.has_rumble()
     }
 
-    /// Returns true if the rumble motor is currently active.
-    pub fn rumble_active(&self) -> bool {
-        self.emu.rumble_active()
+    /// Returns true if the rumble motor was active at any point since the last call.
+    pub fn rumble_active(&mut self) -> bool {
+        self.emu.drain_rumble()
     }
 
     /// Feed accelerometer data. gx/gy are in g-force units (±1.0 = ±1g).
