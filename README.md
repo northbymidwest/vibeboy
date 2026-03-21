@@ -1,5 +1,7 @@
 # vibeboy
 
+[**Play in your browser**](https://northbymidwest.github.io/vibeboy/)
+
 A Game Boy / Game Boy Color emulator written in Rust.
 
 Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GBA in GBC mode) hardware models.
