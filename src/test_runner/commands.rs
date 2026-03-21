@@ -293,7 +293,7 @@ pub fn cmd_screenshot(
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize, gpu: bool) {
+pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: bool) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -310,6 +310,18 @@ pub fn cmd_vectorize(input: &Path, out: &str, format: &str, scale: usize, gpu: b
             0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
         })
         .collect();
+
+    // Map --filter names to internal format names for vectorize_and_save
+    let format = match filter {
+        "vectorize" | "vectorize-adaptive" => "raster",
+        "vectorize-diffusion" => "diffusion",
+        "vectorize-spline-diffusion" | "vectorize-spline-diffusion-adaptive" => "spline-diffusion",
+        "vectorize-legacy" | "vectorize-legacy-adaptive" => "edge",
+        "vectorize-gpu" => "vectorize-gpu-cpu",
+        "gpu-full" => "gpu-full",
+        "edge" => "edge",
+        other => other, // pass through for any direct format names
+    };
 
     vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
 }

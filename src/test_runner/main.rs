@@ -67,22 +67,26 @@ enum Command {
         #[arg(long)]
         gpu: bool,
     },
-    /// Vectorize an input PNG image to SVG using Kopf-Lischinski
+    /// Vectorize an input PNG image to SVG or scaled PNG
     Vectorize {
         /// Path to input image
         path: PathBuf,
         /// Output file path (.svg for vector, .png for raster)
         #[arg(long, default_value = "output.svg")]
         out: String,
-        /// Rasterizer format: raster (default), diffusion, spline-diffusion
-        #[arg(long, default_value = "raster")]
-        format: String,
+        /// Vectorize filter: vectorize (default), vectorize-diffusion, vectorize-spline-diffusion,
+        /// vectorize-gpu (uses CPU fallback), vectorize-legacy, edge, gpu-full
+        #[arg(long, default_value = "vectorize")]
+        filter: String,
         /// Scale factor for raster output (default 4)
         #[arg(long, default_value = "4")]
         scale: usize,
-        /// Use GPU shader for rasterization
+        /// Use GPU shader for rasterization (where available)
         #[arg(long)]
         gpu: bool,
+        /// Force CPU-only (no GPU shaders)
+        #[arg(long)]
+        cpu_filter: bool,
     },
     /// Analyze frame buffer (debug tool)
     Analyze {
@@ -216,8 +220,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, format, scale, gpu } => {
-            commands::cmd_vectorize(&path, &out, &format, scale, gpu);
+        Command::Vectorize { path, out, filter, scale, gpu, cpu_filter } => {
+            commands::cmd_vectorize(&path, &out, &filter, scale, gpu && !cpu_filter);
         }
         Command::Analyze {
             path,
