@@ -4,6 +4,8 @@
 use crate::model::GbModel;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::scaling;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 use std::time::Duration;
 
 /// Target frame time: 70224 T-cycles / cpu_clock_rate.
@@ -121,3 +123,97 @@ pub fn downsample_audio(samples: &[f32], factor: usize) -> Vec<f32> {
     out
 }
 
+/// Load battery-backed save RAM from a `.sav` file next to the ROM.
+/// Call this after creating the emulator, before the first frame.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_sav(emu: &mut crate::emulator::Emulator, rom_path: &Path) {
+    if !emu.has_battery() {
+        return;
+    }
+    let sav_path = rom_path.with_extension("sav");
+    if let Ok(data) = std::fs::read(&sav_path) {
+        log::info!("Loaded save from {}", sav_path.display());
+        emu.load_ram(&data);
+    }
+}
+
+/// Write battery-backed save RAM to a `.sav` file next to the ROM unconditionally.
+/// Use this for final on-quit flush.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn flush_sav(emu: &crate::emulator::Emulator, rom_path: &Path) {
+    if !emu.has_battery() {
+        return;
+    }
+    let data = emu.save_data();
+    if data.is_empty() {
+        return;
+    }
+    let sav_path = rom_path.with_extension("sav");
+    if let Err(e) = std::fs::write(&sav_path, &data) {
+        log::error!("Failed to write save file '{}': {}", sav_path.display(), e);
+    }
+}
+
+/// Tracks save RAM state for periodic flushing.
+/// Only writes to disk when RAM has changed since the last flush and has been
+/// stable (unchanged) for at least 1 second, avoiding writes during active
+/// save operations by the game.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct SavFlusher {
+    rom_path: std::path::PathBuf,
+    last_flushed: Vec<u8>,
+    dirty_since: Option<std::time::Instant>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SavFlusher {
+    /// Create a new flusher for the given ROM path.
+    /// Initializes `last_flushed` to the current save data so we don't
+    /// immediately write on startup.
+    pub fn new(emu: &crate::emulator::Emulator, rom_path: &Path) -> Self {
+        Self {
+            rom_path: rom_path.to_path_buf(),
+            last_flushed: if emu.has_battery() { emu.save_data() } else { Vec::new() },
+            dirty_since: None,
+        }
+    }
+
+    /// Check if save RAM has changed and flush if stable for >= 1 second.
+    /// Call this every frame or every few frames.
+    pub fn poll(&mut self, emu: &crate::emulator::Emulator) {
+        if !emu.has_battery() {
+            return;
+        }
+        let data = emu.save_data();
+        if data == self.last_flushed {
+            // RAM matches last flush — not dirty
+            self.dirty_since = None;
+            return;
+        }
+        // RAM has changed
+        let now = std::time::Instant::now();
+        match self.dirty_since {
+            None => {
+                // Just became dirty — start the stability timer
+                self.dirty_since = Some(now);
+            }
+            Some(since) if now.duration_since(since) >= Duration::from_secs(1) => {
+                // Dirty and stable for >= 1 second — flush
+                let sav_path = self.rom_path.with_extension("sav");
+                if let Err(e) = std::fs::write(&sav_path, &data) {
+                    log::error!("Failed to write save file '{}': {}", sav_path.display(), e);
+                }
+                self.last_flushed = data;
+                self.dirty_since = None;
+            }
+            _ => {
+                // Dirty but not yet stable — wait
+            }
+        }
+    }
+
+    /// Force flush on quit (unconditional if dirty).
+    pub fn flush(&mut self, emu: &crate::emulator::Emulator) {
+        flush_sav(emu, &self.rom_path);
+    }
+}

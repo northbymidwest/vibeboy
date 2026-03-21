@@ -59,6 +59,7 @@ pub(super) struct App {
     rumble_effect: Option<gilrs::ff::Effect>,
     rumble_gamepad: Option<GamepadId>, // which gamepad owns the effect
     rumble_on: bool,
+    sav_flusher: Option<ui_util::SavFlusher>,
 }
 
 impl App {
@@ -105,6 +106,7 @@ impl App {
             rumble_effect: None,
             rumble_gamepad: None,
             rumble_on: false,
+            sav_flusher: None,
         }
     }
 
@@ -135,7 +137,8 @@ impl App {
             fs::read(path).ok()
         };
 
-        let emu = Emulator::new(rom, boot_rom, Some(path.as_path()), self.model, None);
+        let mut emu = Emulator::new(rom, boot_rom, self.model, None);
+        ui_util::load_sav(&mut emu, path);
         let is_sgb = emu.is_sgb();
         self.src_w = if is_sgb { SGB_W } else { GB_W };
         self.src_h = if is_sgb { SGB_H } else { GB_H };
@@ -145,6 +148,7 @@ impl App {
             self.camera_thread = CameraThread::start();
         }
 
+        self.sav_flusher = Some(ui_util::SavFlusher::new(&emu, path));
         self.emu = Some(emu);
         self.rom_path = Some(path.clone());
         self.frame_dur = frame_duration(self.model);
@@ -234,8 +238,8 @@ impl App {
                 }
             }
             ID_QUIT => {
-                if let Some(ref emu) = self.emu {
-                    emu.save();
+                if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+                    flusher.flush(emu);
                 }
                 std::process::exit(0);
             }
@@ -453,6 +457,11 @@ impl App {
             self.fps_emu_total = Duration::ZERO;
             self.fps_timer = Instant::now();
         }
+
+        // Periodic save RAM flush
+        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+            flusher.poll(emu);
+        }
     }
 }
 
@@ -525,8 +534,8 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(ref emu) = self.emu {
-                    emu.save();
+                if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+                    flusher.flush(emu);
                 }
                 event_loop.exit();
             }
@@ -578,8 +587,8 @@ impl ApplicationHandler for App {
                     if pressed {
                         match key {
                             KeyCode::Escape => {
-                                if let Some(ref emu) = self.emu {
-                                    emu.save();
+                                if let (Some(emu), Some(path)) = (&self.emu, &self.rom_path) {
+                                    ui_util::flush_sav(emu, path);
                                 }
                                 event_loop.exit();
                             }

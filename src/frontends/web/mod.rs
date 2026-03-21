@@ -100,7 +100,7 @@ impl WasmEmulator {
         let checksum = ((rom_vec[0x14E] as u16) << 8) | rom_vec[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
-        let emu = Emulator::new(rom_vec.clone(), None, None, model, None);
+        let emu = Emulator::new(rom_vec.clone(), None, model, None);
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
@@ -425,7 +425,7 @@ impl WasmEmulator {
             "agb" => GbModel::Agb,
             _ => return false,
         };
-        self.emu = Emulator::new(self.rom.clone(), None, None, model, None);
+        self.emu = Emulator::new(self.rom.clone(), None, model, None);
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];

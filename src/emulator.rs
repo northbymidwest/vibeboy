@@ -8,7 +8,6 @@ use crate::rewind::RewindBuffer;
 use crate::sgb::Sgb;
 use crate::snapshot::Snapshot;
 use crate::snes::SnesSys;
-use std::path::Path;
 
 /// T-cycles per frame at normal speed (70224 = 456 × 154).
 pub const CYCLES_PER_FRAME: u32 = 70_224;
@@ -49,7 +48,6 @@ impl Emulator {
     pub fn new(
         rom: Vec<u8>,
         boot_rom: Option<Vec<u8>>,
-        rom_path: Option<&Path>,
         model: GbModel,
         snes_rom: Option<Vec<u8>>,
     ) -> Self {
@@ -60,7 +58,7 @@ impl Emulator {
         } else {
             cpu.regs = Registers::post_boot_with_rom(model, Some(&rom));
         }
-        let mut bus = Bus::new(rom, boot_rom, rom_path, model);
+        let mut bus = Bus::new(rom, boot_rom, model);
 
         // When no boot ROM, set post-boot IO register values
         if !has_boot {
@@ -110,11 +108,6 @@ impl Emulator {
             rewinding: false,
             headless: false,
         }
-    }
-
-    /// Persist battery-backed cartridge RAM to disk.
-    pub fn save(&self) {
-        self.bus.save_to_disk();
     }
 
     /// Run until one full frame has been rendered (VBlank).

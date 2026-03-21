@@ -266,7 +266,9 @@ fn main() {
     }
     eprintln!();
 
-    let mut emu = Emulator::new(rom, boot_rom, Some(rom_path.as_path()), model, snes_rom);
+    let mut emu = Emulator::new(rom, boot_rom, model, snes_rom);
+    ui_util::load_sav(&mut emu, &rom_path);
+    let mut sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
@@ -908,6 +910,9 @@ fn main() {
             fps_timer = Instant::now();
         }
 
+        // ── Periodic save RAM flush ──────────────────────────────────────────
+        sav_flusher.poll(&emu);
+
         // No manual frame cap — vsync handles pacing, and the time accumulator
         // above ensures emulation runs at the correct speed regardless of
         // display refresh rate.
@@ -922,5 +927,5 @@ fn main() {
     // Camera thread shuts down automatically via Drop
     drop(camera_thread);
 
-    emu.save();
+    sav_flusher.flush(&emu);
 }

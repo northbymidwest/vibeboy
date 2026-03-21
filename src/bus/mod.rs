@@ -7,7 +7,6 @@ use crate::serial::Serial;
 use crate::sgb::Sgb;
 use crate::timer::Timer;
 
-use std::path::{Path, PathBuf};
 
 mod dma;
 mod io;
@@ -108,9 +107,6 @@ pub struct Bus {
     /// Whether the boot ROM is still mapped (cleared by writing 0xFF50).
     pub boot_rom_active: bool,
 
-    /// Path to .sav file (set when cartridge has battery).
-    save_path: Option<PathBuf>,
-
     /// Hardware model (DMG, CGB, etc.)
     pub(crate) model: GbModel,
 
@@ -193,7 +189,7 @@ fn init_hram(model: GbModel) -> [u8; 0x7F] {
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, rom_path: Option<&Path>, model: GbModel) -> Self {
+    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Self {
         let boot_rom_active = boot_rom.is_some();
 
         let mut ppu = Ppu::new();
@@ -247,18 +243,6 @@ impl Bus {
 
         let mut cart = make_cartridge(rom);
 
-        // Compute .sav path and load existing save data
-        let save_path = rom_path
-            .filter(|_| cart.has_battery())
-            .map(|p| p.with_extension("sav"));
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref sp) = save_path {
-            if let Ok(data) = std::fs::read(sp) {
-                log::info!("Loaded save from {}", sp.display());
-                cart.load_ram(&data);
-            }
-        }
-
         Bus {
             cart,
             ppu,
@@ -277,7 +261,6 @@ impl Bus {
             hdma: Hdma::new(),
             boot_rom,
             boot_rom_active,
-            save_path,
             model,
             sgb: if model.is_sgb() {
                 let mut sgb = Sgb::new();
@@ -363,21 +346,6 @@ impl Bus {
         self.ff74 = s.ff74;
         self.ff75 = s.ff75;
         self.dmg_compat = s.dmg_compat;
-    }
-
-    /// Write cartridge RAM to .sav file if battery-backed.
-    pub fn save_to_disk(&self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref path) = self.save_path {
-            let data = self.cart.save_data();
-            if !data.is_empty() {
-                if let Err(e) = std::fs::write(path, data) {
-                    log::error!("Failed to write save file '{}': {}", path.display(), e);
-                } else {
-                    log::info!("Saved to {}", path.display());
-                }
-            }
-        }
     }
 
     // ── Public accessors for Cpu ───────────────────────────────────────────────

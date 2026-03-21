@@ -74,6 +74,7 @@ struct EmuState {
     active_gamepad: Option<GamepadId>,
     model_override: Option<GbModel>,
     slow_tick: u32,
+    sav_flusher: ui_util::SavFlusher,
 }
 
 fn main() {
@@ -144,7 +145,8 @@ fn create_emu_state(
     }
     eprintln!();
 
-    let mut emu = emulator::Emulator::new(rom.clone(), boot_rom, Some(rom_path.as_path()), model, None);
+    let mut emu = emulator::Emulator::new(rom.clone(), boot_rom, model, None);
+    ui_util::load_sav(&mut emu, &rom_path);
 
     if cli.printer {
         let output_dir = std::path::Path::new("prints");
@@ -164,6 +166,8 @@ fn create_emu_state(
         None => (None, AUDIO_SAMPLE_RATE),
     };
     audio_ring.lock().unwrap().downsample_ratio = (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
+
+    let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
     EmuState {
         emu,
@@ -193,6 +197,7 @@ fn create_emu_state(
         active_gamepad: None,
         model_override,
         slow_tick: 0,
+        sav_flusher,
     }
 }
 
@@ -469,6 +474,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 st.fps_timer = Instant::now();
                             }
 
+                            // Periodic save RAM flush
+                            st.sav_flusher.poll(&st.emu);
+
                             // Get frame buffer and dimensions
                             let is_sgb = st.emu.is_sgb();
                             let base_w = if is_sgb { SGB_W as usize } else { GB_W as usize };
@@ -617,7 +625,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             }
 
             match keyval {
-                gtk4::gdk::Key::Escape => std::process::exit(0),
+                gtk4::gdk::Key::Escape => {
+                    st.sav_flusher.flush(&st.emu);
+                    std::process::exit(0);
+                }
                 gtk4::gdk::Key::BackSpace => { st.emu.set_rewinding(true); }
                 gtk4::gdk::Key::Tab => { st.fast_forward = true; }
                 gtk4::gdk::Key::minus => { st.slow_motion = true; }
@@ -674,8 +685,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     window.add_controller(key_controller);
 
     // GLib actions
+    let state_quit = Rc::clone(&state);
     let action_quit = gtk4::gio::SimpleAction::new("quit", None);
-    action_quit.connect_activate(|_, _| std::process::exit(0));
+    action_quit.connect_activate(move |_, _| {
+        let mut st = state_quit.borrow_mut();
+        if let Some(s) = st.as_mut() {
+            s.sav_flusher.flush(&s.emu);
+        }
+        std::process::exit(0);
+    });
     app.add_action(&action_quit);
 
     // Open ROM action — show file dialog
@@ -730,8 +748,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let boot_rom = load_boot_rom(model, &cli_for_reset);
             let path = s.rom_path.clone();
             s.emu = emulator::Emulator::new(
-                s.rom_data.clone(), boot_rom, Some(path.as_path()), model, None,
+                s.rom_data.clone(), boot_rom, model, None,
             );
+            ui_util::load_sav(&mut s.emu, &path);
             s.model = model;
             eprintln!("Reset");
         }

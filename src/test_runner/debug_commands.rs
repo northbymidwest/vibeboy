@@ -148,7 +148,7 @@ pub fn cmd_calibrate(path: &Path) {
     ];
     for model in &models {
         if let Some(br) = load_boot_rom(*model) {
-            let mut emu = Emulator::new(rom.clone(), Some(br), None, *model, None);
+            let mut emu = Emulator::new(rom.clone(), Some(br), *model, None);
             emu.set_headless(true);
             for _ in 0..100_000_000u64 {
                 if emu.cpu().regs.pc == 0x0100 && !emu.bus().boot_rom_active {

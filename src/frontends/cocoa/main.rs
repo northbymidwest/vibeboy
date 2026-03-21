@@ -202,7 +202,9 @@ fn main() {
         let mut current_rom = rom;
         let mut current_rom_path = rom_path;
         let mut current_model = model;
-        let mut emu = Emulator::new(current_rom.clone(), boot_rom, Some(current_rom_path.as_path()), current_model, snes_rom);
+        let mut emu = Emulator::new(current_rom.clone(), boot_rom, current_model, snes_rom);
+        ui_util::load_sav(&mut emu, &current_rom_path);
+        let mut sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
 
         // Load custom key mappings
         let mut key_map = load_key_map();
@@ -422,7 +424,9 @@ fn main() {
                             current_rom = rom_data;
                             current_rom_path = path;
                             current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                            emu = Emulator::new(current_rom.clone(), None, current_model, None);
+                            ui_util::load_sav(&mut emu, &current_rom_path);
+                            sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
                             paused = false;
                             eprintln!("Loaded: {}", current_rom_path.display());
                         }
@@ -442,7 +446,9 @@ fn main() {
                 }
 
                 if actions.reset {
-                    emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                    emu = Emulator::new(current_rom.clone(), None, current_model, None);
+                    ui_util::load_sav(&mut emu, &current_rom_path);
+                    sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
                     paused = false;
                     eprintln!("Reset");
                 }
@@ -486,7 +492,9 @@ fn main() {
                     if let Some(new_model) = model_tag_to_model(tag) {
                         forced_model = new_model;
                         current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                        emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                        emu = Emulator::new(current_rom.clone(), None, current_model, None);
+                        ui_util::load_sav(&mut emu, &current_rom_path);
+                        sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
                         update_model_checkmarks(&app, tag);
                         paused = false;
                         let model_name = forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
@@ -535,7 +543,9 @@ fn main() {
                             current_rom = rom_data;
                             current_rom_path = path;
                             current_model = forced_model.unwrap_or_else(|| auto_detect_model(&current_rom));
-                            emu = Emulator::new(current_rom.clone(), None, Some(current_rom_path.as_path()), current_model, None);
+                            emu = Emulator::new(current_rom.clone(), None, current_model, None);
+                            ui_util::load_sav(&mut emu, &current_rom_path);
+                            sav_flusher = ui_util::SavFlusher::new(&emu, &current_rom_path);
                             paused = false;
                             eprintln!("Loaded: {}", current_rom_path.display());
                         } else {
@@ -836,6 +846,9 @@ fn main() {
                 fps_timer = Instant::now();
             }
 
+            // ── Periodic save RAM flush ──────────────────────────────────────
+            sav_flusher.poll(&emu);
+
             // ── Frame rate cap ───────────────────────────────────────────────
             let remaining = frame_dur.saturating_sub(frame_start.elapsed());
             if remaining > Duration::from_millis(2) {
@@ -851,6 +864,6 @@ fn main() {
         close_accel(&accel_source);
         drop(camera);
 
-        emu.save();
+        sav_flusher.flush(&emu);
     }
 }
