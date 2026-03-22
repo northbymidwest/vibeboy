@@ -131,11 +131,11 @@ fn vectorize_and_save(
                 || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
             )
         }
-        "vectorize-gpu-cpu" => {
+        "vectorize-gpu" => {
             let scale_f = scale as f32;
             let out_w = (width as f32 * scale_f).round() as usize;
             let out_h = (height as f32 * scale_f).round() as usize;
-            let r = vibeboy::scaling::vectorize_gpu_cpu::scale(pixels, width, height, scale_f);
+            let r = vibeboy::scaling::vectorize_gpu::scale(pixels, width, height, scale_f);
             (r, out_w, out_h)
         }
         _ => {
@@ -317,7 +317,7 @@ pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: b
         "vectorize-diffusion" => "diffusion",
         "vectorize-spline-diffusion" | "vectorize-spline-diffusion-adaptive" => "spline-diffusion",
         "vectorize-legacy" | "vectorize-legacy-adaptive" => "edge",
-        "vectorize-gpu" => "vectorize-gpu-cpu",
+        "vectorize-gpu" => "vectorize-gpu",
         "gpu-full" => "gpu-full",
         "edge" => "edge",
         other => other, // pass through for any direct format names

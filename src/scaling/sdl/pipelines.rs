@@ -25,6 +25,8 @@ const SP_NEDI: usize = 12;
 const SP_DCCI: usize = 13;
 const SP_MMPX: usize = 14;
 const SP_LCD_GRID: usize = 15;
+const SP_NEAREST: usize = 16;
+const SP_BILINEAR: usize = 17;
 
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
@@ -40,7 +42,7 @@ pub struct GpuPipelines {
     // All scaling filters now use compute pipelines instead.
 
     // Lazily-initialized compute pipelines (scaling filters)
-    scale_pipelines: [Option<gpu::ComputePipeline>; 16],
+    scale_pipelines: [Option<gpu::ComputePipeline>; 18],
 
     // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
@@ -166,6 +168,10 @@ impl GpuPipelines {
                 Some((SP_MMPX, super::init_mmpx_compute_pipeline)),
             ScaleFilter::LcdGrid =>
                 Some((SP_LCD_GRID, super::init_lcd_grid_compute_pipeline)),
+            ScaleFilter::Nearest =>
+                Some((SP_NEAREST, super::init_nearest_compute_pipeline)),
+            ScaleFilter::Bilinear =>
+                Some((SP_BILINEAR, super::init_bilinear_compute_pipeline)),
             _ => None,
         };
 
@@ -181,7 +187,6 @@ impl GpuPipelines {
         }
 
         match filter {
-            ScaleFilter::Nearest | ScaleFilter::Bilinear => GpuRenderMode::Native,
             ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
                 if self.vectorize_compute.is_none() {
                     self.vectorize_compute =

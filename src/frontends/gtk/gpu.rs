@@ -34,7 +34,6 @@ pub struct GlRenderer {
 }
 
 /// Frame data queued by the emulator tick, consumed by the GL render signal.
-#[derive(Default)]
 pub struct PendingFrame {
     pub pixels: Vec<u32>,
     pub frame_w: u32,
@@ -46,6 +45,24 @@ pub struct PendingFrame {
     pub gpu_filter: Option<crate::scaling::wgpu_scale::WgpuScaleFilter>,
     pub fit_w: u32,
     pub fit_h: u32,
+    /// Scale factor from ScaleFilter::factor() (0 = adaptive).
+    pub factor: u32,
+    /// Pre-rendered GL texture from GPU compute (shared-chain rasterizer).
+    pub gl_texture: Option<glow::Texture>,
+}
+
+impl Default for PendingFrame {
+    fn default() -> Self {
+        Self {
+            pixels: Vec::new(),
+            frame_w: 0, frame_h: 0,
+            src_w: 0, src_h: 0,
+            gpu_filter: None,
+            fit_w: 0, fit_h: 0,
+            factor: 0,
+            gl_texture: None,
+        }
+    }
 }
 
 fn compile_shader(gl: &glow::Context, ty: u32, src: &str) -> Option<glow::Shader> {

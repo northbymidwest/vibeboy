@@ -1,6 +1,7 @@
 #version 450
 
 // EPX / Scale2x / Scale4x compute shader — pixel-art scaling by Eric Johnston.
+// Comparisons use packed u32 colors for exact integer matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -30,26 +31,26 @@ vec4 unpack(uint c) {
     );
 }
 
-vec4 fetch(ivec2 coord) {
+uint fetch(ivec2 coord) {
     coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+    return pixels[coord.y * int(src_w) + coord.x];
 }
 
-vec4 epx(vec4 p, vec4 a, vec4 b, vec4 c, vec4 d, int sx, int sy) {
+uint epx(uint p, uint a, uint b, uint c, uint d, int sx, int sy) {
     if (sx == 0 && sy == 0) return (c==a && c!=d && a!=b) ? a : p;
     if (sx == 1 && sy == 0) return (a==b && a!=c && b!=d) ? b : p;
     if (sx == 0 && sy == 1) return (d==c && d!=b && c!=a) ? c : p;
     return (b==d && b!=a && d!=c) ? d : p;
 }
 
-vec4 epx_at(ivec2 pos) {
+uint epx_at(ivec2 pos) {
     ivec2 src = pos / 2;
     ivec2 sub = pos - src * 2;
-    vec4 p = fetch(src);
-    vec4 a = fetch(src + ivec2(0, -1));
-    vec4 b = fetch(src + ivec2(1, 0));
-    vec4 c = fetch(src + ivec2(-1, 0));
-    vec4 d = fetch(src + ivec2(0, 1));
+    uint p = fetch(src);
+    uint a = fetch(src + ivec2(0, -1));
+    uint b = fetch(src + ivec2(1, 0));
+    uint c = fetch(src + ivec2(-1, 0));
+    uint d = fetch(src + ivec2(0, 1));
     return epx(p, a, b, c, d, sub.x, sub.y);
 }
 
@@ -58,31 +59,30 @@ void main() {
     uint opy = gl_GlobalInvocationID.y;
     if (opx >= out_w || opy >= out_h) return;
 
-    // Map output pixel to source pixel + sub-pixel
-    float inv_scale = float(src_w) / float(out_w);
-    vec2 src_coord = (vec2(opx, opy) + 0.5) * inv_scale;
-    ivec2 src_i = clamp(ivec2(floor(src_coord)), ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    vec2 frac_val = src_coord - vec2(src_i);
-    ivec2 sub = clamp(ivec2(floor(frac_val * float(iscale))), ivec2(0), ivec2(int(iscale) - 1));
+    // Integer mapping: output pixel to source pixel + sub-pixel position
+    int isc = int(iscale);
+    ivec2 out_pos = ivec2(opx, opy);
+    ivec2 src_i = clamp(out_pos / isc, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    ivec2 sub = out_pos - src_i * isc;
 
-    vec4 result;
+    uint result;
     if (iscale == 2u) {
-        vec4 p = fetch(src_i);
-        vec4 a = fetch(src_i + ivec2(0, -1));
-        vec4 b = fetch(src_i + ivec2(1, 0));
-        vec4 c = fetch(src_i + ivec2(-1, 0));
-        vec4 d = fetch(src_i + ivec2(0, 1));
+        uint p = fetch(src_i);
+        uint a = fetch(src_i + ivec2(0, -1));
+        uint b = fetch(src_i + ivec2(1, 0));
+        uint c = fetch(src_i + ivec2(-1, 0));
+        uint d = fetch(src_i + ivec2(0, 1));
         result = epx(p, a, b, c, d, sub.x, sub.y);
     } else {
         ivec2 mid_pos = src_i * 2 + sub / 2;
         ivec2 sub4 = sub - (sub / 2) * 2;
-        vec4 p = epx_at(mid_pos);
-        vec4 a = epx_at(mid_pos + ivec2(0, -1));
-        vec4 b = epx_at(mid_pos + ivec2(1, 0));
-        vec4 c = epx_at(mid_pos + ivec2(-1, 0));
-        vec4 d = epx_at(mid_pos + ivec2(0, 1));
+        uint p = epx_at(mid_pos);
+        uint a = epx_at(mid_pos + ivec2(0, -1));
+        uint b = epx_at(mid_pos + ivec2(1, 0));
+        uint c = epx_at(mid_pos + ivec2(-1, 0));
+        uint d = epx_at(mid_pos + ivec2(0, 1));
         result = epx(p, a, b, c, d, sub4.x, sub4.y);
     }
 
-    imageStore(output_img, ivec2(opx, opy), result);
+    imageStore(output_img, ivec2(opx, opy), unpack(result));
 }

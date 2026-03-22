@@ -3,6 +3,7 @@ use muda::{
     accelerator::{Accelerator, Code, Modifiers},
 };
 
+use super::model::GbModel;
 use super::scaling;
 
 pub(super) const ID_OPEN: &str = "open_rom";
@@ -10,6 +11,31 @@ pub(super) const ID_QUIT: &str = "quit";
 pub(super) const ID_PAUSE: &str = "pause";
 pub(super) const ID_RESET: &str = "reset";
 pub(super) const ID_PRINTER: &str = "toggle_printer";
+
+pub(super) const MODEL_IDS: &[(&str, &str)] = &[
+    ("model_auto", "Auto"),
+    ("model_dmg0", "DMG0"),
+    ("model_dmg", "DMG"),
+    ("model_mgb", "MGB"),
+    ("model_sgb", "SGB"),
+    ("model_sgb2", "SGB2"),
+    ("model_cgb", "CGB"),
+    ("model_agb", "AGB"),
+];
+
+pub(super) fn model_id_to_model(id: &str) -> Option<Option<GbModel>> {
+    match id {
+        "model_auto" => Some(None),
+        "model_dmg0" => Some(Some(GbModel::Dmg0)),
+        "model_dmg" => Some(Some(GbModel::Dmg)),
+        "model_mgb" => Some(Some(GbModel::Mgb)),
+        "model_sgb" => Some(Some(GbModel::Sgb)),
+        "model_sgb2" => Some(Some(GbModel::Sgb2)),
+        "model_cgb" => Some(Some(GbModel::Cgb)),
+        "model_agb" => Some(Some(GbModel::Agb)),
+        _ => None,
+    }
+}
 
 pub(super) fn slot_save_id(n: usize) -> String {
     format!("slot_save_{}", n)
@@ -36,7 +62,7 @@ pub(super) fn filter_id_to_filter(id: &str) -> Option<scaling::ScaleFilter> {
     filter_entries().iter().find(|(mid, _, _)| *mid == id).map(|(_, _, f)| *f)
 }
 
-pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem) {
+pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem, Vec<CheckMenuItem>) {
     let menu = Menu::new();
 
     // File menu
@@ -77,6 +103,18 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
             &printer_item,
         ])
         .unwrap();
+
+    // Hardware model submenu
+    let hw_menu = Submenu::new("Hardware", true);
+    let mut model_items = Vec::new();
+    for &(id, label) in MODEL_IDS {
+        let checked = id == "model_auto";
+        let item = CheckMenuItem::with_id(id, label, true, checked, None::<Accelerator>);
+        hw_menu.append(&item).unwrap();
+        model_items.push(item);
+    }
+    emu_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    emu_menu.append(&hw_menu).unwrap();
 
     // State menu with Save/Load submenus
     let state_menu = Submenu::new("State", true);
@@ -175,5 +213,5 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
     menu.append_items(&[&file_menu, &emu_menu, &state_menu, &filter_menu, &help_menu])
         .unwrap();
 
-    (menu, filter_items, printer_item)
+    (menu, filter_items, printer_item, model_items)
 }

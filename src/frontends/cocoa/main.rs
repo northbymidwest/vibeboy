@@ -474,10 +474,9 @@ impl AppState {
             }
         }
 
-        // GPU compute scaling filters (not vectorize variants, not nearest/bilinear)
+        // GPU compute scaling filters (not vectorize variants which have their own paths)
         if !matches!(self.scale_filter,
-            scaling::ScaleFilter::Nearest | scaling::ScaleFilter::Bilinear
-            | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
+            scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
             | scaling::ScaleFilter::VectorizeDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusion
             | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
             | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive

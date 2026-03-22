@@ -174,24 +174,9 @@ pub fn vectorize_core(
 fn vectorize_core_inner(
     pixels: &[u32], width: usize, height: usize, adaptive: bool,
 ) -> (Vec<contour::ColorPath>, u32) {
-    let verbose = std::env::var("VECTORIZE_BENCH").is_ok();
-    let t0 = std::time::Instant::now();
-
     let graph = graph::build(pixels, width, height);
-    let t1 = std::time::Instant::now();
-
     let paths = contour::extract_cells_smooth(pixels, &graph, adaptive);
-    let t2 = std::time::Instant::now();
-
     let (bg_color, _) = detect_background_color(pixels, width, height);
-    let t3 = std::time::Instant::now();
-
-    if verbose {
-        eprintln!("  graph build:     {:>8.3}ms", (t1 - t0).as_secs_f64() * 1000.0);
-        eprintln!("  contour extract: {:>8.3}ms", (t2 - t1).as_secs_f64() * 1000.0);
-        eprintln!("  bg detect:       {:>8.3}ms", (t3 - t2).as_secs_f64() * 1000.0);
-        eprintln!("  total pipeline:  {:>8.3}ms", (t3 - t0).as_secs_f64() * 1000.0);
-    }
 
     (paths, bg_color)
 }

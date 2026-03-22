@@ -279,6 +279,8 @@ init_scale_pipeline!(init_nedi_compute_pipeline, "nedi");
 init_scale_pipeline!(init_dcci_compute_pipeline, "dcci");
 init_scale_pipeline!(init_mmpx_compute_pipeline, "mmpx");
 init_scale_pipeline!(init_lcd_grid_compute_pipeline, "lcd_grid");
+init_scale_pipeline!(init_nearest_compute_pipeline, "nearest");
+init_scale_pipeline!(init_bilinear_compute_pipeline, "bilinear");
 
 /// Dispatch a scaling compute shader and blit to the swapchain.
 /// `uniforms` must be exactly 32 bytes (8 × u32) matching the shader's uniform block.

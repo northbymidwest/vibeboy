@@ -212,14 +212,11 @@ void main() {
     uint opy = gl_GlobalInvocationID.y;
     if (opx >= out_w || opy >= out_h) return;
 
-    float inv_scale_x = float(src_w) / float(out_w);
-    float inv_scale_y = float(src_h) / float(out_h);
-
-    vec2 src_coord = vec2((float(opx) + 0.5) * inv_scale_x, (float(opy) + 0.5) * inv_scale_y);
-    ivec2 src_i = clamp(ivec2(floor(src_coord)), ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    vec2 frac_val = src_coord - vec2(src_i);
+    // Integer mapping: output pixel to source pixel + sub-pixel position
     int is = int(iscale);
-    ivec2 sub = clamp(ivec2(floor(frac_val * float(is))), ivec2(0), ivec2(is - 1));
+    ivec2 out_pos = ivec2(opx, opy);
+    ivec2 src_i = clamp(out_pos / is, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    ivec2 sub = out_pos - src_i * is;
 
     // Sample 3x3 neighborhood into global array
     g_nb[0]=fetch(src_i+ivec2(-1,-1)); g_nb[1]=fetch(src_i+ivec2(0,-1)); g_nb[2]=fetch(src_i+ivec2(1,-1));

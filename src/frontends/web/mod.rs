@@ -4,8 +4,10 @@ use wasm_bindgen_futures::JsFuture;
 use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
+use crate::scaling;
 use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
 use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
+use crate::vectorize;
 
 fn auto_detect_model(rom: &[u8]) -> GbModel {
     if rom.len() > 0x143 && (rom[0x143] & 0x80) != 0 {
@@ -40,17 +42,6 @@ fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Active rendering filter for the web frontend.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WebFilter {
-    /// Nearest-neighbor (direct Canvas2D blit, no GPU)
-    Nearest,
-    /// Kopf-Lischinski vectorize pipeline
-    Vectorize,
-    /// GPU compute scaling filter
-    Scale(WgpuScaleFilter),
-}
-
 #[wasm_bindgen]
 pub struct WasmEmulator {
     emu: Emulator,
@@ -60,7 +51,8 @@ pub struct WasmEmulator {
     last_print_w: u32,
     last_print_h: u32,
     save_key: String,
-    filter: WebFilter,
+    filter: scaling::ScaleFilter,
+    vec_cache: Option<vectorize::VectorizeCache>,
     // GPU state (initialized async after construction)
     gpu: Option<GpuState>,
 }
@@ -74,6 +66,7 @@ struct GpuState {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vectorize: WgpuVectorizePipeline,
+    shared_chain: scaling::wgpu_vectorize::WgpuSharedChainRasterizer,
     scale: WgpuScalePipeline,
 }
 
@@ -112,7 +105,8 @@ impl WasmEmulator {
             last_print_w: 0,
             last_print_h: 0,
             save_key,
-            filter: WebFilter::Vectorize,
+            filter: scaling::ScaleFilter::VectorizeGpu,
+            vec_cache: None,
             gpu: None,
         })
     }
@@ -181,14 +175,14 @@ impl WasmEmulator {
                     ty: wgpu::BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -230,12 +224,13 @@ impl WasmEmulator {
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
         let vectorize = WgpuVectorizePipeline::new(&device);
+        let shared_chain = scaling::wgpu_vectorize::WgpuSharedChainRasterizer::new(&device);
         let scale = WgpuScalePipeline::new(&device);
 
         self.gpu = Some(GpuState {
@@ -247,6 +242,7 @@ impl WasmEmulator {
             blit_bind_group_layout,
             sampler,
             vectorize,
+            shared_chain,
             scale,
         });
 
@@ -386,27 +382,25 @@ impl WasmEmulator {
     /// "bicubic", "aa-nearest", "omniscale".
     /// Returns true if the filter was recognized.
     pub fn set_filter(&mut self, name: &str) -> bool {
-        match name {
-            "nearest" => { self.filter = WebFilter::Nearest; true }
-            "vectorize" => { self.filter = WebFilter::Vectorize; true }
-            _ => {
-                if let Some(f) = WgpuScaleFilter::from_name(name) {
-                    self.filter = WebFilter::Scale(f);
-                    true
-                } else {
-                    false
-                }
-            }
+        if let Some(f) = scaling::ScaleFilter::from_name(name) {
+            self.filter = f;
+            // Initialize vectorize cache for filters that need it
+            self.vec_cache = match f {
+                scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
+                scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+                scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+                scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
+                _ => None,
+            };
+            true
+        } else {
+            false
         }
     }
 
-    /// Get the name of the current filter.
+    /// Get the CLI name of the current filter.
     pub fn current_filter(&self) -> String {
-        match self.filter {
-            WebFilter::Nearest => "nearest".to_string(),
-            WebFilter::Vectorize => "vectorize".to_string(),
-            WebFilter::Scale(f) => format!("{:?}", f).to_lowercase(),
-        }
+        self.filter.cli_name().to_string()
     }
 
     /// Set the hardware model and restart emulation.
@@ -435,9 +429,7 @@ impl WasmEmulator {
     /// Render the current frame via WebGPU.
     /// Returns true if GPU rendering was used, false if fallback needed.
     pub fn render_gpu(&mut self) -> bool {
-        if self.filter == WebFilter::Nearest {
-            return false; // caller should use Canvas2D path
-        }
+        use scaling::ScaleFilter;
 
         let gpu = match &mut self.gpu {
             Some(g) => g,
@@ -448,7 +440,6 @@ impl WasmEmulator {
         let src_w: u32 = if is_sgb { 256 } else { 160 };
         let src_h: u32 = if is_sgb { 224 } else { 144 };
 
-        // Copy frame buffer to avoid borrow conflicts
         let fb: Vec<u32> = if is_sgb {
             self.emu.sgb_composited_frame().to_vec()
         } else {
@@ -458,7 +449,6 @@ impl WasmEmulator {
         let out_w = gpu.surface_config.width;
         let out_h = gpu.surface_config.height;
         let scale = (out_w as f64 / src_w as f64).min(out_h as f64 / src_h as f64) as f32;
-
         let render_w = (src_w as f32 * scale).round() as u32;
         let render_h = (src_h as f32 * scale).round() as u32;
 
@@ -466,21 +456,69 @@ impl WasmEmulator {
             label: Some("filter+blit"),
         });
 
-        // Dispatch the appropriate pipeline
-        let out_tex = match self.filter {
-            WebFilter::Vectorize => {
+        let owned_tex;
+        let out_tex: &wgpu::Texture = match self.filter {
+            // Full 6-stage GPU vectorize pipeline
+            ScaleFilter::VectorizeGpu => {
                 gpu.vectorize.encode(
                     &gpu.device, &gpu.queue, &mut encoder,
                     &fb, src_w, src_h, render_w, render_h, scale,
                 )
             }
-            WebFilter::Scale(filter) => {
+            // Vectorize variants using GPU edge rasterizer
+            ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
+            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
+                let cache = self.vec_cache.get_or_insert_with(|| {
+                    vectorize::VectorizeCache::new_legacy(false)
+                });
+                let (paths, bg) = cache.get_paths(&fb, src_w as usize, src_h as usize);
+                let (edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(
+                        paths, bg, scale as f64, src_w as usize, src_h as usize,
+                    );
+                if ow == 0 || oh == 0 || edges.is_empty() {
+                    return false;
+                }
+                owned_tex = gpu.shared_chain.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    &edges, &row_ranges, &edge_indices, ow, oh, bg,
+                );
+                &owned_tex
+            }
+            // All other filters: map to WgpuScaleFilter compute pipeline
+            other => {
+                let wgpu_filter = match other {
+                    ScaleFilter::Nearest => WgpuScaleFilter::Nearest,
+                    ScaleFilter::Bilinear => WgpuScaleFilter::Bilinear,
+                    ScaleFilter::Bicubic => WgpuScaleFilter::Bicubic,
+                    ScaleFilter::Epx => WgpuScaleFilter::Epx,
+                    ScaleFilter::Scale2x | ScaleFilter::Scale4x => WgpuScaleFilter::Epx,
+                    ScaleFilter::Scale3x => WgpuScaleFilter::Scale3x,
+                    ScaleFilter::Eagle => WgpuScaleFilter::Eagle,
+                    ScaleFilter::Hqx(_) => WgpuScaleFilter::Hqx,
+                    ScaleFilter::Xbr(_) | ScaleFilter::SuperXbr => WgpuScaleFilter::Xbr,
+                    ScaleFilter::Xbrz(_) => WgpuScaleFilter::Xbrz,
+                    ScaleFilter::AaNearestNeighbor => WgpuScaleFilter::AaNearest,
+                    ScaleFilter::OmniScale => WgpuScaleFilter::OmniScale,
+                    ScaleFilter::OmniScaleLegacy => WgpuScaleFilter::OmniScaleLegacy,
+                    ScaleFilter::Edi => WgpuScaleFilter::Edi,
+                    ScaleFilter::Nedi => WgpuScaleFilter::Nedi,
+                    ScaleFilter::Dcci => WgpuScaleFilter::Dcci,
+                    ScaleFilter::Mmpx => WgpuScaleFilter::Mmpx,
+                    ScaleFilter::LcdGrid => WgpuScaleFilter::LcdGrid,
+                    _ => return false, // unsupported filter
+                };
+                let factor = other.factor();
+                let (ow, oh) = if factor > 0 {
+                    (src_w * factor, src_h * factor)
+                } else {
+                    (render_w, render_h)
+                };
                 gpu.scale.encode(
                     &gpu.device, &gpu.queue, &mut encoder,
-                    filter, &fb, src_w, src_h, render_w, render_h,
+                    wgpu_filter, &fb, src_w, src_h, ow, oh,
                 )
             }
-            WebFilter::Nearest => unreachable!(),
         };
 
         let frame = match gpu.surface.get_current_texture() {
@@ -553,6 +591,66 @@ impl WasmEmulator {
         }
     }
 
+    /// Apply CPU scaling filter and write result to the RGBA buffer.
+    /// Returns [scaled_width, scaled_height]. The JS side should use these
+    /// dimensions for the Canvas2D ImageData.
+    pub fn cpu_scaled_frame_update(&mut self, disp_w: u32, disp_h: u32) -> Vec<u32> {
+        let src_w = self.width() as usize;
+        let src_h = self.height() as usize;
+        let fb: Vec<u32> = if self.emu.is_sgb() {
+            self.emu.sgb_composited_frame().to_vec()
+        } else {
+            self.emu.frame_buffer().to_vec()
+        };
+
+        // Compute aspect-correct dimensions for adaptive filters
+        let scale_fit = (disp_w as f64 / src_w as f64)
+            .min(disp_h as f64 / src_h as f64)
+            .max(1.0);
+        let fit_w = (src_w as f64 * scale_fit).round() as usize;
+        let fit_h = (src_h as f64 * scale_fit).round() as usize;
+
+        // Try CPU scaling
+        let (pixels, pw, ph) = if matches!(self.filter,
+            scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
+            | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
+        {
+            let cache = self.vec_cache.get_or_insert_with(|| {
+                match self.filter {
+                    scaling::ScaleFilter::Vectorize => vectorize::VectorizeCache::new(false),
+                    scaling::ScaleFilter::VectorizeAdaptive => vectorize::VectorizeCache::new(true),
+                    scaling::ScaleFilter::VectorizeLegacyAdaptive => vectorize::VectorizeCache::new_legacy(true),
+                    _ => vectorize::VectorizeCache::new_legacy(false),
+                }
+            });
+            let (raster, vw, vh) = cache.rasterize(&fb, src_w, src_h, scale_fit);
+            (raster.to_vec(), vw, vh)
+        } else if let Some((scaled, w, h)) = scaling::cpu_scale(
+            self.filter,
+            &fb, src_w, src_h,
+            fit_w, fit_h,
+        ) {
+            (scaled, w as usize, h as usize)
+        } else {
+            (fb, src_w, src_h)
+        };
+
+        // Convert to RGBA
+        let needed = pw * ph * 4;
+        if self.rgba_buf.len() != needed {
+            self.rgba_buf.resize(needed, 0);
+        }
+        for (i, &px) in pixels.iter().take(pw * ph).enumerate() {
+            let off = i * 4;
+            self.rgba_buf[off]     = ((px >> 16) & 0xFF) as u8;
+            self.rgba_buf[off + 1] = ((px >> 8) & 0xFF) as u8;
+            self.rgba_buf[off + 2] = (px & 0xFF) as u8;
+            self.rgba_buf[off + 3] = 0xFF;
+        }
+
+        vec![pw as u32, ph as u32]
+    }
+
     pub fn frame_buffer_ptr(&self) -> *const u8 {
         self.rgba_buf.as_ptr()
     }
@@ -602,6 +700,29 @@ impl WasmEmulator {
 #[wasm_bindgen]
 pub fn wasm_memory() -> JsValue {
     wasm_bindgen::memory()
+}
+
+/// Get the filter registry as a JSON string for building UI dropdowns.
+/// Returns an array of `{ "cli_name": "...", "display_name": "...", "group": "..." }`.
+/// Group is "main", "hqx", "xbr", "xbrz", or "edge_detect".
+#[wasm_bindgen]
+pub fn filter_registry_json() -> String {
+    use crate::scaling::{ScaleFilter, FilterMenuGroup};
+    let mut entries = Vec::new();
+    for (display_name, filter) in ScaleFilter::menu_entries() {
+        let group = match filter.menu_group() {
+            FilterMenuGroup::Main => "main",
+            FilterMenuGroup::Hqx => "hqx",
+            FilterMenuGroup::Xbr => "xbr",
+            FilterMenuGroup::Xbrz => "xbrz",
+            FilterMenuGroup::EdgeDetect => "edge_detect",
+        };
+        entries.push(format!(
+            r#"{{"cli_name":"{}","display_name":"{}","group":"{}"}}"#,
+            filter.cli_name(), display_name, group,
+        ));
+    }
+    format!("[{}]", entries.join(","))
 }
 
 #[wasm_bindgen]

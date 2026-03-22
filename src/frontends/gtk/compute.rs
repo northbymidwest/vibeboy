@@ -5,6 +5,7 @@
 //! same context, which the blit shader can bind directly.
 
 use crate::scaling::wgpu_scale::{WgpuScaleFilter, WgpuScalePipeline};
+use crate::scaling::wgpu_vectorize::WgpuSharedChainRasterizer;
 use crate::scaling::ScaleFilter;
 use glow::HasContext;
 
@@ -13,6 +14,7 @@ pub struct GpuCompute {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: WgpuScalePipeline,
+    shared_chain: WgpuSharedChainRasterizer,
     /// Last output dimensions (for cache invalidation).
     last_out_w: u32,
     last_out_h: u32,
@@ -54,6 +56,7 @@ impl GpuCompute {
         .ok()?;
 
         let pipeline = WgpuScalePipeline::new(&device);
+        let shared_chain = WgpuSharedChainRasterizer::new(&device);
 
         eprintln!("GPU compute initialized (GL shared context)");
 
@@ -62,6 +65,7 @@ impl GpuCompute {
             device,
             queue,
             pipeline,
+            shared_chain,
             last_out_w: 0,
             last_out_h: 0,
         })
@@ -77,8 +81,13 @@ impl GpuCompute {
         src_h: u32,
         fit_w: u32,
         fit_h: u32,
+        factor: u32,
     ) -> Option<(glow::Texture, u32, u32)> {
-        let (out_w, out_h) = filter.native_size(src_w, src_h, fit_w, fit_h);
+        let (out_w, out_h) = if factor > 0 {
+            (src_w * factor, src_h * factor)
+        } else {
+            (fit_w, fit_h)
+        };
 
         let mut encoder = self
             .device
@@ -114,11 +123,48 @@ impl GpuCompute {
 
         Some((gl_texture, out_w, out_h))
     }
+
+    /// Rasterize shared-chain vectorize paths via GPU compute.
+    /// Returns the GL texture ID and output dimensions.
+    pub fn rasterize_shared_chain(
+        &mut self,
+        edges: &[crate::vectorize::rasterize::GpuEdgeV2],
+        row_ranges: &[crate::vectorize::rasterize::GpuRowRange],
+        edge_indices: &[u32],
+        out_w: u32,
+        out_h: u32,
+        bg_color: u32,
+    ) -> Option<(glow::Texture, u32, u32)> {
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None },
+        );
+
+        let output_tex = self.shared_chain.encode(
+            &self.device, &self.queue, &mut encoder,
+            edges, row_ranges, edge_indices, out_w, out_h, bg_color,
+        );
+
+        // Extract the GL texture ID from the wgpu texture
+        let gl_texture = unsafe {
+            let hal_tex = output_tex.as_hal::<wgpu::hal::api::Gles>()?;
+            match &hal_tex.inner {
+                wgpu::hal::gles::TextureInner::Texture { raw, .. } => Some(*raw),
+                _ => None,
+            }
+        }?;
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        Some((gl_texture, out_w, out_h))
+    }
 }
 
 /// Map a ScaleFilter to a WgpuScaleFilter, if it has a GPU compute path.
 pub fn to_wgpu_filter(filter: ScaleFilter) -> Option<WgpuScaleFilter> {
     match filter {
+        ScaleFilter::Nearest => Some(WgpuScaleFilter::Nearest),
+        ScaleFilter::Bilinear => Some(WgpuScaleFilter::Bilinear),
         ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => {
             Some(WgpuScaleFilter::Epx)
         }

@@ -1,6 +1,7 @@
 use vibeboy::*;
 
 mod audio;
+#[cfg(target_os = "linux")]
 mod compute;
 mod gpu;
 
@@ -291,7 +292,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // GL renderer state + GPU compute + pending frame for GLArea render signal
     let gl_renderer: Rc<RefCell<Option<gpu::GlRenderer>>> = Rc::new(RefCell::new(None));
+    #[cfg(target_os = "linux")]
     let gpu_compute: Rc<RefCell<Option<compute::GpuCompute>>> = Rc::new(RefCell::new(None));
+    #[cfg(not(target_os = "linux"))]
+    let gpu_compute: Rc<RefCell<Option<()>>> = Rc::new(RefCell::new(None));
     let pending_frame: Rc<RefCell<gpu::PendingFrame>> = Rc::new(RefCell::new(gpu::PendingFrame::default()));
 
     // GLArea realize: init GL resources + wgpu compute (same GL context)
@@ -310,9 +314,12 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     *gl_renderer.borrow_mut() = Some(r);
                     stack.set_visible_child_name("gl");
                     // Init wgpu compute using the same GL context (zero-copy)
-                    match compute::GpuCompute::new(|s| gpu::gl_proc_address(s)) {
-                        Some(c) => *gpu_compute.borrow_mut() = Some(c),
-                        None => eprintln!("GPU compute init failed, will use CPU scaling"),
+                    #[cfg(target_os = "linux")]
+                    {
+                        match compute::GpuCompute::new(|s| gpu::gl_proc_address(s)) {
+                            Some(c) => *gpu_compute.borrow_mut() = Some(c),
+                            None => eprintln!("GPU compute init failed, will use CPU scaling"),
+                        }
                     }
                 }
                 None => eprintln!("GL renderer init failed, falling back to Cairo"),
@@ -340,12 +347,20 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let mut r = gl_renderer.borrow_mut();
             let f = pending.borrow();
             if let Some(ref mut renderer) = *r {
-                if !f.pixels.is_empty() {
+                let has_frame = !f.pixels.is_empty() || f.gl_texture.is_some();
+                if has_frame {
                     let scale = area.scale_factor();
                     let vp_w = area.width() * scale;
                     let vp_h = area.height() * scale;
 
+                    // Pre-rendered GL texture (shared-chain GPU rasterizer)
+                    if let Some(gl_tex) = f.gl_texture {
+                        renderer.render_gl_texture(gl_tex, vp_w, vp_h, f.src_w, f.src_h);
+                        return glib::Propagation::Stop;
+                    }
+
                     // Try GPU compute path (zero-copy: compute → GL texture → blit)
+                    #[cfg(target_os = "linux")]
                     if let Some(wgpu_filter) = f.gpu_filter {
                         let mut gc = gpu_compute.borrow_mut();
                         if let Some(ref mut compute) = *gc {
@@ -356,6 +371,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 f.frame_h,
                                 f.fit_w,
                                 f.fit_h,
+                                f.factor,
                             ) {
                                 renderer.render_gl_texture(gl_tex, vp_w, vp_h, f.src_w, f.src_h);
                                 return glib::Propagation::Stop;
@@ -578,7 +594,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             let fit_h = (base_h as f64 * scale_fit).round() as usize;
 
                             // Check if we can use GPU compute for this filter
+                            #[cfg(target_os = "linux")]
                             let wgpu_filter = compute::to_wgpu_filter(st.scale_filter);
+                            #[cfg(not(target_os = "linux"))]
+                            let wgpu_filter: Option<scaling::wgpu_scale::WgpuScaleFilter> = None;
                             let use_gpu = wgpu_filter.is_some() && gpu_compute.borrow().is_some();
 
                             // Apply scaling filter: GPU deferred to render callback, else CPU
@@ -597,6 +616,60 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                         st.scale_filter,
                                         scaling::ScaleFilter::VectorizeLegacyAdaptive
                                     );
+                                    let cache = st.vec_cache.get_or_insert_with(|| {
+                                        vectorize::VectorizeCache::new_legacy(adaptive)
+                                    });
+                                    let (raster, vw, vh) =
+                                        cache.rasterize(fb, base_w, base_h, scale_fit);
+                                    (raster, vw, vh, None)
+                                } else if matches!(
+                                    st.scale_filter,
+                                    scaling::ScaleFilter::Vectorize
+                                        | scaling::ScaleFilter::VectorizeAdaptive
+                                ) {
+                                    // Shared-chain: GPU rasterizer on Linux, CPU legacy fallback on macOS
+                                    let adaptive = matches!(
+                                        st.scale_filter,
+                                        scaling::ScaleFilter::VectorizeAdaptive
+                                    );
+                                    let cache = st.vec_cache.get_or_insert_with(|| {
+                                        vectorize::VectorizeCache::new(adaptive)
+                                    });
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let (paths, bg) = cache.get_paths(fb, base_w, base_h);
+                                        let (edges, row_ranges, edge_indices, ow, oh) =
+                                            vectorize::rasterize::prepare_gpu_edges_v2(
+                                                paths, bg, scale_fit, base_w, base_h,
+                                            );
+                                        let mut gc = gpu_compute.borrow_mut();
+                                        if ow > 0 && oh > 0 && !edges.is_empty() {
+                                            if let Some(ref mut compute) = *gc {
+                                                if let Some((gl_tex, gw, gh)) =
+                                                    compute.rasterize_shared_chain(
+                                                        &edges, &row_ranges, &edge_indices,
+                                                        ow, oh, bg,
+                                                    )
+                                                {
+                                                    let mut pf = pending_frame.borrow_mut();
+                                                    pf.pixels.clear(); // signal: use gl_tex instead
+                                                    pf.frame_w = gw;
+                                                    pf.frame_h = gh;
+                                                    pf.src_w = base_w as u32;
+                                                    pf.src_h = base_h as u32;
+                                                    pf.gpu_filter = None;
+                                                    pf.gl_texture = Some(gl_tex);
+                                                    pf.fit_w = fit_w as u32;
+                                                    pf.fit_h = fit_h as u32;
+                                                    drop(gc);
+                                                    drop(pf);
+                                                    gl_area.queue_render();
+                                                    return glib::ControlFlow::Continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // CPU fallback (macOS or GPU unavailable): use legacy rasterizer
                                     let cache = st.vec_cache.get_or_insert_with(|| {
                                         vectorize::VectorizeCache::new_legacy(adaptive)
                                     });
@@ -629,6 +702,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 pf.gpu_filter = gpu_filter_for_render;
                                 pf.fit_w = fit_w as u32;
                                 pf.fit_h = fit_h as u32;
+                                pf.factor = st.scale_filter.factor();
                                 drop(pf);
                                 gl_area.queue_render();
                             } else {
@@ -955,28 +1029,28 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     });
     app.add_action(&action_model);
 
-    // Filter action with string parameter
+    // Filter action: stateful string action — GIO shows checkmark on the matching item
     let state_filter = Rc::clone(&state);
-    let action_filter = gtk4::gio::SimpleAction::new(
+    let action_filter = gtk4::gio::SimpleAction::new_stateful(
         "filter",
         Some(&glib::VariantTy::STRING),
+        &initial_filter.cli_name().to_variant(),
     );
-    action_filter.connect_activate(move |_, param| {
+    action_filter.connect_activate(move |action, param| {
         if let Some(param) = param {
             if let Some(name) = param.str() {
                 if let Some(filter) = scaling::ScaleFilter::from_name(name) {
                     let mut st = state_filter.borrow_mut();
                     if let Some(s) = st.as_mut() {
                         s.scale_filter = filter;
-                        match filter {
-                            scaling::ScaleFilter::VectorizeLegacy => {
-                                s.vec_cache = Some(vectorize::VectorizeCache::new_legacy(false));
-                            }
-                            scaling::ScaleFilter::VectorizeLegacyAdaptive => {
-                                s.vec_cache = Some(vectorize::VectorizeCache::new_legacy(true));
-                            }
-                            _ => {}
-                        }
+                        s.vec_cache = match filter {
+                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
+                            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
+                            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+                            _ => None,
+                        };
+                        action.set_state(&name.to_variant());
                         eprintln!("Filter: {:?}", filter);
                     }
                 }

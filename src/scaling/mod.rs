@@ -16,14 +16,14 @@ pub mod omniscale_legacy;
 pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
-pub mod vectorize_gpu_cpu;
+pub mod vectorize_gpu;
 pub mod xbr;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod sdl;
 #[cfg(any(feature = "gpu", feature = "winit-ui", feature = "web", feature = "gtk-ui"))]
 pub mod wgpu_vectorize;
-#[cfg(any(feature = "web", feature = "gtk-ui"))]
+#[cfg(any(feature = "web", feature = "gtk-ui", feature = "winit-ui"))]
 pub mod wgpu_scale;
 
 /// Sample a pixel with clamped coordinates.
@@ -177,7 +177,7 @@ pub enum ScaleFilter {
     /// Adaptive shared-chain: skips optimization on complex frames.
     VectorizeAdaptive,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
-    /// Falls back to CPU implementation (vectorize_gpu_cpu) when GPU is unavailable.
+    /// CPU implementation of the full GPU vectorize pipeline.
     VectorizeGpu,
 }
 
@@ -447,10 +447,20 @@ pub fn cpu_scale(
             let scale_f = (disp_w as f32 / sw as f32).min(disp_h as f32 / sh as f32);
             let ow = (sw as f32 * scale_f).round() as usize;
             let oh = (sh as f32 * scale_f).round() as usize;
-            let s = vectorize_gpu_cpu::scale(src, sw, sh, scale_f);
+            let s = vectorize_gpu::scale(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
         }
-        // Nearest, Vectorize handled elsewhere (GPU blit / compute)
+        ScaleFilter::Nearest => {
+            let mut out = vec![0u32; disp_w * disp_h];
+            for y in 0..disp_h {
+                let sy = y * sh / disp_h;
+                for x in 0..disp_w {
+                    let sx = x * sw / disp_w;
+                    out[y * disp_w + x] = src[sy * sw + sx];
+                }
+            }
+            (out, disp_w as u32, disp_h as u32)
+        }
         _ => return None,
     })
 }

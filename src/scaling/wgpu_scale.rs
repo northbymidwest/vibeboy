@@ -11,6 +11,7 @@ use wgpu;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WgpuScaleFilter {
     Nearest,
+    Bilinear,
     Epx,
     Eagle,
     Scale3x,
@@ -33,6 +34,7 @@ impl WgpuScaleFilter {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "nearest" => Some(Self::Nearest),
+            "bilinear" => Some(Self::Bilinear),
             "epx" => Some(Self::Epx),
             "eagle" => Some(Self::Eagle),
             "scale3x" => Some(Self::Scale3x),
@@ -54,41 +56,21 @@ impl WgpuScaleFilter {
     }
 
     pub fn all_names() -> &'static [&'static str] {
-        &["nearest", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
+        &["nearest", "bilinear", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
           "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
           "edi", "nedi", "dcci", "mmpx", "lcd-grid"]
     }
 
     /// For integer-scale filters, compute the native output dimensions.
     /// Returns None for resolution-independent filters (use requested size).
-    pub fn native_size(&self, src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> (u32, u32) {
-        match self {
-            // Fixed 2x
-            Self::Eagle | Self::SuperXbr
-            | Self::Edi | Self::Nedi | Self::Dcci | Self::Mmpx => (src_w * 2, src_h * 2),
-            Self::LcdGrid => (src_w * 4, src_h * 4),
-            // Fixed 3x
-            Self::Scale3x => (src_w * 3, src_h * 3),
-            // 2x/3x/4x — pick best integer fit
-            Self::Epx | Self::Hqx | Self::Xbr => {
-                let s = (out_w / src_w).max(1).min(4);
-                let s = if s <= 2 { 2 } else if s <= 3 { 3 } else { 4 };
-                (src_w * s, src_h * s)
-            }
-            // 2x-6x
-            Self::Xbrz => {
-                let s = (out_w / src_w).max(2).min(6);
-                (src_w * s, src_h * s)
-            }
-            // Resolution-independent — use requested size
-            Self::Nearest | Self::Bicubic | Self::AaNearest
-            | Self::OmniScaleLegacy => (out_w, out_h),
-            // OmniScale works best at moderate integer scale
-            Self::OmniScale => {
-                let s = (out_w / src_w).max(2).min(8);
-                (src_w * s, src_h * s)
-            }
+    /// Compute output dimensions. If `factor` is non-zero, use it directly
+    /// (from ScaleFilter::factor()). Otherwise use the requested size.
+    pub fn native_size(&self, src_w: u32, src_h: u32, out_w: u32, out_h: u32, factor: u32) -> (u32, u32) {
+        if factor > 0 {
+            return (src_w * factor, src_h * factor);
         }
+        // Resolution-independent — use requested size
+        (out_w, out_h)
     }
 }
 
@@ -118,6 +100,8 @@ fn create_compute_pipeline(
 
 /// Cached wgpu compute pipelines and buffers for scaling filters.
 pub struct WgpuScalePipeline {
+    nearest: wgpu::ComputePipeline,
+    bilinear: wgpu::ComputePipeline,
     epx: wgpu::ComputePipeline,
     eagle: wgpu::ComputePipeline,
     scale3x: wgpu::ComputePipeline,
@@ -149,6 +133,8 @@ struct ScaleBufs {
 
 impl WgpuScalePipeline {
     pub fn new(device: &wgpu::Device) -> Self {
+        let nearest_wgsl = include_str!(concat!(env!("OUT_DIR"), "/nearest_comp.wgsl"));
+        let bilinear_wgsl = include_str!(concat!(env!("OUT_DIR"), "/bilinear_comp.wgsl"));
         let epx_wgsl = include_str!(concat!(env!("OUT_DIR"), "/epx_comp.wgsl"));
         let eagle_wgsl = include_str!(concat!(env!("OUT_DIR"), "/eagle_comp.wgsl"));
         let scale3x_wgsl = include_str!(concat!(env!("OUT_DIR"), "/scale3x_comp.wgsl"));
@@ -167,6 +153,8 @@ impl WgpuScalePipeline {
         let lcd_grid_wgsl = include_str!(concat!(env!("OUT_DIR"), "/lcd_grid_comp.wgsl"));
 
         WgpuScalePipeline {
+            nearest: create_compute_pipeline(device, nearest_wgsl, "nearest"),
+            bilinear: create_compute_pipeline(device, bilinear_wgsl, "bilinear"),
             epx: create_compute_pipeline(device, epx_wgsl, "epx"),
             eagle: create_compute_pipeline(device, eagle_wgsl, "eagle"),
             scale3x: create_compute_pipeline(device, scale3x_wgsl, "scale3x"),
@@ -189,7 +177,8 @@ impl WgpuScalePipeline {
 
     fn pipeline_for(&self, filter: WgpuScaleFilter) -> &wgpu::ComputePipeline {
         match filter {
-            WgpuScaleFilter::Nearest => unreachable!("nearest uses direct blit"),
+            WgpuScaleFilter::Nearest => &self.nearest,
+            WgpuScaleFilter::Bilinear => &self.bilinear,
             WgpuScaleFilter::Epx => &self.epx,
             WgpuScaleFilter::Eagle => &self.eagle,
             WgpuScaleFilter::Scale3x => &self.scale3x,
@@ -223,8 +212,6 @@ impl WgpuScalePipeline {
         out_w: u32,
         out_h: u32,
     ) -> &wgpu::Texture {
-        // Integer-scale filters render at native size; blit shader stretches to window
-        let (out_w, out_h) = filter.native_size(src_w, src_h, out_w, out_h);
 
         let px_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(

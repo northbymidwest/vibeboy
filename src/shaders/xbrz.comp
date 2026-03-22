@@ -4,6 +4,7 @@
 //
 // Compute shader version. Single-pass: each thread computes one output pixel,
 // folding both phases (preProcessCorners + scalePixel) into one invocation.
+// Color equality comparisons use packed u32 for exact integer matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -37,14 +38,17 @@ vec4 unpack(uint c) {
     return vec4(float((c >> 16u) & 0xFFu) / 255.0, float((c >> 8u) & 0xFFu) / 255.0, float(c & 0xFFu) / 255.0, 1.0);
 }
 
-vec4 fetch(ivec2 coord) {
+uint fetch_raw(ivec2 coord) {
     coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+    return pixels[coord.y * int(src_w) + coord.x];
+}
+
+vec4 fetch(ivec2 coord) {
+    return unpack(fetch_raw(coord));
 }
 
 // BT.2020 YCbCr color distance (matches CPU xBRZ implementation).
 float dist(vec4 a, vec4 b) {
-    if (a == b) return 0.0;
     vec3 d = (a.rgb - b.rgb) * 255.0;
     const float K_R = 0.2627;
     const float K_G = 0.6780;
@@ -55,6 +59,12 @@ float dist(vec4 a, vec4 b) {
     float cb = S_B * (d.b - y);
     float cr = S_R * (d.r - y);
     return sqrt(y * y + cb * cb + cr * cr);
+}
+
+// Distance with packed u32 early-out for identical colors.
+float dist_raw(uint ra, uint rb, vec4 a, vec4 b) {
+    if (ra == rb) return 0.0;
+    return dist(a, b);
 }
 
 bool eq(vec4 a, vec4 b) { return dist(a, b) < EQ_TOLERANCE; }
@@ -79,13 +89,18 @@ int get_bl(int b) { return (b >> 6) & 3; }
 // Returns packed result: blend_f in BR, blend_g in BL, blend_j in TR, blend_k in TL
 
 int preprocess_block(ivec2 bxy) {
-    vec4 f = fetch(bxy);
-    vec4 g = fetch(bxy + ivec2(1, 0));
-    vec4 j = fetch(bxy + ivec2(0, 1));
-    vec4 k = fetch(bxy + ivec2(1, 1));
+    uint rf = fetch_raw(bxy);
+    uint rg = fetch_raw(bxy + ivec2(1, 0));
+    uint rj = fetch_raw(bxy + ivec2(0, 1));
+    uint rk = fetch_raw(bxy + ivec2(1, 1));
 
-    // Skip uniform blocks (exact comparison)
-    if ((f == g && j == k) || (f == j && g == k)) return 0;
+    // Skip uniform blocks (exact comparison using packed u32)
+    if ((rf == rg && rj == rk) || (rf == rj && rg == rk)) return 0;
+
+    vec4 f = unpack(rf);
+    vec4 g = unpack(rg);
+    vec4 j = unpack(rj);
+    vec4 k = unpack(rk);
 
     vec4 b_px = fetch(bxy + ivec2(0, -1));
     vec4 c    = fetch(bxy + ivec2(1, -1));
@@ -103,12 +118,12 @@ int preprocess_block(ivec2 bxy) {
 
     if (jg < fk) {
         int bt = (DOMINANT_RATIO * jg < fk) ? BL_DOMINANT : BL_NORMAL;
-        if (f != g && f != j) result |= (bt << 4); // blend_f -> BR
-        if (k != j && k != g) result |= bt;        // blend_k -> TL
+        if (rf != rg && rf != rj) result |= (bt << 4); // blend_f -> BR
+        if (rk != rj && rk != rg) result |= bt;        // blend_k -> TL
     } else if (fk < jg) {
         int bt = (DOMINANT_RATIO * fk < jg) ? BL_DOMINANT : BL_NORMAL;
-        if (j != f && j != k) result |= (bt << 2); // blend_j -> TR
-        if (g != f && g != k) result |= (bt << 6); // blend_g -> BL
+        if (rj != rf && rj != rk) result |= (bt << 2); // blend_j -> TR
+        if (rg != rf && rg != rk) result |= (bt << 6); // blend_g -> BL
     }
     return result;
 }

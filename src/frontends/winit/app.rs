@@ -23,7 +23,7 @@ use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
 use super::menu::{
     ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET, ID_PRINTER,
-    slot_save_id, slot_load_id, filter_id_to_filter, build_menu,
+    slot_save_id, slot_load_id, filter_id_to_filter, model_id_to_model, build_menu, MODEL_IDS,
 };
 
 pub(super) struct App {
@@ -31,11 +31,13 @@ pub(super) struct App {
     cli: Cli,
     emu: Option<Emulator>,
     model: GbModel,
+    forced_model: Option<GbModel>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuRenderer>,
     _menu: Option<Menu>,
     filter_items: Vec<(CheckMenuItem, scaling::ScaleFilter)>,
     printer_item: Option<CheckMenuItem>,
+    model_items: Vec<CheckMenuItem>,
     audio_ring: Arc<Mutex<AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     camera_thread: Option<CameraThread>,
@@ -43,6 +45,8 @@ pub(super) struct App {
     scale_filter: scaling::ScaleFilter,
     vec_cache: Option<vectorize::VectorizeCache>,
     wgpu_vectorize: Option<scaling::wgpu_vectorize::WgpuVectorizePipeline>,
+    wgpu_shared_chain: Option<scaling::wgpu_vectorize::WgpuSharedChainRasterizer>,
+    wgpu_scale: Option<scaling::wgpu_scale::WgpuScalePipeline>,
     frame_start: Instant,
     frame_dur: Duration,
     paused: bool,
@@ -60,6 +64,7 @@ pub(super) struct App {
 impl App {
     pub fn new(cli: Cli) -> Self {
         let model = cli.model.unwrap_or(GbModel::Cgb);
+        let forced_model = cli.model;
 
         let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2, AUDIO_SAMPLE_RATE))); // ~4 frames stereo
         let (stream, actual_rate) = match start_audio(Arc::clone(&audio_ring)) {
@@ -73,11 +78,13 @@ impl App {
             cli,
             emu: None,
             model,
+            forced_model,
             window: None,
             gpu: None,
             _menu: None,
             filter_items: Vec::new(),
             printer_item: None,
+            model_items: Vec::new(),
             audio_ring,
             _audio_stream: stream,
             camera_thread: None,
@@ -85,6 +92,8 @@ impl App {
             scale_filter: scaling::ScaleFilter::Nearest,
             vec_cache: None,
             wgpu_vectorize: None,
+            wgpu_shared_chain: None,
+            wgpu_scale: None,
             frame_start: Instant::now(),
             frame_dur: frame_duration(model),
             paused: false,
@@ -109,6 +118,7 @@ impl App {
             return;
         }
 
+        self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
         let boot_rom = ui_util::load_boot_rom(self.model, self.cli.bootrom.as_deref(), self.cli.no_boot);
 
         let mut emu = Emulator::new(rom, boot_rom, self.model, None);
@@ -195,19 +205,33 @@ impl App {
                 }
             }
             other => {
+                // Check model menu items
+                if let Some(new_model) = model_id_to_model(other) {
+                    self.forced_model = new_model;
+                    // Reload ROM with new model
+                    if let Some(path) = self.rom_path.clone() {
+                        self.load_rom(&path);
+                    }
+                    // Update checkmarks
+                    for item in &self.model_items {
+                        item.set_checked(item.id().0 == other);
+                    }
+                    let name = new_model.map(|m| format!("{:?}", m)).unwrap_or("Auto".into());
+                    eprintln!("Hardware model: {}", name);
+                    return;
+                }
+
                 // Check filter menu items
                 if let Some(filter) = filter_id_to_filter(other) {
                     self.scale_filter = filter;
                     self.update_filter_checkmarks();
-                    match filter {
-                        scaling::ScaleFilter::VectorizeLegacy => {
-                            self.vec_cache = Some(vectorize::VectorizeCache::new_legacy(false));
-                        }
-                        scaling::ScaleFilter::VectorizeLegacyAdaptive => {
-                            self.vec_cache = Some(vectorize::VectorizeCache::new_legacy(true));
-                        }
-                        _ => {}
-                    }
+                    self.vec_cache = match filter {
+                        scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
+                        scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
+                        scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
+                        scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
+                        _ => None,
+                    };
                     eprintln!("Filter: {:?}", filter);
                     return;
                 }
@@ -303,12 +327,47 @@ impl App {
         let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
             if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
                 (fb, sw, sh)
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive) {
-                let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                let (raster, vw, vh) = cache.rasterize(fb, sw, sh, scale);
-                (raster, vw, vh)
+            } else if matches!(self.scale_filter,
+                scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
+                | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+            {
+                // All vectorize variants: extract paths on CPU, rasterize on GPU
+                let scale_factor = window.scale_factor();
+                let logical_w = disp_w as f64 / scale_factor;
+                let logical_h = disp_h as f64 / scale_factor;
+                let scale = (logical_w / sw as f64).min(logical_h / sh as f64);
+                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
+                let (paths, bg) = cache.get_paths(fb, sw, sh);
+                let (edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale, sw, sh);
+                if ow > 0 && oh > 0 && !edges.is_empty() {
+                    if self.wgpu_shared_chain.is_none() {
+                        self.wgpu_shared_chain = Some(
+                            scaling::wgpu_vectorize::WgpuSharedChainRasterizer::new(&gpu.device)
+                        );
+                    }
+                    let rasterizer = self.wgpu_shared_chain.as_ref().unwrap();
+                    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("vectorize_shared_chain"),
+                    });
+                    let out_tex = rasterizer.encode(
+                        &gpu.device, &gpu.queue, &mut encoder,
+                        &edges, &row_ranges, &edge_indices, ow, oh, bg,
+                    );
+                    let frame = match gpu.surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                        _ => return,
+                    };
+                    let surface_view = frame.texture.create_view(&Default::default());
+                    gpu.encode_blit(&mut encoder, &out_tex, &surface_view, sw as u32, sh as u32);
+                    gpu.queue.submit(std::iter::once(encoder.finish()));
+                    frame.present();
+                    self.frame_start = Instant::now();
+                    return;
+                }
+                // Fallback if edge prep failed
+                (fb, sw, sh)
             } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeDiffusion) {
                 let s = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
                 let sc = s.round().max(1.0) as usize;
@@ -353,6 +412,38 @@ impl App {
                 gpu.queue.submit(std::iter::once(encoder.finish()));
                 frame.present();
                 return; // skip normal render path
+            } else if let Some(wgpu_filter) = map_scale_filter(self.scale_filter) {
+                // GPU compute scaling filter
+                if self.wgpu_scale.is_none() {
+                    self.wgpu_scale = Some(scaling::wgpu_scale::WgpuScalePipeline::new(&gpu.device));
+                }
+                let factor = self.scale_filter.factor();
+                let (ow, oh) = if factor > 0 {
+                    (sw as u32 * factor, sh as u32 * factor)
+                } else {
+                    let scale_factor = window.scale_factor();
+                    let lw = disp_w as f64 / scale_factor;
+                    let lh = disp_h as f64 / scale_factor;
+                    let s = (lw / sw as f64).min(lh / sh as f64);
+                    ((sw as f64 * s).round() as u32, (sh as f64 * s).round() as u32)
+                };
+                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("scale+blit"),
+                });
+                let pipeline = self.wgpu_scale.as_mut().unwrap();
+                let out_tex = pipeline.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    wgpu_filter, fb, sw as u32, sh as u32, ow, oh,
+                );
+                let frame = match gpu.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                    _ => return,
+                };
+                let fb_view = frame.texture.create_view(&Default::default());
+                gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
+                gpu.queue.submit(std::iter::once(encoder.finish()));
+                frame.present();
+                return;
             } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
                 scaled = s;
                 (&scaled, w as usize, h as usize)
@@ -391,7 +482,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         // Set up menu bar
-        let (menu, filter_items, printer_item) = build_menu(self.cli.printer);
+        let (menu, filter_items, printer_item, model_items) = build_menu(self.cli.printer);
         #[cfg(target_os = "macos")]
         {
             menu.init_for_nsapp();
@@ -416,6 +507,7 @@ impl ApplicationHandler for App {
         self._menu = Some(menu);
         self.filter_items = filter_items;
         self.printer_item = Some(printer_item);
+        self.model_items = model_items;
         self.window = Some(window);
         self.gpu = Some(gpu);
 
@@ -596,5 +688,30 @@ impl ApplicationHandler for App {
         if let Some(ref window) = self.window {
             window.request_redraw();
         }
+    }
+}
+
+fn map_scale_filter(filter: scaling::ScaleFilter) -> Option<scaling::wgpu_scale::WgpuScaleFilter> {
+    use scaling::ScaleFilter as SF;
+    use scaling::wgpu_scale::WgpuScaleFilter as WF;
+    match filter {
+        SF::Nearest => Some(WF::Nearest),
+        SF::Bilinear => Some(WF::Bilinear),
+        SF::Bicubic => Some(WF::Bicubic),
+        SF::Epx | SF::Scale2x | SF::Scale4x => Some(WF::Epx),
+        SF::Scale3x => Some(WF::Scale3x),
+        SF::Eagle => Some(WF::Eagle),
+        SF::Hqx(_) => Some(WF::Hqx),
+        SF::Xbr(_) | SF::SuperXbr => Some(WF::Xbr),
+        SF::Xbrz(_) => Some(WF::Xbrz),
+        SF::AaNearestNeighbor => Some(WF::AaNearest),
+        SF::OmniScale => Some(WF::OmniScale),
+        SF::OmniScaleLegacy => Some(WF::OmniScaleLegacy),
+        SF::Edi => Some(WF::Edi),
+        SF::Nedi => Some(WF::Nedi),
+        SF::Dcci => Some(WF::Dcci),
+        SF::Mmpx => Some(WF::Mmpx),
+        SF::LcdGrid => Some(WF::LcdGrid),
+        _ => None,
     }
 }

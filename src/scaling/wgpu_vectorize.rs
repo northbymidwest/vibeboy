@@ -426,3 +426,194 @@ impl WgpuVectorizePipeline {
         Some((result, w, h))
     }
 }
+
+// ── Shared-chain rasterizer pipeline ──────────────────────────────────────
+
+/// wgpu compute pipeline for the shared-chain vectorize rasterizer.
+/// Dispatches `vectorize_raster.comp` (row-indexed edges with per-edge color).
+///
+/// Shader bind groups (matching GLSL descriptor sets):
+///   group 0: binding 0 = edges, binding 1 = row_ranges, binding 2 = edge_indices (all storage)
+///   group 1: binding 0 = output texture (storage image, rgba8unorm)
+///   group 2: binding 0 = uniforms (uniform buffer)
+pub struct WgpuSharedChainRasterizer {
+    pipeline: wgpu::ComputePipeline,
+    bgl_buffers: wgpu::BindGroupLayout,  // group 0: storage buffers
+    bgl_texture: wgpu::BindGroupLayout,  // group 1: output texture
+    bgl_uniform: wgpu::BindGroupLayout,  // group 2: uniforms
+}
+
+impl WgpuSharedChainRasterizer {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let wgsl = include_str!(concat!(env!("OUT_DIR"), "/vectorize_raster_comp.wgsl"));
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vectorize_raster"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+
+        let storage_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
+        // Group 0: edges (b0), row_ranges (b1), edge_indices (b2)
+        let bgl_buffers = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_bgl0"),
+            entries: &[storage_entry(0), storage_entry(1), storage_entry(2)],
+        });
+
+        // Group 1: output texture
+        let bgl_texture = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_bgl1"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+
+        // Group 2: uniforms
+        let bgl_uniform = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_bgl2"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vr_pl"),
+            bind_group_layouts: &[Some(&bgl_buffers), Some(&bgl_texture), Some(&bgl_uniform)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("vectorize_raster"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        Self { pipeline, bgl_buffers, bgl_texture, bgl_uniform }
+    }
+
+    /// Encode the shared-chain rasterize pass. Returns the output texture.
+    pub fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        edges: &[crate::vectorize::rasterize::GpuEdgeV2],
+        row_ranges: &[crate::vectorize::rasterize::GpuRowRange],
+        edge_indices: &[u32],
+        out_w: u32,
+        out_h: u32,
+        bg_color: u32,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+
+        let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vr_edges"),
+            contents: bytemuck::cast_slice(edges),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let row_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vr_rows"),
+            contents: bytemuck::cast_slice(row_ranges),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let idx_data = if edge_indices.is_empty() { &[0u32][..] } else { edge_indices };
+        let idx_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vr_indices"),
+            contents: bytemuck::cast_slice(idx_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vr_output"),
+            size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let output_view = output_tex.create_view(&Default::default());
+
+        let uniforms = [out_w, out_h, edges.len() as u32, bg_color];
+        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vr_uniform"),
+            contents: bytemuck::cast_slice(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        // Group 0: storage buffers
+        let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vr_bg0"),
+            layout: &self.bgl_buffers,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: edge_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: row_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: idx_buf.as_entire_binding() },
+            ],
+        });
+
+        // Group 1: output texture
+        let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vr_bg1"),
+            layout: &self.bgl_texture,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_view) },
+            ],
+        });
+
+        // Group 2: uniforms
+        let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vr_bg2"),
+            layout: &self.bgl_uniform,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+            ],
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vectorize_raster"),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bg0, &[]);
+            pass.set_bind_group(1, &bg1, &[]);
+            pass.set_bind_group(2, &bg2, &[]);
+            pass.dispatch_workgroups(
+                (out_w + 15) / 16,
+                (out_h + 15) / 16,
+                1,
+            );
+        }
+
+        output_tex
+    }
+}

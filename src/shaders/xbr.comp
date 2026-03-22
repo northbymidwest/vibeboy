@@ -2,6 +2,7 @@
 
 // xBR — pixel-art scaling (2x, 3x, 4x) by Hyllian.
 // Compute shader variant with resolved CP lookups for naga WGSL compatibility.
+// Color equality comparisons use packed u32 for exact integer matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -24,9 +25,13 @@ vec4 unpack(uint c) {
                 float(c & 0xFFu) / 255.0, 1.0);
 }
 
-vec4 fetch(ivec2 coord) {
+uint fetch_raw(ivec2 coord) {
     coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+    return pixels[coord.y * int(src_w) + coord.x];
+}
+
+vec4 fetch(ivec2 coord) {
+    return unpack(fetch_raw(coord));
 }
 
 float color_dist(vec4 a, vec4 b) {
@@ -47,17 +52,23 @@ const float B128 = 128.0 / 256.0;
 const float B192 = 192.0 / 256.0;
 const float B224 = 224.0 / 256.0;
 
-// Resolved corner pixels: F, H, I, C, G, B, D, F4, H5, I4, I5
-// Set before calling any filter function.
+// Resolved corner pixels (vec4 for blending, uint for equality).
 vec4 cF, cH, cI, cC, cG, cB, cD, cF4, cH5, cI4, cI5;
-vec4 cE; // center pixel (nb[12])
+vec4 cE;
+uint uF, uH, uI, uC, uG, uB, uD, uF4, uH5, uI4, uI5;
+uint uE;
 
-void resolve_cp(vec4 nb[25], int cp[11]) {
+void resolve_cp(vec4 nb[25], uint nb_raw[25], int cp[11]) {
     cF = nb[cp[0]]; cH = nb[cp[1]]; cI = nb[cp[2]];
     cC = nb[cp[3]]; cG = nb[cp[4]]; cB = nb[cp[5]];
     cD = nb[cp[6]]; cF4 = nb[cp[7]]; cH5 = nb[cp[8]];
     cI4 = nb[cp[9]]; cI5 = nb[cp[10]];
     cE = nb[12];
+    uF = nb_raw[cp[0]]; uH = nb_raw[cp[1]]; uI = nb_raw[cp[2]];
+    uC = nb_raw[cp[3]]; uG = nb_raw[cp[4]]; uB = nb_raw[cp[5]];
+    uD = nb_raw[cp[6]]; uF4 = nb_raw[cp[7]]; uH5 = nb_raw[cp[8]];
+    uI4 = nb_raw[cp[9]]; uI5 = nb_raw[cp[10]];
+    uE = nb_raw[12];
 }
 
 vec2 edge_weights() {
@@ -77,29 +88,29 @@ vec4 pick_color() {
 void detect_direction(out bool is_left, out bool is_up) {
     float ke = color_dist(cF, cG);
     float ki = color_dist(cH, cC);
-    is_left = ke * 2.0 <= ki && cE != cG && cD != cG;
-    is_up   = ke >= ki * 2.0 && cE != cC && cB != cC;
+    is_left = ke * 2.0 <= ki && uE != uG && uD != uG;
+    is_up   = ke >= ki * 2.0 && uE != uC && uB != uC;
 }
 
 bool sub_cond_24() {
-    return (cF != cB && cH != cD)
-        || (cE == cI && cF != cI4 && cH != cI5)
-        || cE == cG
-        || cE == cC;
+    return (uF != uB && uH != uD)
+        || (uE == uI && uF != uI4 && uH != uI5)
+        || uE == uG
+        || uE == uC;
 }
 
 bool sub_cond_3() {
-    return (cF != cB && cF != cC)
-        || (cH != cD && cH != cG)
-        || (cE == cI
-            && ((cF != cF4 && cF != cI4)
-                || (cH != cH5 && cH != cI5)))
-        || cE == cG
-        || cE == cC;
+    return (uF != uB && uF != uC)
+        || (uH != uD && uH != uG)
+        || (uE == uI
+            && ((uF != uF4 && uF != uI4)
+                || (uH != uH5 && uH != uI5)))
+        || uE == uG
+        || uE == uC;
 }
 
 vec4 filt2x(vec4 e) {
-    if (cE == cH || cE == cF) return e;
+    if (uE == uH || uE == uF) return e;
     vec2 ew_iw = edge_weights();
     if (ew_iw.x > ew_iw.y) return e;
     vec4 px = pick_color();
@@ -115,7 +126,7 @@ vec4 filt2x(vec4 e) {
 }
 
 void filt3x(vec4 e, inout vec4 corner, inout vec4 side_h, inout vec4 side_f) {
-    if (cE == cH || cE == cF) return;
+    if (uE == uH || uE == uF) return;
     vec2 ew_iw = edge_weights();
     if (ew_iw.x > ew_iw.y) return;
     vec4 px = pick_color();
@@ -148,7 +159,7 @@ vec4 g_out_block[16];
 
 void filt4x(vec4 e, int n15, int n14, int n13, int n12,
             int n11, int n10, int n7, int n3) {
-    if (cE == cH || cE == cF) return;
+    if (uE == uH || uE == uF) return;
     vec2 ew_iw = edge_weights();
     if (ew_iw.x > ew_iw.y) return;
     vec4 px = pick_color();
@@ -199,11 +210,15 @@ void main() {
     ivec2 sub = out_pos - src_i * isc;
     src_i = clamp(src_i, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
 
-    // Sample 5x5 neighborhood into local array
+    // Sample 5x5 neighborhood into local arrays (vec4 + uint)
     vec4 nb[25];
+    uint nb_raw[25];
     for (int j = 0; j < 5; j++)
-        for (int i = 0; i < 5; i++)
-            nb[j * 5 + i] = fetch(src_i + ivec2(i - 2, j - 2));
+        for (int i = 0; i < 5; i++) {
+            uint raw = fetch_raw(src_i + ivec2(i - 2, j - 2));
+            nb_raw[j * 5 + i] = raw;
+            nb[j * 5 + i] = unpack(raw);
+        }
 
     vec4 e = nb[12];
 
@@ -213,7 +228,7 @@ void main() {
         else if (sub.x == 1 && sub.y == 0) cp = CP_TR;
         else if (sub.x == 0 && sub.y == 1) cp = CP_BL;
         else cp = CP_BR;
-        resolve_cp(nb, cp);
+        resolve_cp(nb, nb_raw, cp);
         imageStore(output_img, out_pos, filt2x(e));
 
     } else if (isc == 3) {
@@ -227,7 +242,7 @@ void main() {
             else if (cx == 1 && cy == 0) cp = CP_TR;
             else if (cx == 0 && cy == 1) cp = CP_BL;
             else cp = CP_BR;
-            resolve_cp(nb, cp);
+            resolve_cp(nb, nb_raw, cp);
 
             vec4 corner = e, side_h = e, side_f = e;
             filt3x(e, corner, side_h, side_f);
@@ -240,13 +255,13 @@ void main() {
     } else {
         for (int i = 0; i < 16; i++) g_out_block[i] = e;
 
-        resolve_cp(nb, CP_BR);
+        resolve_cp(nb, nb_raw, CP_BR);
         filt4x(e, 15,14,13,12, 11,10, 7, 3);
-        resolve_cp(nb, CP_BL);
+        resolve_cp(nb, nb_raw, CP_BL);
         filt4x(e, 12,13,14,15,  8, 9, 4, 0);
-        resolve_cp(nb, CP_TR);
+        resolve_cp(nb, nb_raw, CP_TR);
         filt4x(e,  3, 2, 1, 0,  7, 6,11,15);
-        resolve_cp(nb, CP_TL);
+        resolve_cp(nb, nb_raw, CP_TL);
         filt4x(e,  0, 1, 2, 3,  4, 5, 8,12);
 
         imageStore(output_img, out_pos, g_out_block[sub.y * 4 + sub.x]);

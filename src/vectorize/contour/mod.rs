@@ -133,14 +133,8 @@ struct CellEdge {
 pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: bool) -> Vec<ColorPath> {
     let w = graph.width;
     let h = graph.height;
-    let verbose = std::env::var("VECTORIZE_BENCH").is_ok();
-    let t0 = std::time::Instant::now();
-
     let all_cells = cells::precompute_cells(w, h, graph);
-    let t1 = std::time::Instant::now();
-
     let (visible_edges, directed_edges) = edges::build_directed_boundary_edges(pixels, w, h, &all_cells, adaptive);
-    let t2 = std::time::Instant::now();
 
     // Adaptive pipeline: skip expensive B-spline optimization when boundary
     // complexity is high (noisy/dithered frames). The optimization provides
@@ -242,11 +236,9 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
         }
         (j, final_corrected)
     };
-    let t3 = std::time::Instant::now();
 
     // Trace boundary loops, then optimize each loop directly.
     let all_loops = loops::trace_all_boundary_loops(&directed_edges);
-    let t4 = std::time::Instant::now();
 
     let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
     for (node_loop, _) in &all_loops {
@@ -256,7 +248,6 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
     }
 
     optimize::optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
-    let t5 = std::time::Instant::now();
 
     // Group loops by color and convert to segments
     let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
@@ -279,16 +270,6 @@ pub fn extract_cells_smooth(pixels: &[u32], graph: &SimilarityGraph, adaptive: b
             color,
             segments: all_segments,
         });
-    }
-    let t6 = std::time::Instant::now();
-
-    if verbose {
-        eprintln!("    cells:         {:>8.3}ms", (t1 - t0).as_secs_f64() * 1000.0);
-        eprintln!("    boundary edges:{:>8.3}ms", (t2 - t1).as_secs_f64() * 1000.0);
-        eprintln!("    chain+tjunc:   {:>8.3}ms", (t3 - t2).as_secs_f64() * 1000.0);
-        eprintln!("    trace loops:   {:>8.3}ms", (t4 - t3).as_secs_f64() * 1000.0);
-        eprintln!("    optimize:      {:>8.3}ms", (t5 - t4).as_secs_f64() * 1000.0);
-        eprintln!("    bspline emit:  {:>8.3}ms", (t6 - t5).as_secs_f64() * 1000.0);
     }
 
     result
@@ -383,35 +364,8 @@ pub fn extract_shared_edge_paths_gpu(
     let (visible_edges, directed_edges) = edges::build_directed_boundary_edges(pixels, w, h, &all_cells, adaptive);
 
     // Adaptive: when visible_edges is empty, boundary count exceeded threshold.
-    // Skip chain building and optimization for faster output.
+    // Skip optimization but still build shared chains with B-splines.
     let adaptive = adaptive && visible_edges.is_empty();
-
-    if adaptive {
-        let all_loops = loops::trace_all_boundary_loops(&directed_edges);
-        let mut color_loops: BTreeMap<u32, Vec<Vec<PathSegment>>> = BTreeMap::new();
-        for (node_loop, color) in &all_loops {
-            let points: Vec<Point> = node_loop.iter()
-                .map(|nd| nd.to_point())
-                .collect();
-            if points.len() < 3 { continue; }
-            let segs = optimize::bspline_closed(&points);
-            if !segs.is_empty() {
-                color_loops.entry(*color).or_default().push(segs);
-            }
-        }
-
-        let mut result: Vec<ColorPath> = Vec::new();
-        for (color, loop_segments) in color_loops {
-            if color == VOID_COLOR { continue; }
-            let mut all_segments = Vec::new();
-            for segs in loop_segments {
-                all_segments.extend(segs);
-            }
-            result.push(ColorPath { color, segments: all_segments });
-        }
-        let bg_color = detect_bg(pixels, w, h);
-        return (result, bg_color);
-    }
 
     // Build chains without T-junction merging.
     let chains = edges::chain_visible_edges(&visible_edges);
@@ -426,7 +380,7 @@ pub fn extract_shared_edge_paths_gpu(
         }
     }
 
-    // Optimize node positions
+    // Optimize node positions (skip in adaptive mode)
     let all_loops = loops::trace_all_boundary_loops(&directed_edges);
     let mut node_positions: FxHashMap<NodeId, Point> = fx_hashmap();
     for (node_loop, _) in &all_loops {
@@ -435,7 +389,9 @@ pub fn extract_shared_edge_paths_gpu(
         }
     }
 
-    optimize::optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+    if !adaptive {
+        optimize::optimize_boundary_loops(&all_loops, &mut node_positions, &junctions);
+    }
 
     // Fit B-splines to each chain
     let chain_segments: Vec<Vec<PathSegment>> = chains.iter().map(|(chain, _)| {

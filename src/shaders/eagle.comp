@@ -1,6 +1,7 @@
 #version 450
 
 // Eagle — 2x pixel-art scaling (compute shader).
+// Comparisons use packed u32 colors for exact integer matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -26,9 +27,9 @@ vec4 unpack(uint c) {
     );
 }
 
-vec4 fetch(ivec2 coord) {
+uint fetch(ivec2 coord) {
     coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    return unpack(pixels[coord.y * int(src_w) + coord.x]);
+    return pixels[coord.y * int(src_w) + coord.x];
 }
 
 void main() {
@@ -36,27 +37,26 @@ void main() {
     uint opy = gl_GlobalInvocationID.y;
     if (opx >= out_w || opy >= out_h) return;
 
-    float inv_scale = float(src_w) / float(out_w);
-    vec2 src_coord = (vec2(opx, opy) + 0.5) * inv_scale;
-    ivec2 src_i = clamp(ivec2(floor(src_coord)), ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    vec2 frac_val = src_coord - vec2(src_i);
-    ivec2 sub = clamp(ivec2(floor(frac_val * 2.0)), ivec2(0), ivec2(1));
+    // Integer mapping: fixed 2x scale
+    ivec2 out_pos = ivec2(opx, opy);
+    ivec2 src_i = clamp(out_pos / 2, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    ivec2 sub = out_pos - src_i * 2;
 
-    vec4 p = fetch(src_i);
-    vec4 s = fetch(src_i + ivec2(-1, -1));
-    vec4 t = fetch(src_i + ivec2( 0, -1));
-    vec4 u = fetch(src_i + ivec2( 1, -1));
-    vec4 v = fetch(src_i + ivec2(-1,  0));
-    vec4 w = fetch(src_i + ivec2( 1,  0));
-    vec4 x = fetch(src_i + ivec2(-1,  1));
-    vec4 y = fetch(src_i + ivec2( 0,  1));
-    vec4 z = fetch(src_i + ivec2( 1,  1));
+    uint p = fetch(src_i);
+    uint s = fetch(src_i + ivec2(-1, -1));
+    uint t = fetch(src_i + ivec2( 0, -1));
+    uint u = fetch(src_i + ivec2( 1, -1));
+    uint v = fetch(src_i + ivec2(-1,  0));
+    uint w = fetch(src_i + ivec2( 1,  0));
+    uint x = fetch(src_i + ivec2(-1,  1));
+    uint y = fetch(src_i + ivec2( 0,  1));
+    uint z = fetch(src_i + ivec2( 1,  1));
 
-    vec4 result;
+    uint result;
     if      (sub.x == 0 && sub.y == 0) result = (s==t && s==v) ? s : p;
     else if (sub.x == 1 && sub.y == 0) result = (t==u && u==w) ? u : p;
     else if (sub.x == 0 && sub.y == 1) result = (v==x && x==y) ? x : p;
     else                               result = (w==z && z==y) ? z : p;
 
-    imageStore(output_img, ivec2(opx, opy), result);
+    imageStore(output_img, ivec2(opx, opy), unpack(result));
 }

@@ -39,37 +39,19 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
     let out_w = (src_w as f32 * scale_factor).ceil() as usize;
     let out_h = (src_h as f32 * scale_factor).ceil() as usize;
 
-    let t0 = std::time::Instant::now();
-
-    // Stage 1: Build similarity graph
     let graph = build_similarity_graph(src, src_w, src_h);
-    let t1 = t0.elapsed();
-
-    // Stage 2: Resolve diagonal crossings
     let graph = resolve_crossings(&graph, src_w, src_h);
-    let t2 = t0.elapsed();
-
-    // Stage 3: Build cell graph (B-spline control points)
     let (positions, neighbors, flags, edge_colors) = build_cell_graph(&graph, src_w, src_h);
-    let t3 = t0.elapsed();
 
     let corners_w = src_w + 1;
     let corners_h = src_h + 1;
     let num_cps = corners_w * corners_h * 2;
 
-    // Save original positions for positional energy
     let orig_positions = positions.clone();
-
-    // Stage 4: Optimize energy (2 ping-pong passes)
     let positions = optimize_energy(&positions, &orig_positions, &neighbors, &flags, num_cps);
-    let t4 = t0.elapsed();
-
-    // Stage 5: Update T-junctions
     let mut positions = positions;
     update_tjunctions(&mut positions, &neighbors, &flags, num_cps);
-    let t5 = t0.elapsed();
 
-    // Stage 6: Rasterize
     let result = rasterize(
         src,
         &positions,
@@ -82,18 +64,6 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
         out_w,
         out_h,
         scale_factor,
-    );
-    let t6 = t0.elapsed();
-
-    log::info!(
-        "vectorize-gpu-cpu: graph={:.1}ms resolve={:.1}ms cell={:.1}ms opt={:.1}ms tjunc={:.1}ms raster={:.1}ms total={:.1}ms",
-        t1.as_secs_f64() * 1000.0,
-        (t2 - t1).as_secs_f64() * 1000.0,
-        (t3 - t2).as_secs_f64() * 1000.0,
-        (t4 - t3).as_secs_f64() * 1000.0,
-        (t5 - t4).as_secs_f64() * 1000.0,
-        (t6 - t5).as_secs_f64() * 1000.0,
-        t6.as_secs_f64() * 1000.0,
     );
 
     result
@@ -1909,21 +1879,10 @@ fn rasterize(
     let inv_scale = 1.0 / scale_factor;
     let aa_threshold = 2.0 / (scale_factor * scale_factor);
 
-    // Process rows in parallel using std::thread::scope
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    let rows_per_thread = (out_h + num_threads - 1) / num_threads;
-
-    std::thread::scope(|scope| {
-        let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
-
-        let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
-            let all_cps = &all_cps;
-            let grid_data = &grid_data;
-            let cell_offset = &cell_offset;
-            let start = ci * rows_per_thread;
-            scope.spawn(move || {
+    // Rasterize row range into output chunk
+    let rasterize_rows = |chunk: &mut [u32], start: usize,
+        all_cps: &[CpData], grid_data: &[u16], cell_offset: &[u32]|
+    {
                 let chunk_rows = chunk.len() / out_w;
                 for local_y in 0..chunk_rows {
                     let opy = start + local_y;
@@ -2072,10 +2031,33 @@ fn rasterize(
             }
         } // opx
         } // local_y
-            })
-        }).collect();
-        for h in handles { h.join().unwrap(); }
-    });
+    };
+
+    // Parallel on native, sequential on wasm
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let rows_per_thread = (out_h + num_threads - 1) / num_threads;
+        std::thread::scope(|scope| {
+            let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
+            let all_cps = &all_cps;
+            let grid_data = &grid_data;
+            let cell_offset = &cell_offset;
+            let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
+                let start = ci * rows_per_thread;
+                scope.spawn(move || {
+                    rasterize_rows(chunk, start, all_cps, grid_data, cell_offset);
+                })
+            }).collect();
+            for h in handles { h.join().unwrap(); }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        rasterize_rows(&mut output, 0, &all_cps, &grid_data, &cell_offset);
+    }
 
     output
 }

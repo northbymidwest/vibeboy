@@ -70,7 +70,7 @@ pub(super) struct MetalRenderer {
     pub tex_w: u32,
     pub tex_h: u32,
     // Compute scaling pipelines (lazily initialized)
-    scale_compute: [Option<ComputePipeline>; 16],
+    scale_compute: [Option<ComputePipeline>; 18],
     pub compute_out_tex: Option<Texture>,
     pub compute_out_w: u32,
     pub compute_out_h: u32,
@@ -508,6 +508,10 @@ impl MetalRenderer {
                 (14, include_bytes!(concat!(env!("OUT_DIR"), "/mmpx_comp.metal"))),
             ScaleFilter::LcdGrid =>
                 (15, include_bytes!(concat!(env!("OUT_DIR"), "/lcd_grid_comp.metal"))),
+            ScaleFilter::Nearest =>
+                (16, include_bytes!(concat!(env!("OUT_DIR"), "/nearest_comp.metal"))),
+            ScaleFilter::Bilinear =>
+                (17, include_bytes!(concat!(env!("OUT_DIR"), "/bilinear_comp.metal"))),
             _ => return None,
         };
 

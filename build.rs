@@ -154,6 +154,22 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
+        glsl_src: "nearest.comp",
+        spv_name: "nearest_comp.spv",
+        msl_name: "nearest_comp.metal",
+        dxil_name: "nearest_comp.dxil",
+        wgsl_name: "nearest_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "bilinear.comp",
+        spv_name: "bilinear_comp.spv",
+        msl_name: "bilinear_comp.metal",
+        dxil_name: "bilinear_comp.dxil",
+        wgsl_name: "bilinear_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
         glsl_src: "aa_nearest.comp",
         spv_name: "aa_nearest_comp.spv",
         msl_name: "aa_nearest_comp.metal",

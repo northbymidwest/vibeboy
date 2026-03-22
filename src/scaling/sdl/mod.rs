@@ -25,6 +25,8 @@ pub use compute::{
     init_edi_compute_pipeline, init_nedi_compute_pipeline, init_dcci_compute_pipeline,
     init_mmpx_compute_pipeline,
     init_lcd_grid_compute_pipeline,
+    init_nearest_compute_pipeline,
+    init_bilinear_compute_pipeline,
 };
 pub use screenshot::{
     gpu_screenshot,

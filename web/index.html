@@ -104,25 +104,11 @@
       <option value="agb">AGB</option>
     </select>
     <select id="filter-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
-      <option value="vectorize">Vectorize</option>
-      <option value="omniscale">OmniScale</option>
-      <option value="omniscale-legacy">OmniScale Legacy</option>
-      <option value="hqx">HQx</option>
-      <option value="xbr">xBR</option>
-      <option value="xbrz">xBRZ</option>
-      <option value="super-xbr">Super xBR</option>
-      <option value="epx">EPX / Scale2x</option>
-      <option value="eagle">Eagle</option>
-      <option value="scale3x">Scale3x</option>
-      <option value="bicubic">Bicubic</option>
-      <option value="aa-nearest">AA Nearest</option>
-      <option value="edi">EDI</option>
-      <option value="nedi">NEDI</option>
-      <option value="dcci">DCCI</option>
-      <option value="mmpx">MMPX</option>
-      <option value="lcd-grid">LCD Grid</option>
-      <option value="nearest">Nearest</option>
+      <!-- Populated from Rust filter registry via filter_registry_json() -->
     </select>
+    <label style="color:#aaa; font-size:0.85em; cursor:pointer; user-select:none;">
+      <input type="checkbox" id="force-cpu" style="margin-right:4px; vertical-align:middle;">CPU
+    </label>
   </div>
   <div id="controls">
     Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Backspace: Rewind &nbsp; Tab: Fast-fwd &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 1-9: Slot &nbsp; | &nbsp; Gamepad
@@ -198,7 +184,7 @@
 </script>
 
 <script type="module">
-import init, { WasmEmulator, wasm_memory, btn_a, btn_b, btn_up, btn_down, btn_left, btn_right, btn_start, btn_select } from './pkg/vibeboy.js';
+import init, { WasmEmulator, wasm_memory, filter_registry_json, btn_a, btn_b, btn_up, btn_down, btn_left, btn_right, btn_start, btn_select } from './pkg/vibeboy.js';
 
 let printCount = 0;
 function checkForPrint() {
@@ -226,6 +212,7 @@ function checkForPrint() {
 
 let emu = null;
 let useGpu = false;
+let gpuAvailable = false;
 const canvas = document.getElementById('screen');
 const canvas2d = document.getElementById('screen-2d');
 let ctx = null;
@@ -238,6 +225,31 @@ const filterSelect = document.getElementById('filter-select');
 // Load wasm eagerly
 let keyMap = {};
 await init();
+
+// Populate filter dropdown from Rust registry
+{
+  const filters = JSON.parse(filter_registry_json());
+  const select = document.getElementById('filter-select');
+  const groupLabels = { hqx: 'HQx', xbr: 'xBR', xbrz: 'xBRZ', edge_detect: 'Edge Detect' };
+  const groups = {};
+  for (const f of filters) {
+    const opt = document.createElement('option');
+    opt.value = f.cli_name;
+    opt.textContent = f.display_name;
+    if (f.cli_name === 'vectorize-gpu') opt.selected = true;
+    if (f.group === 'main') {
+      select.appendChild(opt);
+    } else {
+      if (!groups[f.group]) {
+        groups[f.group] = document.createElement('optgroup');
+        groups[f.group].label = groupLabels[f.group] || f.group;
+      }
+      groups[f.group].appendChild(opt);
+    }
+  }
+  for (const g of Object.values(groups)) select.appendChild(g);
+}
+
 // Expose startEmulator for the ROM selector script
 window._startEmulator = startEmulator;
 // If a ROM was selected before wasm loaded, start it now
@@ -390,6 +402,7 @@ async function startEmulator(romBytes) {
       canvas.height = h * 4;
       await emu.init_gpu(canvas);
       useGpu = true;
+      gpuAvailable = true;
       status.textContent = 'Rendering: WebGPU vectorize';
       // Also prepare 2D canvas for NN toggle
       canvas2d.width = w;
@@ -432,16 +445,27 @@ filterSelect.addEventListener('change', () => {
   if (!emu) return;
   const name = filterSelect.value;
   emu.set_filter(name);
-  if (name === 'nearest') {
-    status.textContent = 'Rendering: Nearest neighbor';
+  updateRenderMode();
+});
+
+const forceCpuCheckbox = document.getElementById('force-cpu');
+forceCpuCheckbox.addEventListener('change', () => updateRenderMode());
+
+function updateRenderMode() {
+  const forceCpu = forceCpuCheckbox.checked;
+  if (forceCpu) {
+    useGpu = false;
     canvas.style.display = 'none';
     canvas2d.style.display = '';
-  } else {
-    status.textContent = 'Rendering: ' + filterSelect.options[filterSelect.selectedIndex].text;
+    status.textContent = 'Rendering: CPU (Canvas2D)';
+  } else if (gpuAvailable) {
+    useGpu = true;
     canvas.style.display = '';
     canvas2d.style.display = 'none';
+    const sel = filterSelect.options[filterSelect.selectedIndex];
+    status.textContent = 'Rendering: ' + (sel ? sel.text : 'GPU');
   }
-});
+}
 
 const modelSelect = document.getElementById('model-select');
 modelSelect.addEventListener('change', () => {
@@ -546,13 +570,20 @@ function frame(timestamp) {
     if (useGpu && emu.render_gpu()) {
       // GPU rendered successfully
     } else if (ctx) {
-      emu.frame_buffer_update();
+      // CPU scaling: apply filter and render to Canvas2D
+      const cw = canvas2d.parentElement.clientWidth;
+      const ch = canvas2d.parentElement.clientHeight;
+      const dims = emu.cpu_scaled_frame_update(cw, ch);
+      const sw = dims[0];
+      const sh = dims[1];
       const ptr = emu.frame_buffer_ptr();
       const len = emu.frame_buffer_len();
-      const w = emu.width();
-      const h = emu.height();
+      if (canvas2d.width !== sw || canvas2d.height !== sh) {
+        canvas2d.width = sw;
+        canvas2d.height = sh;
+      }
       const rgba = new Uint8ClampedArray(wasm_memory().buffer, ptr, len);
-      const img = new ImageData(rgba, w, h);
+      const img = new ImageData(rgba, sw, sh);
       ctx.putImageData(img, 0, 0);
     }
   }

@@ -1,6 +1,8 @@
 #version 450
 
 // Scale3x — 3x pixel-art scaling (compute shader).
+// Fixed 3x scale: output must be exactly src_w*3 x src_h*3.
+// Comparisons use packed u32 colors for exact integer matching.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -17,6 +19,11 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint out_h;
 };
 
+uint fetch(ivec2 coord) {
+    coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    return pixels[coord.y * int(src_w) + coord.x];
+}
+
 vec4 unpack(uint c) {
     return vec4(
         float((c >> 16u) & 0xFFu) / 255.0,
@@ -26,36 +33,31 @@ vec4 unpack(uint c) {
     );
 }
 
-vec4 fetch(ivec2 coord) {
-    coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    return unpack(pixels[coord.y * int(src_w) + coord.x]);
-}
-
 void main() {
     uint opx = gl_GlobalInvocationID.x;
     uint opy = gl_GlobalInvocationID.y;
     if (opx >= out_w || opy >= out_h) return;
 
-    float inv_scale = float(src_w) / float(out_w);
-    vec2 src_coord = (vec2(opx, opy) + 0.5) * inv_scale;
-    ivec2 src_i = clamp(ivec2(floor(src_coord)), ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
-    vec2 frac_val = src_coord - vec2(src_i);
-    ivec2 sub = clamp(ivec2(floor(frac_val * 3.0)), ivec2(0), ivec2(2));
+    int sx = int(opx) / 3;
+    int sy = int(opy) / 3;
+    int sub_x = int(opx) % 3;
+    int sub_y = int(opy) % 3;
+    int idx = sub_y * 3 + sub_x;
 
-    vec4 a = fetch(src_i + ivec2(-1, -1));
-    vec4 b = fetch(src_i + ivec2( 0, -1));
-    vec4 c = fetch(src_i + ivec2( 1, -1));
-    vec4 d = fetch(src_i + ivec2(-1,  0));
-    vec4 e = fetch(src_i);
-    vec4 f = fetch(src_i + ivec2( 1,  0));
-    vec4 g = fetch(src_i + ivec2(-1,  1));
-    vec4 h = fetch(src_i + ivec2( 0,  1));
-    vec4 i = fetch(src_i + ivec2( 1,  1));
+    ivec2 p = ivec2(sx, sy);
+    uint a = fetch(p + ivec2(-1, -1));
+    uint b = fetch(p + ivec2( 0, -1));
+    uint c = fetch(p + ivec2( 1, -1));
+    uint d = fetch(p + ivec2(-1,  0));
+    uint e = fetch(p);
+    uint f = fetch(p + ivec2( 1,  0));
+    uint g = fetch(p + ivec2(-1,  1));
+    uint h = fetch(p + ivec2( 0,  1));
+    uint i = fetch(p + ivec2( 1,  1));
 
-    vec4 result = e;
+    uint result = e;
 
     if (b != h && d != f) {
-        int idx = sub.y * 3 + sub.x;
         if      (idx == 0) result = (d == b) ? d : e;
         else if (idx == 1) result = ((d == b && e != c) || (b == f && e != a)) ? b : e;
         else if (idx == 2) result = (b == f) ? f : e;
@@ -67,5 +69,5 @@ void main() {
         else               result = (h == f) ? f : e;
     }
 
-    imageStore(output_img, ivec2(opx, opy), result);
+    imageStore(output_img, ivec2(opx, opy), unpack(result));
 }

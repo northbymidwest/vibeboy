@@ -17,7 +17,6 @@ pub mod printer;
 
 pub mod scaling;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod vectorize;
 
 pub mod ui_util;
