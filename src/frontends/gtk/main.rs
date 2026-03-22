@@ -607,33 +607,66 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (fb, base_w, base_h, wgpu_filter)
                                 } else if st.scale_filter == scaling::ScaleFilter::Nearest {
                                     (fb, base_w, base_h, None)
+                                } else if st.scale_filter == scaling::ScaleFilter::VectorizeGpu {
+                                    // Full 6-stage GPU vectorize pipeline
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let s = scale_fit as f32;
+                                        let ow = (base_w as f32 * s).round() as u32;
+                                        let oh = (base_h as f32 * s).round() as u32;
+                                        let mut gc = gpu_compute.borrow_mut();
+                                        if let Some(ref mut compute) = *gc {
+                                            if let Some((gl_tex, gw, gh)) =
+                                                compute.vectorize_gpu(fb, base_w as u32, base_h as u32, ow, oh, s)
+                                            {
+                                                let mut pf = pending_frame.borrow_mut();
+                                                pf.pixels.clear();
+                                                pf.frame_w = gw;
+                                                pf.frame_h = gh;
+                                                pf.src_w = base_w as u32;
+                                                pf.src_h = base_h as u32;
+                                                pf.gpu_filter = None;
+                                                pf.gl_texture = Some(gl_tex);
+                                                pf.fit_w = fit_w as u32;
+                                                pf.fit_h = fit_h as u32;
+                                                pf.factor = 0;
+                                                drop(gc);
+                                                drop(pf);
+                                                gl_area.queue_render();
+                                                return glib::ControlFlow::Continue;
+                                            }
+                                        }
+                                    }
+                                    // CPU fallback
+                                    if let Some((scaled, w, h)) = scaling::cpu_scale(
+                                        st.scale_filter, fb, base_w, base_h, fit_w, fit_h,
+                                    ) {
+                                        st.scaled_buf = scaled;
+                                        (&st.scaled_buf, w as usize, h as usize, None)
+                                    } else {
+                                        (fb, base_w, base_h, None)
+                                    }
                                 } else if matches!(
                                     st.scale_filter,
                                     scaling::ScaleFilter::VectorizeLegacy
                                         | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                                ) {
-                                    let adaptive = matches!(
-                                        st.scale_filter,
-                                        scaling::ScaleFilter::VectorizeLegacyAdaptive
-                                    );
-                                    let cache = st.vec_cache.get_or_insert_with(|| {
-                                        vectorize::VectorizeCache::new_legacy(adaptive)
-                                    });
-                                    let (raster, vw, vh) =
-                                        cache.rasterize(fb, base_w, base_h, scale_fit);
-                                    (raster, vw, vh, None)
-                                } else if matches!(
-                                    st.scale_filter,
-                                    scaling::ScaleFilter::Vectorize
+                                        | scaling::ScaleFilter::Vectorize
                                         | scaling::ScaleFilter::VectorizeAdaptive
                                 ) {
-                                    // Shared-chain: GPU rasterizer on Linux, CPU legacy fallback on macOS
+                                    // All vectorize variants: GPU rasterizer on Linux, CPU fallback on macOS
                                     let adaptive = matches!(
                                         st.scale_filter,
                                         scaling::ScaleFilter::VectorizeAdaptive
+                                            | scaling::ScaleFilter::VectorizeLegacyAdaptive
+                                    );
+                                    let is_legacy = matches!(
+                                        st.scale_filter,
+                                        scaling::ScaleFilter::VectorizeLegacy
+                                            | scaling::ScaleFilter::VectorizeLegacyAdaptive
                                     );
                                     let cache = st.vec_cache.get_or_insert_with(|| {
-                                        vectorize::VectorizeCache::new(adaptive)
+                                        if is_legacy { vectorize::VectorizeCache::new_legacy(adaptive) }
+                                        else { vectorize::VectorizeCache::new(adaptive) }
                                     });
                                     #[cfg(target_os = "linux")]
                                     {

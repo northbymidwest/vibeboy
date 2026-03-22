@@ -5,7 +5,7 @@
 //! same context, which the blit shader can bind directly.
 
 use crate::scaling::wgpu_scale::{WgpuScaleFilter, WgpuScalePipeline};
-use crate::scaling::wgpu_vectorize::WgpuSharedChainRasterizer;
+use crate::scaling::wgpu_vectorize::{WgpuSharedChainRasterizer, WgpuVectorizePipeline};
 use crate::scaling::ScaleFilter;
 use glow::HasContext;
 
@@ -15,6 +15,7 @@ pub struct GpuCompute {
     queue: wgpu::Queue,
     pipeline: WgpuScalePipeline,
     shared_chain: WgpuSharedChainRasterizer,
+    vectorize_gpu: WgpuVectorizePipeline,
     /// Last output dimensions (for cache invalidation).
     last_out_w: u32,
     last_out_h: u32,
@@ -57,6 +58,7 @@ impl GpuCompute {
 
         let pipeline = WgpuScalePipeline::new(&device);
         let shared_chain = WgpuSharedChainRasterizer::new(&device);
+        let vectorize_gpu = WgpuVectorizePipeline::new(&device);
 
         eprintln!("GPU compute initialized (GL shared context)");
 
@@ -66,6 +68,7 @@ impl GpuCompute {
             queue,
             pipeline,
             shared_chain,
+            vectorize_gpu,
             last_out_w: 0,
             last_out_h: 0,
         })
@@ -145,6 +148,40 @@ impl GpuCompute {
         );
 
         // Extract the GL texture ID from the wgpu texture
+        let gl_texture = unsafe {
+            let hal_tex = output_tex.as_hal::<wgpu::hal::api::Gles>()?;
+            match &hal_tex.inner {
+                wgpu::hal::gles::TextureInner::Texture { raw, .. } => Some(*raw),
+                _ => None,
+            }
+        }?;
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        Some((gl_texture, out_w, out_h))
+    }
+
+    /// Run the full 6-stage GPU vectorize pipeline.
+    /// Returns the GL texture ID and output dimensions.
+    pub fn vectorize_gpu(
+        &mut self,
+        pixels: &[u32],
+        src_w: u32,
+        src_h: u32,
+        out_w: u32,
+        out_h: u32,
+        scale: f32,
+    ) -> Option<(glow::Texture, u32, u32)> {
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None },
+        );
+
+        let output_tex = self.vectorize_gpu.encode(
+            &self.device, &self.queue, &mut encoder,
+            pixels, src_w, src_h, out_w, out_h, scale,
+        );
+
         let gl_texture = unsafe {
             let hal_tex = output_tex.as_hal::<wgpu::hal::api::Gles>()?;
             match &hal_tex.inner {
