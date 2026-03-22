@@ -431,6 +431,7 @@ impl WasmEmulator {
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];
+        self.vec_cache = None;
         true
     }
 

@@ -499,6 +499,14 @@ const modelSelect = document.getElementById('model-select');
 modelSelect.addEventListener('change', () => {
   if (!emu) return;
   emu.set_model(modelSelect.value);
+  // Reset timing to avoid catchup burst after model switch
+  lastTimestamp = 0;
+  emuTime = 0;
+  // Force GPU surface resize on next frame (dimensions may have changed for SGB)
+  if (useGpu) {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
   status.textContent = 'Model: ' + modelSelect.options[modelSelect.selectedIndex].text;
 });
 
@@ -572,19 +580,20 @@ function frame(timestamp) {
     }
   }
 
-  // Resize GPU surface to match wrapper size, preserving 10:9 aspect ratio
+  // Resize GPU surface to match wrapper size, preserving native aspect ratio
   if (useGpu) {
     const wrapper = document.getElementById('canvas-wrapper');
     const cw = wrapper.clientWidth;
     const ch = wrapper.clientHeight;
-    // Fit 10:9 aspect ratio within wrapper
+    const srcW = emu.width();
+    const srcH = emu.height();
     let tw, th;
-    if (cw * 9 <= ch * 10) {
+    if (cw * srcH <= ch * srcW) {
       tw = cw;
-      th = Math.round(cw * 9 / 10);
+      th = Math.round(cw * srcH / srcW);
     } else {
       th = ch;
-      tw = Math.round(ch * 10 / 9);
+      tw = Math.round(ch * srcW / srcH);
     }
     if (tw > 0 && th > 0 && (canvas.width !== tw || canvas.height !== th)) {
       canvas.width = tw;
