@@ -279,6 +279,9 @@ pub struct Ppu {
     /// CGB double-speed mode active.
     pub double_speed: bool,
 
+    /// MGB (Game Boy Pocket) mode: uses grayscale palette instead of DMG green.
+    pub mgb_mode: bool,
+
     /// SGB mode: capture 2-bit shade indices for SGB palette remapping.
     pub sgb_mode: bool,
     /// Shade buffer: 160×144 of 2-bit shade indices (written during rendering).
@@ -462,6 +465,7 @@ impl Ppu {
             cgb_palette_unblock_dot: 0,
             cgb_mode: true,
             double_speed: false,
+            mgb_mode: false,
             sgb_mode: false,
             shade_buffer: vec![0u8; 160 * 144],
             dmg_compat: false,

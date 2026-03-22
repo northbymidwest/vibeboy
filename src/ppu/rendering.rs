@@ -620,7 +620,7 @@ impl Ppu {
             } else {
                 // Use rendering palette (respects T3 write timing)
                 let pal = if oam_px.sprite_dmg_palette == 1 { self.obp1_rendering } else { self.obp0_rendering };
-                Self::dmg_color(pal, oam_px.color_index)
+                self.dmg_color(pal, oam_px.color_index)
             }
         } else {
             // BG/window pixel
@@ -636,9 +636,9 @@ impl Ppu {
                 }
             } else if self.lcdc & 0x01 == 0 {
                 // DMG: LCDC bit 0 off → BG/window draws as color 0
-                Self::dmg_color(self.bgp_rendering, 0)
+                self.dmg_color(self.bgp_rendering, 0)
             } else {
-                Self::dmg_color(self.bgp_rendering, bg.color_index)
+                self.dmg_color(self.bgp_rendering, bg.color_index)
             }
         };
 
@@ -702,8 +702,15 @@ impl Ppu {
     /// Classic green Game Boy LCD colors.
     pub(super) const DMG_SHADES: [u32; 4] = [0x009BBC0F, 0x008BAC0F, 0x00306230, 0x000F380F];
 
-    pub(super) fn dmg_color(palette_reg: u8, color_idx: u8) -> u32 {
+    /// MGB (Game Boy Pocket) grayscale palette.
+    pub(super) const MGB_SHADES: [u32; 4] = [0x00C4CFA1, 0x008B956D, 0x004D533C, 0x001F1F1F];
+
+    pub(super) fn dmg_color(&self, palette_reg: u8, color_idx: u8) -> u32 {
         let shade = (palette_reg >> (color_idx * 2)) & 0x03;
-        Self::DMG_SHADES[shade as usize]
+        if self.mgb_mode {
+            Self::MGB_SHADES[shade as usize]
+        } else {
+            Self::DMG_SHADES[shade as usize]
+        }
     }
 }

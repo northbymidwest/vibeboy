@@ -140,9 +140,22 @@ struct AppState {
     src_w: usize,
     src_h: usize,
     is_sgb: bool,
+    no_boot: bool,
 }
 
 impl AppState {
+    /// Update SGB state and source dimensions after creating a new emulator.
+    fn update_src_dims(&mut self) {
+        self.is_sgb = self.emu.is_sgb();
+        if self.is_sgb {
+            self.src_w = 256;
+            self.src_h = 224;
+        } else {
+            self.src_w = 160;
+            self.src_h = 144;
+        }
+    }
+
     /// Load a new ROM, resetting emulator state. Updates window title and recent ROMs.
     unsafe fn load_rom(
         &mut self,
@@ -161,7 +174,9 @@ impl AppState {
         self.rom = rom_data;
         self.rom_path = path;
         self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
-        self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+        let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+        self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+        self.update_src_dims();
         ui_util::load_sav(&mut self.emu, &self.rom_path);
         self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
         self.paused = false;
@@ -200,7 +215,9 @@ impl AppState {
         }
 
         if actions.reset {
-            self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+            self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+            self.update_src_dims();
             ui_util::load_sav(&mut self.emu, &self.rom_path);
             self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
             self.paused = false;
@@ -225,13 +242,17 @@ impl AppState {
             if let Some(new_model) = model_tag_to_model(tag) {
                 self.forced_model = new_model;
                 self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
-                self.emu = Emulator::new(self.rom.clone(), None, self.model, None);
+                // Use auto-detected boot ROM for the new model (ignore explicit --bootrom)
+                let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+                let model_name = self.forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
+                eprintln!("Hardware model: {} (boot ROM: {})", model_name,
+                    if boot_rom.is_some() { "loaded" } else { "none" });
+                self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+                self.update_src_dims();
                 ui_util::load_sav(&mut self.emu, &self.rom_path);
                 self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
                 update_model_checkmarks(app, tag);
                 self.paused = false;
-                let model_name = self.forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
-                eprintln!("Hardware model: {}", model_name);
             }
         }
 
@@ -868,6 +889,7 @@ fn main() {
             src_w,
             src_h,
             is_sgb,
+            no_boot: cli.no_boot,
         };
 
         let mut frame_start = Instant::now();

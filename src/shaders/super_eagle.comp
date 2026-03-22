@@ -43,6 +43,10 @@ uint interp3_1(uint a, uint b) {
     return interp(a, interp(a, b));
 }
 
+uint qinterp(uint a, uint b, uint c, uint d) {
+    return interp(interp(a, b), interp(c, d));
+}
+
 // GetResult vote: bias toward a or b based on neighbors c, d.
 int get_result(uint a, uint b, uint c, uint d) {
     int x = 0;
@@ -65,8 +69,8 @@ void main() {
     ivec2 sub = out_pos - src_i * 2;
 
     // Map to Kreed naming from 4x4 neighborhood
-    uint color_b1 = fetch(src_i + ivec2( 0, -1));
-    uint color_b2 = fetch(src_i + ivec2( 1, -1));
+    uint color_b1 = fetch(src_i + ivec2(-1, -1));
+    uint color_b2 = fetch(src_i + ivec2( 0, -1));
     uint color4   = fetch(src_i + ivec2(-1,  0));
     uint color5   = fetch(src_i + ivec2( 0,  0));  // center
     uint color6   = fetch(src_i + ivec2( 1,  0));  // right
@@ -84,26 +88,28 @@ void main() {
         // Anti-diagonal wins
         e1 = color2;
         e2 = color2;
-        if ((color1 == color2 && color6 == color_s2)
-            || (color2 == color_a1 && color6 == color_b2))
-        {
+        if (color1 == color2 || color6 == color_s2) {
             e0 = interp3_1(color2, color5);
-            e3 = interp3_1(color2, color3);
         } else {
             e0 = interp(color5, color6);
+        }
+        if (color2 == color_a1 || color6 == color_b2) {
+            e3 = interp3_1(color2, color3);
+        } else {
             e3 = interp(color2, color3);
         }
     } else if (color5 == color3 && color2 != color6) {
         // Main diagonal wins
         e3 = color5;
         e0 = color5;
-        if ((color_b1 == color5 && color3 == color_a2)
-            || (color4 == color5 && color3 == color_s1))
-        {
+        if (color_b1 == color5 || color3 == color_a2) {
             e1 = interp3_1(color5, color6);
-            e2 = interp3_1(color5, color2);
         } else {
             e1 = interp(color5, color6);
+        }
+        if (color4 == color5 || color3 == color_s1) {
+            e2 = interp3_1(color5, color2);
+        } else {
             e2 = interp(color2, color3);
         }
     } else if (color5 == color3 && color2 == color6 && color5 != color6) {
@@ -130,17 +136,11 @@ void main() {
             e2 = color2;
         }
     } else {
-        if (color2 == color5 || color3 == color6) {
-            e0 = color5;
-            e1 = color6;
-            e2 = color2;
-            e3 = color3;
-        } else {
-            e0 = interp3_1(color5, color6);
-            e1 = interp3_1(color6, color5);
-            e2 = interp3_1(color2, color3);
-            e3 = interp3_1(color3, color2);
-        }
+        // Center output on the input pixel to avoid half-pixel shift
+        e0 = color5;
+        e1 = interp(color5, color6);
+        e2 = interp(color5, color2);
+        e3 = qinterp(color5, color6, color2, color3);
     }
 
     // Select output pixel based on sub-pixel position

@@ -194,6 +194,7 @@ impl Bus {
 
         let mut ppu = Ppu::new();
         ppu.cgb_mode = model.is_cgb();
+        ppu.mgb_mode = model == GbModel::Mgb;
         ppu.sgb_mode = model.is_sgb();
         if model.is_sgb() {
             ppu.cgb_mode = false;

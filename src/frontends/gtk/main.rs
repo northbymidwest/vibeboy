@@ -96,7 +96,9 @@ fn main() {
 }
 
 fn load_boot_rom(model: GbModel, cli: &Cli) -> Option<Vec<u8>> {
-    ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot)
+    // Always auto-detect boot ROM by model; explicit --bootrom path may be
+    // for a different model than the one being loaded.
+    ui_util::load_boot_rom(model, None, cli.no_boot)
 }
 
 fn create_emu_state(

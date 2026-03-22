@@ -129,7 +129,8 @@ impl App {
         }
 
         self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
-        let boot_rom = ui_util::load_boot_rom(self.model, self.cli.bootrom.as_deref(), self.cli.no_boot);
+        // Auto-detect boot ROM by model (don't use explicit --bootrom which may be for a different model)
+        let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
         let mut emu = Emulator::new(rom, boot_rom, self.model, None);
         ui_util::load_sav(&mut emu, path);

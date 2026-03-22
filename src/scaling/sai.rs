@@ -267,8 +267,8 @@ fn get_result(a: u32, b: u32, c: u32, d: u32) -> i32 {
 ///
 /// Snes9x naming mapped to our 4x4 grid:
 /// ```text
-///              colorB1(p1) colorB2(p2)
-///  color4(p4)  color5(p5)  color6(p6) colorS2(p7)
+///  colorB1(p0) colorB2(p1)
+///  color4(p4)  color5(p5)  color6(p6)  colorS2(p7)
 ///  color1(p8)  color2(p9)  color3(p10) colorS1(p11)
 ///              colorA1(p13) colorA2(p14)
 /// ```
@@ -282,8 +282,8 @@ pub fn scale_super_eagle(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let p = sample4x4(src, src_w, src_h, x as isize, y as isize);
 
             // Map to Kreed naming
-            let color_b1 = p[1];
-            let color_b2 = p[2];
+            let color_b1 = p[0];
+            let color_b2 = p[1];
             let color4  = p[4];
             let color5  = p[5];  // center (top-left of 2x2 block)
             let color6  = p[6];  // right
@@ -301,26 +301,28 @@ pub fn scale_super_eagle(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                 // Anti-diagonal wins
                 e1 = color2;
                 e2 = color2;
-                if (color1 == color2 && color6 == color_s2)
-                    || (color2 == color_a1 && color6 == color_b2)
-                {
+                if color1 == color2 || color6 == color_s2 {
                     e0 = interp3_1(color2, color5);
-                    e3 = interp3_1(color2, color3);
                 } else {
                     e0 = interp(color5, color6);
+                }
+                if color2 == color_a1 || color6 == color_b2 {
+                    e3 = interp3_1(color2, color3);
+                } else {
                     e3 = interp(color2, color3);
                 }
             } else if color5 == color3 && color2 != color6 {
                 // Main diagonal wins
                 e3 = color5;
                 e0 = color5;
-                if (color_b1 == color5 && color3 == color_a2)
-                    || (color4 == color5 && color3 == color_s1)
-                {
+                if color_b1 == color5 || color3 == color_a2 {
                     e1 = interp3_1(color5, color6);
-                    e2 = interp3_1(color5, color2);
                 } else {
                     e1 = interp(color5, color6);
+                }
+                if color4 == color5 || color3 == color_s1 {
+                    e2 = interp3_1(color5, color2);
+                } else {
                     e2 = interp(color2, color3);
                 }
             } else if color5 == color3 && color2 == color6 && color5 != color6 {
@@ -347,19 +349,11 @@ pub fn scale_super_eagle(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                     e2 = color2;
                 }
             } else {
-                if color2 == color5 || color3 == color6 {
-                    // Horizontal/vertical edge — nearest neighbor
-                    e0 = color5;
-                    e1 = color6;
-                    e2 = color2;
-                    e3 = color3;
-                } else {
-                    // No clear feature — 75/25 blend toward each corner
-                    e0 = interp3_1(color5, color6);
-                    e1 = interp3_1(color6, color5);
-                    e2 = interp3_1(color2, color3);
-                    e3 = interp3_1(color3, color2);
-                }
+                // Center output on the input pixel to avoid half-pixel shift
+                e0 = color5;
+                e1 = interp(color5, color6);
+                e2 = interp(color5, color2);
+                e3 = qinterp(color5, color6, color2, color3);
             }
 
             let dx = x * 2;
