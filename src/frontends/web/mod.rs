@@ -5,7 +5,9 @@ use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
 use crate::scaling;
-use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
+use crate::scaling::wgpu_vectorize::{
+    WgpuVectorizePipeline, WgpuDiffusionRasterizer, WgpuSplineDiffusionPipeline,
+};
 use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 use crate::vectorize;
 
@@ -67,6 +69,8 @@ struct GpuState {
     sampler: wgpu::Sampler,
     vectorize: WgpuVectorizePipeline,
     shared_chain: scaling::wgpu_vectorize::WgpuSharedChainRasterizer,
+    diffusion: WgpuDiffusionRasterizer,
+    spline_diff: WgpuSplineDiffusionPipeline,
     scale: WgpuScalePipeline,
 }
 
@@ -231,6 +235,8 @@ impl WasmEmulator {
 
         let vectorize = WgpuVectorizePipeline::new(&device);
         let shared_chain = scaling::wgpu_vectorize::WgpuSharedChainRasterizer::new(&device);
+        let diffusion = WgpuDiffusionRasterizer::new(&device);
+        let spline_diff = WgpuSplineDiffusionPipeline::new(&device);
         let scale = WgpuScalePipeline::new(&device);
 
         self.gpu = Some(GpuState {
@@ -243,6 +249,8 @@ impl WasmEmulator {
             sampler,
             vectorize,
             shared_chain,
+            diffusion,
+            spline_diff,
             scale,
         });
 
@@ -482,6 +490,39 @@ impl WasmEmulator {
                 owned_tex = gpu.shared_chain.encode(
                     &gpu.device, &gpu.queue, &mut encoder,
                     &edges, &row_ranges, &edge_indices, ow, oh, bg,
+                );
+                &owned_tex
+            }
+            // Diffusion rasterizer (single-pass Gaussian blending)
+            ScaleFilter::VectorizeDiffusion => {
+                let sc = scale.round().max(1.0) as u32;
+                let ow = src_w * sc;
+                let oh = src_h * sc;
+                owned_tex = gpu.diffusion.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    &fb, src_w, src_h, ow, oh, sc,
+                );
+                &owned_tex
+            }
+            // Spline-diffusion (2-pass: vectorize_to_buf + spline_diffusion)
+            ScaleFilter::VectorizeSplineDiffusion | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
+                let sc = scale.round().max(1.0) as u32;
+                let adaptive = matches!(self.filter, ScaleFilter::VectorizeSplineDiffusionAdaptive);
+                let cache = self.vec_cache.get_or_insert_with(|| {
+                    vectorize::VectorizeCache::new(adaptive)
+                });
+                let (paths, bg) = cache.get_paths(&fb, src_w as usize, src_h as usize);
+                let (edges, row_ranges, edge_indices, ow, oh) =
+                    vectorize::rasterize::prepare_gpu_edges_v2(
+                        paths, bg, scale as f64, src_w as usize, src_h as usize,
+                    );
+                if ow == 0 || oh == 0 || edges.is_empty() {
+                    return false;
+                }
+                owned_tex = gpu.spline_diff.encode(
+                    &gpu.device, &gpu.queue, &mut encoder,
+                    &edges, &row_ranges, &edge_indices, &fb,
+                    src_w, src_h, ow, oh, bg, sc,
                 );
                 &owned_tex
             }

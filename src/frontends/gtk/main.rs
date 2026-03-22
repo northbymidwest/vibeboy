@@ -709,6 +709,97 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     let (raster, vw, vh) =
                                         cache.rasterize(fb, base_w, base_h, scale_fit);
                                     (raster, vw, vh, None)
+                                } else if st.scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
+                                    let sc = scale_fit.round().max(1.0) as u32;
+                                    let ow = base_w as u32 * sc;
+                                    let oh = base_h as u32 * sc;
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let mut gc = gpu_compute.borrow_mut();
+                                        if let Some(ref mut compute) = *gc {
+                                            if let Some((gl_tex, gw, gh)) =
+                                                compute.diffusion_rasterize(
+                                                    fb, base_w as u32, base_h as u32, ow, oh, sc,
+                                                )
+                                            {
+                                                let mut pf = pending_frame.borrow_mut();
+                                                pf.pixels.clear();
+                                                pf.frame_w = gw;
+                                                pf.frame_h = gh;
+                                                pf.src_w = base_w as u32;
+                                                pf.src_h = base_h as u32;
+                                                pf.gpu_filter = None;
+                                                pf.gl_texture = Some(gl_tex);
+                                                pf.fit_w = fit_w as u32;
+                                                pf.fit_h = fit_h as u32;
+                                                drop(gc);
+                                                drop(pf);
+                                                gl_area.queue_render();
+                                                return glib::ControlFlow::Continue;
+                                            }
+                                        }
+                                    }
+                                    // CPU fallback
+                                    let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(
+                                        fb, base_w, base_h, sc as usize,
+                                    );
+                                    st.scaled_buf = buf;
+                                    (&st.scaled_buf, dw, dh, None)
+                                } else if matches!(
+                                    st.scale_filter,
+                                    scaling::ScaleFilter::VectorizeSplineDiffusion
+                                        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
+                                ) {
+                                    let sc = scale_fit.round().max(1.0) as u32;
+                                    let adaptive = st.scale_filter == scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive;
+                                    let cache = st.vec_cache.get_or_insert_with(|| {
+                                        vectorize::VectorizeCache::new(adaptive)
+                                    });
+                                    let (paths, bg) = cache.get_paths(fb, base_w, base_h);
+                                    let (edges, row_ranges, edge_indices, ow, oh) =
+                                        vectorize::rasterize::prepare_gpu_edges_v2(
+                                            paths, bg, scale_fit, base_w, base_h,
+                                        );
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        if ow > 0 && oh > 0 && !edges.is_empty() {
+                                            let mut gc = gpu_compute.borrow_mut();
+                                            if let Some(ref mut compute) = *gc {
+                                                if let Some((gl_tex, gw, gh)) =
+                                                    compute.spline_diffusion(
+                                                        &edges, &row_ranges, &edge_indices,
+                                                        fb, base_w as u32, base_h as u32,
+                                                        ow, oh, bg, sc,
+                                                    )
+                                                {
+                                                    let mut pf = pending_frame.borrow_mut();
+                                                    pf.pixels.clear();
+                                                    pf.frame_w = gw;
+                                                    pf.frame_h = gh;
+                                                    pf.src_w = base_w as u32;
+                                                    pf.src_h = base_h as u32;
+                                                    pf.gpu_filter = None;
+                                                    pf.gl_texture = Some(gl_tex);
+                                                    pf.fit_w = fit_w as u32;
+                                                    pf.fit_h = fit_h as u32;
+                                                    drop(gc);
+                                                    drop(pf);
+                                                    gl_area.queue_render();
+                                                    return glib::ControlFlow::Continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // CPU fallback
+                                    let cache = st.vec_cache.get_or_insert_with(|| {
+                                        vectorize::VectorizeCache::new(adaptive)
+                                    });
+                                    let (paths, bg) = cache.get_paths(fb, base_w, base_h);
+                                    let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
+                                        paths, fb, base_w, base_h, bg, sc as usize,
+                                    );
+                                    st.scaled_buf = buf;
+                                    (&st.scaled_buf, dw, dh, None)
                                 } else if let Some((scaled, w, h)) = scaling::cpu_scale(
                                     st.scale_filter,
                                     fb,

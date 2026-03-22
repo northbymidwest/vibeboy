@@ -617,3 +617,327 @@ impl WgpuSharedChainRasterizer {
         output_tex
     }
 }
+
+// ── Diffusion rasterizer pipeline ─────────────────────────────────────────
+
+/// Gaussian diffusion rasterizer (single-pass `diffusion_raster.comp`).
+///
+/// Builds the similarity graph and region labels on CPU, then dispatches the
+/// GPU shader for Gaussian-blended pixel output.
+pub struct WgpuDiffusionRasterizer {
+    pipeline: wgpu::ComputePipeline,
+}
+
+/// Gaussian blur kernel width for diffusion rasterizers.
+const GAUSS_K: f32 = 2.5;
+/// Gaussian blur radius for diffusion rasterizers.
+const GAUSS_RADIUS: f32 = 2.0;
+
+/// Compute the diagonal ownership state for a given corner (cx, cy) in the
+/// similarity graph. Returns 0 = no diagonal, 1 = down-right, 2 = down-left.
+fn corner_diag(g: &crate::vectorize::graph::SimilarityGraph, cx: usize, cy: usize) -> u8 {
+    if cx == 0 || cy == 0 || cx >= g.width || cy >= g.height { return 0; }
+    if g.edge(cx - 1, cy - 1).down_right { return 1; }
+    if g.edge(cx, cy - 1).down_left { return 2; }
+    0
+}
+
+impl WgpuDiffusionRasterizer {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let wgsl = include_str!(concat!(env!("OUT_DIR"), "/diffusion_raster_comp.wgsl"));
+        let pipeline = create_compute_pipeline(device, wgsl, "diffusion_raster");
+        Self { pipeline }
+    }
+
+    /// Encode the diffusion rasterize pass. Returns the output texture.
+    pub fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        out_w: u32, out_h: u32,
+        scale: u32,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        use crate::vectorize::{graph, rasterize::build_graph_regions};
+
+        // Build similarity graph and regions on CPU
+        let g = graph::build(pixels, src_w as usize, src_h as usize);
+        let regions = build_graph_regions(src_w as usize, src_h as usize, &g);
+
+        // Compute packed diagonal states per pixel
+        let mut diags = vec![0u32; (src_w * src_h) as usize];
+        for py in 0..src_h as usize {
+            for px in 0..src_w as usize {
+                let tl = corner_diag(&g, px, py) as u32;
+                let tr = corner_diag(&g, px + 1, py) as u32;
+                let br = corner_diag(&g, px + 1, py + 1) as u32;
+                let bl = corner_diag(&g, px, py + 1) as u32;
+                diags[py * src_w as usize + px] = tl | (tr << 2) | (br << 4) | (bl << 6);
+            }
+        }
+
+        // Upload buffers
+        let px_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("diff_pixels"),
+            contents: bytemuck::cast_slice(pixels),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let reg_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("diff_regions"),
+            contents: bytemuck::cast_slice(&regions),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let diag_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("diff_diags"),
+            contents: bytemuck::cast_slice(&diags),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("diff_output"),
+            size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let output_view = output_tex.create_view(&Default::default());
+
+        let inv_scale = 1.0f32 / scale as f32;
+        let uniforms: [u32; 8] = [
+            out_w, out_h, src_w, src_h,
+            f32::to_bits(inv_scale), f32::to_bits(GAUSS_K), f32::to_bits(GAUSS_RADIUS), 0,
+        ];
+        let uni_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("diff_uniforms"),
+            contents: bytemuck::cast_slice(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        // Bind groups (auto-derived layout from pipeline)
+        let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diff_bg0"),
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: px_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: reg_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: diag_buf.as_entire_binding() },
+            ],
+        });
+        let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diff_bg1"),
+            layout: &self.pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_view) },
+            ],
+        });
+        let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diff_bg2"),
+            layout: &self.pipeline.get_bind_group_layout(2),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uni_buf.as_entire_binding() },
+            ],
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("diffusion_raster"),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bg0, &[]);
+            pass.set_bind_group(1, &bg1, &[]);
+            pass.set_bind_group(2, &bg2, &[]);
+            pass.dispatch_workgroups((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        }
+
+        output_tex
+    }
+}
+
+// ── Spline-diffusion 2-pass pipeline ──────────────────────────────────────
+
+/// Two-pass spline-diffusion pipeline:
+/// 1. `vectorize_to_buf.comp` — rasterize B-spline edges into region buffer
+/// 2. `spline_diffusion.comp` — Gaussian blend using region buffer + source pixels
+pub struct WgpuSplineDiffusionPipeline {
+    pass1: wgpu::ComputePipeline,
+    pass2: wgpu::ComputePipeline,
+}
+
+impl WgpuSplineDiffusionPipeline {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let wgsl1 = include_str!(concat!(env!("OUT_DIR"), "/vectorize_to_buf_comp.wgsl"));
+        let wgsl2 = include_str!(concat!(env!("OUT_DIR"), "/spline_diffusion_comp.wgsl"));
+        Self {
+            pass1: create_compute_pipeline(device, wgsl1, "vectorize_to_buf"),
+            pass2: create_compute_pipeline(device, wgsl2, "spline_diffusion"),
+        }
+    }
+
+    /// Encode both passes. Returns the output texture.
+    pub fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        edges: &[crate::vectorize::rasterize::GpuEdgeV2],
+        row_ranges: &[crate::vectorize::rasterize::GpuRowRange],
+        edge_indices: &[u32],
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        out_w: u32, out_h: u32,
+        bg_color: u32,
+        scale: u32,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+
+        // Upload edge data buffers
+        let edge_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_edges"),
+            contents: bytemuck::cast_slice(edges),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let row_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_rows"),
+            contents: bytemuck::cast_slice(row_ranges),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let idx_data = if edge_indices.is_empty() { &[0u32][..] } else { edge_indices };
+        let idx_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_indices"),
+            contents: bytemuck::cast_slice(idx_data),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Intermediate region buffer (read-write storage, NOT a texture)
+        let region_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sd_region_buf"),
+            size: ((out_w * out_h * 4) as u64).max(4),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        // Pass 1 uniforms
+        let uni1 = [out_w, out_h, edges.len() as u32, bg_color];
+        let uni1_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_uni1"),
+            contents: bytemuck::cast_slice(&uni1),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        // Pass 1 bind groups (auto-derived layout)
+        let bg1_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p1_bg0"),
+            layout: &self.pass1.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: edge_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: row_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: idx_buf.as_entire_binding() },
+            ],
+        });
+        let bg1_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p1_bg1"),
+            layout: &self.pass1.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: region_buf.as_entire_binding() },
+            ],
+        });
+        let bg1_2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p1_bg2"),
+            layout: &self.pass1.get_bind_group_layout(2),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uni1_buf.as_entire_binding() },
+            ],
+        });
+
+        // Pass 1: vectorize_to_buf
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vectorize_to_buf"),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pass1);
+            pass.set_bind_group(0, &bg1_0, &[]);
+            pass.set_bind_group(1, &bg1_1, &[]);
+            pass.set_bind_group(2, &bg1_2, &[]);
+            pass.dispatch_workgroups((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        }
+
+        // Output texture for pass 2
+        let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sd_output"),
+            size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let output_view = output_tex.create_view(&Default::default());
+
+        // Upload pixel data for pass 2
+        let px_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_pixels"),
+            contents: bytemuck::cast_slice(pixels),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        // Pass 2 uniforms
+        let inv_scale = 1.0f32 / scale as f32;
+        let uni2: [u32; 8] = [
+            out_w, out_h, src_w, src_h,
+            f32::to_bits(inv_scale), f32::to_bits(GAUSS_K), f32::to_bits(GAUSS_RADIUS), scale,
+        ];
+        let uni2_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sd_uni2"),
+            contents: bytemuck::cast_slice(&uni2),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        // Pass 2 bind groups
+        let bg2_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p2_bg0"),
+            layout: &self.pass2.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: px_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: region_buf.as_entire_binding() },
+            ],
+        });
+        let bg2_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p2_bg1"),
+            layout: &self.pass2.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_view) },
+            ],
+        });
+        let bg2_2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sd_p2_bg2"),
+            layout: &self.pass2.get_bind_group_layout(2),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uni2_buf.as_entire_binding() },
+            ],
+        });
+
+        // Pass 2: spline_diffusion
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("spline_diffusion"),
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pass2);
+            pass.set_bind_group(0, &bg2_0, &[]);
+            pass.set_bind_group(1, &bg2_1, &[]);
+            pass.set_bind_group(2, &bg2_2, &[]);
+            pass.dispatch_workgroups((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        }
+
+        output_tex
+    }
+}
