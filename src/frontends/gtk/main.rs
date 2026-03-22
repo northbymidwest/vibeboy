@@ -58,6 +58,7 @@ struct EmuState {
     slow_motion: bool,
     step_one_frame: bool,
     current_slot: usize,
+    force_cpu: bool,
     scale_filter: scaling::ScaleFilter,
     kb_buttons: u8,
     gp_buttons: u8,
@@ -150,6 +151,7 @@ fn create_emu_state(
         slow_motion: false,
         step_one_frame: false,
         current_slot: 0,
+        force_cpu: false,
         scale_filter: initial_filter,
         kb_buttons: 0,
         gp_buttons: 0,
@@ -204,7 +206,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Save State submenu with slots
     let save_submenu = gtk4::gio::Menu::new();
-    for slot in 1..=9 {
+    for &slot in &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
         save_submenu.append(
             Some(&format!("Slot {}", slot)),
             Some(&format!("app.save-slot::{}", slot)),
@@ -212,7 +214,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     }
     // Load State submenu with slots
     let load_submenu = gtk4::gio::Menu::new();
-    for slot in 1..=9 {
+    for &slot in &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
         load_submenu.append(
             Some(&format!("Slot {}", slot)),
             Some(&format!("app.load-slot::{}", slot)),
@@ -222,6 +224,16 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     state_section.append_submenu(Some("Save State"), &save_submenu);
     state_section.append_submenu(Some("Load State"), &load_submenu);
     emu_menu.append_section(None, &state_section);
+
+    // Slot selection radio items
+    let slot_section = gtk4::gio::Menu::new();
+    for &slot in &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        slot_section.append(
+            Some(&format!("Slot {}", slot)),
+            Some(&format!("app.select-slot::{}", slot)),
+        );
+    }
+    emu_menu.append_section(None, &slot_section);
 
     // Hardware model submenu
     let model_submenu = gtk4::gio::Menu::new();
@@ -241,6 +253,12 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Filter submenu (grouped like Cocoa/Winit: HQx, xBR, xBRZ, Edge submenus)
     let filter_menu = gtk4::gio::Menu::new();
+
+    // Force CPU toggle at top of filter menu
+    let force_cpu_section = gtk4::gio::Menu::new();
+    force_cpu_section.append(Some("Force CPU"), Some("app.force-cpu"));
+    filter_menu.append_section(None, &force_cpu_section);
+
     let mut sub_menus = std::collections::BTreeMap::new();
 
     for (display_name, filter) in scaling::ScaleFilter::menu_entries() {
@@ -595,10 +613,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                             // Check if we can use GPU compute for this filter
                             #[cfg(target_os = "linux")]
-                            let wgpu_filter = compute::to_wgpu_filter(st.scale_filter);
+                            let wgpu_filter = if st.force_cpu { None } else { compute::to_wgpu_filter(st.scale_filter) };
                             #[cfg(not(target_os = "linux"))]
                             let wgpu_filter: Option<scaling::wgpu_scale::WgpuScaleFilter> = None;
-                            let use_gpu = wgpu_filter.is_some() && gpu_compute.borrow().is_some();
+                            let use_gpu = !st.force_cpu && wgpu_filter.is_some() && gpu_compute.borrow().is_some();
 
                             // Apply scaling filter: GPU deferred to render callback, else CPU
                             let (pixels, pw, ph, gpu_filter_for_render): (&[u32], usize, usize, Option<scaling::wgpu_scale::WgpuScaleFilter>) =
@@ -607,7 +625,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (fb, base_w, base_h, wgpu_filter)
                                 } else if st.scale_filter == scaling::ScaleFilter::Nearest {
                                     (fb, base_w, base_h, None)
-                                } else if st.scale_filter == scaling::ScaleFilter::VectorizeGpu {
+                                } else if !st.force_cpu && st.scale_filter == scaling::ScaleFilter::VectorizeGpu {
                                     // Full 6-stage GPU vectorize pipeline
                                     #[cfg(target_os = "linux")]
                                     {
@@ -669,7 +687,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                         else { vectorize::VectorizeCache::new(adaptive) }
                                     });
                                     #[cfg(target_os = "linux")]
-                                    {
+                                    if !st.force_cpu {
                                         let (paths, bg) = cache.get_paths(fb, base_w, base_h);
                                         let (edges, row_ranges, edge_indices, ow, oh) =
                                             vectorize::rasterize::prepare_gpu_edges_v2(
@@ -714,7 +732,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     let ow = base_w as u32 * sc;
                                     let oh = base_h as u32 * sc;
                                     #[cfg(target_os = "linux")]
-                                    {
+                                    if !st.force_cpu {
                                         let mut gc = gpu_compute.borrow_mut();
                                         if let Some(ref mut compute) = *gc {
                                             if let Some((gl_tex, gw, gh)) =
@@ -761,7 +779,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                             paths, bg, scale_fit, base_w, base_h,
                                         );
                                     #[cfg(target_os = "linux")]
-                                    {
+                                    if !st.force_cpu {
                                         if ow > 0 && oh > 0 && !edges.is_empty() {
                                             let mut gc = gpu_compute.borrow_mut();
                                             if let Some(ref mut compute) = *gc {
@@ -947,15 +965,16 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     st.paused = !st.paused;
                     eprintln!("{}", if st.paused { "Paused" } else { "Resumed" });
                 }
-                gtk4::gdk::Key::_1 => st.current_slot = 0,
-                gtk4::gdk::Key::_2 => st.current_slot = 1,
-                gtk4::gdk::Key::_3 => st.current_slot = 2,
-                gtk4::gdk::Key::_4 => st.current_slot = 3,
-                gtk4::gdk::Key::_5 => st.current_slot = 4,
-                gtk4::gdk::Key::_6 => st.current_slot = 5,
-                gtk4::gdk::Key::_7 => st.current_slot = 6,
-                gtk4::gdk::Key::_8 => st.current_slot = 7,
-                gtk4::gdk::Key::_9 => st.current_slot = 8,
+                gtk4::gdk::Key::_0 => st.current_slot = 0,
+                gtk4::gdk::Key::_1 => st.current_slot = 1,
+                gtk4::gdk::Key::_2 => st.current_slot = 2,
+                gtk4::gdk::Key::_3 => st.current_slot = 3,
+                gtk4::gdk::Key::_4 => st.current_slot = 4,
+                gtk4::gdk::Key::_5 => st.current_slot = 5,
+                gtk4::gdk::Key::_6 => st.current_slot = 6,
+                gtk4::gdk::Key::_7 => st.current_slot = 7,
+                gtk4::gdk::Key::_8 => st.current_slot = 8,
+                gtk4::gdk::Key::_9 => st.current_slot = 9,
                 _ => {}
             }
             glib::Propagation::Stop
@@ -1068,7 +1087,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 if let Ok(slot_num) = s.parse::<usize>() {
                     let mut st = state_save.borrow_mut();
                     if let Some(st) = st.as_mut() {
-                        let slot = slot_num - 1;
+                        let slot = slot_num;
                         ui_util::save_state_to_slot(&mut st.emu, &st.rom_path, slot);
                     }
                 }
@@ -1088,7 +1107,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 if let Ok(slot_num) = s.parse::<usize>() {
                     let mut st = state_load.borrow_mut();
                     if let Some(st) = st.as_mut() {
-                        let slot = slot_num - 1;
+                        let slot = slot_num;
                         ui_util::load_state_from_slot(&mut st.emu, &st.rom_path, slot);
                     }
                 }
@@ -1209,6 +1228,48 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         }
     });
     app.add_action(&action_printer);
+
+    // Force CPU toggle action
+    let state_force_cpu = Rc::clone(&state);
+    let action_force_cpu = gtk4::gio::SimpleAction::new_stateful(
+        "force-cpu",
+        None,
+        &false.to_variant(),
+    );
+    action_force_cpu.connect_activate(move |action, _| {
+        let mut st = state_force_cpu.borrow_mut();
+        if let Some(s) = st.as_mut() {
+            let currently_on = action.state().and_then(|v| v.get::<bool>()).unwrap_or(false);
+            let new_state = !currently_on;
+            action.set_state(&new_state.to_variant());
+            s.force_cpu = new_state;
+            eprintln!("Force CPU: {}", if new_state { "on" } else { "off" });
+        }
+    });
+    app.add_action(&action_force_cpu);
+
+    // Select slot action (stateful string for radio checkmarks)
+    let state_select_slot = Rc::clone(&state);
+    let action_select_slot = gtk4::gio::SimpleAction::new_stateful(
+        "select-slot",
+        Some(&glib::VariantTy::STRING),
+        &"0".to_variant(),
+    );
+    action_select_slot.connect_activate(move |action, param| {
+        if let Some(param) = param {
+            if let Some(name) = param.str() {
+                action.set_state(&name.to_variant());
+                let mut st = state_select_slot.borrow_mut();
+                if let Some(s) = st.as_mut() {
+                    if let Ok(n) = name.parse::<usize>() {
+                        s.current_slot = n;
+                        eprintln!("Slot {} selected", n);
+                    }
+                }
+            }
+        }
+    });
+    app.add_action(&action_select_slot);
 
     window.present();
 

@@ -11,6 +11,7 @@ pub(super) const ID_QUIT: &str = "quit";
 pub(super) const ID_PAUSE: &str = "pause";
 pub(super) const ID_RESET: &str = "reset";
 pub(super) const ID_PRINTER: &str = "toggle_printer";
+pub(super) const ID_FORCE_CPU: &str = "force_cpu";
 
 pub(super) const MODEL_IDS: &[(&str, &str)] = &[
     ("model_auto", "Auto"),
@@ -62,7 +63,7 @@ pub(super) fn filter_id_to_filter(id: &str) -> Option<scaling::ScaleFilter> {
     filter_entries().iter().find(|(mid, _, _)| *mid == id).map(|(_, _, f)| *f)
 }
 
-pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem, Vec<CheckMenuItem>) {
+pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem, Vec<CheckMenuItem>, Vec<CheckMenuItem>, CheckMenuItem) {
     let menu = Menu::new();
 
     // File menu
@@ -116,21 +117,17 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
     emu_menu.append(&PredefinedMenuItem::separator()).unwrap();
     emu_menu.append(&hw_menu).unwrap();
 
-    // State menu with Save/Load submenus
+    // State menu with Save/Load submenus and slot selection
     let state_menu = Submenu::new("State", true);
     let save_sub = Submenu::new("Save State", true);
     let load_sub = Submenu::new("Load State", true);
-    for i in 1..=9 {
+    for i in 0..=9usize {
         save_sub
             .append(&MenuItem::with_id(
                 slot_save_id(i),
                 format!("Slot {}", i),
                 true,
-                if i == 1 {
-                    Some(Accelerator::new(None, Code::F5))
-                } else {
-                    None
-                },
+                if i == 0 { Some(Accelerator::new(None, Code::F5)) } else { None },
             ))
             .unwrap();
         load_sub
@@ -138,20 +135,34 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
                 slot_load_id(i),
                 format!("Slot {}", i),
                 true,
-                if i == 1 {
-                    Some(Accelerator::new(None, Code::F7))
-                } else {
-                    None
-                },
+                if i == 0 { Some(Accelerator::new(None, Code::F7)) } else { None },
             ))
             .unwrap();
     }
     state_menu
         .append_items(&[&save_sub, &load_sub])
         .unwrap();
+    state_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    let mut slot_items = Vec::new();
+    for i in 0..=9usize {
+        let item = CheckMenuItem::with_id(
+            format!("select_slot_{}", i),
+            format!("Slot {}", i),
+            true,
+            i == 0,
+            None::<Accelerator>,
+        );
+        state_menu.append(&item).unwrap();
+        slot_items.push(item);
+    }
 
     // Filter menu -- use CheckMenuItem for checkmark support
     let filter_menu = Submenu::new("Filter", true);
+    let force_cpu_item = CheckMenuItem::with_id(
+        ID_FORCE_CPU, "Force CPU", true, false, None::<Accelerator>,
+    );
+    filter_menu.append(&force_cpu_item).unwrap();
+    filter_menu.append(&PredefinedMenuItem::separator()).unwrap();
     let mut filter_items = Vec::new();
     {
         use scaling::FilterMenuGroup;
@@ -213,5 +224,5 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
     menu.append_items(&[&file_menu, &emu_menu, &state_menu, &filter_menu, &help_menu])
         .unwrap();
 
-    (menu, filter_items, printer_item, model_items)
+    (menu, filter_items, printer_item, model_items, slot_items, force_cpu_item)
 }

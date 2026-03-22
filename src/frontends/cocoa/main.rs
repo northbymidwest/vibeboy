@@ -67,15 +67,16 @@ pub(crate) const K_DELETE: u16 = 51;
 
 fn keycode_to_slot(keycode: u16) -> Option<usize> {
     match keycode {
-        18 => Some(0), // 1
-        19 => Some(1), // 2
-        20 => Some(2), // 3
-        21 => Some(3), // 4
-        23 => Some(4), // 5
-        22 => Some(5), // 6
-        26 => Some(6), // 7
-        28 => Some(7), // 8
-        25 => Some(8), // 9
+        29 => Some(0), // 0
+        18 => Some(1), // 1
+        19 => Some(2), // 2
+        20 => Some(3), // 3
+        21 => Some(4), // 4
+        23 => Some(5), // 5
+        22 => Some(6), // 6
+        26 => Some(7), // 7
+        28 => Some(8), // 8
+        25 => Some(9), // 9
         _ => None,
     }
 }
@@ -128,6 +129,7 @@ struct AppState {
     sav_flusher: ui_util::SavFlusher,
     paused: bool,
     current_slot: usize,
+    force_cpu: bool,
     fps: ui_util::FpsCounter,
     show_fps_overlay: bool,
     overlay_fps: f64,
@@ -215,7 +217,8 @@ impl AppState {
 
         if let Some(slot) = actions.select_slot {
             self.current_slot = slot;
-            eprintln!("Slot {} selected", self.current_slot + 1);
+            eprintln!("Slot {} selected", (self.current_slot + 1) % 10);
+            update_slot_checkmarks(app, slot);
         }
 
         if let Some(tag) = actions.select_model {
@@ -243,6 +246,12 @@ impl AppState {
                 update_filter_checkmarks(app, tag);
                 eprintln!("Filter: {:?}", self.scale_filter);
             }
+        }
+
+        if actions.toggle_force_cpu {
+            self.force_cpu = !self.force_cpu;
+            update_force_cpu_checkmark(app, self.force_cpu);
+            eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
         }
 
         if actions.toggle_printer {
@@ -431,7 +440,11 @@ impl AppState {
         let mut frame_copy = Vec::with_capacity(src_len);
         frame_copy.extend_from_slice(&raw_src[..src_len]);
 
-        let gpu_rendered = self.render_with_filter(&frame_copy, disp_w, disp_h);
+        let gpu_rendered = if self.force_cpu {
+            false
+        } else {
+            self.render_with_filter(&frame_copy, disp_w, disp_h)
+        };
 
         if !gpu_rendered {
             self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
@@ -844,6 +857,7 @@ fn main() {
             sav_flusher,
             paused: false,
             current_slot: 0,
+            force_cpu: false,
             fps: ui_util::FpsCounter::new(),
             show_fps_overlay: false,
             overlay_fps: 0.0,
@@ -896,7 +910,8 @@ fn main() {
                         ui_util::load_state_from_slot(&mut state.emu, &state.rom_path, state.current_slot);
                     } else if let Some(slot) = keycode_to_slot(keycode) {
                         state.current_slot = slot;
-                        eprintln!("Slot {} selected", state.current_slot + 1);
+                        eprintln!("Slot {} selected", (state.current_slot + 1) % 10);
+                        update_slot_checkmarks(&app, slot);
                     }
 
                     if let Some(btn) = state.key_map.get(&keycode).copied() {

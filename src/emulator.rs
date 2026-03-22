@@ -33,8 +33,8 @@ pub struct Emulator {
     frame_count: u64,
     /// Delta-compressed rewind buffer.
     rewind_buffer: RewindBuffer,
-    /// In-memory save state slots (1-9, index 0 = slot 1).
-    save_slots: [Option<Box<Snapshot>>; 9],
+    /// In-memory save state slots (0-9).
+    save_slots: [Option<Box<Snapshot>>; 10],
     /// True while the user is holding the rewind key.
     rewinding: bool,
     /// When true, skip rewind snapshots and audio accumulation (test runner mode).
@@ -261,20 +261,20 @@ impl Emulator {
 
     /// Save current state to the given slot (0-indexed, 0-8 for slots 1-9).
     pub fn save_state(&mut self, slot: usize) {
-        if slot < 9 {
+        if slot < 10 {
             self.save_slots[slot] = Some(Box::new(self.save_snapshot()));
-            log::info!("State saved to slot {}", slot + 1);
+            log::info!("State saved to slot {}", (slot + 1) % 10);
         }
     }
 
     /// Load state from the given slot. Returns true if a state was loaded.
     pub fn load_state(&mut self, slot: usize) -> bool {
-        if slot < 9 {
+        if slot < 10 {
             if let Some(snap) = self.save_slots[slot].take() {
                 self.restore_snapshot(&snap);
                 self.save_slots[slot] = Some(snap);
                 self.rewind_buffer.clear();
-                log::info!("State loaded from slot {}", slot + 1);
+                log::info!("State loaded from slot {}", (slot + 1) % 10);
                 return true;
             }
         }
@@ -284,7 +284,7 @@ impl Emulator {
     /// Serialize the given slot to bytes for disk/network storage.
     /// Returns None if the slot is empty.
     pub fn save_state_to_bytes(&mut self, slot: usize) -> Option<Vec<u8>> {
-        if slot < 9 {
+        if slot < 10 {
             if let Some(ref snap) = self.save_slots[slot] {
                 return Some(crate::savestate::serialize(snap));
             }

@@ -133,10 +133,10 @@ pub fn save_state_to_slot(
 ) {
     emu.save_state(slot);
     if let Some(data) = emu.save_state_to_bytes(slot) {
-        let path = rom_path.with_extension(format!("{}.ss", slot + 1));
+        let path = rom_path.with_extension(format!("{}.ss", slot));
         match std::fs::write(&path, &data) {
-            Ok(_) => eprintln!("State saved to slot {} ({})", slot + 1, path.display()),
-            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", slot + 1, e),
+            Ok(_) => eprintln!("State saved to slot {} ({})", slot, path.display()),
+            Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", slot, e),
         }
     }
 }
@@ -149,9 +149,9 @@ pub fn load_state_from_slot(
     slot: usize,
 ) {
     if emu.load_state(slot) {
-        eprintln!("State loaded from slot {}", slot + 1);
+        eprintln!("State loaded from slot {}", slot);
     } else {
-        let path = rom_path.with_extension(format!("{}.ss", slot + 1));
+        let path = rom_path.with_extension(format!("{}.ss", slot));
         if let Ok(data) = std::fs::read(&path) {
             if emu.load_state_from_bytes(slot, &data) {
                 eprintln!("State loaded from disk: {}", path.display());

@@ -459,20 +459,21 @@ fn main() {
                 }
                 Event::KeyDown { keycode: Some(k), .. } => {
                     let slot = match k {
-                        Keycode::_1 => Some(0),
-                        Keycode::_2 => Some(1),
-                        Keycode::_3 => Some(2),
-                        Keycode::_4 => Some(3),
-                        Keycode::_5 => Some(4),
-                        Keycode::_6 => Some(5),
-                        Keycode::_7 => Some(6),
-                        Keycode::_8 => Some(7),
-                        Keycode::_9 => Some(8),
+                        Keycode::_0 => Some(0),
+                        Keycode::_1 => Some(1),
+                        Keycode::_2 => Some(2),
+                        Keycode::_3 => Some(3),
+                        Keycode::_4 => Some(4),
+                        Keycode::_5 => Some(5),
+                        Keycode::_6 => Some(6),
+                        Keycode::_7 => Some(7),
+                        Keycode::_8 => Some(8),
+                        Keycode::_9 => Some(9),
                         _ => None,
                     };
                     if let Some(s) = slot {
                         current_slot = s;
-                        eprintln!("Slot {} selected", current_slot + 1);
+                        eprintln!("Slot {} selected", (current_slot + 1) % 10);
                     }
                 }
                 Event::ControllerDeviceAdded { which, .. } => {

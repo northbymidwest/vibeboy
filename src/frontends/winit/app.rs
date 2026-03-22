@@ -22,7 +22,7 @@ use super::gpu::GpuRenderer;
 use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
 use super::menu::{
-    ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET, ID_PRINTER,
+    ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET, ID_PRINTER, ID_FORCE_CPU,
     slot_save_id, slot_load_id, filter_id_to_filter, model_id_to_model, build_menu, MODEL_IDS,
 };
 
@@ -38,6 +38,8 @@ pub(super) struct App {
     filter_items: Vec<(CheckMenuItem, scaling::ScaleFilter)>,
     printer_item: Option<CheckMenuItem>,
     model_items: Vec<CheckMenuItem>,
+    slot_items: Vec<CheckMenuItem>,
+    force_cpu_item: Option<CheckMenuItem>,
     audio_ring: Arc<Mutex<AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     camera_thread: Option<CameraThread>,
@@ -53,6 +55,7 @@ pub(super) struct App {
     frame_dur: Duration,
     paused: bool,
     current_slot: usize,
+    force_cpu: bool,
     src_w: u32,
     src_h: u32,
     fps: ui_util::FpsCounter,
@@ -87,6 +90,8 @@ impl App {
             filter_items: Vec::new(),
             printer_item: None,
             model_items: Vec::new(),
+            slot_items: Vec::new(),
+            force_cpu_item: None,
             audio_ring,
             _audio_stream: stream,
             camera_thread: None,
@@ -102,6 +107,7 @@ impl App {
             frame_dur: frame_duration(model),
             paused: false,
             current_slot: 0,
+            force_cpu: false,
             src_w: GB_W,
             src_h: GB_H,
             fps: ui_util::FpsCounter::new(),
@@ -191,6 +197,12 @@ impl App {
                     self.load_rom(&path);
                 }
             }
+            ID_FORCE_CPU => {
+                if let Some(ref item) = self.force_cpu_item {
+                    self.force_cpu = item.is_checked();
+                    eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
+                }
+            }
             ID_PRINTER => {
                 if let Some(ref item) = self.printer_item {
                     let now_on = item.is_checked();
@@ -240,17 +252,29 @@ impl App {
                     return;
                 }
 
-                for i in 1..=9 {
+                for i in 0..=9 {
                     if other == slot_save_id(i) {
                         if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                            ui_util::save_state_to_slot(emu, rp, i - 1);
+                            ui_util::save_state_to_slot(emu, rp, i);
                         }
                         return;
                     }
                     if other == slot_load_id(i) {
                         if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                            ui_util::load_state_from_slot(emu, rp, i - 1);
+                            ui_util::load_state_from_slot(emu, rp, i);
                         }
+                        return;
+                    }
+                }
+
+                // Slot selection checkmarks
+                if other.starts_with("select_slot_") {
+                    if let Ok(n) = other["select_slot_".len()..].parse::<usize>() {
+                        self.current_slot = n;
+                        for item in &self.slot_items {
+                            item.set_checked(item.id().0 == other);
+                        }
+                        eprintln!("Slot {} selected", n);
                         return;
                     }
                 }
@@ -329,7 +353,15 @@ impl App {
 
         let scaled;
         let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
-            if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
+            if self.force_cpu {
+                // Force CPU: skip all GPU paths
+                if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
+                    scaled = s;
+                    (&scaled, w as usize, h as usize)
+                } else {
+                    (fb, sw, sh)
+                }
+            } else if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
                 (fb, sw, sh)
             } else if matches!(self.scale_filter,
                 scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
@@ -540,7 +572,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         // Set up menu bar
-        let (menu, filter_items, printer_item, model_items) = build_menu(self.cli.printer);
+        let (menu, filter_items, printer_item, model_items, slot_items, force_cpu_item) = build_menu(self.cli.printer);
         #[cfg(target_os = "macos")]
         {
             menu.init_for_nsapp();
@@ -566,6 +598,8 @@ impl ApplicationHandler for App {
         self.filter_items = filter_items;
         self.printer_item = Some(printer_item);
         self.model_items = model_items;
+        self.slot_items = slot_items;
+        self.force_cpu_item = Some(force_cpu_item);
         self.window = Some(window);
         self.gpu = Some(gpu);
 
@@ -661,15 +695,23 @@ impl ApplicationHandler for App {
                                     ui_util::load_state_from_slot(emu, rp, self.current_slot);
                                 }
                             }
-                            KeyCode::Digit1 => self.current_slot = 0,
-                            KeyCode::Digit2 => self.current_slot = 1,
-                            KeyCode::Digit3 => self.current_slot = 2,
-                            KeyCode::Digit4 => self.current_slot = 3,
-                            KeyCode::Digit5 => self.current_slot = 4,
-                            KeyCode::Digit6 => self.current_slot = 5,
-                            KeyCode::Digit7 => self.current_slot = 6,
-                            KeyCode::Digit8 => self.current_slot = 7,
-                            KeyCode::Digit9 => self.current_slot = 8,
+                            KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3
+                            | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
+                            | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9
+                            | KeyCode::Digit0 => {
+                                self.current_slot = match key {
+                                    KeyCode::Digit0 => 0, KeyCode::Digit1 => 1,
+                                    KeyCode::Digit2 => 2, KeyCode::Digit3 => 3,
+                                    KeyCode::Digit4 => 4, KeyCode::Digit5 => 5,
+                                    KeyCode::Digit6 => 6, KeyCode::Digit7 => 7,
+                                    KeyCode::Digit8 => 8, KeyCode::Digit9 => 9,
+                                    _ => unreachable!(),
+                                };
+                                for (i, item) in self.slot_items.iter().enumerate() {
+                                    item.set_checked(i == self.current_slot);
+                                }
+                                eprintln!("Slot {} selected", self.current_slot);
+                            }
                             _ => {}
                         }
                     }

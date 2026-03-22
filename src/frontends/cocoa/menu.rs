@@ -20,7 +20,8 @@ pub(super) const MENU_TAG_PAUSE: isize = 101;
 pub(super) const MENU_TAG_RESET: isize = 102;
 pub(super) const MENU_TAG_SAVE_STATE: isize = 103;
 pub(super) const MENU_TAG_LOAD_STATE: isize = 104;
-pub(super) const MENU_TAG_SLOT_BASE: isize = 200; // 200..208 for slots 1-9
+pub(super) const MENU_TAG_SLOT_BASE: isize = 200; // 200..209 for slots 0-9
+pub(super) const MENU_TAG_FORCE_CPU: isize = 210;
 pub(super) const MENU_TAG_MODEL_AUTO: isize = 300;
 pub(super) const MENU_TAG_MODEL_DMG0: isize = 301;
 pub(super) const MENU_TAG_MODEL_DMG: isize = 302;
@@ -85,6 +86,48 @@ pub(super) fn update_filter_checkmarks(app: &NSApplication, selected_tag: isize)
                     }
                 }
             }
+        }
+    }
+}
+
+pub(super) fn update_slot_checkmarks(app: &NSApplication, selected_slot: usize) {
+    let Some(main_menu) = app.mainMenu() else {
+        return;
+    };
+    // State menu is at index 5
+    let Some(state_menu_item) = main_menu.itemAtIndex(5) else {
+        return;
+    };
+    let Some(state_submenu) = state_menu_item.submenu() else {
+        return;
+    };
+    let count = state_submenu.numberOfItems();
+    for i in 0..count {
+        if let Some(item) = state_submenu.itemAtIndex(i) {
+            let tag = item.tag();
+            if tag >= MENU_TAG_SLOT_BASE && tag < MENU_TAG_SLOT_BASE + 10 {
+                let slot_idx = (tag - MENU_TAG_SLOT_BASE) as usize;
+                set_checkmark(&item, slot_idx == selected_slot);
+            }
+        }
+    }
+}
+
+pub(super) fn update_force_cpu_checkmark(app: &NSApplication, force_cpu: bool) {
+    let Some(main_menu) = app.mainMenu() else {
+        return;
+    };
+    // Filter menu is at index 4
+    let Some(filter_menu_item) = main_menu.itemAtIndex(4) else {
+        return;
+    };
+    let Some(filter_submenu) = filter_menu_item.submenu() else {
+        return;
+    };
+    // Force CPU item is the first item in the filter menu
+    if let Some(item) = filter_submenu.itemAtIndex(0) {
+        if item.tag() == MENU_TAG_FORCE_CPU {
+            set_checkmark(&item, force_cpu);
         }
     }
 }
@@ -187,6 +230,7 @@ pub(super) struct MenuActions {
     pub select_filter: Option<isize>, // tag of selected filter
     pub toggle_fps: bool,
     pub toggle_printer: bool,
+    pub toggle_force_cpu: bool,
     pub open_controls: bool,
     pub open_recent: Option<usize>, // index into recent ROMs list
     pub clear_recent: bool,
@@ -205,6 +249,7 @@ impl MenuActions {
             select_filter: None,
             toggle_fps: false,
             toggle_printer: false,
+            toggle_force_cpu: false,
             open_controls: false,
             open_recent: None,
             clear_recent: false,
@@ -260,9 +305,10 @@ define_class!(
                 MENU_TAG_RESET => actions.reset = true,
                 MENU_TAG_SAVE_STATE => actions.save_state = true,
                 MENU_TAG_LOAD_STATE => actions.load_state = true,
-                t if t >= MENU_TAG_SLOT_BASE && t < MENU_TAG_SLOT_BASE + 9 => {
+                t if t >= MENU_TAG_SLOT_BASE && t < MENU_TAG_SLOT_BASE + 10 => {
                     actions.select_slot = Some((t - MENU_TAG_SLOT_BASE) as usize);
                 }
+                MENU_TAG_FORCE_CPU => actions.toggle_force_cpu = true,
                 t if t >= MENU_TAG_MODEL_AUTO && t <= MENU_TAG_MODEL_AGB => {
                     actions.select_model = Some(t);
                 }
@@ -553,6 +599,13 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     let filter_menu = NSMenu::new(mtm);
     filter_menu.setTitle(&NSString::from_str("Filter"));
 
+    // Force CPU toggle at top of filter menu
+    let force_cpu_item = menu_item_with_tag(
+        mtm, "Force CPU", sel!(menuAction:), "", MENU_TAG_FORCE_CPU,
+    );
+    filter_menu.addItem(&force_cpu_item);
+    filter_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
     let entries = filter_entries();
     let mut sub_menus: std::collections::BTreeMap<&str, objc2::rc::Retained<NSMenu>> =
         std::collections::BTreeMap::new();
@@ -608,7 +661,7 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     state_menu.addItem(&load_item);
     state_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    for slot in 1..=9usize {
+    for slot in 0..=9usize {
         let title = format!("Slot {}", slot);
         let key = format!("{}", slot);
         let item = menu_item_with_tag(
@@ -616,10 +669,12 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
             &title,
             sel!(menuAction:),
             &key,
-            MENU_TAG_SLOT_BASE + slot as isize - 1,
+            MENU_TAG_SLOT_BASE + slot as isize,
         );
-        // No modifier key for slot selection (plain digit key)
         item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        if slot == 0 {
+            set_checkmark(&item, true); // default slot
+        }
         state_menu.addItem(&item);
     }
 
