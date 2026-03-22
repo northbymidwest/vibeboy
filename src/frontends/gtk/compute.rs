@@ -302,6 +302,9 @@ pub fn to_wgpu_filter(filter: ScaleFilter) -> Option<WgpuScaleFilter> {
         ScaleFilter::Edi => Some(WgpuScaleFilter::Edi),
         ScaleFilter::Mmpx => Some(WgpuScaleFilter::Mmpx),
         ScaleFilter::LcdGrid => Some(WgpuScaleFilter::LcdGrid),
+        ScaleFilter::Sai2x => Some(WgpuScaleFilter::Sai2x),
+        ScaleFilter::Super2xSai => Some(WgpuScaleFilter::Super2xSai),
+        ScaleFilter::SuperEagle => Some(WgpuScaleFilter::SuperEagle),
         _ => None,
     }
 }

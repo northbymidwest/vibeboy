@@ -266,6 +266,30 @@ const SHADERS: &[ShaderInfo] = &[
         wgsl_name: "mmpx_comp.wgsl",
         msl_buffer_remap: &[],
     },
+    ShaderInfo {
+        glsl_src: "sai2x.comp",
+        spv_name: "sai2x_comp.spv",
+        msl_name: "sai2x_comp.metal",
+        dxil_name: "sai2x_comp.dxil",
+        wgsl_name: "sai2x_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "super_sai2x.comp",
+        spv_name: "super_sai2x_comp.spv",
+        msl_name: "super_sai2x_comp.metal",
+        dxil_name: "super_sai2x_comp.dxil",
+        wgsl_name: "super_sai2x_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
+    ShaderInfo {
+        glsl_src: "super_eagle.comp",
+        spv_name: "super_eagle_comp.spv",
+        msl_name: "super_eagle_comp.metal",
+        dxil_name: "super_eagle_comp.dxil",
+        wgsl_name: "super_eagle_comp.wgsl",
+        msl_buffer_remap: &[],
+    },
 ];
 
 fn main() {

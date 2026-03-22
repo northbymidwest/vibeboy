@@ -27,6 +27,9 @@ const SP_MMPX: usize = 14;
 const SP_LCD_GRID: usize = 15;
 const SP_NEAREST: usize = 16;
 const SP_BILINEAR: usize = 17;
+const SP_SAI2X: usize = 18;
+const SP_SUPER_SAI2X: usize = 19;
+const SP_SUPER_EAGLE: usize = 20;
 
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
@@ -42,7 +45,7 @@ pub struct GpuPipelines {
     // All scaling filters now use compute pipelines instead.
 
     // Lazily-initialized compute pipelines (scaling filters)
-    scale_pipelines: [Option<gpu::ComputePipeline>; 18],
+    scale_pipelines: [Option<gpu::ComputePipeline>; 21],
 
     // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
@@ -172,6 +175,12 @@ impl GpuPipelines {
                 Some((SP_NEAREST, super::init_nearest_compute_pipeline)),
             ScaleFilter::Bilinear =>
                 Some((SP_BILINEAR, super::init_bilinear_compute_pipeline)),
+            ScaleFilter::Sai2x =>
+                Some((SP_SAI2X, super::init_sai2x_compute_pipeline)),
+            ScaleFilter::Super2xSai =>
+                Some((SP_SUPER_SAI2X, super::init_super_sai2x_compute_pipeline)),
+            ScaleFilter::SuperEagle =>
+                Some((SP_SUPER_EAGLE, super::init_super_eagle_compute_pipeline)),
             _ => None,
         };
 
@@ -273,6 +282,9 @@ impl GpuPipelines {
             ScaleFilter::Dcci => SP_DCCI,
             ScaleFilter::Mmpx => SP_MMPX,
             ScaleFilter::LcdGrid => SP_LCD_GRID,
+            ScaleFilter::Sai2x => SP_SAI2X,
+            ScaleFilter::Super2xSai => SP_SUPER_SAI2X,
+            ScaleFilter::SuperEagle => SP_SUPER_EAGLE,
             _ => return,
         };
 
@@ -280,7 +292,9 @@ impl GpuPipelines {
         let (out_w, out_h) = match filter {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr
             | ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci
-            | ScaleFilter::Mmpx => (src_w * 2, src_h * 2),
+            | ScaleFilter::Mmpx
+            | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle
+            => (src_w * 2, src_h * 2),
             ScaleFilter::LcdGrid => (src_w * 4, src_h * 4),
             ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
             ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),

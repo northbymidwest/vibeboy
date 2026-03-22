@@ -1,0 +1,131 @@
+#version 450
+
+// 2xSaI (Scale and Interpolation) compute shader by Kreed.
+// Each workgroup thread handles one output pixel (2x scaled).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer PixelBuf {
+    uint pixels[];
+};
+
+layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
+
+layout(std140, set = 2, binding = 0) uniform Uniforms {
+    uint src_w;
+    uint src_h;
+    uint out_w;
+    uint out_h;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    uint _pad3;
+};
+
+vec4 unpack(uint c) {
+    return vec4(
+        float((c >> 16u) & 0xFFu) / 255.0,
+        float((c >>  8u) & 0xFFu) / 255.0,
+        float( c         & 0xFFu) / 255.0,
+        1.0
+    );
+}
+
+uint fetch(ivec2 coord) {
+    coord = clamp(coord, ivec2(0), ivec2(int(src_w) - 1, int(src_h) - 1));
+    return pixels[coord.y * int(src_w) + coord.x];
+}
+
+// 50/50 blend without overflow (bit-manipulation on packed u32)
+uint interp(uint a, uint b) {
+    return ((a & 0x00FEFEFEu) >> 1u) + ((b & 0x00FEFEFEu) >> 1u) + (a & b & 0x00010101u);
+}
+
+// 25% each of four colors
+uint qinterp(uint a, uint b, uint c, uint d) {
+    return interp(interp(a, b), interp(c, d));
+}
+
+// 75% a + 25% b
+uint interp3_1(uint a, uint b) {
+    return interp(a, interp(a, b));
+}
+
+void main() {
+    uint opx = gl_GlobalInvocationID.x;
+    uint opy = gl_GlobalInvocationID.y;
+    if (opx >= out_w || opy >= out_h) return;
+
+    ivec2 out_pos = ivec2(opx, opy);
+    ivec2 src_i = out_pos / 2;
+    ivec2 sub = out_pos - src_i * 2;
+
+    // Sample 4x4 neighborhood
+    // p0  p1  p2  p3       (x-1,y-1) (x,y-1) (x+1,y-1) (x+2,y-1)
+    // p4  p5  p6  p7       (x-1,y)   (x,y)   (x+1,y)   (x+2,y)
+    // p8  p9  p10 p11      (x-1,y+1) (x,y+1) (x+1,y+1) (x+2,y+1)
+    // p12 p13 p14 p15      (x-1,y+2) (x,y+2) (x+1,y+2) (x+2,y+2)
+    uint i = fetch(src_i + ivec2(-1, -1));
+    uint e = fetch(src_i + ivec2( 0, -1));
+    uint f = fetch(src_i + ivec2( 1, -1));
+    uint j = fetch(src_i + ivec2( 2, -1));
+    uint g = fetch(src_i + ivec2(-1,  0));
+    uint a = fetch(src_i + ivec2( 0,  0));
+    uint b = fetch(src_i + ivec2( 1,  0));
+    uint k = fetch(src_i + ivec2( 2,  0));
+    uint h = fetch(src_i + ivec2(-1,  1));
+    uint c = fetch(src_i + ivec2( 0,  1));
+    uint d = fetch(src_i + ivec2( 1,  1));
+    uint l = fetch(src_i + ivec2( 2,  1));
+    uint m = fetch(src_i + ivec2(-1,  2));
+    // n = fetch(src_i + ivec2( 0,  2)); // unused
+    uint o = fetch(src_i + ivec2( 1,  2));
+    // p16 = fetch(src_i + ivec2( 2,  2)); // unused
+
+    // Compute all four output pixels
+    uint product, product1, product2;
+
+    if (a == d && b != c) {
+        product = ((a == e && b == l) || (a == c && a == f && b != e && b == j)) ? a : interp(a, b);
+        product1 = ((a == g && c == o) || (a == b && a == h && g != c && c == m)) ? a : interp(a, c);
+        product2 = a;
+    } else if (b == c && a != d) {
+        product = ((b == f && a == h) || (b == e && b == d && a != f && a == i)) ? b : interp(a, b);
+        product1 = ((c == h && a == f) || (c == g && c == d && a != h && a == i)) ? c : interp(a, c);
+        product2 = b;
+    } else if (a == d && b == c) {
+        if (a == b) {
+            product = a;
+            product1 = a;
+            product2 = a;
+        } else {
+            int r = 0;
+            product = interp(a, b);
+            product1 = interp(a, c);
+
+            if (a == g || a == e) r += 1;
+            if (a == i || a == m) r += 1;
+            if (b == k || b == f) r -= 1;
+            if (b == j || b == l) r -= 1;
+
+            product2 = (r > 0) ? a : (r < 0) ? b : qinterp(a, b, c, d);
+        }
+    } else {
+        product2 = qinterp(a, b, c, d);
+        product = (a == c && a == f && b != e && b == j) ? a
+                : (b == e && b == d && a != f && a == i) ? b
+                : interp(a, b);
+        product1 = (a == b && a == h && g != c && c == m) ? a
+                 : (c == g && c == d && a != h && a == i) ? c
+                 : interp(a, c);
+    }
+
+    // Select output pixel based on sub-pixel position
+    uint result;
+    if (sub.x == 0 && sub.y == 0) result = a;
+    else if (sub.x == 1 && sub.y == 0) result = product;
+    else if (sub.x == 0 && sub.y == 1) result = product1;
+    else result = product2;
+
+    imageStore(output_img, ivec2(opx, opy), unpack(result));
+}

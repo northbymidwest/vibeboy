@@ -28,6 +28,9 @@ pub enum WgpuScaleFilter {
     Dcci,
     Mmpx,
     LcdGrid,
+    Sai2x,
+    Super2xSai,
+    SuperEagle,
 }
 
 impl WgpuScaleFilter {
@@ -51,6 +54,9 @@ impl WgpuScaleFilter {
             "dcci" => Some(Self::Dcci),
             "mmpx" => Some(Self::Mmpx),
             "lcd-grid" => Some(Self::LcdGrid),
+            "2xsai" => Some(Self::Sai2x),
+            "super-2xsai" => Some(Self::Super2xSai),
+            "super-eagle" => Some(Self::SuperEagle),
             _ => None,
         }
     }
@@ -58,7 +64,8 @@ impl WgpuScaleFilter {
     pub fn all_names() -> &'static [&'static str] {
         &["nearest", "bilinear", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
           "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
-          "edi", "nedi", "dcci", "mmpx", "lcd-grid"]
+          "edi", "nedi", "dcci", "mmpx", "lcd-grid",
+          "2xsai", "super-2xsai", "super-eagle"]
     }
 
     /// For integer-scale filters, compute the native output dimensions.
@@ -118,6 +125,9 @@ pub struct WgpuScalePipeline {
     dcci: wgpu::ComputePipeline,
     mmpx: wgpu::ComputePipeline,
     lcd_grid: wgpu::ComputePipeline,
+    sai2x: wgpu::ComputePipeline,
+    super_sai2x: wgpu::ComputePipeline,
+    super_eagle: wgpu::ComputePipeline,
     bufs: Option<ScaleBufs>,
 }
 
@@ -151,6 +161,9 @@ impl WgpuScalePipeline {
         let dcci_wgsl = include_str!(concat!(env!("OUT_DIR"), "/dcci_comp.wgsl"));
         let mmpx_wgsl = include_str!(concat!(env!("OUT_DIR"), "/mmpx_comp.wgsl"));
         let lcd_grid_wgsl = include_str!(concat!(env!("OUT_DIR"), "/lcd_grid_comp.wgsl"));
+        let sai2x_wgsl = include_str!(concat!(env!("OUT_DIR"), "/sai2x_comp.wgsl"));
+        let super_sai2x_wgsl = include_str!(concat!(env!("OUT_DIR"), "/super_sai2x_comp.wgsl"));
+        let super_eagle_wgsl = include_str!(concat!(env!("OUT_DIR"), "/super_eagle_comp.wgsl"));
 
         WgpuScalePipeline {
             nearest: create_compute_pipeline(device, nearest_wgsl, "nearest"),
@@ -171,6 +184,9 @@ impl WgpuScalePipeline {
             dcci: create_compute_pipeline(device, dcci_wgsl, "dcci"),
             mmpx: create_compute_pipeline(device, mmpx_wgsl, "mmpx"),
             lcd_grid: create_compute_pipeline(device, lcd_grid_wgsl, "lcd_grid"),
+            sai2x: create_compute_pipeline(device, sai2x_wgsl, "sai2x"),
+            super_sai2x: create_compute_pipeline(device, super_sai2x_wgsl, "super_sai2x"),
+            super_eagle: create_compute_pipeline(device, super_eagle_wgsl, "super_eagle"),
             bufs: None,
         }
     }
@@ -195,6 +211,9 @@ impl WgpuScalePipeline {
             WgpuScaleFilter::Dcci => &self.dcci,
             WgpuScaleFilter::Mmpx => &self.mmpx,
             WgpuScaleFilter::LcdGrid => &self.lcd_grid,
+            WgpuScaleFilter::Sai2x => &self.sai2x,
+            WgpuScaleFilter::Super2xSai => &self.super_sai2x,
+            WgpuScaleFilter::SuperEagle => &self.super_eagle,
         }
     }
 

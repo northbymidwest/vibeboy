@@ -547,6 +547,9 @@ impl WasmEmulator {
                     ScaleFilter::Dcci => WgpuScaleFilter::Dcci,
                     ScaleFilter::Mmpx => WgpuScaleFilter::Mmpx,
                     ScaleFilter::LcdGrid => WgpuScaleFilter::LcdGrid,
+                    ScaleFilter::Sai2x => WgpuScaleFilter::Sai2x,
+                    ScaleFilter::Super2xSai => WgpuScaleFilter::Super2xSai,
+                    ScaleFilter::SuperEagle => WgpuScaleFilter::SuperEagle,
                     _ => return false, // unsupported filter
                 };
                 let factor = other.factor();

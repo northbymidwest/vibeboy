@@ -770,6 +770,9 @@ fn map_scale_filter(filter: scaling::ScaleFilter) -> Option<scaling::wgpu_scale:
         SF::Dcci => Some(WF::Dcci),
         SF::Mmpx => Some(WF::Mmpx),
         SF::LcdGrid => Some(WF::LcdGrid),
+        SF::Sai2x => Some(WF::Sai2x),
+        SF::Super2xSai => Some(WF::Super2xSai),
+        SF::SuperEagle => Some(WF::SuperEagle),
         _ => None,
     }
 }

@@ -27,6 +27,9 @@ pub use compute::{
     init_lcd_grid_compute_pipeline,
     init_nearest_compute_pipeline,
     init_bilinear_compute_pipeline,
+    init_sai2x_compute_pipeline,
+    init_super_sai2x_compute_pipeline,
+    init_super_eagle_compute_pipeline,
 };
 pub use screenshot::{
     gpu_screenshot,

@@ -70,7 +70,7 @@ pub(super) struct MetalRenderer {
     pub tex_w: u32,
     pub tex_h: u32,
     // Compute scaling pipelines (lazily initialized)
-    scale_compute: [Option<ComputePipeline>; 18],
+    scale_compute: [Option<ComputePipeline>; 21],
     pub compute_out_tex: Option<Texture>,
     pub compute_out_w: u32,
     pub compute_out_h: u32,
@@ -512,6 +512,12 @@ impl MetalRenderer {
                 (16, include_bytes!(concat!(env!("OUT_DIR"), "/nearest_comp.metal"))),
             ScaleFilter::Bilinear =>
                 (17, include_bytes!(concat!(env!("OUT_DIR"), "/bilinear_comp.metal"))),
+            ScaleFilter::Sai2x =>
+                (18, include_bytes!(concat!(env!("OUT_DIR"), "/sai2x_comp.metal"))),
+            ScaleFilter::Super2xSai =>
+                (19, include_bytes!(concat!(env!("OUT_DIR"), "/super_sai2x_comp.metal"))),
+            ScaleFilter::SuperEagle =>
+                (20, include_bytes!(concat!(env!("OUT_DIR"), "/super_eagle_comp.metal"))),
             _ => return None,
         };
 
@@ -523,7 +529,9 @@ impl MetalRenderer {
             ScaleFilter::Eagle | ScaleFilter::SuperXbr |
             ScaleFilter::Epx | ScaleFilter::Scale2x |
             ScaleFilter::Edi | ScaleFilter::Nedi | ScaleFilter::Dcci
-            | ScaleFilter::Mmpx => (src_w * 2, src_h * 2),
+            | ScaleFilter::Mmpx
+            | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle
+            => (src_w * 2, src_h * 2),
             ScaleFilter::LcdGrid => (src_w * 4, src_h * 4),
             ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
             ScaleFilter::Scale4x => (src_w * 4, src_h * 4),

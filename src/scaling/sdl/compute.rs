@@ -281,6 +281,9 @@ init_scale_pipeline!(init_mmpx_compute_pipeline, "mmpx");
 init_scale_pipeline!(init_lcd_grid_compute_pipeline, "lcd_grid");
 init_scale_pipeline!(init_nearest_compute_pipeline, "nearest");
 init_scale_pipeline!(init_bilinear_compute_pipeline, "bilinear");
+init_scale_pipeline!(init_sai2x_compute_pipeline, "sai2x");
+init_scale_pipeline!(init_super_sai2x_compute_pipeline, "super_sai2x");
+init_scale_pipeline!(init_super_eagle_compute_pipeline, "super_eagle");
 
 /// Dispatch a scaling compute shader and blit to the swapchain.
 /// `uniforms` must be exactly 32 bytes (8 × u32) matching the shader's uniform block.
