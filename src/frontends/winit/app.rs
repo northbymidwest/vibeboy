@@ -805,7 +805,7 @@ fn map_scale_filter(filter: scaling::ScaleFilter) -> Option<scaling::wgpu_scale:
         SF::Hqx(_) => Some(WF::Hqx),
         SF::Xbr(_) | SF::SuperXbr => Some(WF::Xbr),
         SF::Xbrz(_) => Some(WF::Xbrz),
-        SF::AaNearestNeighbor => Some(WF::AaNearest),
+        SF::NearestAa => Some(WF::NearestAa),
         SF::OmniScale => Some(WF::OmniScale),
         SF::OmniScaleLegacy => Some(WF::OmniScaleLegacy),
         SF::Edi => Some(WF::Edi),

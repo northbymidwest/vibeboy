@@ -228,7 +228,7 @@ init_scale_pipeline!(init_epx_compute_pipeline, "epx");
 init_scale_pipeline!(init_eagle_compute_pipeline, "eagle");
 init_scale_pipeline!(init_scale3x_compute_pipeline, "scale3x");
 init_scale_pipeline!(init_bicubic_compute_pipeline, "bicubic");
-init_scale_pipeline!(init_aa_nearest_compute_pipeline, "aa_nearest");
+init_scale_pipeline!(init_nearest_aa_compute_pipeline, "nearest_aa");
 init_scale_pipeline!(init_hqx_compute_pipeline, "hqx");
 init_scale_pipeline!(init_xbr_compute_pipeline, "xbr");
 init_scale_pipeline!(init_xbrz_compute_pipeline, "xbrz");

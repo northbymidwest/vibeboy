@@ -61,7 +61,7 @@ cargo run --release -- path/to/rom.gb --filter hq4x
 # Available filters: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x,
 #   eagle, 2xsai, super-2xsai, super-eagle, hq2x, hq3x, hq4x,
 #   xbr2x, xbr3x, xbr4x, xbrz2x-6x, super-xbr,
-#   nedi, dcci, edi, omniscale, omniscale-legacy, aa-nearest, mmpx, lcd-grid
+#   nedi, dcci, edi, omniscale, omniscale-legacy, nearest-aa, mmpx, lcd-grid
 
 # Kopf-Lischinski pixel-art vectorization (scales to window size)
 cargo run --release -- path/to/rom.gb --filter vectorize

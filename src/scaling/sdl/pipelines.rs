@@ -14,7 +14,7 @@ const SP_EPX: usize = 1;
 const SP_EAGLE: usize = 2;
 const SP_SCALE3X: usize = 3;
 const SP_BICUBIC: usize = 4;
-const SP_AA_NEAREST: usize = 5;
+const SP_NEAREST_AA: usize = 5;
 const SP_HQX: usize = 6;
 const SP_XBR: usize = 7;
 const SP_XBRZ: usize = 8;
@@ -149,8 +149,8 @@ impl GpuPipelines {
                 Some((SP_SCALE3X, super::init_scale3x_compute_pipeline)),
             ScaleFilter::Bicubic =>
                 Some((SP_BICUBIC, super::init_bicubic_compute_pipeline)),
-            ScaleFilter::AaNearestNeighbor =>
-                Some((SP_AA_NEAREST, super::init_aa_nearest_compute_pipeline)),
+            ScaleFilter::NearestAa =>
+                Some((SP_NEAREST_AA, super::init_nearest_aa_compute_pipeline)),
             ScaleFilter::Hqx(_) =>
                 Some((SP_HQX, super::init_hqx_compute_pipeline)),
             ScaleFilter::Xbr(_) =>
@@ -271,7 +271,7 @@ impl GpuPipelines {
             ScaleFilter::Eagle => SP_EAGLE,
             ScaleFilter::Scale3x => SP_SCALE3X,
             ScaleFilter::Bicubic => SP_BICUBIC,
-            ScaleFilter::AaNearestNeighbor => SP_AA_NEAREST,
+            ScaleFilter::NearestAa => SP_NEAREST_AA,
             ScaleFilter::Hqx(_) => SP_HQX,
             ScaleFilter::Xbr(_) => SP_XBR,
             ScaleFilter::Xbrz(_) => SP_XBRZ,

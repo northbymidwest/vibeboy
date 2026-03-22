@@ -486,8 +486,8 @@ impl MetalRenderer {
                 (3, include_bytes!(concat!(env!("OUT_DIR"), "/scale3x_comp.metal"))),
             ScaleFilter::Bicubic =>
                 (4, include_bytes!(concat!(env!("OUT_DIR"), "/bicubic_comp.metal"))),
-            ScaleFilter::AaNearestNeighbor =>
-                (5, include_bytes!(concat!(env!("OUT_DIR"), "/aa_nearest_comp.metal"))),
+            ScaleFilter::NearestAa =>
+                (5, include_bytes!(concat!(env!("OUT_DIR"), "/nearest_aa_comp.metal"))),
             ScaleFilter::Hqx(_) =>
                 (6, include_bytes!(concat!(env!("OUT_DIR"), "/hqx_comp.metal"))),
             ScaleFilter::Xbr(_) =>

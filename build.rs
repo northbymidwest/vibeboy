@@ -170,11 +170,11 @@ const SHADERS: &[ShaderInfo] = &[
         msl_buffer_remap: &[],
     },
     ShaderInfo {
-        glsl_src: "aa_nearest.comp",
-        spv_name: "aa_nearest_comp.spv",
-        msl_name: "aa_nearest_comp.metal",
-        dxil_name: "aa_nearest_comp.dxil",
-        wgsl_name: "aa_nearest_comp.wgsl",
+        glsl_src: "nearest_aa.comp",
+        spv_name: "nearest_aa_comp.spv",
+        msl_name: "nearest_aa_comp.metal",
+        dxil_name: "nearest_aa_comp.dxil",
+        wgsl_name: "nearest_aa_comp.wgsl",
         msl_buffer_remap: &[],
     },
     ShaderInfo {

@@ -387,7 +387,7 @@ impl WasmEmulator {
 
     /// Set the active scaling filter by name.
     /// Valid names: "nearest", "vectorize", "epx", "eagle", "scale3x",
-    /// "bicubic", "aa-nearest", "omniscale".
+    /// "bicubic", "nearest-aa", "omniscale".
     /// Returns true if the filter was recognized.
     pub fn set_filter(&mut self, name: &str) -> bool {
         if let Some(f) = scaling::ScaleFilter::from_name(name) {
@@ -540,7 +540,7 @@ impl WasmEmulator {
                     ScaleFilter::Hqx(_) => WgpuScaleFilter::Hqx,
                     ScaleFilter::Xbr(_) | ScaleFilter::SuperXbr => WgpuScaleFilter::Xbr,
                     ScaleFilter::Xbrz(_) => WgpuScaleFilter::Xbrz,
-                    ScaleFilter::AaNearestNeighbor => WgpuScaleFilter::AaNearest,
+                    ScaleFilter::NearestAa => WgpuScaleFilter::NearestAa,
                     ScaleFilter::OmniScale => WgpuScaleFilter::OmniScale,
                     ScaleFilter::OmniScaleLegacy => WgpuScaleFilter::OmniScaleLegacy,
                     ScaleFilter::Edi => WgpuScaleFilter::Edi,

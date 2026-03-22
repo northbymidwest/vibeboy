@@ -1,7 +1,7 @@
 //! GPU scaling filter pipeline using wgpu (WebGPU-compatible).
 //!
 //! Runs pixel-art scaling filters as compute shaders:
-//! EPX, Eagle, Scale3x, Bicubic, AA Nearest, OmniScale.
+//! EPX, Eagle, Scale3x, Bicubic, Nearest AA, OmniScale.
 //!
 //! All shaders read from a u32 pixel storage buffer and write to an rgba8 output texture.
 
@@ -16,7 +16,7 @@ pub enum WgpuScaleFilter {
     Eagle,
     Scale3x,
     Bicubic,
-    AaNearest,
+    NearestAa,
     OmniScale,
     Hqx,
     Xbr,
@@ -42,7 +42,7 @@ impl WgpuScaleFilter {
             "eagle" => Some(Self::Eagle),
             "scale3x" => Some(Self::Scale3x),
             "bicubic" => Some(Self::Bicubic),
-            "aa-nearest" => Some(Self::AaNearest),
+            "nearest-aa" => Some(Self::NearestAa),
             "omniscale" => Some(Self::OmniScale),
             "hqx" => Some(Self::Hqx),
             "xbr" => Some(Self::Xbr),
@@ -62,7 +62,7 @@ impl WgpuScaleFilter {
     }
 
     pub fn all_names() -> &'static [&'static str] {
-        &["nearest", "bilinear", "epx", "eagle", "scale3x", "bicubic", "aa-nearest",
+        &["nearest", "bilinear", "epx", "eagle", "scale3x", "bicubic", "nearest-aa",
           "omniscale", "hqx", "xbr", "xbrz", "super-xbr", "omniscale-legacy",
           "edi", "nedi", "dcci", "mmpx", "lcd-grid",
           "2xsai", "super-2xsai", "super-eagle"]
@@ -113,7 +113,7 @@ pub struct WgpuScalePipeline {
     eagle: wgpu::ComputePipeline,
     scale3x: wgpu::ComputePipeline,
     bicubic: wgpu::ComputePipeline,
-    aa_nearest: wgpu::ComputePipeline,
+    nearest_aa: wgpu::ComputePipeline,
     omniscale: wgpu::ComputePipeline,
     hqx: wgpu::ComputePipeline,
     xbr: wgpu::ComputePipeline,
@@ -149,7 +149,7 @@ impl WgpuScalePipeline {
         let eagle_wgsl = include_str!(concat!(env!("OUT_DIR"), "/eagle_comp.wgsl"));
         let scale3x_wgsl = include_str!(concat!(env!("OUT_DIR"), "/scale3x_comp.wgsl"));
         let bicubic_wgsl = include_str!(concat!(env!("OUT_DIR"), "/bicubic_comp.wgsl"));
-        let aa_nearest_wgsl = include_str!(concat!(env!("OUT_DIR"), "/aa_nearest_comp.wgsl"));
+        let nearest_aa_wgsl = include_str!(concat!(env!("OUT_DIR"), "/nearest_aa_comp.wgsl"));
         let omniscale_wgsl = include_str!(concat!(env!("OUT_DIR"), "/omniscale_comp.wgsl"));
         let hqx_wgsl = include_str!(concat!(env!("OUT_DIR"), "/hqx_comp.wgsl"));
         let xbr_wgsl = include_str!(concat!(env!("OUT_DIR"), "/xbr_comp.wgsl"));
@@ -172,7 +172,7 @@ impl WgpuScalePipeline {
             eagle: create_compute_pipeline(device, eagle_wgsl, "eagle"),
             scale3x: create_compute_pipeline(device, scale3x_wgsl, "scale3x"),
             bicubic: create_compute_pipeline(device, bicubic_wgsl, "bicubic"),
-            aa_nearest: create_compute_pipeline(device, aa_nearest_wgsl, "aa_nearest"),
+            nearest_aa: create_compute_pipeline(device, nearest_aa_wgsl, "nearest_aa"),
             omniscale: create_compute_pipeline(device, omniscale_wgsl, "omniscale"),
             hqx: create_compute_pipeline(device, hqx_wgsl, "hqx"),
             xbr: create_compute_pipeline(device, xbr_wgsl, "xbr"),
@@ -199,7 +199,7 @@ impl WgpuScalePipeline {
             WgpuScaleFilter::Eagle => &self.eagle,
             WgpuScaleFilter::Scale3x => &self.scale3x,
             WgpuScaleFilter::Bicubic => &self.bicubic,
-            WgpuScaleFilter::AaNearest => &self.aa_nearest,
+            WgpuScaleFilter::NearestAa => &self.nearest_aa,
             WgpuScaleFilter::OmniScale => &self.omniscale,
             WgpuScaleFilter::Hqx => &self.hqx,
             WgpuScaleFilter::Xbr => &self.xbr,

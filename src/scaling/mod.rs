@@ -1,6 +1,6 @@
 //! Pixel-art scaling algorithms.
 
-pub mod aa_nearest;
+pub mod nearest_aa;
 pub mod bicubic;
 pub mod bilinear;
 pub mod dcci;
@@ -158,7 +158,7 @@ pub enum ScaleFilter {
     /// Arbitrary-resolution OmniScale legacy variant (scales to display size).
     OmniScaleLegacy,
     /// Anti-aliased nearest neighbor (scales to display size).
-    AaNearestNeighbor,
+    NearestAa,
     /// Kopf-Lischinski vectorization with full B-spline optimization (legacy scanline rasterizer).
     VectorizeLegacy,
     /// Legacy Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
@@ -193,7 +193,8 @@ pub struct FilterInfo {
 }
 
 const REGISTRY: &[FilterInfo] = &[
-    FilterInfo { filter: ScaleFilter::Nearest,          cli_name: "nearest",      display_name: "Nearest",       factor: 0 },
+    FilterInfo { filter: ScaleFilter::Nearest,          cli_name: "nearest",      display_name: "Nearest",        factor: 0 },
+    FilterInfo { filter: ScaleFilter::NearestAa,       cli_name: "nearest-aa",   display_name: "Nearest AA",     factor: 0 },
     FilterInfo { filter: ScaleFilter::Bilinear,         cli_name: "bilinear",     display_name: "Bilinear",      factor: 0 },
     FilterInfo { filter: ScaleFilter::Bicubic,          cli_name: "bicubic",      display_name: "Bicubic",       factor: 0 },
     FilterInfo { filter: ScaleFilter::Epx,              cli_name: "epx",          display_name: "EPX / Scale2x", factor: 2 },
@@ -223,7 +224,6 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::LcdGrid,          cli_name: "lcd-grid",     display_name: "LCD Grid",       factor: 4 },
     FilterInfo { filter: ScaleFilter::OmniScale,        cli_name: "omniscale",    display_name: "OmniScale",      factor: 0 },
     FilterInfo { filter: ScaleFilter::OmniScaleLegacy,  cli_name: "omniscale-legacy", display_name: "OmniScale Legacy", factor: 0 },
-    FilterInfo { filter: ScaleFilter::AaNearestNeighbor, cli_name: "aa-nearest",  display_name: "AA Nearest",     factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeLegacy,  cli_name: "vectorize-legacy", display_name: "Vectorize Legacy", factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeLegacyAdaptive, cli_name: "vectorize-legacy-adaptive", display_name: "Vectorize Legacy Adaptive", factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeDiffusion, cli_name: "vectorize-diffusion", display_name: "Vectorize Diffusion", factor: 0 },
@@ -439,8 +439,8 @@ pub fn cpu_scale(
             let s = omniscale_legacy::scale_to(src, sw, sh, disp_w, disp_h);
             (s, disp_w as u32, disp_h as u32)
         }
-        ScaleFilter::AaNearestNeighbor => {
-            let s = aa_nearest::scale(src, sw, sh, disp_w, disp_h);
+        ScaleFilter::NearestAa => {
+            let s = nearest_aa::scale(src, sw, sh, disp_w, disp_h);
             (s, disp_w as u32, disp_h as u32)
         }
         ScaleFilter::VectorizeGpu => {

@@ -290,7 +290,7 @@ pub fn to_wgpu_filter(filter: ScaleFilter) -> Option<WgpuScaleFilter> {
         ScaleFilter::Eagle => Some(WgpuScaleFilter::Eagle),
         ScaleFilter::Scale3x => Some(WgpuScaleFilter::Scale3x),
         ScaleFilter::Bicubic => Some(WgpuScaleFilter::Bicubic),
-        ScaleFilter::AaNearestNeighbor => Some(WgpuScaleFilter::AaNearest),
+        ScaleFilter::NearestAa => Some(WgpuScaleFilter::NearestAa),
         ScaleFilter::OmniScale => Some(WgpuScaleFilter::OmniScale),
         ScaleFilter::OmniScaleLegacy => Some(WgpuScaleFilter::OmniScaleLegacy),
         ScaleFilter::Hqx(_) => Some(WgpuScaleFilter::Hqx),

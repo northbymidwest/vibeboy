@@ -28,7 +28,7 @@ pub fn gpu_screenshot(
         ScaleFilter::Eagle => init_eagle_compute_pipeline,
         ScaleFilter::Scale3x => init_scale3x_compute_pipeline,
         ScaleFilter::Bicubic => init_bicubic_compute_pipeline,
-        ScaleFilter::AaNearestNeighbor => init_aa_nearest_compute_pipeline,
+        ScaleFilter::NearestAa => init_nearest_aa_compute_pipeline,
         ScaleFilter::Hqx(_) => init_hqx_compute_pipeline,
         ScaleFilter::Xbr(_) => init_xbr_compute_pipeline,
         ScaleFilter::Xbrz(_) => init_xbrz_compute_pipeline,

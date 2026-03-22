@@ -156,7 +156,7 @@ Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
 - `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum (41+ filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 19 filter modules: `aa_nearest`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms (no longer gated behind `not(wasm32)`).
+- `mod.rs`: `ScaleFilter` enum (41+ filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 19 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms (no longer gated behind `not(wasm32)`).
 - `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
 - `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
 - `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
@@ -208,7 +208,7 @@ Unified Game Boy Printer implementation with `PrintOutput` enum:
 All shaders are compute shaders authored in GLSL 4.50. Fragment shaders have been removed; all scaling filters now use compute pipelines.
 
 **Compute shaders (scaling filters):**
-- `aa_nearest.comp`, `bicubic.comp`, `dcci.comp`, `eagle.comp`, `edi.comp`, `epx.comp`, `hqx.comp`, `lcd_grid.comp`, `mmpx.comp`, `nedi.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
+- `nearest_aa.comp`, `bicubic.comp`, `dcci.comp`, `eagle.comp`, `edi.comp`, `epx.comp`, `hqx.comp`, `lcd_grid.comp`, `mmpx.comp`, `nedi.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
 
 **Compute shaders (rasterization):**
 - `vectorize_raster.comp`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
