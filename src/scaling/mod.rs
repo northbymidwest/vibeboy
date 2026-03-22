@@ -445,8 +445,8 @@ pub fn cpu_scale(
         }
         ScaleFilter::VectorizeGpu => {
             let scale_f = (disp_w as f32 / sw as f32).min(disp_h as f32 / sh as f32);
-            let ow = (sw as f32 * scale_f).round() as usize;
-            let oh = (sh as f32 * scale_f).round() as usize;
+            let ow = (sw as f32 * scale_f).ceil() as usize;
+            let oh = (sh as f32 * scale_f).ceil() as usize;
             let s = vectorize_gpu::scale(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
         }
