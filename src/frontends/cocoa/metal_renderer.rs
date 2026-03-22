@@ -538,7 +538,11 @@ impl MetalRenderer {
             ScaleFilter::Hqx(h) => { let f = h.factor(); (src_w * f, src_h * f) }
             ScaleFilter::Xbr(x) => { let f = x.factor(); (src_w * f, src_h * f) }
             ScaleFilter::Xbrz(x) => { let f = x.factor(); (src_w * f, src_h * f) }
-            _ => (disp_w, disp_h),
+            _ => {
+                // Adaptive filters: compute aspect-correct output dimensions
+                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64).max(1.0);
+                ((src_w as f64 * s).round() as u32, (src_h as f64 * s).round() as u32)
+            }
         };
 
         // Create/resize output texture
