@@ -316,7 +316,7 @@ export class WasmEmulator {
     /**
      * Set the active scaling filter by name.
      * Valid names: "nearest", "vectorize", "epx", "eagle", "scale3x",
-     * "bicubic", "aa-nearest", "omniscale".
+     * "bicubic", "nearest-aa", "omniscale".
      * Returns true if the filter was recognized.
      * @param {string} name
      * @returns {boolean}
