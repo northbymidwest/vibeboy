@@ -162,9 +162,8 @@ impl App {
 
         // Attach printer if enabled
         if self.printer_item.as_ref().is_some_and(|p| p.is_checked()) {
-            let output_dir = std::path::Path::new("prints");
             emu.attach_serial_device(
-                Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+                Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
             );
         }
 
@@ -223,9 +222,8 @@ impl App {
                     let now_on = item.is_checked();
                     if let Some(ref mut emu) = self.emu {
                         if now_on {
-                            let output_dir = std::path::Path::new("prints");
                             emu.attach_serial_device(
-                                Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+                                Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
                             );
                             eprintln!("Game Boy Printer connected");
                         } else {
@@ -348,6 +346,9 @@ impl App {
                 }
             }
         }
+
+        // Printer
+        ui_util::check_and_save_prints(emu);
 
         // Render via wgpu
         let gpu = match self.gpu.as_mut() {

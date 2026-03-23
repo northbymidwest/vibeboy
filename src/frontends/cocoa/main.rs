@@ -285,9 +285,8 @@ impl AppState {
                 self.emu.attach_serial_device(Box::new(serial::Disconnected));
                 eprintln!("Game Boy Printer disconnected");
             } else {
-                let output_dir = std::path::Path::new("prints");
                 self.emu.attach_serial_device(
-                    Box::new(printer::Printer::new(output_dir, self.model.cpu_clock_rate()))
+                    Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
                 );
                 eprintln!("Game Boy Printer connected");
             }
@@ -424,6 +423,9 @@ impl AppState {
                 self.emu_time_debt -= self.frame_dur;
             }
         }
+
+        // Printer
+        ui_util::check_and_save_prints(&mut self.emu);
 
         // Rumble
         if self.emu.has_rumble() {
@@ -763,9 +765,8 @@ fn main() {
         rebuild_recent_menu(mtm, &app, &load_recent_roms());
 
         if cli.printer {
-            let output_dir = std::path::Path::new("prints");
             emu.attach_serial_device(
-                Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
+                Box::new(printer::Printer::new(model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
             // Set checkmark on printer menu item
             if let Some(main_menu) = app.mainMenu() {

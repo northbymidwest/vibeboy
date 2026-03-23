@@ -239,8 +239,7 @@ fn main() {
     let mut sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
     if cli.printer {
-        let output_dir = std::path::Path::new("prints");
-        emu.attach_serial_device(Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
+        emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
         eprintln!("Game Boy Printer connected — images will be saved to prints/");
     }
 
@@ -628,6 +627,9 @@ fn main() {
             }
         }
         let emu_elapsed = emu_start.elapsed();
+
+        // ── Printer ──────────────────────────────────────────────────────────
+        ui_util::check_and_save_prints(&mut emu);
 
         // ── Rumble ────────────────────────────────────────────────────────────
         if has_rumble {

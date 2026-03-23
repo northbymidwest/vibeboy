@@ -283,7 +283,7 @@ impl WasmEmulator {
     /// Attach a Game Boy Printer to the serial port.
     pub fn attach_printer(&mut self) {
         let clock_rate = if self.emu.is_double_speed() { 8_388_608 } else { 4_194_304 };
-        self.emu.attach_serial_device(Box::new(Printer::new_memory(clock_rate)));
+        self.emu.attach_serial_device(Box::new(Printer::new(clock_rate)));
     }
 
     /// Check if the printer has a completed print ready for download.

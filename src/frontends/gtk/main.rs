@@ -123,8 +123,7 @@ fn create_emu_state(
     ui_util::load_sav(&mut emu, &rom_path);
 
     if cli.printer {
-        let output_dir = std::path::Path::new("prints");
-        emu.attach_serial_device(Box::new(printer::Printer::new(output_dir, model.cpu_clock_rate())));
+        emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
         eprintln!("Game Boy Printer connected — images will be saved to prints/");
     }
 
@@ -593,6 +592,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                             // Periodic save RAM flush
                             st.sav_flusher.poll(&st.emu);
+
+                            // Printer
+                            ui_util::check_and_save_prints(&mut st.emu);
 
                             // Get frame buffer and dimensions
                             let is_sgb = st.emu.is_sgb();
@@ -1218,9 +1220,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let new_state = !currently_on;
             action.set_state(&new_state.to_variant());
             if new_state {
-                let output_dir = std::path::Path::new("prints");
                 s.emu.attach_serial_device(
-                    Box::new(printer::Printer::new(output_dir, s.model.cpu_clock_rate()))
+                    Box::new(printer::Printer::new(s.model.cpu_clock_rate()))
                 );
                 eprintln!("Game Boy Printer connected");
             } else {

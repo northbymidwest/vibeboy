@@ -414,6 +414,32 @@ pub fn downsample_audio(samples: &[f32], factor: usize) -> Vec<f32> {
     out
 }
 
+/// Poll the printer for completed prints and save them as PNG files to `prints/`.
+/// Call this after stepping the emulator each frame.
+#[cfg(all(not(target_arch = "wasm32"), feature = "image"))]
+pub fn check_and_save_prints(emu: &mut crate::emulator::Emulator) {
+    use crate::printer::Printer;
+    if let Some(printer) = emu.serial_device_as_any_mut().downcast_mut::<Printer>() {
+        while let Some((rgba, w, h)) = printer.take_print() {
+            let dir = Path::new("prints");
+            if !dir.exists() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            // Find next available filename
+            let mut idx = 0u32;
+            let path = loop {
+                let p = dir.join(format!("print_{:04}.png", idx));
+                if !p.exists() { break p; }
+                idx += 1;
+            };
+            match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                Ok(_) => eprintln!("Printer: saved {}", path.display()),
+                Err(e) => eprintln!("Printer: failed to save {}: {}", path.display(), e),
+            }
+        }
+    }
+}
+
 /// Load battery-backed save RAM from a `.sav` file next to the ROM.
 /// Call this after creating the emulator, before the first frame.
 #[cfg(not(target_arch = "wasm32"))]

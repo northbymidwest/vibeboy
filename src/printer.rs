@@ -1,14 +1,10 @@
 /// Game Boy Printer emulation.
 ///
 /// Implements the SerialDevice trait to receive print data over the
-/// serial port and render completed prints. Output mode determines
-/// whether images are saved as PNG files (native) or queued as RGBA
-/// pixel data in memory (web).
+/// serial port and render completed prints. Completed prints are queued
+/// as RGBA pixel data in memory for frontends to retrieve and save.
 
 use crate::serial::SerialDevice;
-
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
 
 const PRINTER_DATA_SIZE: usize = 0x280;
 const PRINTER_MAX_COMMAND_LENGTH: usize = 0x280;
@@ -58,14 +54,8 @@ impl PartialOrd for CommandState {
     }
 }
 
-/// Determines where completed prints are sent.
-pub enum PrintOutput {
-    /// Save PNGs to disk (native only).
-    #[cfg(not(target_arch = "wasm32"))]
-    File { output_dir: PathBuf },
-    /// Queue completed prints as (RGBA pixels, width, height) tuples in memory.
-    Memory,
-}
+/// All prints are queued in memory as (RGBA pixels, width, height) tuples.
+/// Frontends are responsible for saving to disk or presenting to the user.
 
 pub struct Printer {
     command_state: CommandState,
@@ -98,10 +88,6 @@ pub struct Printer {
     /// Print timer (clock ticks remaining)
     time_remaining: u32,
 
-    /// Output mode
-    output: PrintOutput,
-    /// Counter for naming output files (File mode only)
-    print_count: u32,
     /// CPU clock rate for timing calculations
     clock_rate: u32,
 
@@ -110,18 +96,7 @@ pub struct Printer {
 }
 
 impl Printer {
-    /// Create a printer that saves PNGs to the given directory.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn new(output_dir: &Path, clock_rate: u32) -> Self {
-        Self::with_output(PrintOutput::File { output_dir: output_dir.to_path_buf() }, clock_rate)
-    }
-
-    /// Create a printer that queues completed prints in memory.
-    pub fn new_memory(clock_rate: u32) -> Self {
-        Self::with_output(PrintOutput::Memory, clock_rate)
-    }
-
-    fn with_output(output: PrintOutput, clock_rate: u32) -> Self {
+    pub fn new(clock_rate: u32) -> Self {
         Printer {
             command_state: CommandState::Magic1,
             command_id: 0,
@@ -141,8 +116,6 @@ impl Printer {
             compression_run_is_compressed: false,
             idle_time: 0,
             time_remaining: 0,
-            output,
-            print_count: 0,
             clock_rate,
             pending_prints: Vec::new(),
         }
@@ -355,70 +328,10 @@ impl Printer {
         Some((rgba, width, h))
     }
 
-    /// Output the completed print image according to the configured output mode.
+    /// Queue the completed print image for retrieval via `take_print`.
     fn output_image(&mut self) {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
-        if let PrintOutput::File { ref output_dir } = self.output {
-            let dir = output_dir.clone();
-            self.save_image_to_file(&dir);
-            return;
-        }
-
-        if let PrintOutput::Memory = self.output {
-            if let Some(print) = self.render_rgba() {
-                self.pending_prints.push(print);
-            }
-        }
-    }
-
-    /// Save the image as a grayscale PNG file (native only).
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
-    fn save_image_to_file(&mut self, output_dir: &std::path::Path) {
-        let height = self.image_offset / 160;
-        if height == 0 {
-            return;
-        }
-
-        // Get palette from PRINT command data byte 2
-        let palette = if self.command_length >= 3 {
-            self.command_data[2]
-        } else {
-            0xE4 // default: 0,1,2,3
-        };
-
-        // Map 2-bit values through palette to grayscale
-        let gray_levels: [u8; 4] = [0xFF, 0xAA, 0x55, 0x00];
-        let width = 160;
-        let pixels: Vec<u8> = self.image[..self.image_offset]
-            .iter()
-            .map(|&px| {
-                let mapped = (palette >> (px * 2)) & 3;
-                gray_levels[mapped as usize]
-            })
-            .collect();
-
-        // Ensure output directory exists
-        if let Err(e) = std::fs::create_dir_all(output_dir) {
-            log::error!("Failed to create printer output dir: {}", e);
-            return;
-        }
-
-        let path = output_dir.join(format!("print_{:04}.png", self.print_count));
-        self.print_count += 1;
-
-        // Create grayscale PNG using the image crate
-        let img = image::GrayImage::from_raw(width as u32, height as u32, pixels);
-        match img {
-            Some(img) => {
-                if let Err(e) = img.save(&path) {
-                    log::error!("Failed to save printer image: {}", e);
-                } else {
-                    log::info!("Printer: saved {}x{} image to {}", width, height, path.display());
-                }
-            }
-            None => {
-                log::error!("Printer: failed to create image buffer");
-            }
+        if let Some(print) = self.render_rgba() {
+            self.pending_prints.push(print);
         }
     }
 }
