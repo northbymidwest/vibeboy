@@ -11,6 +11,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use super::{Cli, SCALE, GB_W, GB_H, SGB_W, SGB_H, AUDIO_SAMPLE_RATE};
+use super::clock;
 use super::emulator::Emulator;
 use super::model::GbModel;
 use super::scaling;
@@ -149,7 +150,7 @@ impl App {
         self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
-        let mut emu = Emulator::new(rom, boot_rom, self.model, None);
+        let mut emu = Emulator::new(rom, boot_rom, self.model, None, clock::default_clock());
         ui_util::load_sav(&mut emu, path);
         let is_sgb = emu.is_sgb();
         self.src_w = if is_sgb { SGB_W } else { GB_W };

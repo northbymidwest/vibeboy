@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use super::{Cartridge, Instant, unix_timestamp_secs};
+use super::Cartridge;
+use crate::clock::Clock;
 
 pub struct HuC3 {
     rom: Arc<[u8]>,
@@ -12,11 +13,13 @@ pub struct HuC3 {
     rtc_data_out: u8,   // response nybble for reads
     rtc_minutes: u32,   // minutes in day (0-1439)
     rtc_days: u32,      // day counter
-    rtc_base: Instant,
+    rtc_last_secs: u64,
+    clock: Arc<dyn Clock>,
 }
 
 impl HuC3 {
-    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, clock: Arc<dyn Clock>) -> Self {
+        let rtc_last_secs = clock.now_secs();
         HuC3 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
@@ -28,13 +31,15 @@ impl HuC3 {
             rtc_data_out: 0,
             rtc_minutes: 0,
             rtc_days: 0,
-            rtc_base: Instant::now(),
+            rtc_last_secs,
+            clock,
         }
     }
 
     fn advance_rtc(&mut self) {
-        let elapsed = self.rtc_base.elapsed().as_secs();
-        self.rtc_base = Instant::now();
+        let now = self.clock.now_secs();
+        let elapsed = now.saturating_sub(self.rtc_last_secs);
+        self.rtc_last_secs = now;
         let elapsed_mins = elapsed / 60;
         if elapsed_mins == 0 { return; }
         self.rtc_minutes += elapsed_mins as u32;
@@ -63,7 +68,7 @@ impl HuC3 {
         self.rtc_days = (self.rtc_mem[0x13] as u32)
             | ((self.rtc_mem[0x14] as u32) << 4)
             | ((self.rtc_mem[0x15] as u32) << 8);
-        self.rtc_base = Instant::now();
+        self.rtc_last_secs = self.clock.now_secs();
     }
 
     fn handle_rtc_cmd(&mut self, cmd_byte: u8) {
@@ -166,7 +171,7 @@ impl Cartridge for HuC3 {
         data.extend_from_slice(&self.rtc_mem);
         data.extend_from_slice(&self.rtc_minutes.to_le_bytes());
         data.extend_from_slice(&self.rtc_days.to_le_bytes());
-        let ts = unix_timestamp_secs() as i64;
+        let ts = self.clock.unix_timestamp_secs() as i64;
         data.extend_from_slice(&ts.to_le_bytes());
         data
     }
@@ -188,12 +193,12 @@ impl Cartridge for HuC3 {
             let mut buf8 = [0u8; 8];
             buf8.copy_from_slice(&data[rtc_start + 136..rtc_start + 144]);
             let saved_ts = i64::from_le_bytes(buf8);
-            let now_ts = unix_timestamp_secs() as i64;
+            let now_ts = self.clock.unix_timestamp_secs() as i64;
             let elapsed_mins = ((now_ts - saved_ts).max(0) as u64) / 60;
             self.rtc_minutes += elapsed_mins as u32;
             self.rtc_days += self.rtc_minutes / 1440;
             self.rtc_minutes %= 1440;
-            self.rtc_base = Instant::now();
+            self.rtc_last_secs = self.clock.now_secs();
         }
     }
     fn snapshot_state(&self) -> Vec<u8> {
@@ -219,7 +224,7 @@ impl Cartridge for HuC3 {
         self.rtc_data_out = d[138];
         self.rtc_minutes = u32::from_le_bytes([d[139],d[140],d[141],d[142]]);
         self.rtc_days = u32::from_le_bytes([d[143],d[144],d[145],d[146]]);
-        self.rtc_base = Instant::now();
+        self.rtc_last_secs = self.clock.now_secs();
         let ram = &d[147..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);

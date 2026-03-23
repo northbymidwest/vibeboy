@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use super::{Cartridge, Instant, unix_timestamp_secs};
+use super::Cartridge;
+use crate::clock::Clock;
 
 pub struct Tama5 {
     rom: Arc<[u8]>,
@@ -11,13 +12,15 @@ pub struct Tama5 {
     data_out_lo: u8,
     data_out_hi: u8,
     // RTC: TC8521AM — simplified
-    rtc_regs: [u8; 52], // 4 pages × 13 nybble registers
-    rtc_base: Instant,
+    rtc_regs: [u8; 52], // 4 pages x 13 nybble registers
+    rtc_last_secs: u64,
     rtc_seconds: u32,
+    clock: Arc<dyn Clock>,
 }
 
 impl Tama5 {
-    pub(super) fn new(rom: Arc<[u8]>) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, clock: Arc<dyn Clock>) -> Self {
+        let rtc_last_secs = clock.now_secs();
         Tama5 {
             rom,
             rom_bank: 1,
@@ -28,14 +31,16 @@ impl Tama5 {
             data_out_lo: 0,
             data_out_hi: 0,
             rtc_regs: [0; 52],
-            rtc_base: Instant::now(),
+            rtc_last_secs,
             rtc_seconds: 0,
+            clock,
         }
     }
 
     fn advance_rtc(&mut self) {
-        let elapsed = self.rtc_base.elapsed().as_secs() as u32;
-        self.rtc_base = Instant::now();
+        let now = self.clock.now_secs();
+        let elapsed = now.saturating_sub(self.rtc_last_secs) as u32;
+        self.rtc_last_secs = now;
         self.rtc_seconds += elapsed;
     }
 
@@ -140,7 +145,7 @@ impl Cartridge for Tama5 {
         let mut data = Vec::new();
         data.extend_from_slice(&self.tama_ram);
         data.extend_from_slice(&self.rtc_regs);
-        let ts = unix_timestamp_secs() as i64;
+        let ts = self.clock.unix_timestamp_secs() as i64;
         data.extend_from_slice(&ts.to_le_bytes());
         data
     }
@@ -156,11 +161,11 @@ impl Cartridge for Tama5 {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&data[84..92]);
             let saved_ts = i64::from_le_bytes(buf);
-            let now_ts = unix_timestamp_secs() as i64;
+            let now_ts = self.clock.unix_timestamp_secs() as i64;
             let elapsed = (now_ts - saved_ts).max(0) as u32;
             self.rtc_seconds += elapsed;
         }
-        self.rtc_base = Instant::now();
+        self.rtc_last_secs = self.clock.now_secs();
     }
     fn snapshot_state(&self) -> Vec<u8> {
         let mut s = Vec::new();
@@ -186,6 +191,6 @@ impl Cartridge for Tama5 {
         self.data_out_hi = d[40];
         self.rtc_regs.copy_from_slice(&d[41..93]);
         self.rtc_seconds = u32::from_le_bytes([d[93],d[94],d[95],d[96]]);
-        self.rtc_base = Instant::now();
+        self.rtc_last_secs = self.clock.now_secs();
     }
 }

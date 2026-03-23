@@ -183,7 +183,7 @@ impl AppState {
         self.rom_path = path;
         self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-        self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+        self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock());
         self.update_src_dims();
         ui_util::load_sav(&mut self.emu, &self.rom_path);
         self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -224,7 +224,7 @@ impl AppState {
 
         if actions.reset {
             let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-            self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+            self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock());
             self.update_src_dims();
             ui_util::load_sav(&mut self.emu, &self.rom_path);
             self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -255,7 +255,7 @@ impl AppState {
                 let model_name = self.forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
                 eprintln!("Hardware model: {} (boot ROM: {})", model_name,
                     if boot_rom.is_some() { "loaded" } else { "none" });
-                self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None);
+                self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock());
                 self.update_src_dims();
                 ui_util::load_sav(&mut self.emu, &self.rom_path);
                 self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -753,7 +753,7 @@ fn main() {
         ui_util::print_controls();
         eprintln!();
 
-        let mut emu = Emulator::new(rom.clone(), boot_rom, model, snes_rom);
+        let mut emu = Emulator::new(rom.clone(), boot_rom, model, snes_rom, clock::default_clock());
         ui_util::load_sav(&mut emu, &rom_path);
         let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 

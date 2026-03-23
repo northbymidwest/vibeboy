@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod apu;
 pub mod bus;
 pub mod cartridge;
@@ -19,6 +20,7 @@ pub mod scaling;
 
 pub mod vectorize;
 
+pub mod util;
 pub mod ui_util;
 
 #[cfg(target_os = "macos")]

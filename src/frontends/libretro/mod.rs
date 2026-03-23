@@ -9,6 +9,7 @@ use std::os::raw::{c_char, c_uint, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
+use crate::clock;
 use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::ui_util;
@@ -332,7 +333,7 @@ pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
         let model = get_model_from_options().unwrap_or_else(|| detect_model(&rom));
         let boot_rom = load_boot_rom(model);
 
-        let emu = Emulator::new(rom.clone(), boot_rom, model, None);
+        let emu = Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock());
 
         std::ptr::addr_of_mut!(CORE).write(Some(CoreState {
             emu,
@@ -426,7 +427,7 @@ pub extern "C" fn retro_reset() {
         if let Some(core) = core_mut() {
             let model = get_model_from_options().unwrap_or_else(|| detect_model(&core.rom));
             let boot_rom = load_boot_rom(model);
-            core.emu = Emulator::new(core.rom.clone(), boot_rom, model, None);
+            core.emu = Emulator::new(core.rom.clone(), boot_rom, model, None, clock::default_clock());
             core.model = model;
         }
     }

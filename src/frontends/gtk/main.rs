@@ -119,7 +119,7 @@ fn create_emu_state(
     }
     eprintln!();
 
-    let mut emu = emulator::Emulator::new(rom.clone(), boot_rom, model, None);
+    let mut emu = emulator::Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock());
     ui_util::load_sav(&mut emu, &rom_path);
 
     if cli.printer {
@@ -1071,7 +1071,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let boot_rom = load_boot_rom(model, &cli_for_reset);
             let path = s.rom_path.clone();
             s.emu = emulator::Emulator::new(
-                s.rom_data.clone(), boot_rom, model, None,
+                s.rom_data.clone(), boot_rom, model, None, clock::default_clock(),
             );
             ui_util::load_sav(&mut s.emu, &path);
             s.model = model;

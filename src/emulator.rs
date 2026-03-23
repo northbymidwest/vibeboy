@@ -1,4 +1,5 @@
 use crate::bus::Bus;
+use crate::clock::Clock;
 use crate::cpu::{Cpu, Registers};
 use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
@@ -50,6 +51,7 @@ impl Emulator {
         boot_rom: Option<Vec<u8>>,
         model: GbModel,
         snes_rom: Option<Vec<u8>>,
+        clock: std::sync::Arc<dyn Clock>,
     ) -> Self {
         let rom: std::sync::Arc<[u8]> = rom.into();
         let has_boot = boot_rom.is_some();
@@ -59,7 +61,7 @@ impl Emulator {
         } else {
             cpu.regs = Registers::post_boot_with_rom(model, Some(&rom));
         }
-        let mut bus = Bus::new(rom, boot_rom, model);
+        let mut bus = Bus::new(rom, boot_rom, model, clock);
 
         // When no boot ROM, set post-boot IO register values
         if !has_boot {

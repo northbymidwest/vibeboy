@@ -1,5 +1,6 @@
 use crate::apu::Apu;
 use crate::cartridge::{make_cartridge, Cartridge};
+use crate::clock::Clock;
 use crate::joypad::Joypad;
 use crate::model::GbModel;
 use crate::ppu::Ppu;
@@ -189,7 +190,7 @@ fn init_hram(model: GbModel) -> [u8; 0x7F] {
 }
 
 impl Bus {
-    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Self {
+    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel, clock: std::sync::Arc<dyn Clock>) -> Self {
         let boot_rom_active = boot_rom.is_some();
 
         let mut ppu = Ppu::new();
@@ -242,7 +243,7 @@ impl Bus {
         // Compute timer before rom is moved into cartridge
         let timer = if boot_rom_active { Timer::reset(model) } else { Timer::post_boot(model, is_cgb_game, &rom) };
 
-        let mut cart = make_cartridge(rom);
+        let mut cart = make_cartridge(rom, clock);
 
         Bus {
             cart,

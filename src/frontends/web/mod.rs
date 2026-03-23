@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::clock;
 use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
@@ -90,7 +91,7 @@ impl WasmEmulator {
         let checksum = ((rom_arc[0x14E] as u16) << 8) | rom_arc[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
-        let emu = Emulator::new(rom_arc.clone(), None, model, None);
+        let emu = Emulator::new(rom_arc.clone(), None, model, None, clock::default_clock());
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
@@ -413,7 +414,7 @@ impl WasmEmulator {
             "agb" => GbModel::Agb,
             _ => return false,
         };
-        self.emu = Emulator::new(self.rom.clone(), None, model, None);
+        self.emu = Emulator::new(self.rom.clone(), None, model, None, clock::default_clock());
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];

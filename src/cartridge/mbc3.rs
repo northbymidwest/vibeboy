@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use super::{Cartridge, Instant, unix_timestamp_secs};
+use super::Cartridge;
+use crate::clock::Clock;
 
 pub struct Mbc3 {
     rom: Arc<[u8]>,
@@ -13,16 +14,18 @@ pub struct Mbc3 {
     rtc_regs: [u8; 5],     // S, M, H, DL, DH (live counters)
     rtc_latched: [u8; 5],  // latched snapshot for reading
     rtc_latch_ready: bool, // true after writing 0x00, arms latch
-    rtc_base: Instant,     // last time RTC was updated
+    rtc_last_secs: u64,    // last time RTC was updated (seconds from clock)
+    clock: Arc<dyn Clock>,
 }
 
 impl Mbc3 {
-    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool, has_rtc: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool, has_rtc: bool, clock: Arc<dyn Clock>) -> Self {
         // MBC30 detection: ROM > 2MB or RAM > 32KB (only Pokemon Crystal JP)
         let mbc30 = rom.len() > 0x200000 || ram_size > 0x8000;
         if mbc30 {
             log::info!("MBC30 detected (ROM={}KB, RAM={}KB)", rom.len() / 1024, ram_size / 1024);
         }
+        let rtc_last_secs = clock.now_secs();
         Mbc3 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],
@@ -35,7 +38,8 @@ impl Mbc3 {
             rtc_regs: [0; 5],
             rtc_latched: [0; 5],
             rtc_latch_ready: false,
-            rtc_base: Instant::now(),
+            rtc_last_secs,
+            clock,
         }
     }
 
@@ -44,8 +48,9 @@ impl Mbc3 {
         // Don't advance if halted (DH bit 6)
         if self.rtc_regs[4] & 0x40 != 0 { return; }
 
-        let elapsed = self.rtc_base.elapsed().as_secs();
-        self.rtc_base = Instant::now();
+        let now = self.clock.now_secs();
+        let elapsed = now.saturating_sub(self.rtc_last_secs);
+        self.rtc_last_secs = now;
         if elapsed == 0 { return; }
 
         self.add_seconds_to_rtc(elapsed);
@@ -139,7 +144,7 @@ impl Cartridge for Mbc3 {
                 let reg = self.ram_bank - 0x08;
                 // If unhalting (clearing halt bit), reset base so time counts from now
                 if reg == 4 && self.rtc_regs[4] & 0x40 != 0 && val & 0x40 == 0 {
-                    self.rtc_base = Instant::now();
+                    self.rtc_last_secs = self.clock.now_secs();
                 }
                 // Advance RTC before overwriting registers so accumulated time isn't lost
                 self.advance_rtc();
@@ -159,7 +164,7 @@ impl Cartridge for Mbc3 {
             let mut footer = [0u8; 48];
             footer[..5].copy_from_slice(&self.rtc_regs);
             footer[5..10].copy_from_slice(&self.rtc_latched);
-            let ts = unix_timestamp_secs() as i64;
+            let ts = self.clock.unix_timestamp_secs() as i64;
             footer[20..28].copy_from_slice(&ts.to_le_bytes());
             data.extend_from_slice(&footer);
         }
@@ -185,13 +190,13 @@ impl Cartridge for Mbc3 {
                 let mut ts_bytes = [0u8; 8];
                 ts_bytes.copy_from_slice(&rtc[20..28]);
                 let saved_ts = i64::from_le_bytes(ts_bytes);
-                let now_ts = unix_timestamp_secs() as i64;
+                let now_ts = self.clock.unix_timestamp_secs() as i64;
                 let elapsed = (now_ts - saved_ts).max(0) as u64;
                 if elapsed > 0 && self.rtc_regs[4] & 0x40 == 0 {
                     self.add_seconds_to_rtc(elapsed);
                 }
             }
-            self.rtc_base = Instant::now();
+            self.rtc_last_secs = self.clock.now_secs();
         }
     }
     fn snapshot_state(&self) -> Vec<u8> {
@@ -213,7 +218,7 @@ impl Cartridge for Mbc3 {
         self.rtc_latch_ready = d[9] != 0;
         self.rtc_regs.copy_from_slice(&d[10..15]);
         self.rtc_latched.copy_from_slice(&d[15..20]);
-        self.rtc_base = Instant::now();
+        self.rtc_last_secs = self.clock.now_secs();
         let ram = &d[20..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);

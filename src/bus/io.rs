@@ -77,12 +77,6 @@ impl Bus {
             0xFF01 => self.serial.sb = val,
             0xFF02 => {
                 self.serial.write_sc(val);
-                // Print to stdout for test ROMs (write_sc pushes to serial_output)
-                if val & 0x80 != 0 {
-                    print!("{}", self.serial.sb as char);
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                }
             }
             0xFF04..=0xFF07 => {
                 let old_div = self.timer.counter();

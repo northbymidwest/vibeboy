@@ -30,35 +30,7 @@ use pocket_camera::PocketCamera;
 
 use std::sync::Arc;
 
-// Instant and SystemTime are unavailable on wasm32 — provide substitutes.
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-
-#[cfg(not(target_arch = "wasm32"))]
-fn unix_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-#[derive(Clone, Copy)]
-struct Instant(f64);
-
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-impl Instant {
-    fn now() -> Self { Instant(js_sys::Date::now()) }
-    fn elapsed(&self) -> std::time::Duration {
-        let ms = js_sys::Date::now() - self.0;
-        std::time::Duration::from_millis(ms.max(0.0) as u64)
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
-fn unix_timestamp_secs() -> u64 {
-    (js_sys::Date::now() / 1000.0) as u64
-}
+use crate::clock::Clock;
 
 pub trait Cartridge: Send {
     fn read_rom(&self, addr: u16) -> u8;
@@ -92,7 +64,7 @@ pub trait Cartridge: Send {
 }
 
 /// Construct the appropriate cartridge from a ROM image.
-pub fn make_cartridge(rom: Arc<[u8]>) -> Box<dyn Cartridge> {
+pub fn make_cartridge(rom: Arc<[u8]>, clock: Arc<dyn Clock>) -> Box<dyn Cartridge> {
     let cart_type = rom.get(0x0147).copied().unwrap_or(0);
     let ram_size: usize = match rom.get(0x0149).copied().unwrap_or(0) {
         0x01 => 0x0800,
@@ -134,7 +106,7 @@ pub fn make_cartridge(rom: Arc<[u8]>) -> Box<dyn Cartridge> {
         0x0F..=0x13 => {
             let battery = matches!(cart_type, 0x0F | 0x10 | 0x13);
             let has_rtc = matches!(cart_type, 0x0F | 0x10);
-            Box::new(Mbc3::new(rom, ram_size, battery, has_rtc))
+            Box::new(Mbc3::new(rom, ram_size, battery, has_rtc, clock.clone()))
         }
         0x19..=0x1E => {
             let battery = matches!(cart_type, 0x1B | 0x1E);
@@ -144,8 +116,8 @@ pub fn make_cartridge(rom: Arc<[u8]>) -> Box<dyn Cartridge> {
         0x20 => Box::new(Mbc6::new(rom, ram_size)),
         0x22 => Box::new(Mbc7::new(rom)),
         0xFC => Box::new(PocketCamera::new(rom)),
-        0xFD => Box::new(Tama5::new(rom)),
-        0xFE => Box::new(HuC3::new(rom, ram_size)),
+        0xFD => Box::new(Tama5::new(rom, clock.clone())),
+        0xFE => Box::new(HuC3::new(rom, ram_size, clock.clone())),
         0xFF => Box::new(HuC1::new(rom, ram_size)),
         other => {
             log::warn!("Unsupported cart type {:#04X}, using ROM-only", other);

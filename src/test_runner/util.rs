@@ -10,7 +10,7 @@ pub const GB_FB_WIDTH: usize = 160;
 pub const GB_FB_HEIGHT: usize = 144;
 
 pub fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emulator {
-    let mut emu = Emulator::new(rom, boot_rom, model, None);
+    let mut emu = Emulator::new(rom, boot_rom, model, None, vibeboy::clock::default_clock());
     emu.set_headless(true);
     emu
 }
