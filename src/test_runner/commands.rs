@@ -7,6 +7,11 @@ use vibeboy::vectorize;
 use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
 use crate::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
 
+fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
+    let (paths, w, h, bg_color) = vectorize::vectorize_paths(pixels, width, height);
+    crate::svg::render_svg(&paths, w, h, bg_color)
+}
+
 fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
     let mut rgb = Vec::with_capacity(w * h * 3);
     for &pixel in pixels {
@@ -20,7 +25,7 @@ fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
 
 fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
     if format == "svg" || out.ends_with(".svg") {
-        let svg = vectorize::vectorize_to_svg(pixels, w, h);
+        let svg = vectorize_to_svg(pixels, w, h);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
     } else {
@@ -71,7 +76,7 @@ fn vectorize_and_save(
     out: &str, format: &str, scale: usize, use_gpu: bool,
 ) {
     if out.ends_with(".svg") {
-        let svg = vectorize::vectorize_to_svg(pixels, width, height);
+        let svg = vectorize_to_svg(pixels, width, height);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!(
             "Vectorized {}x{} image -> {} ({} bytes)",

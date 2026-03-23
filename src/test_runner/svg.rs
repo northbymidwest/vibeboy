@@ -1,6 +1,6 @@
 //! SVG serialization: convert color paths to an SVG document using the `svg` crate.
 
-use super::contour::{ColorPath, PathSegment};
+use vibeboy::vectorize::contour::{ColorPath, PathSegment};
 
 /// Render a collection of color paths as a complete SVG document string.
 pub fn render_svg(paths: &[ColorPath], width: usize, height: usize, bg_color: u32) -> String {

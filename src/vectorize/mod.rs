@@ -15,8 +15,6 @@ pub mod graph;
 #[cfg(feature = "gpu")]
 pub mod gpu_rasterize;
 pub mod rasterize;
-#[cfg(feature = "svg")]
-pub mod svg;
 pub mod voronoi;
 
 /// Which vectorization pipeline to use.
@@ -120,12 +118,6 @@ impl VectorizeCache {
 ///
 /// `pixels` is a flat array of ARGB u32 values (0x00RRGGBB).
 /// Returns a complete SVG document as a string.
-#[cfg(feature = "svg")]
-pub fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
-    let (paths, w, h, bg_color) = vectorize_paths(pixels, width, height);
-    svg::render_svg(&paths, w, h, bg_color)
-}
-
 /// Vectorize a pixel buffer and rasterize at the given integer scale.
 /// Detects nearest-neighbor upscaling and collapses to native resolution first,
 /// then scales output relative to native dimensions.
@@ -185,7 +177,7 @@ fn vectorize_core_inner(
 
 /// Full vectorization pipeline with upscale collapse detection.
 /// Returns (paths, native_width, native_height, bg_color).
-fn vectorize_paths(
+pub fn vectorize_paths(
     pixels: &[u32], width: usize, height: usize,
 ) -> (Vec<contour::ColorPath>, usize, usize, u32) {
     // Step 0: Detect and collapse nearest-neighbor upscaling

@@ -4,6 +4,7 @@ mod harness;
 mod harnesses;
 #[path = "model.rs"]
 mod test_model;
+mod svg;
 mod util;
 
 use clap::{Parser, Subcommand};
