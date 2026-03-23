@@ -234,7 +234,7 @@ impl AppState {
 
         if let Some(slot) = actions.select_slot {
             self.current_slot = slot;
-            eprintln!("Slot {} selected", (self.current_slot + 1) % 10);
+            eprintln!("Slot {} selected", self.current_slot);
             update_slot_checkmarks(app, slot);
         }
 
@@ -932,7 +932,7 @@ fn main() {
                         ui_util::load_state_from_slot(&mut state.emu, &state.rom_path, state.current_slot);
                     } else if let Some(slot) = keycode_to_slot(keycode) {
                         state.current_slot = slot;
-                        eprintln!("Slot {} selected", (state.current_slot + 1) % 10);
+                        eprintln!("Slot {} selected", state.current_slot);
                         update_slot_checkmarks(&app, slot);
                     }
 

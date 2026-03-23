@@ -82,7 +82,7 @@ pub fn print_controls() {
     eprintln!("  Period      — Frame advance  (step one frame while paused)");
     eprintln!("  F5 / F7     — Save / Load state");
     eprintln!("  F9          — Screenshot (raw + scaled)");
-    eprintln!("  1-9         — Select state slot");
+    eprintln!("  0-9         — Select state slot");
     eprintln!("  Escape      — Quit");
 }
 

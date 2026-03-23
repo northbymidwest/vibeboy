@@ -473,7 +473,7 @@ fn main() {
                     };
                     if let Some(s) = slot {
                         current_slot = s;
-                        eprintln!("Slot {} selected", (current_slot + 1) % 10);
+                        eprintln!("Slot {} selected", current_slot);
                     }
                 }
                 Event::ControllerDeviceAdded { which, .. } => {
