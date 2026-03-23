@@ -629,13 +629,19 @@ impl AppState {
                 }
                 vec_scaled = Vec::new();
                 (&[] as &[u32], 0, 0)
-            } else if let Some((s, w, h)) = scaling::cpu_scale(
-                self.scale_filter, raw_src, src_w, src_h, disp_w, disp_h,
-            ) {
-                vec_scaled = s;
-                (&vec_scaled, w as usize, h as usize)
             } else {
-                (raw_src, src_w, src_h)
+                // Compute aspect-correct dimensions for adaptive filters
+                let scale = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                let fit_w = (src_w as f64 * scale).round() as usize;
+                let fit_h = (src_h as f64 * scale).round() as usize;
+                if let Some((s, w, h)) = scaling::cpu_scale(
+                    self.scale_filter, raw_src, src_w, src_h, fit_w, fit_h,
+                ) {
+                    vec_scaled = s;
+                    (&vec_scaled, w as usize, h as usize)
+                } else {
+                    (raw_src, src_w, src_h)
+                }
             };
 
         if gpu_rendered {
