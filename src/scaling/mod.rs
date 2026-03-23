@@ -21,9 +21,9 @@ pub mod xbr;
 pub mod xbrz;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod sdl;
-#[cfg(any(feature = "gpu", feature = "winit-ui", feature = "web", feature = "gtk-ui"))]
+#[cfg(feature = "gpu")]
 pub mod wgpu_vectorize;
-#[cfg(any(feature = "web", feature = "gtk-ui", feature = "winit-ui"))]
+#[cfg(feature = "gpu")]
 pub mod wgpu_scale;
 
 /// Sample a pixel with clamped coordinates.

@@ -15,7 +15,7 @@ pub mod graph;
 #[cfg(feature = "gpu")]
 pub mod gpu_rasterize;
 pub mod rasterize;
-#[cfg(feature = "native")]
+#[cfg(feature = "svg")]
 pub mod svg;
 pub mod voronoi;
 
@@ -120,7 +120,7 @@ impl VectorizeCache {
 ///
 /// `pixels` is a flat array of ARGB u32 values (0x00RRGGBB).
 /// Returns a complete SVG document as a string.
-#[cfg(feature = "native")]
+#[cfg(feature = "svg")]
 pub fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
     let (paths, w, h, bg_color) = vectorize_paths(pixels, width, height);
     svg::render_svg(&paths, w, h, bg_color)

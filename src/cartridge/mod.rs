@@ -42,11 +42,11 @@ fn unix_timestamp_secs() -> u64 {
         .as_secs()
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
 #[derive(Clone, Copy)]
 struct Instant(f64);
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
 impl Instant {
     fn now() -> Self { Instant(js_sys::Date::now()) }
     fn elapsed(&self) -> std::time::Duration {
@@ -55,7 +55,7 @@ impl Instant {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
 fn unix_timestamp_secs() -> u64 {
     (js_sys::Date::now() / 1000.0) as u64
 }

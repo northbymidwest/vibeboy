@@ -293,9 +293,10 @@ const SHADERS: &[ShaderInfo] = &[
 ];
 
 fn main() {
-    // Compile shaders when GPU features are enabled
+    // Compile shaders when any GPU feature is enabled
     if std::env::var("CARGO_FEATURE_SDL3_GPU_SHADERS").is_err()
         && std::env::var("CARGO_FEATURE_WEB").is_err()
+        && std::env::var("CARGO_FEATURE_GPU").is_err()
     {
         return;
     }
