@@ -357,7 +357,7 @@ impl Printer {
 
     /// Output the completed print image according to the configured output mode.
     fn output_image(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
         if let PrintOutput::File { ref output_dir } = self.output {
             let dir = output_dir.clone();
             self.save_image_to_file(&dir);
@@ -372,7 +372,7 @@ impl Printer {
     }
 
     /// Save the image as a grayscale PNG file (native only).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
     fn save_image_to_file(&mut self, output_dir: &std::path::Path) {
         let height = self.image_offset / 160;
         if height == 0 {

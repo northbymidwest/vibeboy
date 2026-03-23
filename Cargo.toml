@@ -100,6 +100,7 @@ gtk-ui = ["gtk4", "cairo-rs", "clap", "env_logger", "cpal", "image", "svg", "gil
 gtk-ui-linux = ["gtk-ui"]
 gtk-ui-macos = ["gtk-ui"]
 web = ["wgpu", "bytemuck", "svg", "image", "wasm-bindgen", "web-sys", "js-sys", "console_log", "wasm-bindgen-futures", "console_error_panic_hook"]
+libretro = []
 gdk4-macos = ["dep:gdk4-macos"]
 gdk4-wayland = ["dep:gdk4-wayland"]
 gdk4-x11 = ["dep:gdk4-x11"]

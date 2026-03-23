@@ -27,3 +27,7 @@ pub mod macos_accel;
 #[cfg(feature = "web")]
 #[path = "frontends/web/mod.rs"]
 pub mod web;
+
+#[cfg(feature = "libretro")]
+#[path = "frontends/libretro/mod.rs"]
+pub mod libretro;
