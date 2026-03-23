@@ -111,7 +111,7 @@
     </label>
   </div>
   <div id="controls">
-    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Backspace: Rewind &nbsp; Tab: Fast-fwd &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 1-9: Slot &nbsp; | &nbsp; Gamepad
+    Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Backspace: Rewind &nbsp; Tab: Fast-fwd &nbsp; Space: Pause &nbsp; Period: Step &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 0-9: Slot &nbsp; | &nbsp; Gamepad
   </div>
   <!-- Hidden elements for webcam capture -->
   <video id="cam-video" autoplay playsinline style="display:none;"></video>
@@ -532,7 +532,20 @@ function frame(timestamp) {
   // Step emulation at GB native rate, independent of display refresh
   let stepped = false;
 
-  if (rewindHeld) {
+  if (paused && !stepOneFrame) {
+    // Paused — consume time but don't step
+    emuTime = 0;
+  } else if (paused && stepOneFrame) {
+    // Frame advance — step exactly one frame
+    if (cameraActive) feedCameraFrame();
+    emu.step_frame();
+    if (audioWorklet) pushAudioSamples();
+    stepOneFrame = false;
+    emuTime = 0;
+    stepped = true;
+    checkForPrint();
+    updateRumble();
+  } else if (rewindHeld) {
     // Rewind at 3x speed with reverse audio
     for (let i = 0; i < 3; i++) {
       emu.rewind_one_frame();
@@ -680,7 +693,7 @@ function saveState() {
     for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
     try {
       localStorage.setItem(key, btoa(bin));
-      status.textContent = 'State saved to slot ' + (currentSlot + 1);
+      status.textContent = 'State saved to slot ' + currentSlot;
     } catch (e) {
       status.textContent = 'Save state failed: ' + e.message;
     }
@@ -694,14 +707,18 @@ function loadState() {
   if (saved) {
     const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
     if (emu.load_state_from_bytes(currentSlot, bytes)) {
-      status.textContent = 'State loaded from slot ' + (currentSlot + 1);
+      status.textContent = 'State loaded from slot ' + currentSlot;
     } else {
       status.textContent = 'Failed to load state (incompatible version?)';
     }
   } else {
-    status.textContent = 'Slot ' + (currentSlot + 1) + ' is empty';
+    status.textContent = 'Slot ' + currentSlot + ' is empty';
   }
 }
+
+// Pause / frame advance
+let paused = false;
+let stepOneFrame = false;
 
 // Keyboard input
 let rewindHeld = false;
@@ -711,9 +728,18 @@ let kbFastFwdHeld = false;
 
 document.addEventListener('keydown', e => {
   if (!emu) return;
-  if (e.code >= 'Digit1' && e.code <= 'Digit9') {
-    currentSlot = parseInt(e.code.charAt(5)) - 1;
-    status.textContent = 'Slot ' + (currentSlot + 1) + ' selected';
+  if (e.code >= 'Digit0' && e.code <= 'Digit9') {
+    currentSlot = parseInt(e.code.charAt(5));
+    status.textContent = 'Slot ' + currentSlot + ' selected';
+    e.preventDefault(); return;
+  }
+  if (e.code === 'Space') {
+    paused = !paused;
+    status.textContent = paused ? 'Paused' : 'Resumed';
+    e.preventDefault(); return;
+  }
+  if (e.code === 'Period') {
+    if (paused) stepOneFrame = true;
     e.preventDefault(); return;
   }
   if (e.code === 'F5') { saveState(); e.preventDefault(); return; }
