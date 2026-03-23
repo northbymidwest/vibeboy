@@ -268,7 +268,6 @@ impl Bus {
             }
         }
         self.apu.set_div_counter(new_div);
-        self.apu.set_double_speed(self.double_speed);
 
         if ppu_cycles > 0 {
             let ppu_flags = self.ppu.step(ppu_cycles);

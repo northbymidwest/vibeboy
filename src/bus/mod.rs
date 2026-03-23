@@ -618,6 +618,7 @@ impl Bus {
     pub fn do_speed_toggle(&mut self) {
         self.double_speed = !self.double_speed;
         self.ppu.double_speed = self.double_speed;
+        self.apu.set_double_speed(self.double_speed);
         if self.double_speed {
             self.key1 = 0x80;
         } else {

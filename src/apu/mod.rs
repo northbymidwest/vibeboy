@@ -164,6 +164,8 @@ pub struct Apu {
     prev_left: i32,
     #[serde(skip)]
     prev_right: i32,
+    #[serde(skip)]
+    prev_channel_outputs: u32,
 
     // High-pass filter state (models the coupling capacitor on real hardware)
     #[serde(skip)]
@@ -239,6 +241,7 @@ impl Apu {
             blip: BlipBuf::new(),
             prev_left: 0,
             prev_right: 0,
+            prev_channel_outputs: u32::MAX,
             hpf_left: 0.0,
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
@@ -283,6 +286,7 @@ impl Apu {
             blip: BlipBuf::new(),
             prev_left: 0,
             prev_right: 0,
+            prev_channel_outputs: u32::MAX,
             hpf_left: 0.0,
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
@@ -352,7 +356,18 @@ impl Apu {
     }
 
     /// Record a mix delta to the BLIP buffer if the mixed output has changed.
+    #[inline]
     fn record_mix_delta(&mut self) {
+        // Quick check: skip mix_integer if no channel output changed
+        let o = (self.ch1.output() as u32)
+            | ((self.ch2.output() as u32) << 8)
+            | ((self.ch3.output() as u32) << 16)
+            | ((self.ch4.output() as u32) << 24);
+        if o == self.prev_channel_outputs {
+            return;
+        }
+        self.prev_channel_outputs = o;
+
         let (new_l, new_r) = self.mix_integer();
         let dl = new_l - self.prev_left;
         let dr = new_r - self.prev_right;
@@ -430,7 +445,7 @@ impl Apu {
     // ── Public interface ───────────────────────────────────────────────────
 
     pub fn drain_samples(&mut self) -> Vec<f32> {
-        self.sample_buf.drain(..).collect()
+        std::mem::replace(&mut self.sample_buf, Vec::with_capacity(3200))
     }
 
     pub fn set_ch1_post_boot_volume(&mut self) {
