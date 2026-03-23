@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::{Cartridge, Instant, unix_timestamp_secs};
 
 pub struct Mbc3 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     rom_bank: usize,
     ram_bank: usize, // 0-3 (or 0-7 for MBC30) = RAM, 0x08-0x0C = RTC registers
@@ -16,7 +17,7 @@ pub struct Mbc3 {
 }
 
 impl Mbc3 {
-    pub(super) fn new(rom: Vec<u8>, ram_size: usize, battery: bool, has_rtc: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool, has_rtc: bool) -> Self {
         // MBC30 detection: ROM > 2MB or RAM > 32KB (only Pokemon Crystal JP)
         let mbc30 = rom.len() > 0x200000 || ram_size > 0x8000;
         if mbc30 {

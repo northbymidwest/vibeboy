@@ -29,7 +29,7 @@ pub struct Emulator {
     /// SNES subsystem for SGB LLE (None = HLE fallback)
     snes: Option<SnesSys>,
     /// Packets queued while SNES BIOS was initializing (with shade buffer snapshots)
-    snes_packet_queue: Vec<([u8; 16], Vec<u8>)>,
+    snes_packet_queue: Vec<([u8; 16], std::sync::Arc<[u8]>)>,
     frame_count: u64,
     /// Delta-compressed rewind buffer.
     rewind_buffer: RewindBuffer,
@@ -46,11 +46,12 @@ impl Emulator {
     /// with hardware reset registers and executes the boot ROM. Otherwise the CPU
     /// starts at PC=0x0100 with post-boot register values for the given model.
     pub fn new(
-        rom: Vec<u8>,
+        rom: impl Into<std::sync::Arc<[u8]>>,
         boot_rom: Option<Vec<u8>>,
         model: GbModel,
         snes_rom: Option<Vec<u8>>,
     ) -> Self {
+        let rom: std::sync::Arc<[u8]> = rom.into();
         let has_boot = boot_rom.is_some();
         let mut cpu = Cpu::new();
         if has_boot {
@@ -320,8 +321,8 @@ impl Emulator {
             vec![]
         };
 
-        // 2. Snapshot current shade buffer for any new packets
-        let shade_snapshot = self.bus.ppu.shade_buffer.clone();
+        // 2. Snapshot current shade buffer for any new packets (Arc = cheap clone)
+        let shade_snapshot: std::sync::Arc<[u8]> = self.bus.ppu.shade_buffer.clone().into();
 
         // Queue packets during first ~30 frames (SPC upload + init), then replay
         if snes.frame_count < 32 {
@@ -450,6 +451,10 @@ impl Emulator {
             }
         }
         self.bus.ppu.frame_buffer()
+    }
+
+    pub fn model(&self) -> crate::model::GbModel {
+        self.model
     }
 
     pub fn is_sgb(&self) -> bool {

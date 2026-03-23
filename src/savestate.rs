@@ -24,8 +24,9 @@ const fn fnv1a(data: &[u8]) -> u32 {
 
 const fn layout_hash() -> u32 {
     let desc = concat!(
+        "v3;",  // Bump this when changing serialization format or struct layout
         "Cpu:regs.a,f,b,c,d,e,h,l,sp,pc,ime,ime_pending,halted,halt_bug,speed_switch;",
-        "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites;",
+        "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites,mgb_mode;",
         "Apu:ch1-4,frame_seq,master,nr50-52,blip;",
         "Timer:div,tima,tma,tac,internal;",
         "Joypad:select,state;",
@@ -36,6 +37,7 @@ const fn layout_hash() -> u32 {
         "boot_rom_active,model,ff72-75,dmg_compat,serial,oam_dma,hdma,sgb,cart_state;",
         "Sgb:palettes,attrs,border,mask,packets;",
         "Snes:cpu65816,wram,ppu_regs,dma,icd2,io_regs;",
+        "Cart:mbc_state,ram,rom_bank,ram_bank,rtc;",
         "Snapshot:cpu,bus,snes,frame_count;",
     );
     let sizes: [usize; 12] = [

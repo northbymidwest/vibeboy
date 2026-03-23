@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct Mmm01 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     battery: bool,
     mapped: bool,
@@ -18,7 +19,7 @@ pub struct Mmm01 {
 }
 
 impl Mmm01 {
-    pub(super) fn new(rom: Vec<u8>, ram_size: usize, battery: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool) -> Self {
         Mmm01 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],

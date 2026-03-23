@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::{Cartridge, Instant, unix_timestamp_secs};
 
 pub struct Tama5 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     rom_bank: usize,
     tama_ram: [u8; 32], // 32 nybbles internal RAM
     reg_select: u8,
@@ -16,7 +17,7 @@ pub struct Tama5 {
 }
 
 impl Tama5 {
-    pub(super) fn new(rom: Vec<u8>) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>) -> Self {
         Tama5 {
             rom,
             rom_bank: 1,

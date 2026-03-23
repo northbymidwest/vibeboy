@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct Mbc1 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     rom_bank: usize,
     ram_bank: usize,
@@ -16,7 +17,7 @@ pub struct Mbc1 {
 }
 
 impl Mbc1 {
-    pub(super) fn new(rom: Vec<u8>, ram_size: usize, battery: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool) -> Self {
         // Detect MBC1M multicart: Nintendo logo at 0x104 also appears at 0x40104
         let multicart = rom.len() >= 0x44000
             && rom.len() >= 0x40134

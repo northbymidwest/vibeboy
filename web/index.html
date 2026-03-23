@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VibeBoy</title>
 <link rel="icon" href="favicon.ico">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -83,18 +84,18 @@
       <option value="">-- Select a built-in ROM --</option>
     </select>
   </div>
-  <div id="drop-zone">
+  <div id="drop-zone" role="button" aria-label="Drop or select a ROM file">
     Drop a .gb / .gbc ROM here<br>
     <small>or click to browse, or select a built-in ROM above</small>
-    <input type="file" id="file-input" accept=".gb,.gbc,.sgb,.bin">
+    <input type="file" id="file-input" accept=".gb,.gbc,.sgb,.bin" aria-label="Select ROM file">
   </div>
   <div id="canvas-wrapper">
-    <canvas id="screen" width="160" height="144"></canvas>
-    <canvas id="screen-2d" width="160" height="144" style="display:none;"></canvas>
+    <canvas id="screen" width="160" height="144" role="img" aria-label="Game Boy screen"></canvas>
+    <canvas id="screen-2d" width="160" height="144" style="display:none;" role="img" aria-label="Game Boy screen"></canvas>
   </div>
   <div id="status"></div>
   <div id="filter-bar" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
-    <select id="model-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
+    <select id="model-select" aria-label="Hardware model" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
       <option value="auto">Auto</option>
       <option value="dmg">DMG</option>
       <option value="mgb">MGB</option>
@@ -103,7 +104,7 @@
       <option value="cgb">CGB</option>
       <option value="agb">AGB</option>
     </select>
-    <select id="filter-select" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
+    <select id="filter-select" aria-label="Scaling filter" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
       <!-- Populated from Rust filter registry via filter_registry_json() -->
     </select>
     <label style="color:#aaa; font-size:0.85em; cursor:pointer; user-select:none;">
@@ -275,6 +276,12 @@ let audioCtx = null;
 let audioWorklet = null;
 
 async function initAudio() {
+  // Close previous audio context if re-initializing (e.g., loading a new ROM)
+  if (audioCtx) {
+    try { audioCtx.close(); } catch (_) {}
+    audioCtx = null;
+    audioWorklet = null;
+  }
   try {
     audioCtx = new AudioContext({ sampleRate: 96000, latencyHint: 'interactive' });
 
@@ -371,6 +378,22 @@ const camCtx = camCanvas.getContext('2d', { willReadFrequently: true });
 let cameraActive = false;
 const camGrayscale = new Uint8Array(128 * 112);
 
+function stopCamera() {
+  if (cameraActive && camVideo.srcObject) {
+    camVideo.srcObject.getTracks().forEach(t => t.stop());
+    camVideo.srcObject = null;
+    cameraActive = false;
+  }
+}
+
+function stopAccelerometer() {
+  if (deviceMotionHandler) {
+    window.removeEventListener('devicemotion', deviceMotionHandler);
+    deviceMotionHandler = null;
+    accelActive = false;
+  }
+}
+
 async function initCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -413,6 +436,12 @@ async function startEmulator(romBytes) {
   }
   lastTimestamp = 0;
   emuTime = 0;
+  paused = false;
+  stepOneFrame = false;
+  rewindHeld = false;
+  fastForwardHeld = false;
+  kbRewindHeld = false;
+  kbFastFwdHeld = false;
 
   emu = new WasmEmulator(new Uint8Array(romBytes));
   const w = emu.width();
@@ -421,7 +450,7 @@ async function startEmulator(romBytes) {
   // Init audio (requires user gesture — file pick/drop counts)
   await initAudio();
 
-  // Try WebGPU
+  // Try WebGPU (re-init GPU on each ROM load to get a clean surface)
   if (navigator.gpu) {
     try {
       canvas.width = w * 4;
@@ -430,7 +459,7 @@ async function startEmulator(romBytes) {
       useGpu = true;
       gpuAvailable = true;
       status.textContent = 'Rendering: WebGPU vectorize';
-      // Also prepare 2D canvas for NN toggle
+      // Also prepare 2D canvas for CPU toggle
       canvas2d.width = w;
       canvas2d.height = h;
       ctx = canvas2d.getContext('2d');
@@ -457,6 +486,10 @@ async function startEmulator(romBytes) {
       console.log('Loaded save from localStorage:', key);
     }
   }
+
+  // Clean up previous camera/accelerometer before re-init
+  stopCamera();
+  stopAccelerometer();
 
   // Attach printer, start webcam and accelerometer if needed
   emu.attach_printer();
@@ -499,6 +532,14 @@ const modelSelect = document.getElementById('model-select');
 modelSelect.addEventListener('change', () => {
   if (!emu) return;
   emu.set_model(modelSelect.value);
+  // Reload save RAM from localStorage (set_model creates a fresh emulator)
+  if (emu.has_battery()) {
+    const saved = localStorage.getItem(emu.save_key());
+    if (saved) {
+      const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
+      emu.load_save(bytes);
+    }
+  }
   // Reset timing to avoid catchup burst after model switch
   lastTimestamp = 0;
   emuTime = 0;
@@ -643,9 +684,12 @@ function frame(timestamp) {
 // Accelerometer (MBC7 / Kirby Tilt 'n' Tumble)
 let accelActive = false;
 let accelX = 0, accelY = 0;
+let deviceMotionHandler = null;
 
 function initAccelerometer() {
   if (!emu || !emu.has_accelerometer()) return;
+  // Avoid adding duplicate listeners
+  if (deviceMotionHandler) return;
 
   // Try DeviceMotion API (mobile devices)
   if (window.DeviceMotionEvent) {
@@ -661,13 +705,15 @@ function initAccelerometer() {
 }
 
 function enableDeviceMotion() {
-  window.addEventListener('devicemotion', e => {
+  if (deviceMotionHandler) return;
+  deviceMotionHandler = e => {
     if (e.accelerationIncludingGravity) {
       accelX = (e.accelerationIncludingGravity.x || 0) / 9.81;
       accelY = (e.accelerationIncludingGravity.y || 0) / 9.81;
       accelActive = true;
     }
-  });
+  };
+  window.addEventListener('devicemotion', deviceMotionHandler);
   console.log('DeviceMotion accelerometer active for MBC7');
 }
 

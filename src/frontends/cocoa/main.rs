@@ -64,6 +64,9 @@ pub(crate) const K_F5: u16 = 96;
 pub(crate) const K_F7: u16 = 98;
 pub(crate) const K_TAB: u16 = 48;
 pub(crate) const K_DELETE: u16 = 51;
+const K_SPACE: u16 = 49;
+const K_PERIOD: u16 = 47;
+const K_MINUS: u16 = 27;
 
 fn keycode_to_slot(keycode: u16) -> Option<usize> {
     match keycode {
@@ -112,7 +115,7 @@ struct Cli {
 
 struct AppState {
     emu: Emulator,
-    rom: Vec<u8>,
+    rom: std::sync::Arc<[u8]>,
     rom_path: PathBuf,
     model: GbModel,
     forced_model: Option<GbModel>,
@@ -122,12 +125,16 @@ struct AppState {
     key_map: std::collections::HashMap<u16, u8>,
     keys_down: HashSet<u16>,
     gamepad: GamepadState,
+    // audio_unit must be declared before audio_ring so it's dropped first
+    // (stops the callback before the ring buffer is freed)
+    audio_unit: Option<audio::AudioUnitHandle>,
     audio_ring: SharedAudioBuffer,
     camera: Option<CameraCapture>,
     camera_buf: [u8; 128 * 112],
     accel_source: AccelSource,
     sav_flusher: ui_util::SavFlusher,
     paused: bool,
+    step_one_frame: bool,
     current_slot: usize,
     force_cpu: bool,
     fps: ui_util::FpsCounter,
@@ -136,6 +143,7 @@ struct AppState {
     overlay_emu_ms: f64,
     emu_time_debt: Duration,
     frame_dur: Duration,
+    frame_copy: Vec<u32>,
     bgra_buf: Vec<u32>,
     src_w: usize,
     src_h: usize,
@@ -160,7 +168,7 @@ impl AppState {
     unsafe fn load_rom(
         &mut self,
         path: PathBuf,
-        rom_data: Vec<u8>,
+        rom_data: impl Into<std::sync::Arc<[u8]>>,
         mtm: MainThreadMarker,
         app: &NSApplication,
         window: &NSWindow,
@@ -171,7 +179,7 @@ impl AppState {
         window.setTitle(&title);
         add_recent_rom(&path.to_string_lossy());
         rebuild_recent_menu(mtm, app, &load_recent_roms());
-        self.rom = rom_data;
+        self.rom = rom_data.into();
         self.rom_path = path;
         self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
@@ -259,11 +267,7 @@ impl AppState {
         if let Some(tag) = actions.select_filter {
             if let Some(new_filter) = filter_tag_to_filter(tag) {
                 self.scale_filter = new_filter;
-                self.vec_cache = match self.scale_filter {
-                    scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-                    scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-                    _ => None,
-                };
+                self.vec_cache = self.scale_filter.new_vectorize_cache();
                 update_filter_checkmarks(app, tag);
                 eprintln!("Filter: {:?}", self.scale_filter);
             }
@@ -302,7 +306,7 @@ impl AppState {
         if actions.toggle_fps {
             self.show_fps_overlay = !self.show_fps_overlay;
             if let Some(main_menu) = app.mainMenu() {
-                if let Some(view_menu_item) = main_menu.itemAtIndex(4) {
+                if let Some(view_menu_item) = main_menu.itemAtIndex(2) {
                     if let Some(view_submenu) = view_menu_item.submenu() {
                         if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
                             let state = if self.show_fps_overlay { NSControlStateValueOn } else { NSControlStateValueOff };
@@ -352,16 +356,22 @@ impl AppState {
             }
         }
 
-        // Accelerometer
+        // Accelerometer: prioritize gamepad, fall back to MacBook built-in
         {
             const CENTER: f32 = 0x81D0 as u16 as f32;
             const RANGE: f32 = 0x70 as u16 as f32;
-            let accel_reading = self.gamepad.accel
-                .map(|(x, y, z)| (x, y, z))
-                .or_else(|| poll_accel(&self.accel_source));
-            if let Some((x, y, _z)) = accel_reading {
-                let mbc7_x = (CENTER + (-x) * RANGE).clamp(0.0, 65535.0) as u16;
-                let mbc7_y = (CENTER + y * RANGE).clamp(0.0, 65535.0) as u16;
+            let reading = if let Some((x, y, _z)) = self.gamepad.accel {
+                // GCMotion uses Apple coordinate system: negate X for MBC7
+                Some((-x, y))
+            } else if let Some((x, y, _z)) = poll_accel(&self.accel_source) {
+                // MacBook built-in: same Apple coordinate system, negate X
+                Some((-x, y))
+            } else {
+                None
+            };
+            if let Some((gx, gy)) = reading {
+                let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
+                let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
                 self.emu.set_accelerometer(mbc7_x, mbc7_y);
             }
         }
@@ -371,38 +381,48 @@ impl AppState {
     unsafe fn step_emulation(&mut self, frame_start: &mut Instant) {
         let backspace_held = self.keys_down.contains(&K_DELETE) || self.gamepad.l_shoulder;
         let fast_forward = self.keys_down.contains(&K_TAB) || self.gamepad.r_shoulder;
+        let slow_motion = self.keys_down.contains(&K_MINUS);
         self.emu.set_rewinding(backspace_held);
 
         // Accumulate elapsed time
         self.emu_time_debt += frame_start.elapsed();
         *frame_start = Instant::now();
 
-        if !self.paused {
-            if backspace_held {
-                let mut all_audio = Vec::new();
-                for _ in 0..3 {
-                    self.emu.rewind_one_frame();
-                    all_audio.extend_from_slice(&self.emu.drain_audio_samples());
-                }
-                ui_util::reverse_audio(&mut all_audio);
-                let resampled = ui_util::downsample_audio(&all_audio, 3);
-                if let Ok(mut ring) = self.audio_ring.lock() {
-                    ring.write(&resampled);
-                }
-                self.emu_time_debt = Duration::ZERO;
-            } else if fast_forward {
-                for _ in 0..4 {
-                    self.emu.step_frame();
-                }
-                self.emu_time_debt = Duration::ZERO;
-            } else {
-                while self.emu_time_debt >= self.frame_dur {
-                    self.emu.step_frame();
-                    self.emu_time_debt -= self.frame_dur;
-                }
+        if self.paused && self.step_one_frame {
+            self.emu.step_frame();
+            self.step_one_frame = false;
+            self.emu_time_debt = Duration::ZERO;
+        } else if self.paused {
+            self.emu_time_debt = Duration::ZERO;
+        } else if backspace_held {
+            let mut all_audio = Vec::with_capacity(19200);
+            for _ in 0..3 {
+                self.emu.rewind_one_frame();
+                all_audio.extend_from_slice(&self.emu.drain_audio_samples());
+            }
+            ui_util::reverse_audio(&mut all_audio);
+            let resampled = ui_util::downsample_audio(&all_audio, 3);
+            if let Ok(mut ring) = self.audio_ring.lock() {
+                ring.write(&resampled);
+            }
+            self.emu_time_debt = Duration::ZERO;
+        } else if fast_forward {
+            for _ in 0..4 {
+                self.emu.step_frame();
+            }
+            self.emu_time_debt = Duration::ZERO;
+        } else if slow_motion {
+            // Half speed: step at 2x the normal frame duration
+            let slow_dur = self.frame_dur * 2;
+            while self.emu_time_debt >= slow_dur {
+                self.emu.step_frame();
+                self.emu_time_debt -= slow_dur;
             }
         } else {
-            self.emu_time_debt = Duration::ZERO;
+            while self.emu_time_debt >= self.frame_dur {
+                self.emu.step_frame();
+                self.emu_time_debt -= self.frame_dur;
+            }
         }
 
         // Rumble
@@ -450,16 +470,18 @@ impl AppState {
             return;
         }
 
-        // Copy frame data to a local buffer to avoid borrowing self.emu across &mut self calls.
+        // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
         let src_len = self.src_w * self.src_h;
         let raw_src: &[u32] = if self.is_sgb {
             self.emu.sgb_composited_frame()
         } else {
             self.emu.frame_buffer()
         };
-        // Reuse bgra_buf temporarily as a frame copy buffer; it will be overwritten later if needed.
-        let mut frame_copy = Vec::with_capacity(src_len);
-        frame_copy.extend_from_slice(&raw_src[..src_len]);
+        self.frame_copy.clear();
+        self.frame_copy.extend_from_slice(&raw_src[..src_len]);
+
+        // Take frame_copy out of self to avoid borrow conflict with &mut self methods
+        let frame_copy = std::mem::take(&mut self.frame_copy);
 
         let gpu_rendered = if self.force_cpu {
             false
@@ -470,6 +492,9 @@ impl AppState {
         if !gpu_rendered {
             self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
         }
+
+        // Put it back for reuse next frame
+        self.frame_copy = frame_copy;
     }
 
     /// Try GPU-accelerated rendering for the current filter.
@@ -680,10 +705,10 @@ fn main() {
             open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
 
-        let rom = fs::read(&rom_path).unwrap_or_else(|e| {
+        let rom: std::sync::Arc<[u8]> = fs::read(&rom_path).unwrap_or_else(|e| {
             eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
             std::process::exit(1);
-        });
+        }).into();
 
         let forced_model: Option<GbModel> = cli.model;
         let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
@@ -750,11 +775,7 @@ fn main() {
 
         // Scaling filter
         let scale_filter = string_to_filter(&cli.filter);
-        let vec_cache: Option<vectorize::VectorizeCache> = match scale_filter {
-            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-            _ => None,
-        };
+        let vec_cache = scale_filter.new_vectorize_cache();
         if scale_filter != scaling::ScaleFilter::Nearest {
             eprintln!("  Filter: {:?}", scale_filter);
         }
@@ -842,7 +863,7 @@ fn main() {
         // ── Audio ────────────────────────────────────────────────────────────
         let audio_ring: SharedAudioBuffer =
             Arc::new(Mutex::new(AudioRingBuffer::new(96_000 / 60 * 4 * 2))); // ~4 frames stereo
-        let _audio_unit = setup_audio(&audio_ring);
+        let audio_unit = setup_audio(&audio_ring);
 
         // ── Camera ───────────────────────────────────────────────────────────
         let camera = if emu.has_camera() {
@@ -871,12 +892,14 @@ fn main() {
             key_map,
             keys_down: HashSet::new(),
             gamepad: GamepadState::new(),
+            audio_unit,
             audio_ring,
             camera,
             camera_buf: [0u8; 128 * 112],
             accel_source,
             sav_flusher,
             paused: false,
+            step_one_frame: false,
             current_slot: 0,
             force_cpu: false,
             fps: ui_util::FpsCounter::new(),
@@ -885,6 +908,7 @@ fn main() {
             overlay_emu_ms: 0.0,
             emu_time_debt: Duration::ZERO,
             frame_dur,
+            frame_copy: Vec::with_capacity((src_w * src_h) as usize),
             bgra_buf: Vec::with_capacity((tex_w * tex_h) as usize),
             src_w,
             src_h,
@@ -926,7 +950,12 @@ fn main() {
 
                     state.keys_down.insert(keycode);
 
-                    if keycode == K_F5 {
+                    if keycode == K_SPACE {
+                        state.paused = !state.paused;
+                        eprintln!("{}", if state.paused { "Paused" } else { "Resumed" });
+                    } else if keycode == K_PERIOD {
+                        if state.paused { state.step_one_frame = true; }
+                    } else if keycode == K_F5 {
                         ui_util::save_state_to_slot(&mut state.emu, &state.rom_path, state.current_slot);
                     } else if keycode == K_F7 {
                         ui_util::load_state_from_slot(&mut state.emu, &state.rom_path, state.current_slot);

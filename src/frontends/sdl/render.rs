@@ -23,13 +23,15 @@ pub(super) fn cpu_scale_frame(
     filter: &scaling::ScaleFilter,
     src: &[u32], sw: usize, sh: usize,
     disp_w: usize, disp_h: usize,
-    legacy_cache: &mut Option<crate::vectorize::VectorizeCache>,
     vec_cache: &mut Option<crate::vectorize::VectorizeCache>,
 ) -> (Vec<u32>, u32, u32) {
-    // Legacy vectorize uses its own cache-based path
-    if matches!(filter, scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive) {
+    // Vectorize filters that use cache-based path rendering
+    if matches!(filter,
+        scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
+        | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
+    {
         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let cache = legacy_cache.as_mut().unwrap();
+        let cache = vec_cache.as_mut().unwrap();
         let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
         return (raster.to_vec(), w as u32, h as u32);
     }
@@ -40,18 +42,11 @@ pub(super) fn cpu_scale_frame(
         let (raster, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
         return (raster, w as u32, h as u32);
     }
-    // Shared-chain vectorization: gap-free rendering using shared boundary chains
-    if matches!(filter, scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive) {
-        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-        let cache = vec_cache.as_mut().unwrap();
-        let (raster, w, h) = cache.rasterize(src, sw, sh, scale);
-        return (raster.to_vec(), w as u32, h as u32);
-    }
     // Spline-diffusion: vectorize for paths, then Gaussian diffusion with spline boundaries
     if matches!(filter, scaling::ScaleFilter::VectorizeSplineDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive) {
         let scale_f = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
         let scale = scale_f.round().max(1.0) as usize;
-        let cache = legacy_cache.as_mut().unwrap();
+        let cache = vec_cache.as_mut().unwrap();
         let (paths, bg_color) = cache.get_paths(src, sw, sh);
         let (raster, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
             paths, src, sw, sh, bg_color, scale,

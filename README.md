@@ -101,7 +101,7 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **Printer**: Game Boy Printer emulation (saves PNG to `prints/`, or browser download)
 - **Scaling**: 41+ filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, MMPX, LCD Grid, and more — all GPU filters use compute shaders
 - **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
-- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, WebAssembly/WebGPU browser
+- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, GTK4, WebAssembly/WebGPU browser
 - **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, built-in ROM selector with public domain games, all GPU filters via dropdown, model selection, gamepad support, accelerometer (DeviceMotion for MBC7), AudioWorklet at 96kHz, webcam for Game Boy Camera, localStorage save persistence
 
 ## Test Runner

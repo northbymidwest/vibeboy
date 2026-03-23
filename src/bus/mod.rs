@@ -189,7 +189,7 @@ fn init_hram(model: GbModel) -> [u8; 0x7F] {
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Self {
+    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Self {
         let boot_rom_active = boot_rom.is_some();
 
         let mut ppu = Ppu::new();
@@ -317,6 +317,9 @@ impl Bus {
             ff74: self.ff74,
             ff75: self.ff75,
             dmg_compat: self.dmg_compat,
+            ppu_tick_debt: self.ppu_tick_debt,
+            ppu_deferred: self.ppu_deferred,
+            dma_halt_cycles: self.dma_halt_cycles,
         }
     }
 
@@ -347,6 +350,9 @@ impl Bus {
         self.ff74 = s.ff74;
         self.ff75 = s.ff75;
         self.dmg_compat = s.dmg_compat;
+        self.ppu_tick_debt = s.ppu_tick_debt;
+        self.ppu_deferred = s.ppu_deferred;
+        self.dma_halt_cycles = s.dma_halt_cycles;
     }
 
     // ── Public accessors for Cpu ───────────────────────────────────────────────

@@ -239,6 +239,21 @@ impl ScaleFilter {
         REGISTRY.iter().find(|e| e.filter == self).expect("filter not in registry")
     }
 
+    /// Create a new VectorizeCache appropriate for this filter, or None if not needed.
+    pub fn new_vectorize_cache(self) -> Option<crate::vectorize::VectorizeCache> {
+        match self {
+            Self::Vectorize | Self::VectorizeSplineDiffusion
+                => Some(crate::vectorize::VectorizeCache::new(false)),
+            Self::VectorizeAdaptive | Self::VectorizeSplineDiffusionAdaptive
+                => Some(crate::vectorize::VectorizeCache::new(true)),
+            Self::VectorizeLegacy | Self::VectorizeDiffusion
+                => Some(crate::vectorize::VectorizeCache::new_legacy(false)),
+            Self::VectorizeLegacyAdaptive
+                => Some(crate::vectorize::VectorizeCache::new_legacy(true)),
+            _ => None,
+        }
+    }
+
     /// All valid CLI name strings (includes "none" as alias for "nearest").
     pub fn all_names() -> Vec<&'static str> {
         let mut names: Vec<&str> = REGISTRY.iter().map(|e| e.cli_name).collect();

@@ -261,7 +261,6 @@ impl MetalRenderer {
         }
         enc.endEncoding();
         cmd.commit();
-        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -338,7 +337,6 @@ impl MetalRenderer {
         }
         enc.endEncoding();
         cmd.commit();
-        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -450,7 +448,6 @@ impl MetalRenderer {
         }
 
         cmd.commit();
-        cmd.waitUntilCompleted();
 
         self.tex_w = out_w;
         self.tex_h = out_h;
@@ -592,7 +589,6 @@ impl MetalRenderer {
         }
         encoder.endEncoding();
         cmd.commit();
-        cmd.waitUntilCompleted();
 
         Some((self.compute_out_tex.as_deref()?, out_w, out_h))
     }

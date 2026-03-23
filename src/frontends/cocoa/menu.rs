@@ -663,15 +663,13 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
 
     for slot in 0..=9usize {
         let title = format!("Slot {}", slot);
-        let key = format!("{}", slot);
         let item = menu_item_with_tag(
             mtm,
             &title,
             sel!(menuAction:),
-            &key,
+            "",
             MENU_TAG_SLOT_BASE + slot as isize,
         );
-        item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
         if slot == 0 {
             set_checkmark(&item, true); // default slot
         }

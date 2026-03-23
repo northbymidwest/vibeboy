@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -10,7 +11,7 @@ enum EepromState {
 }
 
 pub struct Mbc7 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     rom_bank: usize,
     enable_a: bool,
     enable_b: bool,
@@ -35,7 +36,7 @@ pub struct Mbc7 {
 }
 
 impl Mbc7 {
-    pub(super) fn new(rom: Vec<u8>) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>) -> Self {
         Mbc7 {
             rom,
             rom_bank: 1,

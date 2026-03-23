@@ -28,6 +28,8 @@ use huc3::HuC3;
 use tama5::Tama5;
 use pocket_camera::PocketCamera;
 
+use std::sync::Arc;
+
 // Instant and SystemTime are unavailable on wasm32 — provide substitutes.
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -90,7 +92,7 @@ pub trait Cartridge: Send {
 }
 
 /// Construct the appropriate cartridge from a ROM image.
-pub fn make_cartridge(rom: Vec<u8>) -> Box<dyn Cartridge> {
+pub fn make_cartridge(rom: Arc<[u8]>) -> Box<dyn Cartridge> {
     let cart_type = rom.get(0x0147).copied().unwrap_or(0);
     let ram_size: usize = match rom.get(0x0149).copied().unwrap_or(0) {
         0x01 => 0x0800,

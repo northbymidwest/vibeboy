@@ -1,13 +1,14 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct RomRam {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     battery: bool,
 }
 
 impl RomRam {
-    pub(super) fn new(rom: Vec<u8>, battery: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, battery: bool) -> Self {
         RomRam { rom, ram: vec![0u8; 0x2000], battery }
     }
 }

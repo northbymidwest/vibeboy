@@ -247,19 +247,7 @@ fn main() {
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
-    let _scales_to_display = scale_filter.scales_to_display();
-    let mut legacy_cache = match scale_filter {
-        scaling::ScaleFilter::VectorizeLegacy
-        | scaling::ScaleFilter::VectorizeSplineDiffusion => Some(crate::vectorize::VectorizeCache::new_legacy(false)),
-        scaling::ScaleFilter::VectorizeLegacyAdaptive
-        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive => Some(crate::vectorize::VectorizeCache::new_legacy(true)),
-        _ => None,
-    };
-    let mut vec_cache = match scale_filter {
-        scaling::ScaleFilter::Vectorize => Some(crate::vectorize::VectorizeCache::new(false)),
-        scaling::ScaleFilter::VectorizeAdaptive => Some(crate::vectorize::VectorizeCache::new(true)),
-        _ => None,
-    };
+    let mut vec_cache = scale_filter.new_vectorize_cache();
     let filter_factor = scale_filter.factor().max(1); // 0 = adaptive, treat as 1× for initial sizing
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
@@ -602,7 +590,7 @@ fn main() {
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
             // Rewind at 3x speed — collect audio from all 3 frames
-            let mut all_audio = Vec::new();
+            let mut all_audio = Vec::with_capacity(19200);
             for _ in 0..3 {
                 emu.rewind_one_frame();
                 all_audio.extend_from_slice(&emu.drain_audio_samples());
@@ -707,7 +695,7 @@ fn main() {
                     GpuRenderMode::SplineDiffusion => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
-                        let (paths, bg_color) = legacy_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
                         let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
                             vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
                         if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
@@ -733,7 +721,7 @@ fn main() {
                     GpuRenderMode::Vectorize => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                        let (paths, bg_color) = legacy_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
+                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
                         let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
                             vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
                         if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
@@ -780,7 +768,7 @@ fn main() {
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let (scaled, fw, fh) = cpu_scale_frame(
-                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut legacy_cache, &mut vec_cache,
+                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
                         );
                         gpu.upload_and_blit(&scaled, fw, fh, &window);
                     }
@@ -802,7 +790,7 @@ fn main() {
                 } else { (0, 0) };
 
                 let (scaled, fw, fh) = cpu_scale_frame(
-                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut legacy_cache, &mut vec_cache,
+                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
                 );
                 let (fw, fh) = (fw as usize, fh as usize);
                 let final_src = if fw == sw && fh == sh { raw_src } else { &scaled };

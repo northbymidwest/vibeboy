@@ -113,9 +113,9 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 
 ### Key data flow
 - **CPU** (`cpu/mod.rs`) executes SM83 opcodes, calls `bus.tick_mcycle()` between M-cycles, reads/writes memory via `bus.read_byte()`/`bus.write_byte()`
-- **Bus** (`bus.rs`) owns all subsystems and implements the memory map. `tick_mcycle()` steps Timer, PPU, APU, Joypad, OAM DMA, and HDMA each M-cycle
-- **PPU** (`ppu/mod.rs`) is a pixel FIFO renderer ticked 1 T-cycle at a time internally via `step(4)`. VRAM and OAM live in the Ppu struct; Bus delegates access. DMG models use classic green LCD palette (`DMG_SHADES`).
-- **APU** (`apu.rs`) uses a DIV-coupled frame sequencer; Bus detects DIV falling edges and calls `apu.div_event()`
+- **Bus** (`bus/mod.rs`) owns all subsystems and implements the memory map. `tick_mcycle()` steps Timer, PPU, APU, Joypad, OAM DMA, and HDMA each M-cycle
+- **PPU** (`ppu/mod.rs`) is a pixel FIFO renderer ticked 1 T-cycle at a time internally via `step(4)`. VRAM and OAM live in the Ppu struct; Bus delegates access. DMG models use classic green LCD palette (`DMG_SHADES`), MGB uses grayscale (`MGB_SHADES`).
+- **APU** (`apu/mod.rs`) uses a DIV-coupled frame sequencer; Bus detects DIV falling edges and calls `apu.div_event()`
 
 ### PPU timing model
 - DMG line-start has a 5-dot state machine (`line_start_pending`, dots 1-5) that delays `visible_ly`, `ly_for_comparison`, and `mode_for_interrupt` transitions to match hardware-accurate timing
@@ -197,6 +197,12 @@ Unified Game Boy Printer implementation with `PrintOutput` enum:
 - `audio.rs`: Audio output
 - `camera.rs`: Webcam capture
 - `menu.rs`: Native menu integration
+
+**GTK4 frontend** (`src/frontends/gtk/`):
+- `main.rs`: GTK4 window with menus, file dialog, filter selection, gamepad, printer
+- `gpu.rs`: GLArea/glow OpenGL rendering
+- `compute.rs`: wgpu GLES backend for GPU compute filters (Linux only)
+- `audio.rs`: Audio output
 
 **WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/index.html`):
 - `lib.rs`: Library crate re-exporting core emulator modules. Exposes `wgpu_vectorize` for the `web` feature. `scaling` module available on all platforms (no longer gated behind `not(wasm32)`).
@@ -326,11 +332,12 @@ open vectorize-tests/comparison.html
 
 ### Binaries
 
-The project produces four native binaries plus a WebAssembly library:
+The project produces five native binaries plus a WebAssembly library:
 
 - **`vibeboy`** (`src/frontends/sdl/main.rs`) -- Main emulator with SDL3 window, audio, and input handling
 - **`vibeboy_cocoa`** (`src/frontends/cocoa/main.rs`) -- Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
 - **`vibeboy_winit`** (`src/frontends/winit/main.rs`) -- Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
+- **`vibeboy_gtk`** (`src/frontends/gtk/main.rs`) -- GTK4 UI frontend (requires `gtk-ui` feature, with GPU compute on Linux via wgpu GLES)
 - **`test_runner`** (`src/test_runner/main.rs`) -- Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
 - **WebAssembly** (`src/lib.rs` + `src/frontends/web/mod.rs`) -- Browser frontend via wasm-bindgen (requires `web` feature). Builds to `pkg/vibeboy_bg.wasm` + JS glue. Served from `web/index.html`. Deployed to GitHub Pages via the `gh-pages` branch.
 

@@ -74,6 +74,9 @@ pub struct BusSnapshot {
     pub ff74: u8,
     pub ff75: u8,
     pub dmg_compat: bool,
+    pub ppu_tick_debt: u32,
+    pub ppu_deferred: u32,
+    pub dma_halt_cycles: u32,
 }
 
 /// Complete emulator snapshot.

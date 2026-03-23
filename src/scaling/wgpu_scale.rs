@@ -34,6 +34,34 @@ pub enum WgpuScaleFilter {
 }
 
 impl WgpuScaleFilter {
+    /// Map a ScaleFilter to the corresponding WgpuScaleFilter, if one exists.
+    pub fn from_scale_filter(f: super::ScaleFilter) -> Option<Self> {
+        use super::ScaleFilter as SF;
+        match f {
+            SF::Nearest => Some(Self::Nearest),
+            SF::Bilinear => Some(Self::Bilinear),
+            SF::Bicubic => Some(Self::Bicubic),
+            SF::Epx | SF::Scale2x | SF::Scale4x => Some(Self::Epx),
+            SF::Scale3x => Some(Self::Scale3x),
+            SF::Eagle => Some(Self::Eagle),
+            SF::Hqx(_) => Some(Self::Hqx),
+            SF::Xbr(_) | SF::SuperXbr => Some(Self::Xbr),
+            SF::Xbrz(_) => Some(Self::Xbrz),
+            SF::NearestAa => Some(Self::NearestAa),
+            SF::OmniScale => Some(Self::OmniScale),
+            SF::OmniScaleLegacy => Some(Self::OmniScaleLegacy),
+            SF::Edi => Some(Self::Edi),
+            SF::Nedi => Some(Self::Nedi),
+            SF::Dcci => Some(Self::Dcci),
+            SF::Mmpx => Some(Self::Mmpx),
+            SF::LcdGrid => Some(Self::LcdGrid),
+            SF::Sai2x => Some(Self::Sai2x),
+            SF::Super2xSai => Some(Self::Super2xSai),
+            SF::SuperEagle => Some(Self::SuperEagle),
+            _ => None,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "nearest" => Some(Self::Nearest),

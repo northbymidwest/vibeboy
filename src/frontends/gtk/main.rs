@@ -65,7 +65,7 @@ struct EmuState {
     rgba_buf: Vec<u8>,
     scaled_buf: Vec<u32>,
     rom_path: PathBuf,
-    rom_data: Vec<u8>,
+    rom_data: std::sync::Arc<[u8]>,
     audio_ring: std::sync::Arc<std::sync::Mutex<audio::AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     vec_cache: Option<vectorize::VectorizeCache>,
@@ -102,7 +102,7 @@ fn load_boot_rom(model: GbModel, cli: &Cli) -> Option<Vec<u8>> {
 }
 
 fn create_emu_state(
-    rom: Vec<u8>,
+    rom: std::sync::Arc<[u8]>,
     rom_path: PathBuf,
     cli: &Cli,
     initial_filter: scaling::ScaleFilter,
@@ -526,7 +526,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         }
 
                         if st.emu.is_rewinding() {
-                            let mut all_audio = Vec::new();
+                            let mut all_audio = Vec::with_capacity(19200);
                             for _ in 0..3 {
                                 st.emu.rewind_one_frame();
                                 all_audio.extend_from_slice(&st.emu.drain_audio_samples());
@@ -892,8 +892,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         let start_frame_timer = start_frame_timer.clone();
         let cli = Rc::clone(&cli_rc);
         move |path: PathBuf, filter: scaling::ScaleFilter| {
-            let rom = match std::fs::read(&path) {
-                Ok(r) => r,
+            let rom: std::sync::Arc<[u8]> = match std::fs::read(&path) {
+                Ok(r) => r.into(),
                 Err(e) => {
                     eprintln!("Failed to read ROM '{}': {}", path.display(), e);
                     return;
@@ -1073,6 +1073,12 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             );
             ui_util::load_sav(&mut s.emu, &path);
             s.model = model;
+            let is_sgb = s.emu.is_sgb();
+            s.src_w = if is_sgb { 256 } else { 160 };
+            s.src_h = if is_sgb { 224 } else { 144 };
+            s.sav_flusher = ui_util::SavFlusher::new(&s.emu, &path);
+            s.paused = false;
+            s.step_one_frame = false;
             eprintln!("Reset");
         }
     });
@@ -1188,13 +1194,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     let mut st = state_filter.borrow_mut();
                     if let Some(s) = st.as_mut() {
                         s.scale_filter = filter;
-                        s.vec_cache = match filter {
-                            scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-                            scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-                            scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
-                            scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
-                            _ => None,
-                        };
+                        s.vec_cache = filter.new_vectorize_cache();
                         action.set_state(&name.to_variant());
                         eprintln!("Filter: {:?}", filter);
                     }

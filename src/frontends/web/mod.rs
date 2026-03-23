@@ -9,15 +9,8 @@ use crate::scaling::wgpu_vectorize::{
     WgpuVectorizePipeline, WgpuDiffusionRasterizer, WgpuSplineDiffusionPipeline,
 };
 use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
+use crate::ui_util;
 use crate::vectorize;
-
-fn auto_detect_model(rom: &[u8]) -> GbModel {
-    if rom.len() > 0x143 && (rom[0x143] & 0x80) != 0 {
-        GbModel::Cgb
-    } else {
-        GbModel::Dmg
-    }
-}
 
 const BLIT_SHADER: &str = r#"
 struct VsOutput {
@@ -47,13 +40,13 @@ fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
 #[wasm_bindgen]
 pub struct WasmEmulator {
     emu: Emulator,
-    rom: Vec<u8>,
+    rom: std::sync::Arc<[u8]>,
     rgba_buf: Vec<u8>,
     audio_buf: Vec<f32>,
     last_print_w: u32,
     last_print_h: u32,
     save_key: String,
-    filter: scaling::ScaleFilter,
+    scale_filter: scaling::ScaleFilter,
     vec_cache: Option<vectorize::VectorizeCache>,
     // GPU state (initialized async after construction)
     gpu: Option<GpuState>,
@@ -86,30 +79,30 @@ impl WasmEmulator {
             return Err(JsValue::from_str("ROM too small"));
         }
 
-        let rom_vec = rom.to_vec();
-        let model = auto_detect_model(&rom_vec);
+        let rom_arc: std::sync::Arc<[u8]> = rom.to_vec().into();
+        let model = ui_util::auto_detect_model(&rom_arc);
 
         // Derive save key from ROM title (0x134..0x143) + global checksum (0x14E..0x14F)
-        let title: String = rom_vec[0x134..0x143].iter()
+        let title: String = rom_arc[0x134..0x143].iter()
             .take_while(|&&b| b != 0)
             .map(|&b| if b.is_ascii_alphanumeric() || b == b' ' { b as char } else { '_' })
             .collect();
-        let checksum = ((rom_vec[0x14E] as u16) << 8) | rom_vec[0x14F] as u16;
+        let checksum = ((rom_arc[0x14E] as u16) << 8) | rom_arc[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
-        let emu = Emulator::new(rom_vec.clone(), None, model, None);
+        let emu = Emulator::new(rom_arc.clone(), None, model, None);
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
         Ok(WasmEmulator {
-            rom: rom_vec,
+            rom: rom_arc,
             emu,
             rgba_buf: vec![0u8; w * h * 4],
             audio_buf: Vec::new(),
             last_print_w: 0,
             last_print_h: 0,
             save_key,
-            filter: scaling::ScaleFilter::VectorizeGpu,
+            scale_filter: scaling::ScaleFilter::VectorizeGpu,
             vec_cache: None,
             gpu: None,
         })
@@ -391,15 +384,8 @@ impl WasmEmulator {
     /// Returns true if the filter was recognized.
     pub fn set_filter(&mut self, name: &str) -> bool {
         if let Some(f) = scaling::ScaleFilter::from_name(name) {
-            self.filter = f;
-            // Initialize vectorize cache for filters that need it
-            self.vec_cache = match f {
-                scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
-                scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
-                scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-                scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-                _ => None,
-            };
+            self.scale_filter = f;
+            self.vec_cache = f.new_vectorize_cache();
             true
         } else {
             false
@@ -408,7 +394,7 @@ impl WasmEmulator {
 
     /// Get the CLI name of the current filter.
     pub fn current_filter(&self) -> String {
-        self.filter.cli_name().to_string()
+        self.scale_filter.cli_name().to_string()
     }
 
     /// Set the hardware model and restart emulation.
@@ -416,7 +402,7 @@ impl WasmEmulator {
     /// Returns true if the model was recognized.
     pub fn set_model(&mut self, name: &str) -> bool {
         let model = match name {
-            "auto" => auto_detect_model(&self.rom),
+            "auto" => ui_util::auto_detect_model(&self.rom),
             "dmg0" => GbModel::Dmg0,
             "dmg" => GbModel::Dmg,
             "mgb" => GbModel::Mgb,
@@ -466,7 +452,7 @@ impl WasmEmulator {
         });
 
         let owned_tex;
-        let out_tex: &wgpu::Texture = match self.filter {
+        let out_tex: &wgpu::Texture = match self.scale_filter {
             // Full 6-stage GPU vectorize pipeline
             ScaleFilter::VectorizeGpu => {
                 gpu.vectorize.encode(
@@ -508,7 +494,7 @@ impl WasmEmulator {
             // Spline-diffusion (2-pass: vectorize_to_buf + spline_diffusion)
             ScaleFilter::VectorizeSplineDiffusion | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
                 let sc = scale.round().max(1.0) as u32;
-                let adaptive = matches!(self.filter, ScaleFilter::VectorizeSplineDiffusionAdaptive);
+                let adaptive = matches!(self.scale_filter, ScaleFilter::VectorizeSplineDiffusionAdaptive);
                 let cache = self.vec_cache.get_or_insert_with(|| {
                     vectorize::VectorizeCache::new(adaptive)
                 });
@@ -529,29 +515,9 @@ impl WasmEmulator {
             }
             // All other filters: map to WgpuScaleFilter compute pipeline
             other => {
-                let wgpu_filter = match other {
-                    ScaleFilter::Nearest => WgpuScaleFilter::Nearest,
-                    ScaleFilter::Bilinear => WgpuScaleFilter::Bilinear,
-                    ScaleFilter::Bicubic => WgpuScaleFilter::Bicubic,
-                    ScaleFilter::Epx => WgpuScaleFilter::Epx,
-                    ScaleFilter::Scale2x | ScaleFilter::Scale4x => WgpuScaleFilter::Epx,
-                    ScaleFilter::Scale3x => WgpuScaleFilter::Scale3x,
-                    ScaleFilter::Eagle => WgpuScaleFilter::Eagle,
-                    ScaleFilter::Hqx(_) => WgpuScaleFilter::Hqx,
-                    ScaleFilter::Xbr(_) | ScaleFilter::SuperXbr => WgpuScaleFilter::Xbr,
-                    ScaleFilter::Xbrz(_) => WgpuScaleFilter::Xbrz,
-                    ScaleFilter::NearestAa => WgpuScaleFilter::NearestAa,
-                    ScaleFilter::OmniScale => WgpuScaleFilter::OmniScale,
-                    ScaleFilter::OmniScaleLegacy => WgpuScaleFilter::OmniScaleLegacy,
-                    ScaleFilter::Edi => WgpuScaleFilter::Edi,
-                    ScaleFilter::Nedi => WgpuScaleFilter::Nedi,
-                    ScaleFilter::Dcci => WgpuScaleFilter::Dcci,
-                    ScaleFilter::Mmpx => WgpuScaleFilter::Mmpx,
-                    ScaleFilter::LcdGrid => WgpuScaleFilter::LcdGrid,
-                    ScaleFilter::Sai2x => WgpuScaleFilter::Sai2x,
-                    ScaleFilter::Super2xSai => WgpuScaleFilter::Super2xSai,
-                    ScaleFilter::SuperEagle => WgpuScaleFilter::SuperEagle,
-                    _ => return false, // unsupported filter
+                let wgpu_filter = match WgpuScaleFilter::from_scale_filter(other) {
+                    Some(f) => f,
+                    None => return false,
                 };
                 let factor = other.factor();
                 let (ow, oh) = if factor > 0 {
@@ -656,12 +622,12 @@ impl WasmEmulator {
         let fit_h = (src_h as f64 * scale_fit).round() as usize;
 
         // Try CPU scaling
-        let (pixels, pw, ph) = if matches!(self.filter,
+        let (pixels, pw, ph) = if matches!(self.scale_filter,
             scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
             | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
         {
             let cache = self.vec_cache.get_or_insert_with(|| {
-                match self.filter {
+                match self.scale_filter {
                     scaling::ScaleFilter::Vectorize => vectorize::VectorizeCache::new(false),
                     scaling::ScaleFilter::VectorizeAdaptive => vectorize::VectorizeCache::new(true),
                     scaling::ScaleFilter::VectorizeLegacyAdaptive => vectorize::VectorizeCache::new_legacy(true),
@@ -671,7 +637,7 @@ impl WasmEmulator {
             let (raster, vw, vh) = cache.rasterize(&fb, src_w, src_h, scale_fit);
             (raster.to_vec(), vw, vh)
         } else if let Some((scaled, w, h)) = scaling::cpu_scale(
-            self.filter,
+            self.scale_filter,
             &fb, src_w, src_h,
             fit_w, fit_h,
         ) {

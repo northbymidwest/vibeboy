@@ -27,7 +27,9 @@ use super::menu::{
 };
 
 pub(super) struct App {
+    quit_requested: bool,
     rom_path: Option<PathBuf>,
+    rom: Option<std::sync::Arc<[u8]>>,
     cli: Cli,
     emu: Option<Emulator>,
     model: GbModel,
@@ -54,6 +56,7 @@ pub(super) struct App {
     frame_start: Instant,
     frame_dur: Duration,
     paused: bool,
+    step_one_frame: bool,
     current_slot: usize,
     force_cpu: bool,
     src_w: u32,
@@ -63,6 +66,7 @@ pub(super) struct App {
     kb_buttons: u8,  // bitmask of keyboard-pressed buttons
     gp_buttons: u8,  // bitmask of gamepad-pressed buttons
     fast_forward: bool,
+    kb_fast_forward: bool,
     sav_flusher: Option<ui_util::SavFlusher>,
 }
 
@@ -79,7 +83,9 @@ impl App {
         audio_ring.lock().unwrap().downsample_ratio = (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
 
         App {
+            quit_requested: false,
             rom_path: cli.rom.clone(),
+            rom: None,
             cli,
             emu: None,
             model,
@@ -106,6 +112,7 @@ impl App {
             frame_start: Instant::now(),
             frame_dur: frame_duration(model),
             paused: false,
+            step_one_frame: false,
             current_slot: 0,
             force_cpu: false,
             src_w: GB_W,
@@ -115,21 +122,31 @@ impl App {
             kb_buttons: 0,
             gp_buttons: 0,
             fast_forward: false,
+            kb_fast_forward: false,
             sav_flusher: None,
         }
     }
 
     fn load_rom(&mut self, path: &PathBuf) {
-        let rom = fs::read(path).unwrap_or_else(|e| {
-            eprintln!("Failed to read ROM '{}': {}", path.display(), e);
-            Vec::new()
-        });
-        if rom.is_empty() {
-            return;
-        }
+        // Re-read from disk only if path changed; reuse stored Arc otherwise
+        let rom: std::sync::Arc<[u8]> = if self.rom_path.as_ref() == Some(path) {
+            if let Some(ref arc) = self.rom {
+                arc.clone()
+            } else {
+                match fs::read(path) {
+                    Ok(v) => v.into(),
+                    Err(e) => { eprintln!("Failed to read ROM '{}': {}", path.display(), e); return; }
+                }
+            }
+        } else {
+            match fs::read(path) {
+                Ok(v) => v.into(),
+                Err(e) => { eprintln!("Failed to read ROM '{}': {}", path.display(), e); return; }
+            }
+        };
+        self.rom = Some(rom.clone());
 
         self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
-        // Auto-detect boot ROM by model (don't use explicit --bootrom which may be for a different model)
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
         let mut emu = Emulator::new(rom, boot_rom, self.model, None);
@@ -184,10 +201,7 @@ impl App {
                 }
             }
             ID_QUIT => {
-                if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-                    flusher.flush(emu);
-                }
-                std::process::exit(0);
+                self.quit_requested = true;
             }
             ID_PAUSE => {
                 self.paused = !self.paused;
@@ -242,13 +256,7 @@ impl App {
                 if let Some(filter) = filter_id_to_filter(other) {
                     self.scale_filter = filter;
                     self.update_filter_checkmarks();
-                    self.vec_cache = match filter {
-                        scaling::ScaleFilter::VectorizeLegacy => Some(vectorize::VectorizeCache::new_legacy(false)),
-                        scaling::ScaleFilter::VectorizeLegacyAdaptive => Some(vectorize::VectorizeCache::new_legacy(true)),
-                        scaling::ScaleFilter::Vectorize => Some(vectorize::VectorizeCache::new(false)),
-                        scaling::ScaleFilter::VectorizeAdaptive => Some(vectorize::VectorizeCache::new(true)),
-                        _ => None,
-                    };
+                    self.vec_cache = filter.new_vectorize_cache();
                     eprintln!("Filter: {:?}", filter);
                     return;
                 }
@@ -283,40 +291,61 @@ impl App {
         }
     }
 
+    fn render_current_frame(&mut self) {
+        // Render-only path (used during rewind — emulation already stepped)
+        self.render_frame_inner(true);
+    }
+
     fn step_and_render(&mut self) {
-        if self.paused {
+        if self.paused && !self.step_one_frame {
             return;
         }
+        self.render_frame_inner(false);
+    }
+
+    fn render_frame_inner(&mut self, skip_step: bool) {
 
         let emu = match self.emu.as_mut() {
             Some(e) => e,
             None => return,
         };
 
-        // Feed webcam frames to Pocket Camera
-        if let Some(ref ct) = self.camera_thread {
-            if ct.read_frame(&mut self.camera_buf) {
-                emu.set_camera_image(&self.camera_buf);
+        if !skip_step {
+            // Feed webcam frames to Pocket Camera
+            if let Some(ref ct) = self.camera_thread {
+                if ct.read_frame(&mut self.camera_buf) {
+                    emu.set_camera_image(&self.camera_buf);
+                }
             }
-        }
 
-        if self.fast_forward {
-            // Run 4 frames, downsample audio to fit 1 frame
-            for _ in 0..4 {
+            if self.step_one_frame {
                 emu.step_frame();
-            }
-            let samples = emu.drain_audio_samples();
-            if !samples.is_empty() {
-                let resampled = ui_util::downsample_audio(&samples, 4);
-                let mut ring = self.audio_ring.lock().unwrap();
-                ring.push(&resampled);
-            }
-        } else {
-            emu.step_frame();
-            let samples = emu.drain_audio_samples();
-            if !samples.is_empty() {
-                let mut ring = self.audio_ring.lock().unwrap();
-                ring.push(&samples);
+                self.step_one_frame = false;
+                let samples = emu.drain_audio_samples();
+                if !samples.is_empty() {
+                    if let Ok(mut ring) = self.audio_ring.lock() {
+                        ring.push(&samples);
+                    }
+                }
+            } else if self.fast_forward {
+                for _ in 0..4 {
+                    emu.step_frame();
+                }
+                let samples = emu.drain_audio_samples();
+                if !samples.is_empty() {
+                    let resampled = ui_util::downsample_audio(&samples, 4);
+                    if let Ok(mut ring) = self.audio_ring.lock() {
+                        ring.push(&resampled);
+                    }
+                }
+            } else {
+                emu.step_frame();
+                let samples = emu.drain_audio_samples();
+                if !samples.is_empty() {
+                    if let Ok(mut ring) = self.audio_ring.lock() {
+                        ring.push(&samples);
+                    }
+                }
             }
         }
 
@@ -674,6 +703,7 @@ impl ApplicationHandler for App {
                             emu.set_rewinding(pressed);
                         }
                         if key == KeyCode::Tab {
+                            self.kb_fast_forward = pressed;
                             self.fast_forward = pressed;
                         }
                     }
@@ -685,6 +715,13 @@ impl ApplicationHandler for App {
                                     ui_util::flush_sav(emu, path);
                                 }
                                 event_loop.exit();
+                            }
+                            KeyCode::Space => {
+                                self.paused = !self.paused;
+                                eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
+                            }
+                            KeyCode::Period => {
+                                if self.paused { self.step_one_frame = true; }
                             }
                             KeyCode::F5 => {
                                 if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
@@ -729,6 +766,14 @@ impl ApplicationHandler for App {
             self.handle_menu_event(event.id().0.as_str());
         }
 
+        if self.quit_requested {
+            if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+                flusher.flush(emu);
+            }
+            _event_loop.exit();
+            return;
+        }
+
         // -- Gamepad polling --
         if let Some(ref mut gp) = self.gamepad {
             let gs = gp.poll();
@@ -741,8 +786,8 @@ impl ApplicationHandler for App {
                     let mask = 1 << bit;
                     emu.set_button(mask, combined & mask != 0);
                 }
-                if gs.rewind { emu.set_rewinding(true); }
-                self.fast_forward = self.fast_forward || gs.fast_forward;
+                emu.set_rewinding(gs.rewind);
+                self.fast_forward = self.kb_fast_forward || gs.fast_forward;
 
                 // Rumble
                 if emu.has_rumble() {
@@ -754,10 +799,11 @@ impl ApplicationHandler for App {
             self.gp_buttons = 0;
         }
 
-        // Handle rewind (3x speed) with reverse audio
-        if let Some(ref mut emu) = self.emu {
-            if emu.is_rewinding() {
-                let mut all_audio = Vec::new();
+        // Handle rewind (3x speed) with reverse audio, or normal emulation
+        let rewinding = self.emu.as_ref().is_some_and(|e| e.is_rewinding());
+        if rewinding {
+            if let Some(ref mut emu) = self.emu {
+                let mut all_audio = Vec::with_capacity(19200);
                 for _ in 0..3 {
                     emu.rewind_one_frame();
                     all_audio.extend_from_slice(&emu.drain_audio_samples());
@@ -765,14 +811,17 @@ impl ApplicationHandler for App {
                 ui_util::reverse_audio(&mut all_audio);
                 let resampled = ui_util::downsample_audio(&all_audio, 3);
                 if !resampled.is_empty() {
-                    let mut ring = self.audio_ring.lock().unwrap();
-                    ring.push(&resampled);
+                    if let Ok(mut ring) = self.audio_ring.lock() {
+                        ring.push(&resampled);
+                    }
                 }
             }
+            // Still render the rewound frame
+            self.render_current_frame();
+        } else {
+            // Normal emulation step + render
+            self.step_and_render();
         }
-
-        // Step emulation
-        self.step_and_render();
 
         // Update rumble after emulation step
 
@@ -793,29 +842,5 @@ impl ApplicationHandler for App {
 }
 
 fn map_scale_filter(filter: scaling::ScaleFilter) -> Option<scaling::wgpu_scale::WgpuScaleFilter> {
-    use scaling::ScaleFilter as SF;
-    use scaling::wgpu_scale::WgpuScaleFilter as WF;
-    match filter {
-        SF::Nearest => Some(WF::Nearest),
-        SF::Bilinear => Some(WF::Bilinear),
-        SF::Bicubic => Some(WF::Bicubic),
-        SF::Epx | SF::Scale2x | SF::Scale4x => Some(WF::Epx),
-        SF::Scale3x => Some(WF::Scale3x),
-        SF::Eagle => Some(WF::Eagle),
-        SF::Hqx(_) => Some(WF::Hqx),
-        SF::Xbr(_) | SF::SuperXbr => Some(WF::Xbr),
-        SF::Xbrz(_) => Some(WF::Xbrz),
-        SF::NearestAa => Some(WF::NearestAa),
-        SF::OmniScale => Some(WF::OmniScale),
-        SF::OmniScaleLegacy => Some(WF::OmniScaleLegacy),
-        SF::Edi => Some(WF::Edi),
-        SF::Nedi => Some(WF::Nedi),
-        SF::Dcci => Some(WF::Dcci),
-        SF::Mmpx => Some(WF::Mmpx),
-        SF::LcdGrid => Some(WF::LcdGrid),
-        SF::Sai2x => Some(WF::Sai2x),
-        SF::Super2xSai => Some(WF::Super2xSai),
-        SF::SuperEagle => Some(WF::SuperEagle),
-        _ => None,
-    }
+    scaling::wgpu_scale::WgpuScaleFilter::from_scale_filter(filter)
 }

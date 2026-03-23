@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::{Cartridge, Instant, unix_timestamp_secs};
 
 pub struct HuC3 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     rom_bank: usize,
     ram_bank: usize,
@@ -15,7 +16,7 @@ pub struct HuC3 {
 }
 
 impl HuC3 {
-    pub(super) fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize) -> Self {
         HuC3 {
             rom,
             ram: vec![0u8; ram_size.max(0x2000)],

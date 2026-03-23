@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct Mbc6 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     flash: Vec<u8>,
     rom_bank_a: usize,
@@ -17,7 +18,7 @@ pub struct Mbc6 {
 }
 
 impl Mbc6 {
-    pub(super) fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize) -> Self {
         Mbc6 {
             flash: vec![0xFF; 0x100000], // 1MB MX29F008TC
             rom,

@@ -228,8 +228,11 @@ impl GamepadState {
             self.stick_up = stick_y > DEADZONE;
             self.stick_down = stick_y < -DEADZONE;
 
-            // Motion (accelerometer)
+            // Motion (accelerometer) — must activate sensors first
             if let Some(motion) = controller.motion() {
+                if !motion.sensorsActive() {
+                    motion.setSensorsActive(true);
+                }
                 let accel: GCAcceleration = motion.acceleration();
                 self.accel = Some((accel.x as f32, accel.y as f32, accel.z as f32));
             } else {

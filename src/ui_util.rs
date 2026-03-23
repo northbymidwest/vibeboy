@@ -159,7 +159,7 @@ pub fn load_state_from_slot(
                 eprintln!("Failed to load state from {}", path.display());
             }
         } else {
-            eprintln!("Slot {} is empty", slot + 1);
+            eprintln!("Slot {} is empty", slot);
         }
     }
 }

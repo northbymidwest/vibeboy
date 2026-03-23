@@ -190,7 +190,7 @@ pub(super) unsafe extern "C" fn audio_render_callback(
     }
 }
 
-pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<core_audio::AudioUnit> {
+pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHandle> {
     unsafe {
         let desc = core_audio::AudioComponentDescription {
             component_type: core_audio::K_AUDIO_UNIT_TYPE_OUTPUT,
@@ -268,6 +268,18 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<core_audio:
             return None;
         }
 
-        Some(audio_unit)
+        Some(AudioUnitHandle(audio_unit))
+    }
+}
+
+/// RAII wrapper that stops and disposes the CoreAudio unit on drop.
+pub(super) struct AudioUnitHandle(core_audio::AudioUnit);
+
+impl Drop for AudioUnitHandle {
+    fn drop(&mut self) {
+        unsafe {
+            core_audio::AudioOutputUnitStop(self.0);
+            core_audio::AudioComponentInstanceDispose(self.0);
+        }
     }
 }

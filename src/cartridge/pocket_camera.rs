@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct PocketCamera {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: Vec<u8>,
     rom_bank: usize,
     ram_bank: usize,
@@ -13,7 +14,7 @@ pub struct PocketCamera {
 }
 
 impl PocketCamera {
-    pub(super) fn new(rom: Vec<u8>) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>) -> Self {
         PocketCamera {
             rom,
             ram: vec![0u8; 0x20000], // 128KB SRAM

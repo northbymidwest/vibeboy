@@ -281,30 +281,5 @@ impl GpuCompute {
 
 /// Map a ScaleFilter to a WgpuScaleFilter, if it has a GPU compute path.
 pub fn to_wgpu_filter(filter: ScaleFilter) -> Option<WgpuScaleFilter> {
-    match filter {
-        ScaleFilter::Nearest => Some(WgpuScaleFilter::Nearest),
-        ScaleFilter::Bilinear => Some(WgpuScaleFilter::Bilinear),
-        ScaleFilter::Epx | ScaleFilter::Scale2x | ScaleFilter::Scale4x => {
-            Some(WgpuScaleFilter::Epx)
-        }
-        ScaleFilter::Eagle => Some(WgpuScaleFilter::Eagle),
-        ScaleFilter::Scale3x => Some(WgpuScaleFilter::Scale3x),
-        ScaleFilter::Bicubic => Some(WgpuScaleFilter::Bicubic),
-        ScaleFilter::NearestAa => Some(WgpuScaleFilter::NearestAa),
-        ScaleFilter::OmniScale => Some(WgpuScaleFilter::OmniScale),
-        ScaleFilter::OmniScaleLegacy => Some(WgpuScaleFilter::OmniScaleLegacy),
-        ScaleFilter::Hqx(_) => Some(WgpuScaleFilter::Hqx),
-        ScaleFilter::Xbr(_) => Some(WgpuScaleFilter::Xbr),
-        ScaleFilter::Xbrz(_) => Some(WgpuScaleFilter::Xbrz),
-        ScaleFilter::SuperXbr => Some(WgpuScaleFilter::SuperXbr),
-        ScaleFilter::Nedi => Some(WgpuScaleFilter::Nedi),
-        ScaleFilter::Dcci => Some(WgpuScaleFilter::Dcci),
-        ScaleFilter::Edi => Some(WgpuScaleFilter::Edi),
-        ScaleFilter::Mmpx => Some(WgpuScaleFilter::Mmpx),
-        ScaleFilter::LcdGrid => Some(WgpuScaleFilter::LcdGrid),
-        ScaleFilter::Sai2x => Some(WgpuScaleFilter::Sai2x),
-        ScaleFilter::Super2xSai => Some(WgpuScaleFilter::Super2xSai),
-        ScaleFilter::SuperEagle => Some(WgpuScaleFilter::SuperEagle),
-        _ => None,
-    }
+    WgpuScaleFilter::from_scale_filter(filter)
 }

@@ -1,11 +1,12 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct RomOnly {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
 }
 
 impl RomOnly {
-    pub(super) fn new(rom: Vec<u8>) -> Self { RomOnly { rom } }
+    pub(super) fn new(rom: Arc<[u8]>) -> Self { RomOnly { rom } }
 }
 
 impl Cartridge for RomOnly {

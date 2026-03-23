@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use super::Cartridge;
 
 pub struct Mbc2 {
-    rom: Vec<u8>,
+    rom: Arc<[u8]>,
     ram: [u8; 512], // 512 × 4-bit values
     rom_bank: usize, // 1-15
     ram_enabled: bool,
@@ -9,7 +10,7 @@ pub struct Mbc2 {
 }
 
 impl Mbc2 {
-    pub(super) fn new(rom: Vec<u8>, battery: bool) -> Self {
+    pub(super) fn new(rom: Arc<[u8]>, battery: bool) -> Self {
         Mbc2 { rom, ram: [0u8; 512], rom_bank: 1, ram_enabled: false, battery }
     }
 }
