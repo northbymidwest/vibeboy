@@ -4,17 +4,25 @@
 
 A Game Boy / Game Boy Color emulator written in Rust.
 
-Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GBA in GBC mode) hardware models.
+Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GBA in GBC mode) hardware models. MGB uses an authentic grayscale palette.
 
 ## Building
 
-Requires Rust 2024 edition and SDL3. Optional features: `macos-ui` (native Cocoa frontend), `winit-ui` (cross-platform winit/wgpu frontend), `gpu` (GPU compute), `sdl3-gpu-shaders` (enabled by default), `web` (WebAssembly browser frontend).
+Requires Rust 2024 edition and SDL3. For GPU shaders: `glslc` (shaderc) and `spirv-cross`.
 
 ```bash
 cargo build --release
 
-# WebAssembly (browser) build
+# Other frontends
+cargo build --release --bin vibeboy_cocoa --features macos-ui    # Native macOS Cocoa/Metal
+cargo build --release --bin vibeboy_winit --features winit-ui    # Cross-platform winit/wgpu
+cargo build --release --bin vibeboy_gtk   --features gtk-ui      # GTK4
+
+# WebAssembly (browser)
 wasm-pack build --target web --features web --no-default-features
+
+# libretro core (for RetroArch)
+cargo build --release --features libretro --no-default-features --lib
 ```
 
 ## Usage
@@ -22,8 +30,6 @@ wasm-pack build --target web --features web --no-default-features
 ```bash
 # Launch with a ROM (auto-detects model from cart header)
 cargo run --release -- path/to/rom.gb
-
-# If no ROM is specified, a native file dialog opens to pick one
 
 # Force a specific hardware model
 cargo run --release -- path/to/rom.gbc --model cgb
@@ -39,74 +45,69 @@ cargo run --release -- path/to/rom.gb --no-boot
 
 | Key | Action |
 |-----|--------|
-| Z | B |
-| X | A |
+| Arrow keys | D-pad |
+| Z / X | B / A |
 | Enter | Start |
 | Right Shift | Select |
-| Arrow keys | D-pad |
 | Backspace | Rewind |
-| Tab (hold) | Fast forward |
-| Minus | Slow motion |
-| F5 | Save state |
-| F7 | Load state |
-| 1-9 | Select save slot |
+| Tab (hold) | Fast forward (4x) |
+| Minus (hold) | Slow motion (0.5x) |
+| Space | Pause / Resume |
+| Period | Frame advance (while paused) |
+| F5 / F7 | Save / Load state |
+| 0-9 | Select save slot |
 | Escape | Quit |
+
+Gamepad: D-pad/left stick, South=B, East=A, Start, Back=Select, L1=Rewind, R1=Fast-forward.
 
 ### Scaling Filters
 
+18 distinct scaling algorithms, each available as both CPU and GPU compute shader:
+
 ```bash
-# Run with a scaling filter
 cargo run --release -- path/to/rom.gb --filter hq4x
 
-# Available filters: nearest, bilinear, bicubic, epx, scale2x, scale3x, scale4x,
-#   eagle, 2xsai, super-2xsai, super-eagle, hq2x, hq3x, hq4x,
-#   xbr2x, xbr3x, xbr4x, xbrz2x-6x, super-xbr,
-#   nedi, dcci, edi, omniscale, omniscale-legacy, nearest-aa, mmpx, lcd-grid
+# Pixel-art filters
+#   nearest, nearest-aa, bilinear, bicubic
+#   epx/scale2x, scale3x, scale4x, eagle
+#   2xsai, super-2xsai, super-eagle
+#   hq2x, hq3x, hq4x
+#   xbr2x-4x, super-xbr, xbrz2x-6x
+#   nedi, dcci, edi, mmpx
+#   omniscale, lcd-grid
 
-# Kopf-Lischinski pixel-art vectorization (scales to window size)
+# Kopf-Lischinski pixel-art vectorization
 cargo run --release -- path/to/rom.gb --filter vectorize
-cargo run --release -- path/to/rom.gb --filter vectorize-adaptive
-
-# Full GPU vectorize pipeline (all stages on GPU)
 cargo run --release -- path/to/rom.gb --filter vectorize-gpu
-
-# Legacy vectorize (original scanline rasterizer path)
-cargo run --release -- path/to/rom.gb --filter vectorize-legacy
-cargo run --release -- path/to/rom.gb --filter vectorize-legacy-adaptive
-
-# Gaussian diffusion renderers (paper's rendering approach)
-cargo run --release -- path/to/rom.gb --filter vectorize-diffusion
 cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion
-cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion-adaptive
 
 # Force CPU-only rendering for any filter
-cargo run --release -- path/to/rom.gb --filter vectorize --cpu-filter
+cargo run --release -- path/to/rom.gb --filter omniscale --cpu-filter
 ```
 
-The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale. The scanline variant (`vectorize`) uses 2x2 supersampled fill with GPU compute shader acceleration. The spline-diffusion variants add Gaussian color blending within contour-bounded regions, matching the paper's rendering approach. The `vectorize-gpu` filter runs the entire pipeline on the GPU (similarity graph, crossing resolution, cell graph, optimization, and rasterization). All run in real-time.
+The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale with multiple rendering modes (scanline, diffusion, spline-diffusion). The `vectorize-gpu` filter runs the entire pipeline on the GPU. All run in real-time.
 
 ## Features
 
 - **CPU**: Full SM83 instruction set with accurate M-cycle timing
-- **PPU**: Pixel FIFO renderer with per-T-cycle accuracy; DMG models use classic green LCD palette
-- **APU**: DIV-coupled frame sequencer, all 4 channels
-- **Cartridges**: ROM-only, MBC1, MBC2, MBC3 (with RTC), MBC5 (with rumble), MBC6, MBC7 (accelerometer + EEPROM)
-- **Rumble**: MBC5+Rumble cartridge support with gamepad haptic feedback (SDL, CoreHaptics, Web vibrationActuator)
-- **Runahead**: `--runahead N` for reduced input latency (SDL frontend)
+- **PPU**: Pixel FIFO renderer with per-T-cycle accuracy; DMG green palette, MGB grayscale palette
+- **APU**: DIV-coupled frame sequencer, all 4 channels, band-limited synthesis at 96 kHz
+- **Cartridges**: ROM-only, MBC1 (multicart), MBC2, MBC3 (with RTC), MBC5 (with rumble), MBC6, MBC7 (accelerometer + EEPROM), HuC1, HuC3, TAMA5, MMM01, Pocket Camera
 - **CGB**: Double-speed mode, VRAM banking, color palettes, HDMA, WRAM banking
-- **SGB**: HLE command processing (palettes, attributes, borders)
+- **SGB**: HLE command processing (palettes, attributes, borders, masking); optional LLE with full 65C816 SNES CPU
 - **OAM DMA**: Bus conflict emulation for both DMG and CGB
-- **Save states**: Serialized via serde + bincode (`rom.N.ss` files), 9 slots with rewind support (~10 minutes buffer, reverse-delta compressed)
-- **Camera**: Game Boy Camera support via webcam (macOS native, SDL3, browser getUserMedia)
-- **Printer**: Game Boy Printer emulation (saves PNG to `prints/`, or browser download)
-- **Scaling**: 41+ filters including EPX, HQx, xBR, xBRZ, OmniScale, Super-xBR, NEDI, DCCI, EDI, MMPX, LCD Grid, and more — all GPU filters use compute shaders
-- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 3 rendering modes (scanline, diffusion, spline-diffusion), GPU compute shaders, SVG export
-- **Multiple frontends**: SDL3 (default), native macOS Cocoa/Metal, cross-platform winit/wgpu, GTK4, WebAssembly/WebGPU browser
-- **Browser**: Runs in any WebGPU-capable browser — drag-and-drop ROM loading, built-in ROM selector with public domain games, all GPU filters via dropdown, model selection, gamepad support, accelerometer (DeviceMotion for MBC7), AudioWorklet at 96kHz, webcam for Game Boy Camera, localStorage save persistence
+- **Rumble**: MBC5+Rumble with gamepad haptic feedback (SDL, CoreHaptics, Web vibrationActuator)
+- **Camera**: Game Boy Camera via webcam (SDL3, AVFoundation, nokhwa, getUserMedia)
+- **Printer**: Game Boy Printer emulation (PNG output on native, browser download on web)
+- **Save states**: 10 slots (0-9), serde + bincode serialization, rewind (~10 minutes, reverse-delta compressed)
+- **Runahead**: `--runahead N` for reduced input latency (SDL frontend)
+- **Scaling**: 18 distinct pixel-art scaling algorithms, all with GPU compute shader acceleration
+- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with scanline, diffusion, and spline-diffusion rasterizers; full GPU pipeline; SVG export
+- **6 frontends**: SDL3, native macOS Cocoa/Metal, winit/wgpu, GTK4, WebAssembly/WebGPU, libretro
+- **Browser**: WebGPU rendering, on-screen touch controls, gamepad, AudioWorklet at 96 kHz, webcam, accelerometer (DeviceMotion for MBC7), localStorage persistence, mobile-responsive
+- **libretro**: RetroArch-compatible core with save RAM persistence (including RTC)
 
 ## Test Runner
-
-A built-in test runner with explicit subcommands for each test harness. See [`src/test_runner/README.md`](src/test_runner/README.md) for full documentation.
 
 ```bash
 # Mooneye tests (breakpoint + Fibonacci register check)
@@ -115,55 +116,54 @@ cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye
 # Blargg tests (serial output detection)
 cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/
 
-# Gambatte tests (hex output comparison, 15-frame capture)
+# Gambatte tests (hex output comparison)
 cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambatte/
 
 # Screenshot any ROM after N frames
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out shot.png
+
+# Vectorize a standalone image to SVG
+cargo run --release --bin test_runner -- vectorize input.png --out output.svg
 ```
 
 ## Architecture
 
 ```
 src/
-├── frontends/       Frontend binaries (moved from src/ root)
-│   ├── sdl/         SDL3 window, audio, input, file dialog
-│   ├── cocoa/       Native macOS Cocoa/Metal UI (feature: macos-ui)
-│   ├── winit/       Cross-platform winit/wgpu UI (feature: winit-ui)
-│   └── web/         WebAssembly/wasm-bindgen frontend (feature: web)
-├── emulator.rs      Frame loop, SGB compositing
+├── frontends/
+│   ├── sdl/         SDL3 window, audio, input, GPU rendering
+│   ├── cocoa/       Native macOS Cocoa/Metal UI
+│   ├── winit/       Cross-platform winit/wgpu UI
+│   ├── gtk/         GTK4 UI with GPU compute (Linux)
+│   ├── web/         WebAssembly/wasm-bindgen frontend
+│   └── libretro/    RetroArch libretro core
+├── emulator.rs      Emulator facade API (step_frame, save states, rewind)
 ├── cpu/             SM83 CPU (opcodes, interrupts, HALT)
-├── bus.rs           Memory map, OAM DMA, HDMA, WRAM banking
-├── ppu/             Pixel FIFO PPU (mode state machine, fetcher, sprites)
-├── apu.rs           Audio: channels 1-4, frame sequencer, mixing
+├── bus/             Memory map, OAM DMA, HDMA, IO registers
+├── ppu/             Pixel FIFO PPU (timing, rendering, registers)
+├── apu/             Audio: channels 1-4, frame sequencer, BLIP synthesis
 ├── timer.rs         DIV/TIMA timer with reload delay
-├── cartridge/       MBC implementations (1, 2, 3, 5, 6, 7)
-├── sgb.rs           Super Game Boy HLE commands
+├── cartridge/       13 mapper implementations (MBC1-7, HuC1/3, TAMA5, etc.)
+├── clock.rs         Clock trait for RTC abstraction (no platform deps in core)
+├── sgb.rs           Super Game Boy HLE + optional SNES LLE
+├── snes/            65C816 CPU, LoROM, DMA, ICD2 bridge
 ├── serial.rs        Link cable / serial port
-├── printer.rs       Unified Game Boy Printer (PrintOutput::File/Memory)
-├── joypad.rs        Input handling
-├── snapshot.rs      Rewind ring buffer + save states
-├── savestate.rs     serde + bincode serialization (rom.N.ss files)
-├── model.rs         GbModel enum and per-model configuration
-├── scaling/         41+ pixel scaling filters (available on all platforms)
-│   ├── sdl/         SDL3 GPU pipeline management (pipelines.rs, compute.rs)
-│   ├── wgpu_vectorize.rs wgpu compute pipeline (6-stage, WebGPU-compatible)
-│   └── *.rs         EPX, HQx, xBR, xBRZ, OmniScale, NEDI, DCCI, EDI, MMPX, LCD Grid, ...
-├── shaders/         GPU compute shaders (21 .comp files, GLSL 4.50)
+├── printer.rs       Game Boy Printer (memory-queued output)
+├── scaling/         18 CPU scaling filters + GPU compute pipelines
+├── shaders/         GLSL 4.50 compute shaders (cross-compiled to SPIR-V/MSL/DXIL/WGSL)
 ├── vectorize/       Kopf-Lischinski pixel-art vectorizer
-│   ├── graph.rs     Similarity graph (YUV thresholds, crossing heuristics)
-│   ├── contour/     Cell templates, edge chains, B-spline optimizer
-│   ├── rasterize/   Scanline, diffusion, spline-diffusion rasterizers
-│   └── svg.rs       SVG export
-├── lib.rs           Library crate for WebAssembly builds
-├── test_runner/     Automated test ROM runner (modular harnesses)
+├── util.rs          Pure utility functions (no I/O)
+├── ui_util.rs       Frontend utilities (filesystem, gamepad, FPS counter)
+└── test_runner/     Automated test ROM harnesses + SVG export
 web/
-├── index.html       Browser UI (Canvas2D/WebGPU, Web Audio, drag-and-drop)
-├── favicon.ico      App icon
-└── roms/            Built-in public domain ROMs
+├── index.html       Browser UI markup
+├── style.css        Responsive styles + touch controls
+├── emu.js           Emulator logic (lazy wasm loading, state management)
+├── touch.js         Multi-touch gamepad controls
+└── audio-processor.js  AudioWorklet processor
 ```
 
-The main loop: `Emulator::step_frame()` calls `Cpu::step()` per instruction. Each M-cycle, `Bus::tick_mcycle()` advances PPU (4 T-cycles), APU, Timer, Serial, OAM DMA, and HDMA.
+The core emulator is a pure computation engine with no I/O, filesystem, or platform dependencies. Time is injected via the `Clock` trait. Frontends handle rendering, audio output, input, and persistence.
 
 ## License
 

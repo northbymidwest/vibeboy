@@ -146,7 +146,7 @@ Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
   - `loops.rs`: Planar face algorithm for boundary loop tracing (flat sorted adjacency with cross-product angle ordering)
   - `optimize.rs`: Gradient descent optimizer with kappa^2 smoothness energy, (2.5x distance)^4 positional energy, x4 grid corner detection (angle >= 60 degrees), corners excluded from curvature energy
   - `mod.rs`: Orchestration, `VectorizeState` for split-phase optimization (CPU or GPU), VOID_COLOR sentinel (0x01000000) for image border edges
-- `svg.rs`: Serializes paths to SVG document string (grouped by color, BTreeMap ordering)
+- SVG export: moved to `test_runner/svg.rs` (only used by test runner screenshot/vectorize commands)
 - `rasterize/`: Three rasterizers (split into submodules):
   - `scanline.rs`: 2x2 supersampling, nonzero winding, recursive Bezier flattening (tolerance 0.25). Default for `--filter vectorize`.
   - `diffusion.rs`: Gaussian blending (sigma ~= 0.63, gauss_k=2.5, radius=2.0) with graph-based region connectivity via 8-connected flood fill. For `--filter vectorize-diffusion`.
@@ -156,15 +156,16 @@ Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
 - `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum (41+ filter names) with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 19 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms (no longer gated behind `not(wasm32)`).
+- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. `new_vectorize_cache()` for cache initialization. 18 distinct scaling algorithms across 19 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms.
 - `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
 - `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
 - `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
 
+### Clock abstraction (`src/clock.rs`)
+`Clock` trait provides wall-clock time to RTC cartridges (MBC3, HuC3, TAMA5). The core emulator never reads the system clock directly — frontends inject a `SystemClock` (native) or `JsClock` (wasm) via `Arc<dyn Clock>`.
+
 ### Printer (`src/printer.rs`)
-Unified Game Boy Printer implementation with `PrintOutput` enum:
-- `PrintOutput::File { output_dir }` -- saves completed prints as PNG files to disk (used by native frontends)
-- `PrintOutput::Memory` -- queues completed prints as RGBA pixel data in memory (used by WebAssembly frontend for browser download)
+Game Boy Printer implementation. All prints are queued as RGBA pixel data in memory via `has_pending_print()`/`take_print()`. Frontends poll and save to disk (native) or offer download (web).
 
 ### Save states (`src/savestate.rs`, `src/snapshot.rs`)
 - `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state, rewind with reverse-delta compression (~10-minute capacity at ~21MB). Rewind plays at 3x speed with reverse audio.
@@ -204,10 +205,20 @@ Unified Game Boy Printer implementation with `PrintOutput` enum:
 - `compute.rs`: wgpu GLES backend for GPU compute filters (Linux only)
 - `audio.rs`: Audio output
 
-**WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/index.html`):
-- `lib.rs`: Library crate re-exporting core emulator modules. Exposes `wgpu_vectorize` for the `web` feature. `scaling` module available on all platforms (no longer gated behind `not(wasm32)`).
-- `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, zero-copy `frame_buffer_update()`/`frame_buffer_ptr()`, `render_gpu()` for WebGPU vectorize, `init_gpu()` async WebGPU initialization, `set_camera_image()`, printer support via downcasting, `save_data()`/`load_save()` for localStorage persistence. Rumble support via vibrationActuator.
-- `web/index.html`: Browser UI with Canvas2D fallback, WebGPU rendering with all GPU filters (vectorize, OmniScale, HQx, xBR, xBRZ, Super xBR, EPX, Eagle, Scale3x, bicubic, AA nearest) via filter dropdown, model select dropdown, built-in ROM selector with public domain games, gamepad support (Gamepad API, L1=Rewind, R1=Fast-forward), accelerometer (DeviceMotion API for MBC7), frame-rate independent emulation (~59.73fps via time accumulator), AudioWorklet at native 96kHz with reverse/downsample audio processing, rewind (Backspace) and fast-forward (Tab), webcam for Game Boy Camera, drag-and-drop ROM loading, localStorage save persistence, favicon.
+**WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/`):
+- `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, `render_gpu()` for WebGPU, `init_gpu()` async initialization, camera/printer/accelerometer/rumble support, `save_data()`/`load_save()` for localStorage persistence.
+- `web/index.html`: Markup with loading overlay, ROM selector, touch controls
+- `web/style.css`: Responsive styles, mobile breakpoints, touch control layout, toast animations
+- `web/emu.js`: ES module with state management, lazy wasm loading, frame loop, keyboard/gamepad input, audio (AudioWorklet at 96kHz), save states, toast notifications, `requestIdleCallback` save flushing
+- `web/touch.js`: Multi-touch gamepad controls with per-identifier tracking
+- `web/audio-processor.js`: Standalone AudioWorklet processor with buffer cap
+
+**libretro frontend** (`src/frontends/libretro/mod.rs`):
+- Full libretro API implementation for RetroArch compatibility
+- XRGB8888 video, 48kHz stereo audio (downsampled from 96kHz)
+- Save RAM persistence with RTC state (MBC3/HuC3/TAMA5 timestamps)
+- Core option for hardware model selection
+- Boot ROM auto-detection from RetroArch system directory
 
 ### GPU shaders (`src/shaders/`)
 
@@ -332,21 +343,24 @@ open vectorize-tests/comparison.html
 
 ### Binaries
 
-The project produces five native binaries plus a WebAssembly library:
+The project produces five native binaries, a WebAssembly library, and a libretro core:
 
 - **`vibeboy`** (`src/frontends/sdl/main.rs`) -- Main emulator with SDL3 window, audio, and input handling
-- **`vibeboy_cocoa`** (`src/frontends/cocoa/main.rs`) -- Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature, used by `bundle_app.sh`)
-- **`vibeboy_winit`** (`src/frontends/winit/main.rs`) -- Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature, with menus, file dialog, filter selection)
-- **`vibeboy_gtk`** (`src/frontends/gtk/main.rs`) -- GTK4 UI frontend (requires `gtk-ui` feature, with GPU compute on Linux via wgpu GLES)
-- **`test_runner`** (`src/test_runner/main.rs`) -- Headless test ROM runner with multiple test harness modes (mooneye, blargg, gambatte, gbmicrotest, tearoom, screenshot). See the [Testing](#testing) section for usage
-- **WebAssembly** (`src/lib.rs` + `src/frontends/web/mod.rs`) -- Browser frontend via wasm-bindgen (requires `web` feature). Builds to `pkg/vibeboy_bg.wasm` + JS glue. Served from `web/index.html`. Deployed to GitHub Pages via the `gh-pages` branch.
+- **`vibeboy_cocoa`** (`src/frontends/cocoa/main.rs`) -- Native macOS Cocoa/Metal UI frontend (requires `macos-ui` feature)
+- **`vibeboy_winit`** (`src/frontends/winit/main.rs`) -- Cross-platform winit/wgpu UI frontend (requires `winit-ui` feature)
+- **`vibeboy_gtk`** (`src/frontends/gtk/main.rs`) -- GTK4 UI frontend (requires `gtk-ui` feature, GPU compute on Linux)
+- **`test_runner`** (`src/test_runner/main.rs`) -- Headless test ROM runner and vectorize tool
+- **WebAssembly** (`src/frontends/web/`) -- Browser frontend via wasm-bindgen (requires `web` feature). Deployed to GitHub Pages.
+- **libretro** (`src/frontends/libretro/`) -- RetroArch-compatible core (requires `libretro` feature). Built as cdylib.
 
 ## Conventions
 
 - Models are `GbModel` enum in `model.rs`. Use `model.is_cgb()` to check CGB/AGB, `model.is_sgb()` for SGB/SGB2
 - Double-speed mode: `bus_cycles = cpu_cycles / 2` -- Bus handles this in `tick_mcycle()`
-- Snapshots (`snapshot.rs`) support rewind (reverse-delta compression, ~10-minute capacity at ~21MB, 3x playback with reverse audio) and save states (F5/F7, slots 1-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
+- Snapshots (`snapshot.rs`) support rewind (reverse-delta compression, ~10-minute capacity at ~21MB, 3x playback with reverse audio) and save states (F5/F7, slots 0-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
 - Fast-forward audio: all frontends downsample 4x audio through a Blackman-windowed sinc FIR filter. Rewind has reverse audio with the same filter.
 - OAM DMA is instant (0xA0 byte copy); HDMA mode 0 instant, mode 1 per-HBlank
 - Boot ROMs are in `bootroms/` directory; test runner loads them with `--boot` flag
-- DMG models use classic green Game Boy LCD palette (shades: `#9BBC0F`, `#8BAC0F`, `#306230`, `#0F380F`)
+- DMG models use classic green Game Boy LCD palette (`DMG_SHADES`: `#9BBC0F`, `#8BAC0F`, `#306230`, `#0F380F`). MGB uses grayscale (`MGB_SHADES`: `#C4CFA1`, `#8B956D`, `#4D533C`, `#1F1F1F`).
+- The core emulator has no I/O, filesystem, or platform dependencies. Time is injected via the `Clock` trait (`src/clock.rs`). Frontends handle rendering, audio, input, and persistence.
+- Pure utility functions (audio processing, model detection, frame timing) in `src/util.rs`. Frontend-specific I/O helpers in `src/ui_util.rs`.
