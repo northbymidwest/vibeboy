@@ -7,7 +7,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_uint, c_void};
 use std::ptr;
-use std::sync::OnceLock;
 
 use crate::clock;
 use crate::emulator::Emulator;

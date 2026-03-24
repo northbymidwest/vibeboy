@@ -18,7 +18,7 @@ mod sequencer;
 
 use channels::{SquareCh, Sweep, WaveCh, NoiseCh};
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 // ── BLIP buffer (band-limited synthesis) ──────────────────────────────────
 
@@ -41,8 +41,8 @@ struct BlipBuf {
 }
 
 fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
-    static TABLE: OnceLock<Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>> = OnceLock::new();
-    TABLE.get_or_init(|| {
+    use std::sync::LazyLock;
+    static TABLE: LazyLock<Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>> = LazyLock::new(|| {
         let n = BLIP_WIDTH * BLIP_PHASES;
         let lowpass = 15.0_f64 / 16.0;
         let mut master = vec![0.0_f64; n];
@@ -71,7 +71,8 @@ fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
             }
         }
         Arc::from(steps)
-    }).clone()
+    });
+    TABLE.clone()
 }
 
 fn default_blip_buf() -> BlipBuf {

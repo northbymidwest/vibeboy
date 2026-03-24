@@ -137,8 +137,8 @@ pub(super) fn bspline_open(ctrl: &[Point]) -> Vec<PathSegment> {
 }
 
 fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
-    pts.windows(2)
-        .map(|w| PathSegment::Line(w[0], w[1]))
+    pts.array_windows::<2>()
+        .map(|&[a, b]| PathSegment::Line(a, b))
         .collect()
 }
 
