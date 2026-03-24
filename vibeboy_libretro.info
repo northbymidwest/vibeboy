@@ -1,0 +1,36 @@
+# Software Information
+display_name = "Nintendo - Game Boy / Color (VibeBoy)"
+authors = "northbymidwest"
+supported_extensions = "gb|gbc|sgb"
+corename = "VibeBoy"
+categories = "Emulator"
+license = "0BSD"
+permissions = ""
+
+# Hardware Information
+manufacturer = "Nintendo"
+systemname = "Game Boy / Game Boy Color"
+systemid = "game_boy"
+database = "Nintendo - Game Boy|Nintendo - Game Boy Color"
+
+# Firmware / BIOS
+firmware_count = 0
+notes = "(!) Boot ROMs are optional. Place in system/vibeboy/ or system/ directory."
+
+# Features
+savestate = "true"
+savestate_features = "serialized"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "true"
+core_options = "true"
+core_options_version = "1.0"
+load_subsystem = "false"
+supports_no_game = "false"
+single_purpose = "false"
+database_match_archive_member = "false"
+is_experimental = "true"
+
+# Description
+description = "Game Boy / Game Boy Color emulator with cycle-accurate PPU, 18 scaling filters, and Kopf-Lischinski pixel-art vectorization. Supports DMG, MGB, SGB, CGB, and AGB hardware models."
