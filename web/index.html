@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>VibeBoy</title>
 <link rel="icon" href="favicon.ico">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -75,6 +75,164 @@
     cursor: pointer;
   }
   #rom-selector select:hover { border-color: #8be9fd; }
+
+  /* Fullscreen button */
+  #fullscreen-btn {
+    background: #2a2a4e;
+    color: #aaa;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.85em;
+    cursor: pointer;
+  }
+  #fullscreen-btn:hover { border-color: #8be9fd; color: #eee; }
+
+  /* Touch controls overlay */
+  #touch-controls {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 40vh;
+    pointer-events: none;
+    z-index: 100;
+    touch-action: none;
+  }
+  #touch-controls.visible { display: block; }
+
+  /* D-pad */
+  .dpad {
+    position: absolute;
+    left: 20px;
+    bottom: 60px;
+    width: 140px;
+    height: 140px;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  .dpad-btn {
+    position: absolute;
+    width: 46px;
+    height: 46px;
+    background: rgba(255, 255, 255, 0.15);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 20px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    pointer-events: auto;
+  }
+  .dpad-btn.active { background: rgba(255, 255, 255, 0.35); }
+  .dpad-center {
+    position: absolute;
+    width: 46px;
+    height: 46px;
+    left: 47px;
+    top: 47px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+  }
+  .dpad-up    { left: 47px; top: 0; }
+  .dpad-down  { left: 47px; bottom: 0; }
+  .dpad-left  { left: 0; top: 47px; }
+  .dpad-right { right: 0; top: 47px; }
+
+  /* A/B buttons */
+  .action-buttons {
+    position: absolute;
+    right: 20px;
+    bottom: 70px;
+    width: 140px;
+    height: 100px;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  .action-btn {
+    position: absolute;
+    width: 56px;
+    height: 56px;
+    background: rgba(255, 255, 255, 0.15);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 18px;
+    font-weight: bold;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    pointer-events: auto;
+  }
+  .action-btn.active { background: rgba(255, 255, 255, 0.35); }
+  .btn-a { right: 0; top: 0; }
+  .btn-b { left: 0; bottom: 0; }
+
+  /* Start/Select buttons */
+  .meta-buttons {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 20px;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  .meta-btn {
+    padding: 8px 22px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-radius: 14px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    pointer-events: auto;
+  }
+  .meta-btn.active { background: rgba(255, 255, 255, 0.3); }
+
+  /* Mobile responsive */
+  @media (max-width: 767px) {
+    body {
+      justify-content: flex-start;
+      padding-top: 8px;
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+      height: 100%;
+    }
+    h1 { font-size: 1.1em; margin-bottom: 6px; }
+    #drop-zone {
+      padding: 20px 16px;
+      margin-bottom: 8px;
+      font-size: 0.9em;
+    }
+    #canvas-wrapper {
+      width: 96vw !important;
+      height: auto !important;
+      aspect-ratio: 160 / 144;
+      max-height: 50vh;
+      resize: none;
+    }
+    #status { font-size: 0.7em; margin-top: 4px; }
+    #filter-bar { font-size: 0.8em; flex-wrap: wrap; justify-content: center; }
+    #filter-bar select { font-size: 0.8em; padding: 3px 6px; }
+    #controls.desktop-only { display: none; }
+    #rom-selector select { font-size: 0.85em; padding: 4px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -93,6 +251,25 @@
     <canvas id="screen" width="160" height="144" role="img" aria-label="Game Boy screen"></canvas>
     <canvas id="screen-2d" width="160" height="144" style="display:none;" role="img" aria-label="Game Boy screen"></canvas>
   </div>
+  <!-- Touch controls overlay (visible on touch devices only) -->
+  <div id="touch-controls">
+    <div class="dpad">
+      <div class="dpad-center"></div>
+      <div class="dpad-btn dpad-up" data-btn="up">&#9650;</div>
+      <div class="dpad-btn dpad-down" data-btn="down">&#9660;</div>
+      <div class="dpad-btn dpad-left" data-btn="left">&#9664;</div>
+      <div class="dpad-btn dpad-right" data-btn="right">&#9654;</div>
+    </div>
+    <div class="action-buttons">
+      <div class="action-btn btn-a" data-btn="a">A</div>
+      <div class="action-btn btn-b" data-btn="b">B</div>
+    </div>
+    <div class="meta-buttons">
+      <div class="meta-btn" data-btn="select">Select</div>
+      <div class="meta-btn" data-btn="start">Start</div>
+    </div>
+  </div>
+
   <div id="status"></div>
   <div id="filter-bar" style="margin-top:8px; display:flex; gap:8px; align-items:center;">
     <select id="model-select" aria-label="Hardware model" style="background:#2a2a4e; color:#eee; border:1px solid #555; border-radius:4px; padding:4px 8px; font-size:0.9em;">
@@ -110,8 +287,9 @@
     <label style="color:#aaa; font-size:0.85em; cursor:pointer; user-select:none;">
       <input type="checkbox" id="force-cpu" style="margin-right:4px; vertical-align:middle;">CPU
     </label>
+    <button id="fullscreen-btn" title="Toggle fullscreen">&#x26F6;</button>
   </div>
-  <div id="controls">
+  <div id="controls" class="desktop-only">
     Arrows: D-pad &nbsp; Z: B &nbsp; X: A &nbsp; Enter: Start &nbsp; Shift: Select &nbsp; | &nbsp; Backspace: Rewind &nbsp; Tab: Fast-fwd &nbsp; Space: Pause &nbsp; Period: Step &nbsp; | &nbsp; F5: Save &nbsp; F7: Load &nbsp; 0-9: Slot &nbsp; | &nbsp; Gamepad
   </div>
   <!-- Hidden elements for webcam capture -->
@@ -907,6 +1085,136 @@ dropZone.addEventListener('drop', e => {
   dropZone.classList.remove('hover');
   if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
 });
+
+// Fullscreen toggle
+document.getElementById('fullscreen-btn').addEventListener('click', () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+});
+
+// Touch controls
+const touchControls = document.getElementById('touch-controls');
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+if (isTouchDevice) {
+  touchControls.classList.add('visible');
+
+  // Prevent pull-to-refresh and overscroll
+  document.body.style.overscrollBehavior = 'none';
+  document.body.style.touchAction = 'none';
+
+  // Map data-btn attributes to button constants
+  const touchBtnMap = {
+    up: btn_up(),
+    down: btn_down(),
+    left: btn_left(),
+    right: btn_right(),
+    a: btn_a(),
+    b: btn_b(),
+    start: btn_start(),
+    select: btn_select(),
+  };
+
+  // Track active touches per button element
+  const activeTouches = new Map();
+
+  function handleTouchStart(e) {
+    e.preventDefault();
+    const el = e.target.closest('[data-btn]');
+    if (!el) return;
+    const btnName = el.dataset.btn;
+    const btnId = touchBtnMap[btnName];
+    if (btnId === undefined) return;
+
+    // Track all touch identifiers on this element
+    for (const t of e.changedTouches) {
+      if (!activeTouches.has(el)) activeTouches.set(el, new Set());
+      activeTouches.get(el).add(t.identifier);
+    }
+
+    el.classList.add('active');
+    if (emu) emu.set_button(btnId, true);
+  }
+
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      for (const [el, ids] of activeTouches) {
+        if (ids.has(t.identifier)) {
+          ids.delete(t.identifier);
+          if (ids.size === 0) {
+            activeTouches.delete(el);
+            el.classList.remove('active');
+            const btnName = el.dataset.btn;
+            const btnId = touchBtnMap[btnName];
+            if (btnId !== undefined && emu) emu.set_button(btnId, false);
+          }
+        }
+      }
+    }
+  }
+
+  function handleTouchMove(e) {
+    e.preventDefault();
+    // Check if any touch moved off its original button onto a different one
+    for (const t of e.changedTouches) {
+      const elUnder = document.elementFromPoint(t.clientX, t.clientY);
+      const btnUnder = elUnder ? elUnder.closest('[data-btn]') : null;
+
+      for (const [el, ids] of activeTouches) {
+        if (ids.has(t.identifier) && el !== btnUnder) {
+          // Touch left this button
+          ids.delete(t.identifier);
+          if (ids.size === 0) {
+            activeTouches.delete(el);
+            el.classList.remove('active');
+            const btnName = el.dataset.btn;
+            const btnId = touchBtnMap[btnName];
+            if (btnId !== undefined && emu) emu.set_button(btnId, false);
+          }
+        }
+      }
+
+      // Touch entered a new button
+      if (btnUnder) {
+        const btnName = btnUnder.dataset.btn;
+        const btnId = touchBtnMap[btnName];
+        if (btnId !== undefined) {
+          if (!activeTouches.has(btnUnder)) activeTouches.set(btnUnder, new Set());
+          if (!activeTouches.get(btnUnder).has(t.identifier)) {
+            activeTouches.get(btnUnder).add(t.identifier);
+            btnUnder.classList.add('active');
+            if (emu) emu.set_button(btnId, true);
+          }
+        }
+      }
+    }
+  }
+
+  touchControls.addEventListener('touchstart', handleTouchStart, { passive: false });
+  touchControls.addEventListener('touchend', handleTouchEnd, { passive: false });
+  touchControls.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+  touchControls.addEventListener('touchmove', handleTouchMove, { passive: false });
+
+  // Prevent default on canvas touches to avoid scrolling
+  canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+  canvas2d.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+
+  // Tap canvas to toggle fullscreen
+  canvas.addEventListener('touchend', e => {
+    if (e.changedTouches.length === 1 && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+  canvas2d.addEventListener('touchend', e => {
+    if (e.changedTouches.length === 1 && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+}
 
 </script>
 </body>
