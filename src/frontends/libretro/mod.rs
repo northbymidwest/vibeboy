@@ -106,9 +106,9 @@ struct CoreState {
     emu: Emulator,
     rom: std::sync::Arc<[u8]>,
     audio_buf_i16: Vec<i16>,
-    video_buf: Vec<u32>,
+    save_buf: Vec<u8>,
+    save_loaded: bool,
     model: GbModel,
-    use_xrgb8888: bool,
 }
 
 static LIB_NAME: &[u8] = b"VibeBoy\0";
@@ -339,9 +339,9 @@ pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
             emu,
             rom,
             audio_buf_i16: Vec::with_capacity(4096),
-            video_buf: vec![0u32; 256 * 224], // max SGB size
+            save_buf: Vec::new(),
+            save_loaded: false,
             model,
-            use_xrgb8888: true,
         }));
 
         true
@@ -365,6 +365,14 @@ pub extern "C" fn retro_run() {
             Some(c) => c,
             None => return,
         };
+
+        // On first run, load save RAM that RetroArch wrote to our buffer
+        if !core.save_loaded {
+            core.save_loaded = true;
+            if !core.save_buf.is_empty() && core.emu.has_battery() {
+                core.emu.load_ram(&core.save_buf);
+            }
+        }
 
         // Poll input
         if let Some(poll) = input_poll_cb() { poll(); }
@@ -487,16 +495,34 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
-    // libretro manages save RAM via retro_get_memory_data/size.
-    // We can't return a pointer to internal cart RAM directly since it may
-    // be resized. Return null and handle via serialize/unserialize instead.
-    // RetroArch will fall back to save states for persistence.
-    ptr::null_mut()
+    unsafe {
+        if id != RETRO_MEMORY_SAVE_RAM { return ptr::null_mut(); }
+        let core = match core_mut() {
+            Some(c) => c,
+            None => return ptr::null_mut(),
+        };
+        if !core.emu.has_battery() { return ptr::null_mut(); }
+        // Sync emulator save data (including RTC footer) to buffer
+        core.save_buf = core.emu.save_data();
+        core.save_buf.as_mut_ptr() as *mut c_void
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
-    0
+    unsafe {
+        if id != RETRO_MEMORY_SAVE_RAM { return 0; }
+        let core = match core_mut() {
+            Some(c) => c,
+            None => return 0,
+        };
+        if !core.emu.has_battery() { return 0; }
+        // Ensure save_buf is populated so size is accurate
+        if core.save_buf.is_empty() {
+            core.save_buf = core.emu.save_data();
+        }
+        core.save_buf.len()
+    }
 }
 
 // ── Stubs for unused callbacks ──────────────────────────────────────────────
