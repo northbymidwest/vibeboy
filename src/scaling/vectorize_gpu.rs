@@ -13,16 +13,7 @@
 const IS_CORNER: u32 = 16;
 const IS_TJUNCTION: u32 = 32;
 
-// Golden section search constants (matching reference)
-const GS_R: f32 = 0.61803399;
-const GS_C: f32 = 0.38196601;
-const GS_TOL: f32 = 0.0001;
-const GS_MAX_ITER: i32 = 20;
-const BRACKET_A: f32 = 0.1;
-const BRACKET_B: f32 = -0.1;
-const GOLD: f32 = 1.618034;
-const GLIMIT: f32 = 10.0;
-const TINY: f32 = 1e-9;
+const NEWTON_ITER: i32 = 3;
 
 // Direction bitmask encoding (matches reference)
 const DIR_NW: u32 = 1;
@@ -1189,7 +1180,7 @@ fn build_cell_graph(
 }
 
 // ============================================================================
-// Stage 4: Optimize energy (golden section search)
+// Stage 4: Optimize energy (2D Newton-Raphson)
 // ============================================================================
 
 fn optimize_energy(
@@ -1200,6 +1191,7 @@ fn optimize_energy(
     num_cps: usize,
 ) -> Vec<f32> {
     let positional_scale: f32 = 2.5;
+    let s4 = positional_scale * positional_scale * positional_scale * positional_scale;
 
     let read_pos = |buf: &[f32], i: usize| -> (f32, f32) {
         (buf[i * 2], buf[i * 2 + 1])
@@ -1218,146 +1210,9 @@ fn optimize_energy(
         (buf[i * 2], buf[i * 2 + 1])
     };
 
-    let calc_curvature_energy = |n0: (f32, f32), p: (f32, f32), n1: (f32, f32)| -> f32 {
-        let tx = n0.0 - 2.0 * p.0 + n1.0;
-        let ty = n0.1 - 2.0 * p.1 + n1.1;
-        tx * tx + ty * ty
-    };
-
-    let calc_positional_energy = |p_new: (f32, f32), p_old: (f32, f32)| -> f32 {
-        let dx = p_new.0 - p_old.0;
-        let dy = p_new.1 - p_old.1;
-        let dist = positional_scale * (dx * dx + dy * dy).sqrt();
-        dist * dist * dist * dist
-    };
-
-    let total_energy =
-        |n0: (f32, f32), p: (f32, f32), n1: (f32, f32), p_orig: (f32, f32)| -> f32 {
-            calc_curvature_energy(n0, p, n1) + calc_positional_energy(p, p_orig)
-        };
-
-    let calc_gradient = |n0: (f32, f32), p: (f32, f32), n1: (f32, f32)| -> (f32, f32) {
-        (8.0 * p.0 - 4.0 * n0.0 - 4.0 * n1.0, 8.0 * p.1 - 4.0 * n0.1 - 4.0 * n1.1)
-    };
-
-    let find_bracket = |n0: (f32, f32),
-                        n1: (f32, f32),
-                        p: (f32, f32),
-                        p_orig: (f32, f32),
-                        gradient: (f32, f32)|
-     -> (f32, f32, f32) {
-        let mut ax = BRACKET_A;
-        let mut bx = BRACKET_B;
-        let mut fa = total_energy(
-            n0,
-            (p.0 - gradient.0 * ax, p.1 - gradient.1 * ax),
-            n1,
-            p_orig,
-        );
-        let mut fb = total_energy(
-            n0,
-            (p.0 - gradient.0 * bx, p.1 - gradient.1 * bx),
-            n1,
-            p_orig,
-        );
-
-        if fb > fa {
-            std::mem::swap(&mut ax, &mut bx);
-            std::mem::swap(&mut fa, &mut fb);
-        }
-
-        let mut cx = bx + GOLD * (bx - ax);
-        let mut fc = total_energy(
-            n0,
-            (p.0 - gradient.0 * cx, p.1 - gradient.1 * cx),
-            n1,
-            p_orig,
-        );
-
-        let mut guard = 0;
-        while fb > fc && guard < 100 {
-            guard += 1;
-            let r = (bx - ax) * (fb - fc);
-            let q = (bx - cx) * (fb - fa);
-            let qr = q - r;
-            let sign_qr = if qr >= 0.0 { 1.0f32 } else { -1.0 };
-            let u_denom = 2.0 * sign_qr * qr.abs().max(TINY);
-            let mut u = bx - ((bx - cx) * q - (bx - ax) * r) / u_denom;
-            let ulim = bx + GLIMIT * (cx - bx);
-            let mut fu: f32;
-
-            if (bx - u) * (u - cx) > 0.0 {
-                let fu_val = total_energy(
-                    n0,
-                    (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                    n1,
-                    p_orig,
-                );
-                if fu_val < fc {
-                    return (bx, u, cx);
-                }
-                if fu_val > fb {
-                    return (ax, bx, u);
-                }
-                u = cx + GOLD * (cx - bx);
-                fu = total_energy(
-                    n0,
-                    (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                    n1,
-                    p_orig,
-                );
-            } else if (cx - u) * (u - ulim) > 0.0 {
-                fu = total_energy(
-                    n0,
-                    (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                    n1,
-                    p_orig,
-                );
-                if fu < fc {
-                    let dum = cx + GOLD * (cx - bx);
-                    bx = cx;
-                    cx = u;
-                    u = dum;
-                    fb = fc;
-                    fc = fu;
-                    fu = total_energy(
-                        n0,
-                        (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                        n1,
-                        p_orig,
-                    );
-                }
-            } else if (u - ulim) * (ulim - cx) >= 0.0 {
-                u = ulim;
-                fu = total_energy(
-                    n0,
-                    (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                    n1,
-                    p_orig,
-                );
-            } else {
-                u = cx + GOLD * (cx - bx);
-                fu = total_energy(
-                    n0,
-                    (p.0 - gradient.0 * u, p.1 - gradient.1 * u),
-                    n1,
-                    p_orig,
-                );
-            }
-
-            ax = bx;
-            bx = cx;
-            cx = u;
-            fa = fb;
-            fb = fc;
-            fc = fu;
-        }
-        (ax, bx, cx)
-    };
-
     let optimize_one_pass = |pos_in: &[f32], pos_out: &mut [f32]| {
         for i in 0..num_cps {
-            let p = read_pos(pos_in, i);
+            let mut p = read_pos(pos_in, i);
             pos_out[i * 2] = p.0;
             pos_out[i * 2 + 1] = p.1;
 
@@ -1389,77 +1244,33 @@ fn optimize_energy(
             let n1 = read_neighbor_pos(pos_in, next_idx as usize);
             let p_orig = read_pos(orig_positions, i);
 
-            // Compute curvature gradient direction
-            let gradient = calc_gradient(n0, p, n1);
-            let grad_len = (gradient.0 * gradient.0 + gradient.1 * gradient.1).sqrt();
-            if grad_len < 1e-12 {
-                continue;
-            }
-            let gradient = (gradient.0 / grad_len, gradient.1 / grad_len);
+            // 2D Newton-Raphson: minimize E = |n0-2p+n1|² + (2.5·||p-p_orig||)⁴
+            // Gradient: ∇E = 4(2p-n0-n1) + 4·s⁴·||d||²·d
+            // Hessian:   H = 8I + 4·s⁴·(2d⊗d + ||d||²·I)
+            for _ in 0..NEWTON_ITER {
+                let dx = p.0 - p_orig.0;
+                let dy = p.1 - p_orig.1;
+                let d2 = dx * dx + dy * dy;
 
-            // Golden section search along gradient direction
-            let bracket = find_bracket(n0, n1, p, p_orig, gradient);
+                let gx = 4.0 * (2.0 * p.0 - n0.0 - n1.0) + 4.0 * s4 * d2 * dx;
+                let gy = 4.0 * (2.0 * p.1 - n0.1 - n1.1) + 4.0 * s4 * d2 * dy;
 
-            let mut x0 = bracket.0;
-            let mut x3 = bracket.2;
-            let (mut x1, mut x2);
+                let h00 = 8.0 + 4.0 * s4 * (2.0 * dx * dx + d2);
+                let h11 = 8.0 + 4.0 * s4 * (2.0 * dy * dy + d2);
+                let h01 = 8.0 * s4 * dx * dy;
 
-            if (bracket.2 - bracket.1).abs() > (bracket.1 - bracket.0).abs() {
-                x1 = bracket.1;
-                x2 = bracket.1 + GS_C * (bracket.2 - bracket.1);
-            } else {
-                x1 = bracket.1 - GS_C * (bracket.1 - bracket.0);
-                x2 = bracket.1;
-            }
-
-            let mut f1 = total_energy(
-                n0,
-                (p.0 - gradient.0 * x1, p.1 - gradient.1 * x1),
-                n1,
-                p_orig,
-            );
-            let mut f2 = total_energy(
-                n0,
-                (p.0 - gradient.0 * x2, p.1 - gradient.1 * x2),
-                n1,
-                p_orig,
-            );
-
-            for _ in 0..GS_MAX_ITER {
-                if (x3 - x0).abs() <= GS_TOL * (x1.abs() + x2.abs()) {
+                let det = h00 * h11 - h01 * h01;
+                if det.abs() < 1e-20 {
                     break;
                 }
 
-                if f2 < f1 {
-                    x0 = x1;
-                    x1 = x2;
-                    x2 = GS_R * x1 + GS_C * x3;
-                    f1 = f2;
-                    f2 = total_energy(
-                        n0,
-                        (p.0 - gradient.0 * x2, p.1 - gradient.1 * x2),
-                        n1,
-                        p_orig,
-                    );
-                } else {
-                    x3 = x2;
-                    x2 = x1;
-                    x1 = GS_R * x2 + GS_C * x0;
-                    f2 = f1;
-                    f1 = total_energy(
-                        n0,
-                        (p.0 - gradient.0 * x1, p.1 - gradient.1 * x1),
-                        n1,
-                        p_orig,
-                    );
-                }
+                let inv_det = 1.0 / det;
+                p.0 -= (h11 * gx - h01 * gy) * inv_det;
+                p.1 -= (-h01 * gx + h00 * gy) * inv_det;
             }
 
-            let offset = if f1 < f2 { x1 } else { x2 };
-            let optimized = (p.0 - gradient.0 * offset, p.1 - gradient.1 * offset);
-
-            pos_out[i * 2] = optimized.0;
-            pos_out[i * 2 + 1] = optimized.1;
+            pos_out[i * 2] = p.0;
+            pos_out[i * 2 + 1] = p.1;
         }
     };
 

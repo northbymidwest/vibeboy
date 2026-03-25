@@ -1,14 +1,14 @@
 #version 450
 
-// Golden section search optimizer for B-spline control points.
-// Matches the reference GPU implementation (OptimizeEnergy.vert).
+// 2D Newton-Raphson optimizer for B-spline control points.
 //
 // Energy function: E = E_curvature + E_positional
 //   E_curvature = |p0 - 2*p1 + p2|²  (simple κ² approximation)
 //   E_positional = (2.5 * distance(p, p_orig))⁴
 //
-// Search direction: gradient of curvature energy only (8*p1 - 4*p0 - 4*p2).
-// The golden section search minimizes total energy along this direction.
+// Both gradient and Hessian are analytical, so Newton converges in 2-3
+// iterations vs the ~120 energy evaluations the old golden section search
+// needed.
 //
 // Flag encoding:
 //   bit 0 (1u)  = pinned (junction/border — don't move)
@@ -43,12 +43,13 @@ layout(std430, set = 1, binding = 0) buffer PositionsOut {
 layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint num_nodes;
     float gradient_step;  // unused (kept for ABI compatibility)
-    float max_move;       // unused (golden section uses its own bracket)
+    float max_move;       // unused
     float positional_scale; // 2.5
 };
 
 const uint IS_CORNER = 16u;
 const uint IS_TJUNCTION = 32u;
+const int NEWTON_ITER = 3;
 
 vec2 read_pos(uint i) {
     return vec2(pos_in[i * 2u], pos_in[i * 2u + 1u]);
@@ -71,94 +72,6 @@ vec2 read_neighbor_pos(uint i) {
 
 vec2 read_orig(uint i) {
     return vec2(orig_pos[i * 2u], orig_pos[i * 2u + 1u]);
-}
-
-// Simple curvature energy: |p0 - 2*p1 + p2|²
-float calc_curvature_energy(vec2 n0, vec2 p, vec2 n1) {
-    vec2 tmp = n0 - 2.0 * p + n1;
-    return tmp.x * tmp.x + tmp.y * tmp.y;
-}
-
-// Positional energy: (2.5 * distance)^4
-float calc_positional_energy(vec2 p_new, vec2 p_old) {
-    float dist = positional_scale * distance(p_new, p_old);
-    return dist * dist * dist * dist;
-}
-
-// Total energy at a given position
-float total_energy(vec2 n0, vec2 p, vec2 n1, vec2 p_orig) {
-    return calc_curvature_energy(n0, p, n1) + calc_positional_energy(p, p_orig);
-}
-
-// Curvature gradient: d/dp |n0 - 2p + n1|² = 8p - 4n0 - 4n1
-vec2 calc_gradient(vec2 n0, vec2 p, vec2 n1) {
-    return 8.0 * p - 4.0 * n0 - 4.0 * n1;
-}
-
-// Golden section search constants (matching reference)
-const float GS_R = 0.61803399;
-const float GS_C = 0.38196601; // 1 - R
-const float GS_TOL = 0.0001;
-const int GS_MAX_ITER = 20;
-const float BRACKET_A = 0.1;
-const float BRACKET_B = -0.1;
-const float GOLD = 1.618034;
-const float GLIMIT = 10.0;
-const float TINY = 0.000000001;
-
-// Find bracket around minimum via parabolic interpolation
-vec3 find_bracket(vec2 n0, vec2 n1, vec2 p, vec2 p_orig, vec2 gradient) {
-    float ax = BRACKET_A;
-    float bx = BRACKET_B;
-    float fa = total_energy(n0, p - gradient * ax, n1, p_orig);
-    float fb = total_energy(n0, p - gradient * bx, n1, p_orig);
-
-    // Ensure fa >= fb (go downhill from a to b)
-    if (fb > fa) {
-        float tmp;
-        tmp = ax; ax = bx; bx = tmp;
-        tmp = fa; fa = fb; fb = tmp;
-    }
-
-    float cx = bx + GOLD * (bx - ax);
-    float fc = total_energy(n0, p - gradient * cx, n1, p_orig);
-
-    int guard = 0;
-    while (fb > fc && guard < 100) {
-        guard++;
-        float r = (bx - ax) * (fb - fc);
-        float q = (bx - cx) * (fb - fa);
-        float qr = q - r;
-        float u = bx - ((bx - cx) * q - (bx - ax) * r) / (2.0 * sign(qr) * max(abs(qr), TINY));
-        float ulim = bx + GLIMIT * (cx - bx);
-        float fu;
-
-        if ((bx - u) * (u - cx) > 0.0) {
-            fu = total_energy(n0, p - gradient * u, n1, p_orig);
-            if (fu < fc) return vec3(bx, u, cx);
-            if (fu > fb) return vec3(ax, bx, u);
-            u = cx + GOLD * (cx - bx);
-            fu = total_energy(n0, p - gradient * u, n1, p_orig);
-        } else if ((cx - u) * (u - ulim) > 0.0) {
-            fu = total_energy(n0, p - gradient * u, n1, p_orig);
-            if (fu < fc) {
-                float dum = cx + GOLD * (cx - bx);
-                bx = cx; cx = u; u = dum;
-                fb = fc; fc = fu;
-                fu = total_energy(n0, p - gradient * u, n1, p_orig);
-            }
-        } else if ((u - ulim) * (ulim - cx) >= 0.0) {
-            u = ulim;
-            fu = total_energy(n0, p - gradient * u, n1, p_orig);
-        } else {
-            u = cx + GOLD * (cx - bx);
-            fu = total_energy(n0, p - gradient * u, n1, p_orig);
-        }
-
-        ax = bx; bx = cx; cx = u;
-        fa = fb; fb = fc; fc = fu;
-    }
-    return vec3(ax, bx, cx);
 }
 
 void main() {
@@ -192,51 +105,29 @@ void main() {
     vec2 n1 = read_neighbor_pos(uint(next_idx));
     vec2 p_orig = read_orig(i);
 
-    // Compute curvature gradient direction
-    vec2 gradient = calc_gradient(n0, p, n1);
-    float grad_len = length(gradient);
-    if (grad_len < 1e-12) return;
-    gradient = gradient / grad_len; // normalize
+    // 2D Newton-Raphson: minimize E = |n0-2p+n1|² + (2.5·||p-p_orig||)⁴
+    // Gradient: ∇E = 4(2p-n0-n1) + 4·s⁴·||d||²·d
+    // Hessian:   H = 8I + 4·s⁴·(2d⊗d + ||d||²·I)
+    float s4 = positional_scale * positional_scale;
+    s4 *= s4; // 2.5⁴ = 39.0625
 
-    // Golden section search along gradient direction
-    vec3 bracket = find_bracket(n0, n1, p, p_orig, gradient);
+    for (int iter = 0; iter < NEWTON_ITER; iter++) {
+        vec2 d = p - p_orig;
+        float d2 = dot(d, d);
 
-    float x0 = bracket.x;
-    float x3 = bracket.z;
-    float x1, x2;
+        vec2 grad = 4.0 * (2.0 * p - n0 - n1) + 4.0 * s4 * d2 * d;
 
-    if (abs(bracket.z - bracket.y) > abs(bracket.y - bracket.x)) {
-        x1 = bracket.y;
-        x2 = bracket.y + GS_C * (bracket.z - bracket.y);
-    } else {
-        x1 = bracket.y - GS_C * (bracket.y - bracket.x);
-        x2 = bracket.y;
+        float h00 = 8.0 + 4.0 * s4 * (2.0 * d.x * d.x + d2);
+        float h11 = 8.0 + 4.0 * s4 * (2.0 * d.y * d.y + d2);
+        float h01 = 8.0 * s4 * d.x * d.y;
+
+        float det = h00 * h11 - h01 * h01;
+        if (abs(det) < 1e-20) break;
+
+        p -= vec2(h11 * grad.x - h01 * grad.y,
+                  -h01 * grad.x + h00 * grad.y) / det;
     }
 
-    float f1 = total_energy(n0, p - gradient * x1, n1, p_orig);
-    float f2 = total_energy(n0, p - gradient * x2, n1, p_orig);
-
-    for (int iter = 0; iter < GS_MAX_ITER; iter++) {
-        if (abs(x3 - x0) <= GS_TOL * (abs(x1) + abs(x2))) break;
-
-        if (f2 < f1) {
-            x0 = x1;
-            x1 = x2;
-            x2 = GS_R * x1 + GS_C * x3;
-            f1 = f2;
-            f2 = total_energy(n0, p - gradient * x2, n1, p_orig);
-        } else {
-            x3 = x2;
-            x2 = x1;
-            x1 = GS_R * x2 + GS_C * x0;
-            f2 = f1;
-            f1 = total_energy(n0, p - gradient * x1, n1, p_orig);
-        }
-    }
-
-    float offset = (f1 < f2) ? x1 : x2;
-    vec2 optimized = p - gradient * offset;
-
-    pos_out[i * 2u] = optimized.x;
-    pos_out[i * 2u + 1u] = optimized.y;
+    pos_out[i * 2u] = p.x;
+    pos_out[i * 2u + 1u] = p.y;
 }
