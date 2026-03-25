@@ -1661,7 +1661,7 @@ fn rasterize(
 
             let orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
             let tl2 = (orig_tangent.0 * orig_tangent.0 + orig_tangent.1 * orig_tangent.1).sqrt();
-            if tl2 < 1e-8 {
+            if tl2 < 1e-4 {
                 return None;
             }
             let orig_tangent = (orig_tangent.0 / tl2, orig_tangent.1 / tl2);
@@ -1670,7 +1670,7 @@ fn rasterize(
             let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
             let opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
             let otl = (opt_tangent.0 * opt_tangent.0 + opt_tangent.1 * opt_tangent.1).sqrt();
-            if otl < 1e-8 {
+            if otl < 1e-4 {
                 return None;
             }
             let opt_tangent = (opt_tangent.0 / otl, opt_tangent.1 / otl);
@@ -1773,7 +1773,7 @@ fn rasterize(
                 let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
                 let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
 
-                if tl < 1e-8 {
+                if tl < 1e-4 {
                     chunk[local_y * out_w + opx] = pack_color(center_color);
                 } else {
                     let normal = (-tang.1 / tl, tang.0 / tl);

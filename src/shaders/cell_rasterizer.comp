@@ -119,14 +119,14 @@ bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
 
     vec2 orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
     float tl2 = length(orig_tangent);
-    if (tl2 < 1e-8) return false;
+    if (tl2 < 1e-4) return false;
     orig_tangent /= tl2;
     vec2 orig_normal = vec2(-orig_tangent.y, orig_tangent.x);
 
     vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
     vec2 opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
     float otl = length(opt_tangent);
-    if (otl < 1e-8) return false;
+    if (otl < 1e-4) return false;
     opt_tangent /= otl;
     vec2 opt_normal = vec2(-opt_tangent.y, opt_tangent.x);
 
@@ -346,7 +346,7 @@ void main() {
             vec2 tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             float tl = length(tang);
 
-            if (tl < 1e-8) {
+            if (tl < 1e-4) {
                 imageStore(output_img, ivec2(opx, opy), vec4(
                     float((center_color >> 16u) & 0xFFu) / 255.0,
                     float((center_color >> 8u) & 0xFFu) / 255.0,
