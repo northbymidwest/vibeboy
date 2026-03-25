@@ -32,7 +32,6 @@ pub(super) struct MetalVecBufs {
     pos_buf: Buffer,
     nbr_buf: Buffer,
     flag_buf: Buffer,
-    ecolor_buf: Buffer,
     opt_out_buf: Buffer,
     orig_pos_buf: Buffer,
 }
@@ -91,7 +90,6 @@ impl MetalVectorizePipeline {
                 pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 nbr_buf: mk_buf(device, (num_cps * 4 * 4) as usize),
                 flag_buf: mk_buf(device, (num_cps * 4) as usize),
-                ecolor_buf: mk_buf(device, (num_cps * 4 * 4) as usize),
                 opt_out_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 orig_pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
             });
@@ -128,7 +126,7 @@ impl MetalVectorizePipeline {
         {
             let enc = cmd.blitCommandEncoder().unwrap();
             for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
-                        &b.flag_buf, &b.ecolor_buf, &b.opt_out_buf, &b.orig_pos_buf] {
+                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf] {
                 enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
             }
             enc.endEncoding();
@@ -194,7 +192,6 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 2);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
-                enc.setBuffer_offset_atIndex(Some(&b.ecolor_buf), 0, 5);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: ((corners_w + 15) / 16) as usize, height: ((corners_h + 15) / 16) as usize, depth: 1 },
                     MTLSize { width: 16, height: 16, depth: 1 },
@@ -270,7 +267,6 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 3);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 5);
-                enc.setBuffer_offset_atIndex(Some(&b.ecolor_buf), 0, 6);
                 enc.setTexture_atIndex(Some(out_tex), 0);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: (tiles_w * tiles_h) as usize, height: 1, depth: 1 },

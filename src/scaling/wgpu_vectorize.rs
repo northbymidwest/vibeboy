@@ -29,7 +29,6 @@ struct VecBufs {
     pos_buf: wgpu::Buffer,
     nbr_buf: wgpu::Buffer,
     flag_buf: wgpu::Buffer,
-    ecolor_buf: wgpu::Buffer,
     opt_out_buf: wgpu::Buffer,
     orig_pos_buf: wgpu::Buffer,
     // One uniform buffer per stage to avoid write conflicts
@@ -129,8 +128,6 @@ impl WgpuVectorizePipeline {
         let pos_size = (num_cps * 2 * 4) as u64;
         let nbr_size = (num_cps * 4 * 4) as u64;
         let flag_size = (num_cps * 4) as u64;
-        let ecolor_size = (num_cps * 4 * 4) as u64;
-
         let output_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vectorize output"),
             size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
@@ -148,7 +145,6 @@ impl WgpuVectorizePipeline {
         let pos_buf = mk("positions", pos_size, storage_rw);
         let nbr_buf = mk("neighbors", nbr_size, storage_rw);
         let flag_buf = mk("flags", flag_size, storage_rw);
-        let ecolor_buf = mk("edge_colors", ecolor_size, storage_rw);
         let opt_out_buf = mk("opt_out", pos_size, storage_rw);
         let orig_pos_buf = mk("orig_pos", pos_size, storage_rw);
         let uni_sim = mk("uni_sim", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
@@ -186,7 +182,6 @@ impl WgpuVectorizePipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: ecolor_buf.as_entire_binding() },
             ]),
             bg(&self.cell_graph, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_cell.as_entire_binding() }]),
         ];
@@ -225,7 +220,6 @@ impl WgpuVectorizePipeline {
                 wgpu::BindGroupEntry { binding: 2, resource: orig_pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: flag_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: nbr_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: ecolor_buf.as_entire_binding() },
             ]),
             bg(&self.rasterizer, 1, &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -237,7 +231,7 @@ impl WgpuVectorizePipeline {
         self.bufs = Some(VecBufs {
             img_w, img_h,
             px_buf, graph_buf, graph_snapshot, pos_buf, nbr_buf, flag_buf,
-            ecolor_buf, opt_out_buf, orig_pos_buf,
+            opt_out_buf, orig_pos_buf,
             uni_sim, uni_resolve, uni_cell, uni_opt, uni_tjunc, uni_rast,
             output_tex, output_tex_w: out_w, output_tex_h: out_h,
             bg_sim, bg_resolve, bg_cell, bg_opt_p1, bg_opt_p2, bg_tjunc, bg_rast,

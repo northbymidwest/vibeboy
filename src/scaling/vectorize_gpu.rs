@@ -32,7 +32,7 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
 
     let graph = build_similarity_graph(src, src_w, src_h);
     let graph = resolve_crossings(&graph, src_w, src_h);
-    let (positions, neighbors, flags, edge_colors) = build_cell_graph(&graph, src_w, src_h);
+    let (positions, neighbors, flags) = build_cell_graph(&graph, src_w, src_h);
 
     let corners_w = src_w + 1;
     let corners_h = src_h + 1;
@@ -49,7 +49,6 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
         &orig_positions,
         &flags,
         &neighbors,
-        &edge_colors,
         src_w,
         src_h,
         out_w,
@@ -402,7 +401,7 @@ fn build_cell_graph(
     graph: &[u32],
     img_w: usize,
     img_h: usize,
-) -> (Vec<f32>, Vec<i32>, Vec<u32>, Vec<u32>) {
+) -> (Vec<f32>, Vec<i32>, Vec<u32>) {
     let graph_stride = 2 * img_w + 1;
     let corners_w = img_w + 1;
     let corners_h = img_h + 1;
@@ -411,7 +410,6 @@ fn build_cell_graph(
     let mut positions = vec![0.0f32; num_cps * 2];
     let mut neighbors = vec![-1i32; num_cps * 4];
     let mut flags = vec![0u32; num_cps];
-    let mut edge_colors = vec![0u32; num_cps * 4];
 
     let g = |gx: i32, gy: i32| -> u32 {
         let gx = gx.clamp(0, graph_stride as i32 - 1) as usize;
@@ -549,41 +547,10 @@ fn build_cell_graph(
         false
     };
 
-    // Read pixel color from graph buffer
-    let get_px_color = |px: i32, py: i32| -> u32 {
-        let px = px.clamp(0, img_w as i32 - 1);
-        let py = py.clamp(0, img_h as i32 - 1);
-        g(2 * px + 1, 2 * py + 1)
-    };
-
-    // Get edge colors for a boundary edge in direction dir
-    let get_edge_colors = |icx: i32, icy: i32, dir: i32| -> (u32, u32) {
-        match dir {
-            0 => {
-                // N
-                (get_px_color(icx - 1, icy - 1), get_px_color(icx, icy - 1))
-            }
-            1 => {
-                // E
-                (get_px_color(icx, icy - 1), get_px_color(icx, icy))
-            }
-            2 => {
-                // S
-                (get_px_color(icx, icy), get_px_color(icx - 1, icy))
-            }
-            3 => {
-                // W
-                (get_px_color(icx - 1, icy), get_px_color(icx - 1, icy - 1))
-            }
-            _ => (0, 0),
-        }
-    };
-
-    // Write CP with full edge color info
+    // Write CP with prev_dir/next_dir stored in neighbors[2]/[3]
     let write_cp_full = |positions: &mut [f32],
                          neighbors_buf: &mut [i32],
                          flags_buf: &mut [u32],
-                         edge_colors_buf: &mut [u32],
                          idx: i32,
                          pos: (f32, f32),
                          prev: i32,
@@ -591,40 +558,22 @@ fn build_cell_graph(
                          flag: u32,
                          prev_dir: i32,
                          next_dir: i32,
-                         icx: i32,
-                         icy: i32| {
+                         _icx: i32,
+                         _icy: i32| {
         let i = idx as usize;
         positions[i * 2] = pos.0;
         positions[i * 2 + 1] = pos.1;
         neighbors_buf[i * 4] = prev;
         neighbors_buf[i * 4 + 1] = next;
-        neighbors_buf[i * 4 + 2] = icx;
-        neighbors_buf[i * 4 + 3] = icy;
+        neighbors_buf[i * 4 + 2] = prev_dir;
+        neighbors_buf[i * 4 + 3] = next_dir;
         flags_buf[i] = flag;
-
-        let (mut pl, mut pr) = (0u32, 0u32);
-        let (mut nl, mut nr) = (0u32, 0u32);
-        if prev_dir >= 0 {
-            let (l, r) = get_edge_colors(icx, icy, prev_dir);
-            pl = l;
-            pr = r;
-        }
-        if next_dir >= 0 {
-            let (l, r) = get_edge_colors(icx, icy, next_dir);
-            nl = l;
-            nr = r;
-        }
-        edge_colors_buf[i * 4] = pl;
-        edge_colors_buf[i * 4 + 1] = pr;
-        edge_colors_buf[i * 4 + 2] = nl;
-        edge_colors_buf[i * 4 + 3] = nr;
     };
 
-    // Write CP without edge colors
+    // Write CP without direction info
     let write_cp = |positions: &mut [f32],
                     neighbors_buf: &mut [i32],
                     flags_buf: &mut [u32],
-                    edge_colors_buf: &mut [u32],
                     idx: i32,
                     pos: (f32, f32),
                     prev: i32,
@@ -638,10 +587,6 @@ fn build_cell_graph(
         neighbors_buf[i * 4 + 2] = -1;
         neighbors_buf[i * 4 + 3] = -1;
         flags_buf[i] = flag;
-        edge_colors_buf[i * 4] = 0;
-        edge_colors_buf[i * 4 + 1] = 0;
-        edge_colors_buf[i * 4 + 2] = 0;
-        edge_colors_buf[i * 4 + 3] = 0;
     };
 
     for cy in 0..corners_h {
@@ -656,7 +601,7 @@ fn build_cell_graph(
                 &mut positions,
                 &mut neighbors,
                 &mut flags,
-                &mut edge_colors,
+
                 base,
                 (0.0, 0.0),
                 -1,
@@ -667,7 +612,7 @@ fn build_cell_graph(
                 &mut positions,
                 &mut neighbors,
                 &mut flags,
-                &mut edge_colors,
+
                 base + 1,
                 (0.0, 0.0),
                 -1,
@@ -710,7 +655,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base,
                         (cx as f32, cy as f32),
                         -1,
@@ -782,7 +727,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base,
                         p0,
                         prev0,
@@ -825,7 +770,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base + 1,
                         p1,
                         prev1,
@@ -880,7 +825,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base,
                         p0,
                         prev0,
@@ -923,7 +868,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base + 1,
                         p1,
                         prev1,
@@ -1013,7 +958,7 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-                    &mut edge_colors,
+    
                     base,
                     pos,
                     prev,
@@ -1044,7 +989,7 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-                    &mut edge_colors,
+    
                     base,
                     pos,
                     nbr,
@@ -1110,7 +1055,7 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-                    &mut edge_colors,
+    
                     base,
                     pos,
                     prev,
@@ -1143,7 +1088,7 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-                        &mut edge_colors,
+        
                         base + 1,
                         pos,
                         stem_idx,
@@ -1161,7 +1106,7 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-                    &mut edge_colors,
+    
                     base,
                     pos,
                     n_idx,
@@ -1176,7 +1121,7 @@ fn build_cell_graph(
         }
     }
 
-    (positions, neighbors, flags, edge_colors)
+    (positions, neighbors, flags)
 }
 
 // ============================================================================
@@ -1455,10 +1400,10 @@ struct CpData {
     poly_ax: f32, poly_ay: f32,
     poly_bx: f32, poly_by: f32,
     poly_cx: f32, poly_cy: f32,
-    pl: u32,
-    pr: u32,
-    nl: u32,
-    nr: u32,
+    prev_dir: i32,
+    next_dir: i32,
+    icx: i32,
+    icy: i32,
     prev_ci: i32,
     next_ci: i32,
 }
@@ -1469,7 +1414,6 @@ fn rasterize(
     orig_positions: &[f32],
     flags: &[u32],
     cp_neighbors: &[i32],
-    edge_colors: &[u32],
     img_w: usize,
     img_h: usize,
     out_w: usize,
@@ -1542,10 +1486,10 @@ fn rasterize(
             bbox_min,
             bbox_max,
             poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
-            pl: edge_colors[ci * 4],
-            pr: edge_colors[ci * 4 + 1],
-            nl: edge_colors[ci * 4 + 2],
-            nr: edge_colors[ci * 4 + 3],
+            prev_dir: cp_neighbors[ci * 4 + 2],
+            next_dir: cp_neighbors[ci * 4 + 3],
+            icx: (ci / 2 % corners_w) as i32,
+            icy: (ci / 2 / corners_w) as i32,
             prev_ci,
             next_ci,
         });
@@ -1600,10 +1544,31 @@ fn rasterize(
 
     let mut output = vec![0u32; out_w * out_h];
 
+    // Compute edge colors on-the-fly from pixel buffer
+    let get_px_color = |px: i32, py: i32| -> u32 {
+        let px = px.clamp(0, img_w as i32 - 1) as usize;
+        let py = py.clamp(0, img_h as i32 - 1) as usize;
+        pixels[py * img_w + px]
+    };
+    let get_edge_colors = |icx: i32, icy: i32, dir: i32| -> (u32, u32) {
+        match dir {
+            0 => (get_px_color(icx - 1, icy - 1), get_px_color(icx, icy - 1)),
+            1 => (get_px_color(icx, icy - 1), get_px_color(icx, icy)),
+            2 => (get_px_color(icx, icy), get_px_color(icx - 1, icy)),
+            3 => (get_px_color(icx - 1, icy), get_px_color(icx - 1, icy - 1)),
+            _ => (0, 0),
+        }
+    };
+
     let resolve_from_cp =
         |pt: (f32, f32), sc: &CpData, t: f32| -> Option<u32> {
-            let prev_valid = sc.pl != sc.pr;
-            let next_valid = sc.nl != sc.nr;
+            let (mut pl, mut pr) = (0u32, 0u32);
+            let (mut nl, mut nr) = (0u32, 0u32);
+            if sc.prev_dir >= 0 { let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.prev_dir); pl = l; pr = r; }
+            if sc.next_dir >= 0 { let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.next_dir); nl = l; nr = r; }
+
+            let prev_valid = pl != pr;
+            let next_valid = nl != nr;
 
             let (color_left, color_right, ref_t);
 
@@ -1614,8 +1579,8 @@ fn rasterize(
                     return None;
                 }
                 if next_valid {
-                    color_left = sc.nr;
-                    color_right = sc.nl;
+                    color_left = nr;
+                    color_right = nl;
                     ref_t = 1.0;
                 } else {
                     return None;
@@ -1627,32 +1592,32 @@ fn rasterize(
                     return None;
                 }
                 if prev_valid {
-                    color_left = sc.pl;
-                    color_right = sc.pr;
+                    color_left = pl;
+                    color_right = pr;
                     ref_t = 0.0;
                 } else {
                     return None;
                 }
             } else if t < 0.5 {
                 if prev_valid {
-                    color_left = sc.pl;
-                    color_right = sc.pr;
+                    color_left = pl;
+                    color_right = pr;
                     ref_t = 0.0;
                 } else if next_valid {
-                    color_left = sc.nr;
-                    color_right = sc.nl;
+                    color_left = nr;
+                    color_right = nl;
                     ref_t = 1.0;
                 } else {
                     return None;
                 }
             } else {
                 if next_valid {
-                    color_left = sc.nr;
-                    color_right = sc.nl;
+                    color_left = nr;
+                    color_right = nl;
                     ref_t = 1.0;
                 } else if prev_valid {
-                    color_left = sc.pl;
-                    color_right = sc.pr;
+                    color_left = pl;
+                    color_right = pr;
                     ref_t = 0.0;
                 } else {
                     return None;
@@ -1779,30 +1744,34 @@ fn rasterize(
                     let normal = (-tang.1 / tl, tang.0 / tl);
                     let d = (center.0 - cpt.0) * normal.0 + (center.1 - cpt.1) * normal.1;
 
+                    // Compute edge colors on-the-fly
+                    let (aa_pl, aa_pr) = if sc.prev_dir >= 0 { get_edge_colors(sc.icx, sc.icy, sc.prev_dir) } else { (0, 0) };
+                    let (aa_nl, aa_nr) = if sc.next_dir >= 0 { get_edge_colors(sc.icx, sc.icy, sc.next_dir) } else { (0, 0) };
+
                     // Resolve both colors from edge colors
                     let mut color_left = 0u32;
                     let mut color_right = 0u32;
                     let mut have_edge = false;
                     let mut ref_t = 0.0f32;
 
-                    if best_t < 0.5 && sc.pl != sc.pr {
-                        color_left = sc.pl;
-                        color_right = sc.pr;
+                    if best_t < 0.5 && aa_pl != aa_pr {
+                        color_left = aa_pl;
+                        color_right = aa_pr;
                         ref_t = 0.0;
                         have_edge = true;
-                    } else if best_t >= 0.5 && sc.nl != sc.nr {
-                        color_left = sc.nr;
-                        color_right = sc.nl;
+                    } else if best_t >= 0.5 && aa_nl != aa_nr {
+                        color_left = aa_nr;
+                        color_right = aa_nl;
                         ref_t = 1.0;
                         have_edge = true;
-                    } else if sc.nl != sc.nr {
-                        color_left = sc.nr;
-                        color_right = sc.nl;
+                    } else if aa_nl != aa_nr {
+                        color_left = aa_nr;
+                        color_right = aa_nl;
                         ref_t = 1.0;
                         have_edge = true;
-                    } else if sc.pl != sc.pr {
-                        color_left = sc.pl;
-                        color_right = sc.pr;
+                    } else if aa_pl != aa_pr {
+                        color_left = aa_pl;
+                        color_right = aa_pr;
                         ref_t = 0.0;
                         have_edge = true;
                     }

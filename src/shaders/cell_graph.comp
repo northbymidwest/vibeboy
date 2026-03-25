@@ -39,15 +39,6 @@ layout(std430, set = 1, binding = 2) buffer FlagBuf {
     uint flags[];
 };
 
-// Per-CP edge colors: the two pixel colors on each side of the boundary.
-// Layout: [prev_left, prev_right, next_left, next_right]
-// "left" = counterclockwise side of tangent, "right" = clockwise side.
-// The tangent points from the neighbor TOWARD this CP for prev,
-// and from this CP TOWARD the neighbor for next.
-layout(std430, set = 1, binding = 3) buffer EdgeColorBuf {
-    uint edge_colors[];
-};
-
 layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint img_w;
     uint img_h;
@@ -183,108 +174,15 @@ int nbr_cp_idx(int cx, int cy, int from_dir) {
 }
 
 
-// Read pixel color from graph buffer (stored at odd grid positions).
-uint get_px_color(int px, int py) {
-    px = clamp(px, 0, int(img_w) - 1);
-    py = clamp(py, 0, int(img_h) - 1);
-    return g(2 * px + 1, 2 * py + 1);
-}
-
-// For a boundary edge in direction `dir` at grid corner (icx, icy),
-// return the two pixel colors separated by that edge.
-// Convention: looking along the tangent direction (from neighbor toward CP
-// for prev edges, from CP toward neighbor for next edges), "left" is the
-// counterclockwise side and "right" is the clockwise side.
-//
-// The tangent directions (pointing from neighbor toward grid corner):
-//   dir 0 (N): neighbor is above → tangent = (0, +1) → left = west pixel, right = east pixel
-//   dir 1 (E): neighbor is right → tangent = (-1, 0) → left = south pixel, right = north pixel
-//   dir 2 (S): neighbor is below → tangent = (0, -1) → left = east pixel, right = west pixel
-//   dir 3 (W): neighbor is left  → tangent = (+1, 0) → left = north pixel, right = south pixel
-void get_edge_colors(int icx, int icy, int dir, out uint color_left, out uint color_right) {
-    // Pixels at grid corner (icx, icy):
-    //   TL = (icx-1, icy-1)   TR = (icx, icy-1)
-    //   BL = (icx-1, icy)     BR = (icx, icy)
-    // The tangent at t=0.5 (grid corner) for a span with prev in direction `dir`
-    // points roughly from the prev neighbor toward the next neighbor, passing
-    // through the grid corner. We define left/right by sampling ±0.5 from the
-    // grid corner perpendicular to the boundary edge direction.
-    //
-    // For each boundary edge direction, the edge itself is perpendicular to the
-    // line connecting the two pixels it separates:
-    //   N edge (horizontal): separates top row from bottom row at this corner
-    //     → pixels above = (icx-1,icy-1) and (icx,icy-1)
-    //     → pixels below = (icx-1,icy) and (icx,icy)
-    //     → We pick one from each side based on which is closer to the curve.
-    //
-    // For the B-spline tangent convention: tangent at t=0 = cp - prev_pos.
-    // The left normal (-tangent.y, tangent.x) points to the left of the
-    // tangent direction. We need to match: positive dot(pt - curve_pt, normal)
-    // means "left" side, negative means "right" side.
-    //
-    // Computing analytically: for a prev direction of N (above), the tangent
-    // at t=0 ≈ (0,+1). The left normal = (-1,0). A point to the left
-    // (negative X) of the curve at the grid corner is in pixel (icx-1, icy-1)
-    // or (icx-1, icy). Since the N edge is at y=icy-0.5 (between rows icy-1
-    // and icy), and the grid corner is at y=icy, the left normal (-1,0) at
-    // the grid corner samples into the BL pixel = (icx-1, icy).
-    // The right side samples into BR = (icx, icy).
-    //
-    // But the N edge separates row icy-1 from row icy. The boundary between
-    // TL and TR is the N edge. So the colors should be from the two pixels
-    // the N edge actually separates: TL and TR.
-    //
-    // The resolution: at t=0 (near the prev neighbor), the curve is near
-    // the prev neighbor, and the tangent normal points sideways relative to
-    // the direction from prev to the CP. The pixels on each side at the
-    // PREV NEIGHBOR's position are the ones separated by the boundary edge.
-    //
-    // For N direction: prev neighbor is at (icx, icy-1). The edge between
-    // this CP and the N neighbor separates TL=(icx-1,icy-1) from TR=(icx,icy-1).
-    // The tangent at t=0 points from (icx,icy-1) toward (icx,icy) = (0,+1).
-    // Left normal = (-1, 0). Relative to the prev position (icx, icy-1):
-    //   left sample = (icx-1, icy-1) = TL ✓
-    //   right sample = (icx, icy-1) = TR ✓ (at the prev position, not the CP!)
-    switch (dir) {
-        case 0: // N: prev at (icx, icy-1), edge separates TL from TR
-            color_left  = get_px_color(icx - 1, icy - 1); // TL
-            color_right = get_px_color(icx,     icy - 1); // TR
-            break;
-        case 1: // E: prev at (icx+1, icy), edge separates TR from BR
-            color_left  = get_px_color(icx,     icy - 1); // TR
-            color_right = get_px_color(icx,     icy);     // BR
-            break;
-        case 2: // S: prev at (icx, icy+1), edge separates BL from BR
-            color_left  = get_px_color(icx,     icy);     // BR
-            color_right = get_px_color(icx - 1, icy);     // BL
-            break;
-        case 3: // W: prev at (icx-1, icy), edge separates TL from BL
-            color_left  = get_px_color(icx - 1, icy);     // BL
-            color_right = get_px_color(icx - 1, icy - 1); // TL
-            break;
-        default:
-            color_left = 0u; color_right = 0u;
-            break;
-    }
-}
-
 void write_cp_full(int idx, vec2 pos, int prev, int next, uint flag,
                    int prev_dir, int next_dir, int icx, int icy) {
     positions[idx * 2] = pos.x;
     positions[idx * 2 + 1] = pos.y;
     neighbors[idx * 4] = prev;
     neighbors[idx * 4 + 1] = next;
-    neighbors[idx * 4 + 2] = icx;
-    neighbors[idx * 4 + 3] = icy;
+    neighbors[idx * 4 + 2] = prev_dir;
+    neighbors[idx * 4 + 3] = next_dir;
     flags[idx] = flag;
-
-    uint pl = 0u, pr = 0u, nl = 0u, nr = 0u;
-    if (prev_dir >= 0) get_edge_colors(icx, icy, prev_dir, pl, pr);
-    if (next_dir >= 0) get_edge_colors(icx, icy, next_dir, nl, nr);
-    edge_colors[idx * 4]     = pl;
-    edge_colors[idx * 4 + 1] = pr;
-    edge_colors[idx * 4 + 2] = nl;
-    edge_colors[idx * 4 + 3] = nr;
 }
 
 void write_cp(int idx, vec2 pos, int prev, int next, uint flag) {
@@ -295,10 +193,6 @@ void write_cp(int idx, vec2 pos, int prev, int next, uint flag) {
     neighbors[idx * 4 + 2] = -1;
     neighbors[idx * 4 + 3] = -1;
     flags[idx] = flag;
-    edge_colors[idx * 4]     = 0u;
-    edge_colors[idx * 4 + 1] = 0u;
-    edge_colors[idx * 4 + 2] = 0u;
-    edge_colors[idx * 4 + 3] = 0u;
 }
 
 // Check if two adjacent pixels are similar using the graph.

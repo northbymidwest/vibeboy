@@ -466,7 +466,6 @@ struct CellRastBufCache {
     pos_buf: gpu::Buffer,
     nbr_buf: gpu::Buffer,
     flag_buf: gpu::Buffer,
-    ecolor_buf: gpu::Buffer,
     opt_out_buf: gpu::Buffer,
     orig_pos_buf: gpu::Buffer,
     px_xfer: gpu::TransferBuffer,
@@ -535,7 +534,7 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.dxil")),
-        1, 4, 0, (16, 16, 1))?; // ro: graph, rw: positions, neighbors, flags, edge_colors
+        1, 3, 0, (16, 16, 1))?; // ro: graph, rw: positions, neighbors, flags
 
     let opt = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.spv")),
@@ -553,7 +552,7 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.dxil")),
-        6, 0, 1, (256, 1, 1))?; // ro: pixels, positions, orig_positions, flags, neighbors, edge_colors; rw_tex: output (tile-based, 256 threads)
+        5, 0, 1, (256, 1, 1))?; // ro: pixels, positions, orig_positions, flags, neighbors; rw_tex: output (tile-based, 256 threads)
 
     eprintln!("Full GPU vectorize pipeline ready (6 stages)");
     Some(GpuVectorizePipelines { sim_graph: sim, resolve, cell_graph: cell, optimizer: opt, tjunction: tjunc, rasterizer: rast, buf_cache: None })
@@ -572,7 +571,6 @@ fn dispatch_stages_1_4b(
     pos_buf: &gpu::Buffer,
     nbr_buf: &gpu::Buffer,
     flag_buf: &gpu::Buffer,
-    ecolor_buf: &gpu::Buffer,
     opt_out_buf: &gpu::Buffer,
     orig_pos_buf: &gpu::Buffer,
     img_w: u32, img_h: u32,
@@ -623,7 +621,6 @@ fn dispatch_stages_1_4b(
             &[gpu::StorageBufferReadWriteBinding::new().with_buffer(pos_buf).with_cycle(false),
               gpu::StorageBufferReadWriteBinding::new().with_buffer(nbr_buf).with_cycle(false),
               gpu::StorageBufferReadWriteBinding::new().with_buffer(flag_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(ecolor_buf).with_cycle(false),
             ]).expect("cell pass");
         cp.bind_compute_pipeline(&pipelines.cell_graph);
         cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
@@ -707,7 +704,6 @@ pub fn gpu_vectorize_full_pipeline(
         let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
         let nbr_size = (num_cps * 4 * 4).max(4);
         let flag_size = (num_cps * 4).max(4);
-        let ecolor_size = (num_cps * 4 * 4).max(4);
         pipelines.buf_cache = Some(CellRastBufCache {
             img_w, img_h,
             px_buf: device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf"),
@@ -716,7 +712,6 @@ pub fn gpu_vectorize_full_pipeline(
             pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("pos buf"),
             nbr_buf: device.create_buffer().with_usage(rw).with_size(nbr_size).build().expect("nbr buf"),
             flag_buf: device.create_buffer().with_usage(rw).with_size(flag_size).build().expect("flag buf"),
-            ecolor_buf: device.create_buffer().with_usage(rw).with_size(ecolor_size).build().expect("ecolor buf"),
             opt_out_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("opt out buf"),
             orig_pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("orig pos buf"),
             px_xfer: device.create_transfer_buffer()
@@ -748,7 +743,7 @@ pub fn gpu_vectorize_full_pipeline(
     let optimized_pos = dispatch_stages_1_4b(
         device, &cmd, pipelines,
         &b.px_buf, &b.graph_buf, &b.graph_snapshot,
-        &b.pos_buf, &b.nbr_buf, &b.flag_buf, &b.ecolor_buf,
+        &b.pos_buf, &b.nbr_buf, &b.flag_buf,
         &b.opt_out_buf, &b.orig_pos_buf, img_w, img_h,
     );
 
@@ -761,7 +756,7 @@ pub fn gpu_vectorize_full_pipeline(
             &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
             &[]).expect("rast pass");
         cp.bind_compute_pipeline(&pipelines.rasterizer);
-        cp.bind_compute_storage_buffers(0, &[b.px_buf.clone(), optimized_pos.clone(), b.orig_pos_buf.clone(), b.flag_buf.clone(), b.nbr_buf.clone(), b.ecolor_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, &[b.px_buf.clone(), optimized_pos.clone(), b.orig_pos_buf.clone(), b.flag_buf.clone(), b.nbr_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, out_w: u32, out_h: u32,
                                scale: f32, corners_w: u32, tiles_w: u32, tiles_h: u32 }
         cmd.push_compute_uniform_data(0, &U {
@@ -811,7 +806,6 @@ fn cpu_rasterize_debug(
     orig_positions: &[f32], // original positions, 2 floats per CP
     cp_flags: &[u32],       // 1 u32 per CP
     cp_neighbors: &[i32],   // 4 i32 per CP
-    edge_colors: &[u32],    // 4 u32 per CP
     out_w: u32, out_h: u32, scale: f32, corners_w: u32,
 ) {
     fn px_color(pixels: &[u32], x: i32, y: i32, img_w: u32, img_h: u32) -> u32 {
@@ -837,6 +831,29 @@ fn cpu_rasterize_debug(
     fn len2(a: (f32,f32)) -> f32 { a.0*a.0 + a.1*a.1 }
     fn color_str(c: u32) -> String {
         format!("#{:02x}{:02x}{:02x}", (c>>16)&0xff, (c>>8)&0xff, c&0xff)
+    }
+    fn edge_colors_for_cp(pixels: &[u32], img_w: u32, img_h: u32, cp_neighbors: &[i32], ci: usize) -> (u32, u32, u32, u32) {
+        let prev_dir = cp_neighbors[ci * 4 + 2];
+        let next_dir = cp_neighbors[ci * 4 + 3];
+        let icx = (ci / 2 % (img_w as usize + 1)) as i32;
+        let icy = (ci / 2 / (img_w as usize + 1)) as i32;
+        let get_px = |px: i32, py: i32| -> u32 {
+            let px = px.clamp(0, img_w as i32 - 1) as usize;
+            let py = py.clamp(0, img_h as i32 - 1) as usize;
+            pixels[py * img_w as usize + px]
+        };
+        let edge_col = |dir: i32| -> (u32, u32) {
+            match dir {
+                0 => (get_px(icx-1, icy-1), get_px(icx, icy-1)),
+                1 => (get_px(icx, icy-1), get_px(icx, icy)),
+                2 => (get_px(icx, icy), get_px(icx-1, icy)),
+                3 => (get_px(icx-1, icy), get_px(icx-1, icy-1)),
+                _ => (0, 0),
+            }
+        };
+        let (pl, pr) = if prev_dir >= 0 { edge_col(prev_dir) } else { (0, 0) };
+        let (nl, nr) = if next_dir >= 0 { edge_col(next_dir) } else { (0, 0) };
+        (pl, pr, nl, nr)
     }
 
     let num_cps = cp_flags.len();
@@ -865,8 +882,7 @@ fn cpu_rasterize_debug(
                         let prev = cp_neighbors[ci * 4];
                         let next = cp_neighbors[ci * 4 + 1];
                         let pos = read_pos(cp_positions, ci as i32);
-                        let pl = edge_colors[ci * 4]; let pr = edge_colors[ci * 4 + 1];
-                        let nl = edge_colors[ci * 4 + 2]; let nr = edge_colors[ci * 4 + 3];
+                        let (pl, pr, nl, nr) = edge_colors_for_cp(pixels, img_w, img_h, cp_neighbors, ci);
                         eprintln!("  ci={} corner({},{}) slot={} flag={} prev={} next={} pos=({:.2},{:.2}) pl={} pr={} nl={} nr={}",
                             ci, cx, cy, slot, flag, prev, next, pos.0, pos.1,
                             color_str(pl), color_str(pr), color_str(nl), color_str(nr));
@@ -958,10 +974,7 @@ fn cpu_rasterize_debug(
                 let ci = hit.ci as usize;
                 let t = hit.t;
 
-                let pl = edge_colors[ci * 4];
-                let pr = edge_colors[ci * 4 + 1];
-                let nl = edge_colors[ci * 4 + 2];
-                let nr = edge_colors[ci * 4 + 3];
+                let (pl, pr, nl, nr) = edge_colors_for_cp(pixels, img_w, img_h, cp_neighbors, ci);
 
                 let prev_valid = pl != pr;
                 let next_valid = nl != nr;
@@ -1144,7 +1157,6 @@ pub fn gpu_full_pipeline_screenshot(
     let pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
     let nbr_buf = device.create_buffer().with_usage(rw).with_size(nbr_size.max(4)).build().ok()?;
     let flag_buf = device.create_buffer().with_usage(rw).with_size(flag_size.max(4)).build().ok()?;
-    let ecolor_buf = device.create_buffer().with_usage(rw).with_size((num_cps * 4 * 4).max(4)).build().ok()?;
     let opt_out_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
 
     { let cp = device.begin_copy_pass(&cmd).ok()?;
@@ -1160,7 +1172,7 @@ pub fn gpu_full_pipeline_screenshot(
     dispatch_stages_1_4b(
         &device, &cmd, &pipelines,
         &px_buf, &graph_buf, &graph_snapshot,
-        &pos_buf, &nbr_buf, &flag_buf, &ecolor_buf,
+        &pos_buf, &nbr_buf, &flag_buf,
         &opt_out_buf, &orig_pos_buf, img_w, img_h,
     );
 
@@ -1288,29 +1300,21 @@ pub fn gpu_full_pipeline_screenshot(
             integer_count, fractional_count, disconnected_count);
 
         // CPU rasterizer: mirror the GPU cell_rasterizer logic for debugging.
-        // Downloads edge_colors and orig_positions, then runs the same algorithm
+        // Downloads orig_positions, then runs the same algorithm
         // on CPU with debug output for artifact pixels.
         if std::env::var("CPU_RASTER").is_ok() {
-            // Download edge_colors and orig_positions
-            let ecolor_dl_size = num_cps * 4 * 4; // 4 u32 per CP
+            // Download orig_positions
             let orig_dl_size = num_cps * 2 * 4; // 2 f32 per CP
-            let ecolor_dl = device.create_transfer_buffer()
-                .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-                .with_size(ecolor_dl_size).build().ok();
             let orig_dl = device.create_transfer_buffer()
                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
                 .with_size(orig_dl_size).build().ok();
-            if let (Some(edl), Some(odl)) = (&ecolor_dl, &orig_dl) {
+            if let Some(odl) = &orig_dl {
                 let cmd3 = device.acquire_command_buffer().ok().unwrap();
                 let cp3 = device.begin_copy_pass(&cmd3).ok().unwrap();
                 unsafe {
                     let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-                    src.buffer = ecolor_buf.raw(); src.size = ecolor_dl_size;
-                    let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-                    dst.transfer_buffer = edl.raw();
-                    sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp3.raw(), &src, &dst);
-
                     src.buffer = orig_pos_buf.raw(); src.size = orig_dl_size;
+                    let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
                     dst.transfer_buffer = odl.raw();
                     sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp3.raw(), &src, &dst);
                 }
@@ -1318,23 +1322,21 @@ pub fn gpu_full_pipeline_screenshot(
                 let f3 = cmd3.submit_and_acquire_fence(&device).ok().unwrap();
                 let _ = device.wait_fences(true, &[f3]);
 
-                let emap = edl.map::<u32>(&device, false);
                 let omap = odl.map::<f32>(&device, false);
                 let fmap2 = if let Some(ref fdl) = flag_dl {
                     Some(fdl.map::<u32>(&device, false))
                 } else { None };
 
-                let ecolors = emap.mem();
                 let orig_pos = omap.mem();
                 let flags_slice = fmap2.as_ref().map(|m| m.mem());
 
                 cpu_rasterize_debug(
                     src, img_w, img_h,
                     pos_data, orig_pos, flags_slice.unwrap_or(&[]),
-                    nbr_data, ecolors,
+                    nbr_data,
                     out_w, out_h, scale as f32, corners_w,
                 );
-                drop(emap); drop(omap); drop(fmap2);
+                drop(omap); drop(fmap2);
             }
         }
 
@@ -1352,7 +1354,7 @@ pub fn gpu_full_pipeline_screenshot(
           &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
           &[]).ok()?;
       cp.bind_compute_pipeline(&pipelines.rasterizer);
-      cp.bind_compute_storage_buffers(0, &[px_buf.clone(), pos_buf.clone(), orig_pos_buf.clone(), flag_buf.clone(), nbr_buf.clone(), ecolor_buf.clone()]);
+      cp.bind_compute_storage_buffers(0, &[px_buf.clone(), pos_buf.clone(), orig_pos_buf.clone(), flag_buf.clone(), nbr_buf.clone()]);
       #[repr(C)] struct U{iw:u32,ih:u32,ow:u32,oh:u32,s:f32,cw:u32,tw:u32,th:u32}
       cmd.push_compute_uniform_data(0,&U{iw:img_w,ih:img_h,ow:out_w,oh:out_h,s:scale as f32,cw:corners_w,tw:tiles_w,th:tiles_h});
       cp.dispatch(total_tiles,1,1); device.end_compute_pass(cp); }

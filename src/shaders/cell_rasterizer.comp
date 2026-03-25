@@ -29,10 +29,6 @@ layout(std430, set = 0, binding = 4) readonly buffer NbrBuf {
     int cp_neighbors[];
 };
 
-layout(std430, set = 0, binding = 5) readonly buffer EdgeColorBuf {
-    uint edge_colors[];
-};
-
 layout(set = 1, binding = 0, rgba8) writeonly uniform image2D output_img;
 
 layout(std140, set = 2, binding = 0) uniform Uniforms {
@@ -60,7 +56,9 @@ struct SharedCP {
     vec2 orig_next;  // next neighbor original position
     vec2 bbox_min;   // axis-aligned bounding box of the span (prev, pos, next)
     vec2 bbox_max;
-    uint pl, pr, nl, nr;  // edge colors
+    int prev_dir;    // boundary direction to prev neighbor (-1 if none)
+    int next_dir;    // boundary direction to next neighbor (-1 if none)
+    uint icx, icy;   // grid corner coordinates (derived from CP index)
     int prev_ci;
     int next_ci;
 };
@@ -87,33 +85,53 @@ vec2 beval_deriv(vec2 p0, vec2 p1, vec2 p2, float t) {
     return (t - 1.0) * p0 + (1.0 - 2.0 * t) * p1 + t * p2;
 }
 
+uint get_px_color(int px, int py) {
+    px = clamp(px, 0, int(img_w) - 1);
+    py = clamp(py, 0, int(img_h) - 1);
+    return pixels[py * int(img_w) + px];
+}
+
+void get_edge_colors(uint icx, uint icy, int dir, out uint color_left, out uint color_right) {
+    switch (dir) {
+        case 0: color_left = get_px_color(int(icx)-1, int(icy)-1); color_right = get_px_color(int(icx), int(icy)-1); break;
+        case 1: color_left = get_px_color(int(icx), int(icy)-1); color_right = get_px_color(int(icx), int(icy)); break;
+        case 2: color_left = get_px_color(int(icx), int(icy)); color_right = get_px_color(int(icx)-1, int(icy)); break;
+        case 3: color_left = get_px_color(int(icx)-1, int(icy)); color_right = get_px_color(int(icx)-1, int(icy)-1); break;
+        default: color_left = 0u; color_right = 0u; break;
+    }
+}
+
 // Returns true if resolved, false if this hit should be skipped.
 // Resolved color is written to out_color.
 bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
     SharedCP sc = sh_cps[cp_idx];
 
+    uint pl = 0u, pr = 0u, nl = 0u, nr = 0u;
+    if (sc.prev_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.prev_dir, pl, pr);
+    if (sc.next_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.next_dir, nl, nr);
+
     uint color_left = 0u, color_right = 0u;
     float ref_t;
-    bool prev_valid = (sc.pl != sc.pr);
-    bool next_valid = (sc.nl != sc.nr);
+    bool prev_valid = (pl != pr);
+    bool next_valid = (nl != nr);
 
     if (sc.prev_ci < 0) {
         vec2 toward = sc.next_pos - sc.pos;
         if (dot(pt - sc.pos, toward) < 0.0) return false;
-        if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
+        if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
         else return false;
     } else if (sc.next_ci < 0) {
         vec2 toward = sc.prev_pos - sc.pos;
         if (dot(pt - sc.pos, toward) < 0.0) return false;
-        if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
+        if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
         else return false;
     } else if (t < 0.5) {
-        if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
-        else if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
+        if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
+        else if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
         else return false;
     } else {
-        if (next_valid) { color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; }
-        else if (prev_valid) { color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; }
+        if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
+        else if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
         else return false;
     }
 
@@ -284,10 +302,10 @@ void main() {
                 sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
                 sh_cps[idx].bbox_min = min(min(pp, cp), np);
                 sh_cps[idx].bbox_max = max(max(pp, cp), np);
-                sh_cps[idx].pl = edge_colors[ci * 4];
-                sh_cps[idx].pr = edge_colors[ci * 4 + 1];
-                sh_cps[idx].nl = edge_colors[ci * 4 + 2];
-                sh_cps[idx].nr = edge_colors[ci * 4 + 3];
+                sh_cps[idx].prev_dir = cp_neighbors[ci * 4 + 2];
+                sh_cps[idx].next_dir = cp_neighbors[ci * 4 + 3];
+                sh_cps[idx].icx = uint((ci / 2) % int(corners_w));
+                sh_cps[idx].icy = uint((ci / 2) / int(corners_w));
                 sh_cps[idx].prev_ci = prev_ci;
                 sh_cps[idx].next_ci = next_ci;
             }
@@ -355,6 +373,11 @@ void main() {
                 vec2 normal = vec2(-tang.y, tang.x) / tl;
                 float d = dot(center - cpt, normal);
 
+                // Compute edge colors on-the-fly from pixel buffer
+                uint aa_pl = 0u, aa_pr = 0u, aa_nl = 0u, aa_nr = 0u;
+                if (sc.prev_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.prev_dir, aa_pl, aa_pr);
+                if (sc.next_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.next_dir, aa_nl, aa_nr);
+
                 // Resolve both colors from edge colors without a second scan.
                 // Pick the edge (prev or next) based on t, then use normal
                 // direction to determine left/right → center/other.
@@ -363,14 +386,14 @@ void main() {
                 float ref_t;
 
                 // Use original tangent to establish consistent left/right
-                if (best_t < 0.5 && sc.pl != sc.pr) {
-                    color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; have_edge = true;
-                } else if (best_t >= 0.5 && sc.nl != sc.nr) {
-                    color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; have_edge = true;
-                } else if (sc.nl != sc.nr) {
-                    color_left = sc.nr; color_right = sc.nl; ref_t = 1.0; have_edge = true;
-                } else if (sc.pl != sc.pr) {
-                    color_left = sc.pl; color_right = sc.pr; ref_t = 0.0; have_edge = true;
+                if (best_t < 0.5 && aa_pl != aa_pr) {
+                    color_left = aa_pl; color_right = aa_pr; ref_t = 0.0; have_edge = true;
+                } else if (best_t >= 0.5 && aa_nl != aa_nr) {
+                    color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;
+                } else if (aa_nl != aa_nr) {
+                    color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;
+                } else if (aa_pl != aa_pr) {
+                    color_left = aa_pl; color_right = aa_pr; ref_t = 0.0; have_edge = true;
                 }
 
                 if (!have_edge) {

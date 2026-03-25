@@ -63,9 +63,9 @@ const SHADERS: &[ShaderInfo] = &[
         msl_name: "cell_rasterizer_comp.metal",
         dxil_name: "cell_rasterizer_comp.dxil",
         wgsl_name: "cell_rasterizer_comp.wgsl",
-        // Raw: 0=cp_positions, 1=orig_positions, 2=uniforms, 3=flags, 4=neighbors, 5=edge_colors, 6=pixels
-        // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=flags, 5=neighbors, 6=edge_colors
-        msl_buffer_remap: &[(0,2),(1,3),(2,0),(3,4),(4,5),(5,6),(6,1)],
+        // Raw: 0=cp_positions, 1=orig_positions, 2=uniforms, 3=pixels, 4=flags, 5=neighbors
+        // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=flags, 5=neighbors
+        msl_buffer_remap: &[(0,2),(1,3),(2,0),(3,1)],
     },
     ShaderInfo {
         glsl_src: "similarity_graph.comp",
@@ -93,7 +93,7 @@ const SHADERS: &[ShaderInfo] = &[
         msl_name: "cell_graph_comp.metal",
         dxil_name: "cell_graph_comp.dxil",
         wgsl_name: "cell_graph_comp.wgsl",
-        // spirv-cross: buffer(0)=uniforms, buffer(1)=graph, buffer(2)=pos, buffer(3)=nbr, buffer(4)=flags
+        // spirv-cross: buffer(0)=uniforms, buffer(1)=graph, buffer(2)=pos, buffer(3)=nbr, buffer(4)=flags (no edge_colors)
         // Already correct — no remap needed
         msl_buffer_remap: &[],
     },
