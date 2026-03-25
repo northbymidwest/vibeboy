@@ -1,4 +1,4 @@
-//! Gradient descent optimizer, energy functions, corner detection, and B-spline fitting
+//! 2D Newton-Raphson optimizer, corner detection, and B-spline fitting
 //! (Paper Section 3.4).
 
 use super::{NodeId, PathSegment};
@@ -8,20 +8,10 @@ use std::collections::HashSet;
 
 // --- Loop optimization (Paper Section 3.4) ---
 
-const OPT_ITERATIONS: usize = 1;
-const MAX_MOVE: f64 = 0.25;
-const CURVATURE_INTERVALS: usize = 3;
-
-/// Positional energy: (2.5 x ||delta||)^4 = 2.5^4 x ||delta||^4 ~ 39.06 x ||delta||^4.
-///
-/// The 2.5 scaling factor matches the reference implementation
-/// (Depixelizing Pixel Art on GPUs, OptimizeEnergy.vert line 84).
-/// The paper specifies ||delta||^4 without the scaling, but the reference
-/// uses 2.5x which keeps nodes much closer to their original positions,
-/// preventing over-smoothing of intentional pixel-art features.
 const POSITIONAL_SCALE: f64 = 2.5;
+const NEWTON_ITER: usize = 3;
 
-/// Optimize boundary loop paths directly using gradient descent.
+/// Optimize boundary loop paths using 2D Newton-Raphson.
 /// Works on full closed loops instead of short chains, so the optimizer
 /// sees the complete contour shape for each color region.
 /// Junction nodes (valence >= 3) are fixed.
@@ -30,8 +20,8 @@ pub(super) fn optimize_boundary_loops(
     positions: &mut FxHashMap<NodeId, Point>,
     junctions: &HashSet<NodeId>,
 ) {
-    // Build a contiguous points array per loop for fast energy evaluation.
-    // Map loop nodes to indices in the array; junction nodes are pinned.
+    let s4 = POSITIONAL_SCALE * POSITIONAL_SCALE * POSITIONAL_SCALE * POSITIONAL_SCALE;
+
     for (node_loop, _) in all_loops {
         let n = node_loop.len();
         if n < 4 { continue; }
@@ -40,40 +30,50 @@ pub(super) fn optimize_boundary_loops(
             .map(|nd| *positions.get(nd).unwrap())
             .collect();
         let orig: Vec<Point> = pts.clone();
-        // Paper Section 3.4, Figure 7: detect corners via x4 grid template matching.
-        // Corner nodes are NOT pinned -- they can still move during optimization.
-        // Only the B-spline spans touching corners are excluded from curvature energy.
         let corners = detect_corners_from_nodes(node_loop, true);
 
         let pinned: Vec<bool> = node_loop.iter()
             .map(|nd| junctions.contains(nd))
             .collect();
 
-        for _iter in 0..OPT_ITERATIONS {
-            for i in 0..n {
-                if pinned[i] { continue; }
+        for i in 0..n {
+            if pinned[i] { continue; }
 
-                let current = pts[i];
-                let e0 = local_energy(&pts, &orig, &corners, i, n, true);
-                if e0 < 1e-12 { continue; }
+            let prev = (i + n - 1) % n;
+            let next = (i + 1) % n;
 
-                // Analytic gradient
-                let (gx, gy) = analytic_gradient(&pts, &orig, &corners, i, n);
+            // Skip spans containing corner nodes
+            if corners[i] || corners[prev] || corners[next] { continue; }
 
-                let grad_len = (gx * gx + gy * gy).sqrt();
-                if grad_len < 1e-12 { continue; }
+            let n0 = pts[prev];
+            let n1 = pts[next];
+            let p_orig = orig[i];
+            let mut p = pts[i];
 
-                let step = (e0 / grad_len).min(MAX_MOVE);
-                let candidate = Point::new(
-                    current.x - step * gx / grad_len,
-                    current.y - step * gy / grad_len,
-                );
-                pts[i] = candidate;
-                let e_new = local_energy(&pts, &orig, &corners, i, n, true);
-                if e_new >= e0 {
-                    pts[i] = current;
-                }
+            // 2D Newton-Raphson: minimize E = |n0-2p+n1|² + (2.5·||p-p_orig||)⁴
+            // Gradient: ∇E = 4(2p-n0-n1) + 4·s⁴·||d||²·d
+            // Hessian:   H = 8I + 4·s⁴·(2d⊗d + ||d||²·I)
+            for _ in 0..NEWTON_ITER {
+                let dx = p.x - p_orig.x;
+                let dy = p.y - p_orig.y;
+                let d2 = dx * dx + dy * dy;
+
+                let gx = 4.0 * (2.0 * p.x - n0.x - n1.x) + 4.0 * s4 * d2 * dx;
+                let gy = 4.0 * (2.0 * p.y - n0.y - n1.y) + 4.0 * s4 * d2 * dy;
+
+                let h00 = 8.0 + 4.0 * s4 * (2.0 * dx * dx + d2);
+                let h11 = 8.0 + 4.0 * s4 * (2.0 * dy * dy + d2);
+                let h01 = 8.0 * s4 * dx * dy;
+
+                let det = h00 * h11 - h01 * h01;
+                if det.abs() < 1e-20 { break; }
+
+                let inv_det = 1.0 / det;
+                p.x -= (h11 * gx - h01 * gy) * inv_det;
+                p.y -= (-h01 * gx + h00 * gy) * inv_det;
             }
+
+            pts[i] = p;
         }
 
         // Write back optimized positions
@@ -142,8 +142,6 @@ fn line_segments(pts: &[Point]) -> Vec<PathSegment> {
         .collect()
 }
 
-// --- Section 3.4: B-spline optimization ---
-
 /// Detect corner patterns using Kopf-Lischinski template matching (Section 3.4, Figure 7).
 ///
 /// On the x4 quantized grid, sharp features take on a finite set of patterns
@@ -197,140 +195,3 @@ pub(super) fn detect_corners_from_nodes(nodes: &[NodeId], is_closed: bool) -> Ve
     is_corner
 }
 
-
-
-#[inline(always)]
-/// Analytic gradient of the total energy at node `idx`.
-/// Returns (dE/dx, dE/dy).
-///
-/// Positional energy: E_pos = (s^2 * d^2)^2
-///   grad(E_pos) = 4 * s^4 * d^2 * (p - p_orig)
-///
-/// Curvature energy per span (p0, p1, p2): E_curv ~ ||p0 - 2p1 + p2||^2
-///   grad(E_curv) w.r.t. p1 (center) = 2*(4p1 - 2p0 - 2p2)
-///   grad(E_curv) w.r.t. p0 (start)  = 2*(p0 - 2p1 + p2)
-///   grad(E_curv) w.r.t. p2 (end)    = 2*(p0 - 2p1 + p2)
-fn analytic_gradient(
-    points: &[Point], orig: &[Point], corners: &[bool],
-    idx: usize, n: usize,
-) -> (f64, f64) {
-    let p = points[idx];
-    let o = orig[idx];
-
-    // Positional gradient
-    let dx = p.x - o.x;
-    let dy = p.y - o.y;
-    let d_sq = dx * dx + dy * dy;
-    let s2 = POSITIONAL_SCALE * POSITIONAL_SCALE;
-    let mut gx = 4.0 * s2 * s2 * d_sq * dx;
-    let mut gy = 4.0 * s2 * s2 * d_sq * dy;
-
-    // Curvature gradient: node participates in up to 3 spans
-    for offset in 0..3i64 {
-        let span_start = ((idx as i64 - 2 + offset) % n as i64 + n as i64) as usize % n;
-        if span_start + 2 >= n { continue; }
-
-        let i0 = span_start % n;
-        let i1 = (span_start + 1) % n;
-        let i2 = (span_start + 2) % n;
-
-        if i1 >= n || i2 >= n { continue; }
-        if corners[i0] || corners[i1] || corners[i2] { continue; }
-
-        let p0 = points[i0];
-        let p1 = points[i1];
-        let p2 = points[i2];
-
-        // Second difference: dd = p0 - 2*p1 + p2
-        let ddx = p0.x - 2.0 * p1.x + p2.x;
-        let ddy = p0.y - 2.0 * p1.y + p2.y;
-
-        if i1 == idx {
-            // This node is the center of the span
-            gx += 2.0 * (4.0 * p1.x - 2.0 * p0.x - 2.0 * p2.x);
-            gy += 2.0 * (4.0 * p1.y - 2.0 * p0.y - 2.0 * p2.y);
-        } else {
-            // This node is p0 or p2
-            gx += 2.0 * ddx;
-            gy += 2.0 * ddy;
-        }
-    }
-
-    (gx, gy)
-}
-
-fn local_energy(
-    points: &[Point], orig: &[Point], corners: &[bool],
-    idx: usize, n: usize, is_closed: bool,
-) -> f64 {
-    curvature_energy(points, corners, idx, n, is_closed)
-        + positional_energy(points, orig, idx)
-}
-
-#[inline(always)]
-fn positional_energy(points: &[Point], orig: &[Point], idx: usize) -> f64 {
-    let dx = points[idx].x - orig[idx].x;
-    let dy = points[idx].y - orig[idx].y;
-    let dist_sq = dx * dx + dy * dy;
-    let scaled_dist_sq = POSITIONAL_SCALE * POSITIONAL_SCALE * dist_sq;
-    scaled_dist_sq * scaled_dist_sq
-}
-
-#[inline(always)]
-fn curvature_energy(
-    points: &[Point], corners: &[bool], idx: usize, n: usize, is_closed: bool,
-) -> f64 {
-    let mut energy = 0.0;
-
-    for offset in 0..3i64 {
-        let span_start = ((idx as i64 - 2 + offset) % n as i64 + n as i64) as usize % n;
-
-        if !is_closed && (span_start + 2 >= n) { continue; }
-
-        let i0 = span_start % n;
-        let i1 = if is_closed { (span_start + 1) % n } else { span_start + 1 };
-        let i2 = if is_closed { (span_start + 2) % n } else { span_start + 2 };
-
-        if i1 >= n || i2 >= n { continue; }
-
-        if corners[i0] || corners[i1] || corners[i2] { continue; }
-
-        energy += integrate_span_curvature(points[i0], points[i1], points[i2]);
-    }
-
-    energy
-}
-
-/// Integrate kappa^2 over one quadratic B-spline span.
-///
-/// NOTE: The paper (Equation 3) defines smoothness energy as integral(|kappa(s)|) ds
-/// (absolute curvature integrated over arc length). We use integral(kappa^2) instead
-/// because it penalizes curvature more aggressively per iteration,
-/// producing visually smooth results with just 1 optimization pass.
-#[inline(always)]
-fn integrate_span_curvature(p0: Point, p1: Point, p2: Point) -> f64 {
-    let ddx = p0.x - 2.0 * p1.x + p2.x;
-    let ddy = p0.y - 2.0 * p1.y + p2.y;
-    let cross_sq_factor = ddx * ddx + ddy * ddy;
-    if cross_sq_factor < 1e-20 { return 0.0; }
-
-    let dt = 1.0 / CURVATURE_INTERVALS as f64;
-    let mut result = (curvature_sq_at(p0, p1, p2, 0.0, ddx, ddy)
-        + curvature_sq_at(p0, p1, p2, 1.0, ddx, ddy)) * 0.5;
-    for i in 1..CURVATURE_INTERVALS {
-        result += curvature_sq_at(p0, p1, p2, i as f64 * dt, ddx, ddy);
-    }
-    result * dt
-}
-
-/// Compute kappa^2(t) = (d' x d'')^2 / |d'|^6 for one sample point.
-#[inline(always)]
-fn curvature_sq_at(p0: Point, p1: Point, p2: Point, t: f64, ddx: f64, ddy: f64) -> f64 {
-    let dx = (t - 1.0) * p0.x + (1.0 - 2.0 * t) * p1.x + t * p2.x;
-    let dy = (t - 1.0) * p0.y + (1.0 - 2.0 * t) * p1.y + t * p2.y;
-
-    let numer = dx * ddy - dy * ddx;
-    let denom_sq = dx * dx + dy * dy;
-    let denom = denom_sq * denom_sq.sqrt();
-    if denom < 1e-12 { 0.0 } else { (numer * numer) / (denom * denom) }
-}
