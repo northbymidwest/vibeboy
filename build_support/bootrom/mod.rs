@@ -20,5 +20,10 @@ pub fn agb_boot_rom() -> Vec<u8> {
 
 /// Generate the built-in DMG boot ROM (256 bytes).
 pub fn dmg_boot_rom() -> Vec<u8> {
-    dmg::build()
+    dmg::build(false)
+}
+
+/// Generate the built-in MGB boot ROM (256 bytes, A=$FF for Game Boy Pocket).
+pub fn mgb_boot_rom() -> Vec<u8> {
+    dmg::build(true)
 }

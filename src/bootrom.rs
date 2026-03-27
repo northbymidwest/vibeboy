@@ -8,3 +8,6 @@ pub const AGB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootroms/agb_bo
 
 /// Built-in DMG boot ROM (256 bytes).
 pub const DMG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootroms/dmg_boot.bin"));
+
+/// Built-in MGB boot ROM (256 bytes, Game Boy Pocket — A=$FF).
+pub const MGB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootroms/mgb_boot.bin"));

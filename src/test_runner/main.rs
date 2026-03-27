@@ -205,11 +205,12 @@ fn main() {
         }
         Command::GenBootrom { out, model } => {
             let rom: &[u8] = match model.as_str() {
+                "dmg" => vibeboy::bootrom::DMG,
+                "mgb" => vibeboy::bootrom::MGB,
                 "cgb" => vibeboy::bootrom::CGB,
                 "agb" | "gba" => vibeboy::bootrom::AGB,
-                "dmg" => vibeboy::bootrom::DMG,
                 other => {
-                    eprintln!("Unknown boot ROM model: {other}. Available: dmg, cgb, agb");
+                    eprintln!("Unknown boot ROM model: {other}. Available: dmg, mgb, cgb, agb");
                     std::process::exit(1);
                 }
             };

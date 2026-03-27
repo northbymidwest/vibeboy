@@ -644,6 +644,9 @@ fn generate_boot_roms(out_dir: &str) {
     let dmg = bootrom::dmg_boot_rom();
     std::fs::write(boot_dir.join("dmg_boot.bin"), &dmg).unwrap();
 
+    let mgb = bootrom::mgb_boot_rom();
+    std::fs::write(boot_dir.join("mgb_boot.bin"), &mgb).unwrap();
+
     // Re-run if generator source changes
     println!("cargo:rerun-if-changed=build_support/bootrom");
 }

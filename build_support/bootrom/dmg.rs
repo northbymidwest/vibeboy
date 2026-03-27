@@ -10,7 +10,8 @@ use super::asm::Asm;
 
 const DMG_BOOT_ROM_SIZE: usize = 0x0100;
 
-pub fn build() -> Vec<u8> {
+/// If `mgb` is true, sets A=$FF (Game Boy Pocket) instead of A=$01 (DMG).
+pub fn build(mgb: bool) -> Vec<u8> {
     let mut a = Asm::new();
 
     // ================================================================
@@ -195,9 +196,9 @@ pub fn build() -> Vec<u8> {
 
     // ================================================================
     // Post-boot register state
-    // A=$01, F=$B0, B=$00, C=$13, D=$00, E=$D8, H=$01, L=$4D
+    // DMG: A=$01, MGB: A=$FF. F=$B0, B=$00, C=$13, D=$00, E=$D8, H=$01, L=$4D
     // ================================================================
-    a.ld_b(0x01);
+    a.ld_b(if mgb { 0xFF } else { 0x01 });
     a.ld_c(0xB0); // F=$B0: Z=1, N=0, H=1, C=1
     a.push_bc();
     a.pop_af(); // A=$01, F=$B0
