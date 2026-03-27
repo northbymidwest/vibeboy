@@ -198,15 +198,22 @@ impl Ppu {
                     // Fire the mode 0 STAT interrupt
                     self.update_stat_irq();
                 }
-                // LCD first-line: STAT mode bits stay 0, then skip to mode 3 at dot 79.
-                // Hardware: 1T DMG sleep + 76T mode 0 + 2T OAM block = T=79 STAT mode 3.
-                // mode3_start_delay=5 ensures actual pixel rendering starts at dot 84.
-                if self.lcd_first_line && self.dot >= 79 {
-                    self.lcd_first_line = false;
-                    self.lcd_first_line_short = true;
-                    self.oam_scan(); // collect sprites
-                    self.transition_to_mode3();
-                    return;
+                // LCD first-line: after line-start fires the STAT IRQ, mode
+                // stays 0 externally but OAM scan proceeds internally.
+                // Transition to mode 3 at dot 78 (CGB) / 79 (DMG).
+                if self.lcd_first_line {
+                    // Per-entry OAM scan (same cadence as normal mode 2)
+                    let scan_start = 4u32;
+                    if self.dot >= scan_start && self.dot % 2 == 0 {
+                        self.oam_scan_step();
+                    }
+                    let first_line_mode3 = if self.cgb_mode { 78 } else { 79 };
+                    if self.dot >= first_line_mode3 {
+                        self.lcd_first_line = false;
+                        self.lcd_first_line_short = true;
+                        self.transition_to_mode3();
+                        return;
+                    }
                 }
                 // Mode 0 → end of scanline at dot 456 (or shorter for first line after LCD enable).
                 // First line HBlank is shortened by 8T phantom cycles_for_line augment.
@@ -352,42 +359,54 @@ impl Ppu {
                     self.ly_for_comparison = if self.ly == 0 { 0 } else { -1 };
                     self.update_coincidence();
                     if self.ly != 0 {
-                        // Lines 1-143: activate mode 2 source. The mode
-                        // was 0 (HBlank) at the wrap; transitioning to 2
-                        // here fires the Mode 2 IRQ via rising edge if
-                        // stat_irq_line was low (mode 0 wasn't keeping it
-                        // high). If mode 0 WAS keeping it high, mode 2
-                        // doesn't create a rising edge → "STAT blocking."
                         self.mode_for_interrupt = 2;
                     }
-                    // OAM reads blocked 1T before mode 2 (T=3 of line start)
-                    self.oam_accessible = false;
+                    if !self.lcd_first_line {
+                        // OAM reads blocked 1T before mode 2.
+                        // Suppressed on first line (STAT stays mode 0 externally).
+                        self.oam_accessible = false;
+                    }
                     self.stat &= !0x03;
                     self.update_stat_irq();
                 }
                 4 => {
-                    self.mode = 2;
-                    self.stat = (self.stat & !0x03) | 0x02;
-                    self.mode_for_interrupt = 2;
-                    self.oam_accessible = false;
-                    self.oam_write_accessible = false;
-                    self.vram_accessible = true;
-                    self.vram_write_accessible = true;
-                    self.accessed_oam_row = 0;
-                    self.ly_for_comparison = self.ly as i16;
-                    self.update_coincidence();
-                    if self.lcdc & 0x20 != 0 && self.ly == self.wy {
-                        self.wy_triggered = true;
+                    if self.lcd_first_line {
+                        // First line after LCD enable: pulse mode_for_interrupt
+                        // for STAT IRQ but DON'T enter mode 2 externally.
+                        // STAT stays 0, OAM stays accessible. OAM scan internals
+                        // are set up so per-entry scanning proceeds in mode 0.
+                        self.ly_for_comparison = self.ly as i16;
+                        self.update_coincidence();
+                        if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                            self.wy_triggered = true;
+                        }
+                        self.scanline_sprites.clear();
+                        self.oam_scan_index = 0;
+                        self.mode_for_interrupt = 2;
+                        self.update_stat_irq();
+                        self.mode_for_interrupt = -1;
+                        self.update_stat_irq();
+                    } else {
+                        // Normal line: full mode 2 entry
+                        self.mode = 2;
+                        self.stat = (self.stat & !0x03) | 0x02;
+                        self.mode_for_interrupt = 2;
+                        self.oam_accessible = false;
+                        self.oam_write_accessible = false;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.accessed_oam_row = 0;
+                        self.ly_for_comparison = self.ly as i16;
+                        self.update_coincidence();
+                        if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                            self.wy_triggered = true;
+                        }
+                        self.scanline_sprites.clear();
+                        self.oam_scan_index = 0;
+                        self.update_stat_irq();
+                        self.mode_for_interrupt = -1;
+                        self.update_stat_irq();
                     }
-                    self.scanline_sprites.clear();
-                    self.oam_scan_index = 0;
-                    self.update_stat_irq();
-                    // Clear mode_for_interrupt after the mode 2 source
-                    // has been evaluated. This allows other sources (like
-                    // LYC coincidence) to independently trigger during
-                    // mode 2 without being masked by the mode 2 source.
-                    self.mode_for_interrupt = -1;
-                    self.update_stat_irq();
                     self.line_start_pending = false;
                 }
                 _ => {}
@@ -476,26 +495,42 @@ impl Ppu {
                     self.update_stat_irq();
                 }
                 4 => {
-                    // State 7 equivalent: Mode 2 entry
-                    self.mode = 2;
-                    self.stat = (self.stat & !0x03) | 0x02;
-                    self.mode_for_interrupt = 2;
-                    self.oam_accessible = false;
-                    self.oam_write_accessible = false;
-                    self.vram_accessible = true;
-                    self.vram_write_accessible = true;
-                    self.accessed_oam_row = 0;
-                    self.ly_for_comparison = self.ly as i16;
-                    self.update_coincidence();
-                    if self.lcdc & 0x20 != 0 && self.ly == self.wy {
-                        self.wy_triggered = true;
+                    if self.lcd_first_line {
+                        // LCD first line: pulse mode_for_interrupt to fire the
+                        // mode 2 STAT IRQ, but DON'T enter actual mode 2.
+                        // STAT bits stay 0, mode stays 0. The mode 0 handler
+                        // will do the direct transition to mode 3 at dot 78.
+                        self.ly_for_comparison = self.ly as i16;
+                        self.update_coincidence();
+                        if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                            self.wy_triggered = true;
+                        }
+                        self.mode_for_interrupt = 2;
+                        self.update_stat_irq();
+                        self.mode_for_interrupt = -1;
+                        self.update_stat_irq();
+                    } else {
+                        // Normal line: full mode 2 entry
+                        self.mode = 2;
+                        self.stat = (self.stat & !0x03) | 0x02;
+                        self.mode_for_interrupt = 2;
+                        self.oam_accessible = false;
+                        self.oam_write_accessible = false;
+                        self.vram_accessible = true;
+                        self.vram_write_accessible = true;
+                        self.accessed_oam_row = 0;
+                        self.ly_for_comparison = self.ly as i16;
+                        self.update_coincidence();
+                        if self.lcdc & 0x20 != 0 && self.ly == self.wy {
+                            self.wy_triggered = true;
+                        }
+                        self.scanline_sprites.clear();
+                        self.oam_scan_index = 0;
+                        self.update_stat_irq();
+                        // Immediately clear mode_for_interrupt
+                        self.mode_for_interrupt = -1;
+                        self.update_stat_irq();
                     }
-                    self.scanline_sprites.clear();
-                    self.oam_scan_index = 0;
-                    self.update_stat_irq();
-                    // Immediately clear mode_for_interrupt
-                    self.mode_for_interrupt = -1;
-                    self.update_stat_irq();
                     self.line_start_pending = false;
                     // Apply lsp-deferred LYC write now that line-start is done
                     if let Some(lyc) = self.pending_lyc.take() {

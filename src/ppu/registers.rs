@@ -131,13 +131,19 @@ impl Ppu {
                         *p = 0x00FFFFFF;
                     }
                 } else if !lcd_was_on && lcd_now_on {
-// LCD on: start at line 0, mode reads as 0 initially
-                    // DMG first line is ~449T (7T shorter): 1T initial sleep + 8T
-                    // phantom cycles_for_line adjustment that shortens Mode 0.
+// LCD on: start at line 0, let normal line-start state machine run.
+                    // The first line uses a shortened mode 2 (early transition to
+                    // mode 3 at dot 78 CGB / 79 DMG), with total line = 448T CGB / 449T DMG.
+                    // Running the line-start sequence ensures mode_for_interrupt
+                    // pulses to 2 at dot 3-4, firing the mode 2 STAT interrupt.
                     self.ly = 0;
                     self.visible_ly = 0;
                     self.ly_for_comparison = 0;
-                    self.line_start_pending = false;
+                    // Run line-start state machine normally — on the first line,
+                    // handlers suppress external state changes (STAT mode bits,
+                    // OAM accessibility) but still pulse mode_for_interrupt for
+                    // the STAT IRQ and set up OAM scan internals.
+                    self.line_start_pending = true;
                     self.line_start_is_vblank = false;
                     self.mode_for_interrupt = -1;
                     self.line_153_phase = 0;
