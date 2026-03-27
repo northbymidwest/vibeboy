@@ -348,6 +348,14 @@ export class WasmEmulator {
         wasm.wasmemulator_set_rewinding(this.__wbg_ptr, active);
     }
     /**
+     * Set whether to skip the boot ROM animation.
+     * Takes effect on next set_model() or ROM load.
+     * @param {boolean} skip
+     */
+    set_skip_boot(skip) {
+        wasm.wasmemulator_set_skip_boot(this.__wbg_ptr, skip);
+    }
+    /**
      * Step one frame of emulation.
      */
     step_frame() {

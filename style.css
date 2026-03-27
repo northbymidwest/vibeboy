@@ -17,19 +17,41 @@ h1 { margin-bottom: 12px; font-size: 1.4em; color: #8be9fd; }
 
 /* ── Drop zone ─────────────────────────────────────────── */
 
-#drop-zone {
-  border: 2px dashed #555;
-  border-radius: 8px;
-  padding: 40px;
-  text-align: center;
-  cursor: pointer;
-  margin-bottom: 16px;
-  transition: border-color 0.2s;
-}
-#drop-zone.hover { border-color: #8be9fd; }
-#drop-zone.hidden { display: none; }
+/* ── Canvas wrapper (also serves as drop zone) ────────── */
 
-/* ── Open ROM button ───────────────────────────────────── */
+#canvas-wrapper {
+  position: relative;
+  resize: both;
+  overflow: hidden;
+  border: 2px solid #333;
+  border-radius: 4px;
+  width: 640px;
+  height: 576px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  cursor: pointer;
+}
+#canvas-wrapper.has-rom { cursor: default; }
+#canvas-wrapper.hover { border-color: #8be9fd; }
+
+/* ── ROM prompt overlay (shown before ROM is loaded) ──── */
+
+#rom-prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #aaa;
+  font-size: 0.95em;
+  z-index: 10;
+  pointer-events: none;
+}
+#rom-prompt.hidden { display: none; }
 
 #open-rom-btn {
   display: inline-block;
@@ -43,24 +65,12 @@ h1 { margin-bottom: 12px; font-size: 1.4em; color: #8be9fd; }
   font-weight: bold;
   cursor: pointer;
   letter-spacing: 0.5px;
+  pointer-events: auto;
 }
 #open-rom-btn:hover { background: #a4f0ff; }
 #open-rom-btn:active { background: #6dd5eb; }
 
-/* ── Canvas wrapper ────────────────────────────────────── */
-
-#canvas-wrapper {
-  resize: both;
-  overflow: hidden;
-  border: 2px solid #333;
-  border-radius: 4px;
-  width: 640px;
-  height: 576px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #000;
-}
+#file-input { display: none; }
 #canvas-wrapper canvas {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
@@ -343,11 +353,6 @@ input[type="file"] { display: none; }
     height: 100%;
   }
   h1 { font-size: 1.1em; margin-bottom: 6px; }
-  #drop-zone {
-    padding: 20px 16px;
-    margin-bottom: 8px;
-    font-size: 0.9em;
-  }
   #canvas-wrapper {
     width: 96vw !important;
     height: auto !important;
