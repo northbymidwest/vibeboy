@@ -63,9 +63,9 @@ const SHADERS: &[ShaderInfo] = &[
         msl_name: "cell_rasterizer_comp.metal",
         dxil_name: "cell_rasterizer_comp.dxil",
         wgsl_name: "cell_rasterizer_comp.wgsl",
-        // Raw: 0=cp_positions, 1=orig_positions, 2=uniforms, 3=pixels, 4=flags, 5=neighbors
-        // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=flags, 5=neighbors
-        msl_buffer_remap: &[(0,2),(1,3),(2,0),(3,1)],
+        // Raw: 0=cp_positions, 1=orig_positions, 2=cp_neighbors, 3=uniforms, 4=pixels, 5=cp_flags
+        // SDL3: 0=uniforms, 1=pixels, 2=cp_positions, 3=orig_positions, 4=cp_flags, 5=cp_neighbors
+        msl_buffer_remap: &[(0,2),(1,3),(2,5),(3,0),(4,1),(5,4)],
     },
     ShaderInfo {
         glsl_src: "similarity_graph.comp",

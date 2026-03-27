@@ -465,6 +465,29 @@ pub fn cpu_scale(
             let s = vectorize_gpu::scale(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
         }
+        ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
+            let scale = (disp_w / sw).max(disp_h / sh).max(1);
+            let (s, w, h) = crate::vectorize::vectorize_to_raster_shared(src, sw, sh, scale);
+            (s, w as u32, h as u32)
+        }
+        ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
+            let scale = (disp_w / sw).max(disp_h / sh).max(1);
+            let (s, w, h) = crate::vectorize::vectorize_to_raster(src, sw, sh, scale);
+            (s, w as u32, h as u32)
+        }
+        ScaleFilter::VectorizeDiffusion => {
+            let scale = (disp_w / sw).max(disp_h / sh).max(1);
+            let (s, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
+            (s, w as u32, h as u32)
+        }
+        ScaleFilter::VectorizeSplineDiffusion | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
+            let scale = (disp_w / sw).max(disp_h / sh).max(1);
+            let (paths, bg_color) = crate::vectorize::vectorize_core(src, sw, sh);
+            let (s, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
+                &paths, src, sw, sh, bg_color, scale,
+            );
+            (s, w as u32, h as u32)
+        }
         ScaleFilter::Nearest => {
             let mut out = vec![0u32; disp_w * disp_h];
             for y in 0..disp_h {

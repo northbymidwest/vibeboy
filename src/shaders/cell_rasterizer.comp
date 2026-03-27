@@ -6,6 +6,11 @@
 // neighborhood are loaded into shared memory ONCE, then all output
 // pixels in the tile evaluate against shared memory — no redundant
 // global reads. Massive speedup for dense scenes.
+//
+// Uses a slim shared-memory struct (SlimCP) for the distance scan,
+// with resolve-only data read lazily from global memory for the 1-4
+// winning CPs per pixel. This halves shared memory usage vs storing
+// all fields, improving GPU occupancy.
 
 layout(local_size_x = 256) in;
 
@@ -42,29 +47,35 @@ layout(std140, set = 2, binding = 0) uniform Uniforms {
     uint tiles_h;   // ceil(img_h / 2)
 };
 
-// Shared memory: CP data for the tile's neighborhood
-// A 2×2 source tile needs CPs from a 5×5 corner region (corners ±2)
-// = 25 corners × 2 slots = 50 CPs max, but most are empty.
+// Slim shared-memory struct: only fields needed for the distance scan.
+// Resolve-only data (orig positions, directions, corner coords) is read
+// lazily from global memory for the 1-4 winning CPs per pixel.
 const uint MAX_TILE_CPS = 98u;  // 7×7 corners × 2 slots
 
-struct SharedCP {
-    vec2 pos;        // optimized position
-    vec2 orig_pos;   // original position
+struct SlimCP {
+    vec2 pos;        // optimized position (control point)
     vec2 prev_pos;   // prev neighbor optimized position
     vec2 next_pos;   // next neighbor optimized position
-    vec2 orig_prev;  // prev neighbor original position
-    vec2 orig_next;  // next neighbor original position
-    vec2 bbox_min;   // axis-aligned bounding box of the span (prev, pos, next)
+    vec2 bbox_min;   // axis-aligned bounding box of span (prev, pos, next)
     vec2 bbox_max;
-    int prev_dir;    // boundary direction to prev neighbor (-1 if none)
-    int next_dir;    // boundary direction to next neighbor (-1 if none)
-    uint icx, icy;   // grid corner coordinates (derived from CP index)
+    int ci;          // global CP index for lazy global reads
+    int _pad;
+};
+
+shared SlimCP sh_cps[MAX_TILE_CPS];
+shared uint sh_num_cps;
+
+// Resolve-only data, loaded lazily from global memory for winning CPs.
+struct ResolveData {
+    vec2 orig_pos;
+    vec2 orig_prev;
+    vec2 orig_next;
+    int prev_dir;
+    int next_dir;
+    uint icx, icy;
     int prev_ci;
     int next_ci;
 };
-
-shared SharedCP sh_cps[MAX_TILE_CPS];
-shared uint sh_num_cps;
 
 vec2 read_pos(int idx) {
     if (idx < 0) return vec2(-1e10);
@@ -74,6 +85,22 @@ vec2 read_pos(int idx) {
 vec2 read_orig(int idx) {
     if (idx < 0) return vec2(-1e10);
     return vec2(orig_positions[idx * 2], orig_positions[idx * 2 + 1]);
+}
+
+// Load resolve-only data from global buffers. Only called for the 1-4
+// winning CPs per pixel, never during the distance scan.
+ResolveData read_resolve_data(int ci) {
+    ResolveData rd;
+    rd.prev_ci = cp_neighbors[ci * 4];
+    rd.next_ci = cp_neighbors[ci * 4 + 1];
+    rd.prev_dir = cp_neighbors[ci * 4 + 2];
+    rd.next_dir = cp_neighbors[ci * 4 + 3];
+    rd.orig_pos = read_orig(ci);
+    rd.orig_prev = (rd.prev_ci >= 0) ? read_orig(rd.prev_ci) : rd.orig_pos;
+    rd.orig_next = (rd.next_ci >= 0) ? read_orig(rd.next_ci) : rd.orig_pos;
+    rd.icx = uint((ci / 2) % int(corners_w));
+    rd.icy = uint((ci / 2) / int(corners_w));
+    return rd;
 }
 
 vec2 beval(vec2 p0, vec2 p1, vec2 p2, float t) {
@@ -101,26 +128,25 @@ void get_edge_colors(uint icx, uint icy, int dir, out uint color_left, out uint 
     }
 }
 
+// Resolve color for a hit CP. Uses SlimCP (pos/prev/next from shared memory)
+// and ResolveData (orig positions, directions from global memory).
 // Returns true if resolved, false if this hit should be skipped.
-// Resolved color is written to out_color.
-bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
-    SharedCP sc = sh_cps[cp_idx];
-
+bool resolve_color(vec2 pt, SlimCP sc, ResolveData rd, float t, out uint out_color) {
     uint pl = 0u, pr = 0u, nl = 0u, nr = 0u;
-    if (sc.prev_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.prev_dir, pl, pr);
-    if (sc.next_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.next_dir, nl, nr);
+    if (rd.prev_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.prev_dir, pl, pr);
+    if (rd.next_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.next_dir, nl, nr);
 
     uint color_left = 0u, color_right = 0u;
     float ref_t;
     bool prev_valid = (pl != pr);
     bool next_valid = (nl != nr);
 
-    if (sc.prev_ci < 0) {
+    if (rd.prev_ci < 0) {
         vec2 toward = sc.next_pos - sc.pos;
         if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
         else return false;
-    } else if (sc.next_ci < 0) {
+    } else if (rd.next_ci < 0) {
         vec2 toward = sc.prev_pos - sc.pos;
         if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
@@ -135,7 +161,7 @@ bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
         else return false;
     }
 
-    vec2 orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+    vec2 orig_tangent = beval_deriv(rd.orig_prev, rd.orig_pos, rd.orig_next, ref_t);
     float tl2 = length(orig_tangent);
     if (tl2 < 1e-4) return false;
     orig_tangent /= tl2;
@@ -158,30 +184,51 @@ bool resolve_from_shared(vec2 pt, uint cp_idx, float t, out uint out_color) {
     return true;
 }
 
-// Find closest parameter t on a quadratic B-spline span to point pt.
-// Uses a coarse N=4 sweep to seed, then 4 Newton-Raphson iterations
-// minimizing D(t) = |B(t) - pt|^2. Returns refined (t, d2).
-vec2 closest_on_span(vec2 p0, vec2 p1, vec2 p2, vec2 pt) {
-    // Coarse sweep: 5 samples to find the best starting interval
-    float best_d2 = 1e10;
-    float best_t = 0.0;
-    for (int s = 0; s <= 4; s++) {
-        float t = float(s) * 0.25;
-        vec2 bp = beval(p0, p1, p2, t);
-        float d2 = dot(pt - bp, pt - bp);
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best_t = t;
-        }
-    }
+// Cheap 3-point distance screening using B-spline endpoints + midpoint.
+// Endpoints are trivial averages (no full beval needed):
+//   B(0)   = 0.5*(p0+p1)
+//   B(0.5) = 0.125*p0 + 0.75*p1 + 0.125*p2
+//   B(1)   = 0.5*(p1+p2)
+// Returns vec2(best_t, min_d2) where t in {0.0, 0.5, 1.0}.
+vec2 quick_screen(vec2 p0, vec2 p1, vec2 p2, vec2 pt) {
+    vec2 b0 = 0.5 * (p0 + p1);
+    vec2 bm = 0.125 * p0 + 0.75 * p1 + 0.125 * p2;
+    vec2 b1 = 0.5 * (p1 + p2);
+
+    float dd0 = dot(pt - b0, pt - b0);
+    float ddm = dot(pt - bm, pt - bm);
+    float dd1 = dot(pt - b1, pt - b1);
+
+    float best = dd0; float t = 0.0;
+    if (ddm < best) { best = ddm; t = 0.5; }
+    if (dd1 < best) { best = dd1; t = 1.0; }
+    return vec2(t, best);
+}
+
+// Full refinement, seeded from quick_screen results.
+// Adds quarter-point samples (t=0.25, 0.75) and 3 Newton-Raphson iterations.
+// The 5-point seeding (3 from quick_screen + 2 here) gives excellent Newton
+// convergence, making 3 iterations sufficient (was 4 without seeding).
+vec2 refine_closest(vec2 p0, vec2 p1, vec2 p2, vec2 pt,
+                    float seed_t, float seed_d2) {
+    float best_d2 = seed_d2;
+    float best_t = seed_t;
+
+    // Quarter-point samples (endpoints + midpoint already checked)
+    vec2 bq1 = beval(p0, p1, p2, 0.25);
+    float dq1 = dot(pt - bq1, pt - bq1);
+    if (dq1 < best_d2) { best_d2 = dq1; best_t = 0.25; }
+
+    vec2 bq3 = beval(p0, p1, p2, 0.75);
+    float dq3 = dot(pt - bq3, pt - bq3);
+    if (dq3 < best_d2) { best_d2 = dq3; best_t = 0.75; }
 
     // Newton-Raphson: minimize D(t) = |B(t) - pt|^2
-    // D'(t) = 2 * B'(t) · (B(t) - pt)
-    // D''(t) = 2 * (B''(t) · (B(t) - pt) + |B'(t)|^2)
-    // Update: t -= D'(t) / D''(t) = f / g
+    // D'(t) = 2 * B'(t) . (B(t) - pt)
+    // D''(t) = 2 * (B''(t) . (B(t) - pt) + |B'(t)|^2)
     // B''(t) is constant for quadratic: p0 - 2*p1 + p2
     vec2 b2 = p0 - 2.0 * p1 + p2;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 3; i++) {
         vec2 bt = beval(p0, p1, p2, best_t);
         vec2 bt1 = beval_deriv(p0, p1, p2, best_t);
         vec2 diff = bt - pt;
@@ -208,15 +255,25 @@ uint sample_from_shared(vec2 pt, uint fallback_color,
 
     uint n = sh_num_cps;
     for (uint i = 0u; i < n; i++) {
-        SharedCP sc = sh_cps[i];
+        SlimCP sc = sh_cps[i];
 
-        // Early-out: skip if point is outside span's bounding box + 1.0 margin
-        // (1.0 matches the distance threshold below)
+        // Level 1: bbox rejection (4 comparisons, cheapest pre-filter)
         if (pt.x < sc.bbox_min.x - 1.0 || pt.x > sc.bbox_max.x + 1.0 ||
             pt.y < sc.bbox_min.y - 1.0 || pt.y > sc.bbox_max.y + 1.0)
             continue;
 
-        vec2 result = closest_on_span(sc.prev_pos, sc.pos, sc.next_pos, pt);
+        // Level 2: cheap 3-point curve distance screening (~15 FMAs).
+        // Evaluates B-spline at t=0, 0.5, 1.0 using endpoint averages.
+        // The min of these is an upper bound on the true closest distance.
+        // Safe to reject at 2.0: max approximation error for pixel-art
+        // quadratic B-splines is ~0.125px, so true_d > sqrt(2.0)-0.125 > 1.0.
+        vec2 quick = quick_screen(sc.prev_pos, sc.pos, sc.next_pos, pt);
+        if (quick.y > 2.0) continue;
+
+        // Level 3: full refinement on surviving candidates.
+        // Reuses the 3-point seed, adds quarter-points + 3 Newton iterations.
+        vec2 result = refine_closest(sc.prev_pos, sc.pos, sc.next_pos, pt,
+                                     quick.x, quick.y);
         float span_best_t = result.x;
         float span_best_d2 = result.y;
 
@@ -239,10 +296,12 @@ uint sample_from_shared(vec2 pt, uint fallback_color,
     out_t = (num_hits > 0) ? hits[0].t : 0.0;
     out_d2 = (num_hits > 0) ? hits[0].d2 : 1e10;
 
-    // Try each hit until one resolves
+    // Try each hit until one resolves — lazily load resolve data from global memory
     for (int h = 0; h < num_hits; h++) {
+        SlimCP sc = sh_cps[uint(hits[h].idx)];
+        ResolveData rd = read_resolve_data(sc.ci);
         uint c;
-        if (resolve_from_shared(pt, uint(hits[h].idx), hits[h].t, c)) {
+        if (resolve_color(pt, sc, rd, hits[h].t, c)) {
             return c;
         }
     }
@@ -262,7 +321,7 @@ void main() {
     int src_x0 = int(tile_x) * 2;
     int src_y0 = int(tile_y) * 2;
 
-    // Phase 1: Cooperatively load CPs into shared memory.
+    // Phase 1: Cooperatively load CPs into shared memory (slim struct only).
     // Barriers must be unconditional for WebGPU WGSL uniformity rules
     // (naga copies workgroup_id to a private var, losing uniformity proof).
     if (tid == 0u) sh_num_cps = 0u;
@@ -295,19 +354,11 @@ void main() {
                 vec2 pp = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
                 vec2 np = (next_ci >= 0) ? read_pos(next_ci) : cp;
                 sh_cps[idx].pos = cp;
-                sh_cps[idx].orig_pos = read_orig(ci);
                 sh_cps[idx].prev_pos = pp;
                 sh_cps[idx].next_pos = np;
-                sh_cps[idx].orig_prev = (prev_ci >= 0) ? read_orig(prev_ci) : read_orig(ci);
-                sh_cps[idx].orig_next = (next_ci >= 0) ? read_orig(next_ci) : read_orig(ci);
                 sh_cps[idx].bbox_min = min(min(pp, cp), np);
                 sh_cps[idx].bbox_max = max(max(pp, cp), np);
-                sh_cps[idx].prev_dir = cp_neighbors[ci * 4 + 2];
-                sh_cps[idx].next_dir = cp_neighbors[ci * 4 + 3];
-                sh_cps[idx].icx = uint((ci / 2) % int(corners_w));
-                sh_cps[idx].icy = uint((ci / 2) / int(corners_w));
-                sh_cps[idx].prev_ci = prev_ci;
-                sh_cps[idx].next_ci = next_ci;
+                sh_cps[idx].ci = ci;
             }
         }
     }
@@ -359,7 +410,10 @@ void main() {
         } else {
             // Analytical AA: determine both colors from the nearest boundary's
             // edge colors directly, avoiding a second full CP scan.
-            SharedCP sc = sh_cps[uint(best_idx)];
+            // Lazily load resolve data from global memory for this one CP.
+            SlimCP sc = sh_cps[uint(best_idx)];
+            ResolveData rd = read_resolve_data(sc.ci);
+
             vec2 cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             vec2 tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
             float tl = length(tang);
@@ -375,12 +429,12 @@ void main() {
 
                 // Compute edge colors on-the-fly from pixel buffer
                 uint aa_pl = 0u, aa_pr = 0u, aa_nl = 0u, aa_nr = 0u;
-                if (sc.prev_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.prev_dir, aa_pl, aa_pr);
-                if (sc.next_dir >= 0) get_edge_colors(sc.icx, sc.icy, sc.next_dir, aa_nl, aa_nr);
+                if (rd.prev_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.prev_dir, aa_pl, aa_pr);
+                if (rd.next_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.next_dir, aa_nl, aa_nr);
 
                 // Resolve both colors from edge colors without a second scan.
                 // Pick the edge (prev or next) based on t, then use normal
-                // direction to determine left/right → center/other.
+                // direction to determine left/right -> center/other.
                 uint color_left, color_right;
                 bool have_edge = false;
                 float ref_t;
@@ -404,7 +458,7 @@ void main() {
                 } else {
                     // Determine which side of the boundary is "left" vs "right"
                     // using the original normal orientation
-                    vec2 orig_tang = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+                    vec2 orig_tang = beval_deriv(rd.orig_prev, rd.orig_pos, rd.orig_next, ref_t);
                     vec2 orig_norm = vec2(-orig_tang.y, orig_tang.x);
                     bool flip = dot(normal, orig_norm) < 0.0;
                     uint pos_side = flip ? color_right : color_left;
