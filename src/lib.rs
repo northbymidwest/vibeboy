@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod apu;
+pub mod bootrom;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
