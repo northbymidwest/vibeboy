@@ -21,6 +21,7 @@ impl Bus {
             pending_write: None,
             bus_conflict_value: None,
             last_bus_byte: 0xFF,
+            bus_release_dots: 0,
         };
     }
 
@@ -82,6 +83,9 @@ impl Bus {
                 self.ppu.oam[idx] = byte;
             }
             self.oam_dma.active = false;
+            // Bus release: OAM bus holds last DMA byte for 1 M-cycle
+            let release = if self.double_speed { 2u8 } else { 4 };
+            self.oam_dma.bus_release_dots = release;
         }
     }
 

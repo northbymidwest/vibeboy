@@ -46,6 +46,10 @@ pub struct OamDma {
     pub(super) bus_conflict_value: Option<u8>,
     /// Last byte read from the DMA source, used for PPU bus-byte override.
     last_bus_byte: u8,
+    /// After DMA deactivates, the OAM bus takes a few dots to release.
+    /// During this time the PPU still sees the last DMA byte on the bus.
+    /// Counted in PPU dots remaining (4 dots = 1 normal M-cycle).
+    bus_release_dots: u8,
 }
 
 impl OamDma {
@@ -55,6 +59,7 @@ impl OamDma {
             was_blocking: false, blocking: false,
             pending_write: None, bus_conflict_value: None,
             last_bus_byte: 0xFF,
+            bus_release_dots: 0,
         }
     }
     fn is_blocking(&self) -> bool {
@@ -596,12 +601,14 @@ impl Bus {
         let debt = self.ppu_tick_debt;
         self.ppu_tick_debt = 0;
         let ppu_cycles = bus_cycles.saturating_sub(debt);
-        // During DMA, tick PPU eagerly with bus byte so OAM scan sees
-        // the DMA transfer byte instead of stored OAM values.
-        if self.oam_dma.blocking {
+        // During DMA (or bus release), tick PPU eagerly with bus byte so
+        // OAM scan sees the DMA transfer byte instead of stored OAM values.
+        if self.oam_dma.blocking || self.oam_dma.bus_release_dots > 0 {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
+            // Clear bus release after one eager tick cycle
+            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -626,10 +633,11 @@ impl Bus {
         let debt = self.ppu_tick_debt;
         self.ppu_tick_debt = 0;
         let ppu_cycles = bus_cycles.saturating_sub(debt);
-        if self.oam_dma.blocking {
+        if self.oam_dma.blocking || self.oam_dma.bus_release_dots > 0 {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
+            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -646,10 +654,11 @@ impl Bus {
         let debt = self.ppu_tick_debt;
         self.ppu_tick_debt = 0;
         let ppu_cycles = bus_cycles.saturating_sub(debt);
-        if self.oam_dma.blocking {
+        if self.oam_dma.blocking || self.oam_dma.bus_release_dots > 0 {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
+            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -662,10 +671,11 @@ impl Bus {
     pub fn tick_half(&mut self) {
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let bus_cycles = if self.double_speed { 1u32 } else { 2 };
-        if self.oam_dma.blocking {
+        if self.oam_dma.blocking || self.oam_dma.bus_release_dots > 0 {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(bus_cycles);
             self.if_ |= flags;
+            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(bus_cycles as u8);
         } else {
             self.ppu_deferred += bus_cycles;
         }
@@ -675,10 +685,11 @@ impl Bus {
     /// Tick second half of M-cycle + post-processing (for HALT NOP).
     pub fn tick_half_post(&mut self) {
         let bus_cycles = if self.double_speed { 1u32 } else { 2 };
-        if self.oam_dma.blocking {
+        if self.oam_dma.blocking || self.oam_dma.bus_release_dots > 0 {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(bus_cycles);
             self.if_ |= flags;
+            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(bus_cycles as u8);
         } else {
             self.ppu_deferred += bus_cycles;
         }
@@ -882,7 +893,9 @@ impl Bus {
     /// During OAM DMA, the PPU reads whatever byte is on the OAM data bus
     /// (the current DMA transfer byte) instead of stored OAM values.
     fn sync_ppu_dma_bus_byte(&mut self) {
-        self.ppu.dma_bus_byte = if self.oam_dma.is_blocking() {
+        self.ppu.dma_bus_byte = if self.oam_dma.is_blocking()
+            || self.oam_dma.bus_release_dots > 0
+        {
             Some(self.oam_dma.last_bus_byte)
         } else {
             None
