@@ -238,9 +238,9 @@ impl Bus {
         self.tick_split(timer_cycles, bus_cycles, bus_cycles);
     }
 
-    /// Like tick() but with a separate PPU cycle count. Used by the lazy PPU
-    /// tick model where PPU gets fewer immediate ticks than other components.
-    fn tick_split(&mut self, timer_cycles: u32, bus_cycles: u32, ppu_cycles: u32) {
+    /// Like tick() but with a separate PPU cycle count. Used for eager PPU
+    /// ticking where PPU may get different cycles than other components.
+    pub(super) fn tick_split(&mut self, timer_cycles: u32, bus_cycles: u32, ppu_cycles: u32) {
         // Capture DIV counter before and after timer step for serial/APU edge detection
         let old_div = self.timer.counter();
         self.timer.step(timer_cycles);

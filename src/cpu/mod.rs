@@ -38,13 +38,13 @@ pub struct Cpu {
 
     /// Current opcode being executed.
     #[serde(default)]
-    opcode: u8,
+    pub(crate) opcode: u8,
     /// CB-prefixed opcode (valid when opcode == 0xCB and phase >= 3).
     #[serde(default)]
     cb_opcode: u8,
     /// Phase counter within current instruction. 0 = fetch next opcode.
     #[serde(default)]
-    phase: u8,
+    pub(crate) phase: u8,
     /// Result of the last Read operation, set by the emulator loop.
     #[serde(default)]
     pub data_latch: u8,
@@ -53,13 +53,13 @@ pub struct Cpu {
     tmp8: u8,
     /// Inter-phase scratch word.
     #[serde(default)]
-    tmp16: u16,
+    pub(crate) tmp16: u16,
     /// True when executing an interrupt dispatch sequence.
     #[serde(default)]
-    in_interrupt: bool,
+    pub(crate) in_interrupt: bool,
     /// Phase counter within interrupt dispatch (0..=4).
     #[serde(default)]
-    interrupt_phase: u8,
+    pub(crate) interrupt_phase: u8,
     /// Write-style OAM bug address to trigger (set by CPU, consumed by emulator).
     #[serde(default)]
     pub oam_bug_addr: Option<u16>,
@@ -69,6 +69,10 @@ pub struct Cpu {
     /// Saved `ime_pending` state at instruction start for EI delay.
     #[serde(default)]
     pending_ime_at_start: bool,
+    /// True when the last mcycle op was the final action of an instruction.
+    /// The next mcycle() call will return Done.
+    #[serde(default)]
+    finishing: bool,
 }
 
 impl Cpu {
@@ -92,6 +96,7 @@ impl Cpu {
             oam_bug_addr: None,
             oam_bug_read_addr: None,
             pending_ime_at_start: false,
+            finishing: false,
         }
     }
 
@@ -104,6 +109,12 @@ impl Cpu {
     /// Return one M-cycle operation. The emulator loop must service the returned
     /// op (read/write/tick) and then call `mcycle()` again until `Done` is returned.
     pub fn mcycle(&mut self) -> McycleOp {
+        // Terminal action was serviced — finish the instruction
+        if self.finishing {
+            self.finishing = false;
+            return self.finish_instruction();
+        }
+
         // Speed switch idle
         if self.speed_switch_remaining > 0 {
             return McycleOp::SpeedSwitchIdle;
@@ -192,6 +203,13 @@ impl Cpu {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// Mark the current instruction as finishing with a terminal action.
+    /// The next mcycle() call will return Done (via the `finishing` flag).
+    fn finish_with(&mut self, op: McycleOp) -> McycleOp {
+        self.finishing = true;
+        op
     }
 
     /// Finish the current instruction and return Done, applying EI delay.
@@ -615,13 +633,11 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             0x02 => {
                 // LD (BC), A
-                self.phase = 3;
-                McycleOp::Write { addr: self.regs.bc(), val: self.regs.a }
+                self.finish_with(McycleOp::Write { addr: self.regs.bc(), val: self.regs.a })
             }
             0x12 => {
                 // LD (DE), A
-                self.phase = 3;
-                McycleOp::Write { addr: self.regs.de(), val: self.regs.a }
+                self.finish_with(McycleOp::Write { addr: self.regs.de(), val: self.regs.a })
             }
 
             // ══════════════════════════════════════════════════════════════════
@@ -989,15 +1005,13 @@ impl Cpu {
                 // LD (HL+), A
                 let hl = self.regs.hl();
                 self.regs.set_hl(hl.wrapping_add(1));
-                self.phase = 3;
-                McycleOp::Write { addr: hl, val: self.regs.a }
+                self.finish_with(McycleOp::Write { addr: hl, val: self.regs.a })
             }
             0x32 => {
                 // LD (HL-), A
                 let hl = self.regs.hl();
                 self.regs.set_hl(hl.wrapping_sub(1));
-                self.phase = 3;
-                McycleOp::Write { addr: hl, val: self.regs.a }
+                self.finish_with(McycleOp::Write { addr: hl, val: self.regs.a })
             }
 
             // ══════════════════════════════════════════════════════════════════
@@ -1613,8 +1627,7 @@ impl Cpu {
             // LD (C), A — 2 M-cycles: fetch, write
             // ══════════════════════════════════════════════════════════════════
             0xE2 => {
-                self.phase = 3;
-                McycleOp::Write { addr: 0xFF00 | self.regs.c as u16, val: self.regs.a }
+                self.finish_with(McycleOp::Write { addr: 0xFF00 | self.regs.c as u16, val: self.regs.a })
             }
 
             // ══════════════════════════════════════════════════════════════════

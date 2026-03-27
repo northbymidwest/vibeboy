@@ -1,6 +1,6 @@
 use crate::bus::Bus;
 use crate::clock::Clock;
-use crate::cpu::{Cpu, Registers};
+use crate::cpu::{Cpu, McycleOp, Registers};
 use crate::joypad::{
     BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
 };
@@ -129,8 +129,7 @@ impl Emulator {
         self.frame_count += 1;
         let mut cycles = 0u32;
         while !self.bus.frame_ready() {
-            self.step();
-            cycles += 4;
+            cycles += self.step();
             // Safety valve: if the ROM toggles LCD off before line 153,
             // frame_ready never fires. Break after 2 frames' worth of cycles.
             if cycles >= CYCLES_PER_FRAME * 2 {
@@ -147,7 +146,6 @@ impl Emulator {
                 self.bus.check_sgb_transfer();
                 self.bus.capture_sgb_freeze();
             }
-
         }
     }
 
@@ -177,8 +175,7 @@ impl Emulator {
             self.frame_count += 1;
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
-                self.step();
-                cycles += 4;
+                cycles += self.step();
                 if cycles >= CYCLES_PER_FRAME * 2 { break; }
             }
         }
@@ -252,8 +249,7 @@ impl Emulator {
             self.bus.clear_frame_ready();
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
-                self.step();
-                cycles += 4;
+                cycles += self.step();
                 if cycles >= CYCLES_PER_FRAME * 2 { break; }
             }
             true
@@ -371,10 +367,149 @@ impl Emulator {
         self.bus.capture_sgb_freeze();
     }
 
-    /// Execute one CPU instruction and advance bus components.
-    fn step(&mut self) {
-        self.cpu.step(&mut self.bus);
-        // Ticking is now done inline by CPU during each M-cycle
+    /// Execute one CPU instruction via the M-cycle state machine.
+    /// Returns the total T-cycles consumed (including any DMA halt cycles).
+    fn step(&mut self) -> u32 {
+        // Check for pending interrupts at the START of each step, matching
+        // hardware behavior where the CPU checks IE & IF before fetching
+        // the next opcode. This must happen before mcycle() so the CPU
+        // enters interrupt dispatch instead of opcode fetch.
+        if !self.cpu.in_interrupt && !self.cpu.halted
+            && self.cpu.ime && self.cpu.speed_switch_remaining == 0
+            && self.cpu.phase == 0
+        {
+            self.bus.flush_ppu_deferred();
+            let pending = self.bus.ie & self.bus.if_ & 0x1F;
+            if pending != 0 {
+                self.cpu.begin_interrupt_dispatch();
+            }
+        }
+
+        let mut total = 0u32;
+        loop {
+            let op = self.cpu.mcycle();
+            let is_done = op == McycleOp::Done
+                || op == McycleOp::HaltNop;
+
+            // Handle OAM bugs from this mcycle() call BEFORE ticking.
+            // This matches the old model where trigger_oam_bug runs between
+            // the CPU state change and the bus tick.
+            if let Some(addr) = self.cpu.oam_bug_addr.take() {
+                self.bus.trigger_oam_bug(addr);
+                // Interrupt dispatch phase 1 also triggers OAM bug on SP.
+                // CPU stores SP in tmp16 at phase 1 for this purpose.
+                if self.cpu.in_interrupt && self.cpu.interrupt_phase == 2 {
+                    self.bus.trigger_oam_bug(self.cpu.tmp16);
+                }
+            }
+            if let Some(addr) = self.cpu.oam_bug_read_addr.take() {
+                self.bus.trigger_oam_bug_read(addr);
+            }
+
+            match op {
+                McycleOp::Done => {}
+                McycleOp::Read { addr } => {
+                    self.cpu.data_latch = self.bus.tick_read(addr);
+                    total += 4;
+                }
+                McycleOp::Write { addr, val } => {
+                    self.bus.tick_write(addr, val);
+                    total += 4;
+                }
+                McycleOp::Internal => {
+                    self.bus.tick_internal();
+                    total += 4;
+                }
+                McycleOp::HaltNop => {
+                    self.bus.tick_half();
+                    self.bus.flush_ppu_deferred();
+                    let pending = self.bus.ie() & self.bus.if_ & 0x1F;
+                    self.bus.tick_half_post();
+                    total += 4;
+                    if pending != 0 {
+                        self.cpu.halted = false;
+                        if self.cpu.ime {
+                            self.cpu.begin_interrupt_dispatch();
+                        } else {
+                            self.cpu.halt_bug = true;
+                        }
+                    }
+                    break;
+                }
+                McycleOp::SpeedSwitchIdle => {
+                    self.bus.tick_speed_switch_idle();
+                    self.cpu.speed_switch_remaining -= 1;
+                    if self.cpu.speed_switch_remaining == self.cpu.speed_switch_toggle_at {
+                        self.bus.do_speed_toggle();
+                    }
+                    if self.cpu.speed_switch_remaining == 0 {
+                        self.cpu.halted = false;
+                    }
+                    total += 4;
+                    break;
+                }
+            }
+
+            // Interrupt vector resolution: after push-high-byte tick in interrupt dispatch,
+            // resolve IE & IF to determine the vector address (between phases 2 and 3).
+            if self.cpu.in_interrupt && self.cpu.interrupt_phase == 3 {
+                self.bus.flush_ppu_deferred();
+                let pending = self.bus.ie & self.bus.if_ & 0x1F;
+                if pending != 0 {
+                    let bit = pending.trailing_zeros() as u8;
+                    self.bus.if_ &= !(1 << bit);
+                    self.cpu.tmp16 = match bit {
+                        0 => 0x0040,
+                        1 => 0x0048,
+                        2 => 0x0050,
+                        3 => 0x0058,
+                        4 => 0x0060,
+                        _ => 0x0040,
+                    };
+                } else {
+                    self.cpu.tmp16 = 0x0000; // cancelled dispatch
+                }
+            }
+
+            // Done means instruction is complete — break after handling
+            // any pending interrupts at this instruction boundary.
+            if is_done {
+                // Undefined opcodes: CPU locks (halted + IME=false + IE=0)
+                // Must be checked BEFORE halt_bug detection so IE is cleared first.
+                if self.cpu.halted && !self.cpu.ime && matches!(self.cpu.opcode,
+                    0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD)
+                {
+                    self.bus.ie = 0;
+                }
+
+                // HALT with IME=false: detect halt_bug (pending interrupt skips next opcode fetch)
+                if self.cpu.halted && !self.cpu.ime {
+                    self.bus.flush_ppu_deferred();
+                    let pending = self.bus.ie & self.bus.if_ & 0x1F;
+                    if pending != 0 {
+                        self.cpu.halt_bug = true;
+                        self.cpu.halted = false;
+                    }
+                }
+
+                // STOP: handle speed switch if armed
+                if self.cpu.opcode == 0x10 && self.cpu.speed_switch_remaining == 0
+                    && self.bus.speed_switch_armed()
+                {
+                    self.bus.do_speed_switch_prepare();
+                    self.cpu.speed_switch_remaining = 2050;
+                    self.cpu.speed_switch_toggle_at = 2050 / 2;
+                    self.cpu.halted = true;
+                }
+
+                // Interrupt check moved to start of step() to match hardware
+                // timing (CPU checks IE & IF before fetching next opcode).
+                break;
+            }
+        }
+        let dma_extra = self.bus.dma_halt_cycles;
+        self.bus.dma_halt_cycles = 0;
+        total + dma_extra
     }
 
     /// Run until the Mooneye LD B,B breakpoint (opcode 0x40 at PC) or
@@ -383,7 +518,19 @@ impl Emulator {
         let cycles_per_frame = 70_224u32;
         let mut cycles = 0u32;
         let limit = cycles_per_frame * max_frames;
+        let mut iter_count = 0u64;
         loop {
+            iter_count += 1;
+            if iter_count == 1_000_000 {
+                eprintln!("1M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
+                    self.cpu.regs.pc, cycles, self.cpu.halted, self.cpu.ime,
+                    self.cpu.phase, self.cpu.in_interrupt);
+            }
+            if iter_count == 10_000_000 {
+                eprintln!("10M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
+                    self.cpu.regs.pc, cycles, self.cpu.halted, self.cpu.ime,
+                    self.cpu.phase, self.cpu.in_interrupt);
+            }
             // Check for Mooneye breakpoints before executing:
             // - LD B,B ($40): modern mooneye-test-suite
             // - NOP; JR -3 ($00 $18 $FD): older mooneye-gb halt_execution loop
@@ -397,8 +544,7 @@ impl Emulator {
                 let r = &self.cpu.regs;
                 return Some([r.b, r.c, r.d, r.e, r.h, r.l]);
             }
-            self.cpu.step(&mut self.bus);
-            cycles += 4; // approximate; good enough for frame counting
+            cycles += self.step();
             if cycles >= limit {
                 return None;
             }
@@ -413,8 +559,7 @@ impl Emulator {
         let mut total_cycles = 0u64;
         loop {
             let pc = self.cpu.regs.pc;
-            self.cpu.step(&mut self.bus);
-            total_cycles += 4; // approximate; good enough for timeout
+            total_cycles += self.step() as u64;
 
             // Detect Blargg done loop: JR -2 (opcode 18 FE)
             if self.bus.read_byte(pc) == 0x18 && self.bus.read_byte(pc.wrapping_add(1)) == 0xFE {
@@ -579,8 +724,7 @@ impl Emulator {
     pub fn bus_mut(&mut self) -> &mut Bus { &mut self.bus }
 
     /// Execute one CPU instruction, advancing bus subsystems accordingly.
-    /// Wraps `cpu.step(&mut bus)` to avoid split-borrow issues for callers.
-    pub fn cpu_step(&mut self) { self.cpu.step(&mut self.bus); }
+    pub fn cpu_step(&mut self) { self.step(); }
 
     /// Enable headless mode: disables audio accumulation and rewind snapshots.
     /// Used by test runner and calibration tools.
