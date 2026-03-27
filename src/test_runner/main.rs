@@ -89,6 +89,15 @@ enum Command {
         #[arg(long)]
         cpu_filter: bool,
     },
+    /// Generate a built-in boot ROM
+    GenBootrom {
+        /// Output file path
+        #[arg(long, default_value = "bootroms/vibeboy_cgb_boot.bin")]
+        out: String,
+        /// Boot ROM type
+        #[arg(long, default_value = "cgb")]
+        model: String,
+    },
     /// Analyze frame buffer (debug tool)
     Analyze {
         /// Path to ROM file
@@ -193,6 +202,17 @@ fn main() {
                 TestCommand::Tearoom(_) => Box::new(TearoomHarness { force_model: model }),
             };
             run_tests(&path, harness.as_ref(), verbose, quiet);
+        }
+        Command::GenBootrom { out, model } => {
+            let rom = match model.as_str() {
+                "cgb" => vibeboy::bootrom::cgb_boot_rom(),
+                other => {
+                    eprintln!("Unknown boot ROM model: {other}. Available: cgb");
+                    std::process::exit(1);
+                }
+            };
+            std::fs::write(&out, &rom).unwrap();
+            eprintln!("Generated {model} boot ROM: {out} ({} bytes)", rom.len());
         }
         Command::Screenshot {
             path,
