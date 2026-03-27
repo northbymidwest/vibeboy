@@ -29,18 +29,30 @@ mod oam_bug;
 pub struct OamDma {
     active: bool,
     source: u16,        // source base address (source_page << 8)
-    progress: u8,       // bytes copied so far (0–159)
-    delay: u8,          // M-cycles remaining before first byte copy
+    progress: u8,       // M-cycles elapsed (0–161)
+    delay: u8,          // M-cycles remaining before first bus read
     was_blocking: bool, // OAM was blocked when DMA was (re)started
     /// Blocking state captured at the *start* of the current M-cycle (before step_oam_dma
     /// runs). CPU reads/writes check this so that the M-cycle where DMA copies its last
     /// byte still blocks OAM, even though `active` becomes false during that same step.
     blocking: bool,
+    /// Pipelined OAM write: DMA reads a byte from the bus in one M-cycle
+    /// and writes it to OAM in the NEXT. This models the 1-cycle delay
+    /// between bus read and OAM latch observed on hardware.
+    pending_write: Option<(usize, u8)>,
+    /// Bus conflict latch: when the CPU writes to the same bus as DMA,
+    /// the write value appears on the data bus and DMA copies it instead
+    /// of the source byte. Set by write_byte, consumed by step_oam_dma.
+    pub(super) bus_conflict_value: Option<u8>,
 }
 
 impl OamDma {
     fn new() -> Self {
-        OamDma { active: false, source: 0, progress: 0, delay: 0, was_blocking: false, blocking: false }
+        OamDma {
+            active: false, source: 0, progress: 0, delay: 0,
+            was_blocking: false, blocking: false,
+            pending_write: None, bus_conflict_value: None,
+        }
     }
     fn is_blocking(&self) -> bool {
         self.blocking
@@ -516,28 +528,14 @@ impl Bus {
         if self.oam_dma.is_blocking() && matches!(addr, 0xFE00..=0xFEFF) {
             return;
         }
-        // Write during active DMA bus conflict: redirect to dma_current_src - 1
+        // Write during active DMA bus conflict: the CPU's write value appears
+        // on the data bus. DMA copies this value to OAM instead of reading
+        // from the source. The write doesn't reach its target address.
         if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
             && self.oam_dma_same_bus(addr)
         {
-            let redirect_addr = self.oam_dma.source.wrapping_add(self.oam_dma.progress as u16).wrapping_sub(1);
-            if self.model.is_cgb() {
-                // CGB-D: zero the OAM byte at progress-1 when redirect is to non-SRAM
-                if redirect_addr < 0xA000 {
-                    let oam_idx = (self.oam_dma.progress - 1) as usize;
-                    if oam_idx < 160 {
-                        self.ppu.oam[oam_idx] = 0;
-                    }
-                }
-                return;
-            } else {
-                // DMG: redirect addr >= 0xA000 → drop; otherwise write to redirect addr
-                if redirect_addr >= 0xA000 {
-                    return;
-                }
-                self.write_byte_raw(redirect_addr, val);
-                return;
-            }
+            self.oam_dma.bus_conflict_value = Some(val);
+            return;
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
         if !self.ppu.oam_accessible && addr >= 0xFE00 && addr < 0xFF00 {

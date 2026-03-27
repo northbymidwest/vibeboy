@@ -18,38 +18,67 @@ impl Bus {
             delay:        1,
             was_blocking,
             blocking:     was_blocking,
+            pending_write: None,
+            bus_conflict_value: None,
         };
     }
 
     /// Advance OAM DMA by one M-cycle. Called from tick_mcycle().
-    /// DMA takes 162 M-cycles total: 1 warmup (delay) + 160 copies + 1 teardown.
-    /// During teardown, bus is still blocked but no data is transferred.
+    ///
+    /// Pipelined model: DMA reads a byte from the bus in one M-cycle,
+    /// then writes it to OAM in the NEXT M-cycle. This matches the
+    /// 1-cycle pipeline delay observed on real hardware.
+    ///
+    /// Timeline (progress values at step entry):
+    ///   0: read byte 0, pending=(0, byte0)
+    ///   1: write pending to OAM[0], read byte 1, pending=(1, byte1)
+    ///   ...
+    ///   159: write pending to OAM[158], read byte 159, pending=(159, byte159)
+    ///   160: write pending to OAM[159] (flush), no read
+    ///   161 (CGB): teardown — bus blocked, no transfer
+    ///   End: DMG at 161, CGB at 162
     pub fn step_oam_dma(&mut self) {
         if !self.oam_dma.active { return; }
         if self.oam_dma.delay > 0 {
             self.oam_dma.delay -= 1;
+            self.oam_dma.bus_conflict_value = None;
             return;
         }
-        if self.oam_dma.progress < 160 {
-            // Copy one byte from source to OAM.
-            let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
-            let byte = if self.model.is_cgb() && src >= 0xE000 {
-                // CGB: source >= $E000 reads as 0xFF
-                0xFF
-            } else {
-                // DMG: $FE00-$FFFF maps to echo WRAM ($DE00-$DFFF)
-                if !self.model.is_cgb() && src >= 0xFE00 {
-                    src -= 0x2000;
-                }
-                self.read_byte_raw(src)
-            };
-            self.ppu.oam[self.oam_dma.progress as usize] = byte;
+
+        // Write PREVIOUS cycle's pending byte to OAM (pipeline flush)
+        if let Some((idx, byte)) = self.oam_dma.pending_write.take() {
+            self.ppu.oam[idx] = byte;
         }
+
+        // Read CURRENT byte from bus (or conflict latch) for next cycle
+        if self.oam_dma.progress < 160 {
+            let byte = if let Some(v) = self.oam_dma.bus_conflict_value.take() {
+                v
+            } else {
+                let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
+                if self.model.is_cgb() && src >= 0xE000 {
+                    0xFF
+                } else {
+                    if !self.model.is_cgb() && src >= 0xFE00 {
+                        src -= 0x2000;
+                    }
+                    self.read_byte_raw(src)
+                }
+            };
+            self.oam_dma.pending_write = Some((self.oam_dma.progress as usize, byte));
+        }
+
+        self.oam_dma.bus_conflict_value = None;
         self.oam_dma.progress += 1;
-        // CGB has a teardown M-cycle at progress=160 (bus still blocked, no copy)
-        // DMG DMA ends immediately after the last byte
+        // Keep original end conditions — blocking timing must not change.
+        // CGB teardown at progress=160 naturally flushes the last pending byte.
+        // DMG: flush remaining pending byte at end.
         let end = if self.model.is_cgb() { 161 } else { 160 };
         if self.oam_dma.progress >= end {
+            // Flush any remaining pending byte before deactivating
+            if let Some((idx, byte)) = self.oam_dma.pending_write.take() {
+                self.ppu.oam[idx] = byte;
+            }
             self.oam_dma.active = false;
         }
     }
