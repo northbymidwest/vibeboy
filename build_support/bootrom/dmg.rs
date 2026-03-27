@@ -112,20 +112,17 @@ pub fn build() -> Vec<u8> {
     a.jr_nz("tm_bot");
 
     // ================================================================
-    // Palette + LCD + chime
+    // Palette + LCD on + enable sound hardware (no note yet)
     // ================================================================
     a.ld_a(0xFC);
     a.ldh_n_a(0x47); // BGP
     a.ld_a(0x91);
     a.ldh_n_a(0x40); // LCDC on
 
-    for &(reg, val) in &[
-        (0x26u8, 0x80u8), (0x25, 0xF3), (0x24, 0x77), (0x10, 0x67),
-        (0x11, 0x80), (0x12, 0xF3), (0x13, 0x83), (0x14, 0x87),
-    ] {
-        a.ld_a(val);
-        a.ldh_n_a(reg);
-    }
+    // Enable sound system (but don't trigger a note)
+    a.ld_a(0x80); a.ldh_n_a(0x26); // NR52: sound on
+    a.ld_a(0xF3); a.ldh_n_a(0x25); // NR51: output routing
+    a.ld_a(0x77); a.ldh_n_a(0x24); // NR50: volume
 
     // ================================================================
     // Horizontal scroll: SCX 0→128 (logo slides from right to center)
@@ -149,6 +146,18 @@ pub fn build() -> Vec<u8> {
     a.jr("scroll");
 
     a.label("scroll_done");
+
+    // Boot chime (now that logo is centered)
+    for &(reg, val) in &[
+        (0x10u8, 0x67u8), // NR10: sweep
+        (0x11, 0x80),     // NR11: duty
+        (0x12, 0xF3),     // NR12: envelope
+        (0x13, 0x83),     // NR13: freq lo
+        (0x14, 0x87),     // NR14: trigger
+    ] {
+        a.ld_a(val);
+        a.ldh_n_a(reg);
+    }
 
     // Hold ~0.5 sec
     a.ld_e(30);
