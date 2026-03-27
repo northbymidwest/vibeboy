@@ -88,6 +88,12 @@ impl Asm {
     pub fn add_a_n(&mut self, n: u8) { self.emit(&[0xC6, n]); }
     pub fn sub_n(&mut self, n: u8) { self.emit(&[0xD6, n]); }
     pub fn or_b(&mut self) { self.emit(&[0xB0]); }
+    pub fn sub_hl_ind(&mut self) { self.emit(&[0x96]); }
+
+    // ── Rotate/shift ─────────────────────────────────────────────────
+
+    pub fn rla(&mut self) { self.emit(&[0x17]); }
+    pub fn rl_c(&mut self) { self.emit(&[0xCB, 0x11]); }
 
     // ── ALU register ─────────────────────────────────────────────────
 
@@ -181,9 +187,11 @@ impl Asm {
     // ── Stack ────────────────────────────────────────────────────────
 
     pub fn push_af(&mut self) { self.emit(&[0xF5]); }
+    pub fn push_bc(&mut self) { self.emit(&[0xC5]); }
     pub fn push_de(&mut self) { self.emit(&[0xD5]); }
     pub fn push_hl(&mut self) { self.emit(&[0xE5]); }
     pub fn pop_af(&mut self) { self.emit(&[0xF1]); }
+    pub fn pop_bc(&mut self) { self.emit(&[0xC1]); }
     pub fn pop_de(&mut self) { self.emit(&[0xD1]); }
     pub fn pop_hl(&mut self) { self.emit(&[0xE1]); }
 

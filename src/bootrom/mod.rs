@@ -5,11 +5,17 @@
 
 pub mod asm;
 pub mod cgb;
+pub mod dmg;
 mod data;
 
 /// Generate the built-in CGB boot ROM (2304 bytes).
 pub fn cgb_boot_rom() -> Vec<u8> {
     cgb::build()
+}
+
+/// Generate the built-in DMG boot ROM (256 bytes).
+pub fn dmg_boot_rom() -> Vec<u8> {
+    dmg::build()
 }
 
 #[cfg(test)]

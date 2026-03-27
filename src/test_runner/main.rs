@@ -206,8 +206,9 @@ fn main() {
         Command::GenBootrom { out, model } => {
             let rom = match model.as_str() {
                 "cgb" => vibeboy::bootrom::cgb_boot_rom(),
+                "dmg" => vibeboy::bootrom::dmg_boot_rom(),
                 other => {
-                    eprintln!("Unknown boot ROM model: {other}. Available: cgb");
+                    eprintln!("Unknown boot ROM model: {other}. Available: cgb, dmg");
                     std::process::exit(1);
                 }
             };
