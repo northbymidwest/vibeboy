@@ -65,10 +65,6 @@ impl OamDma {
     fn compute_blocking(&self) -> bool {
         if !self.active { return false; }
         if self.delay > 0 { return self.was_blocking; }
-        // The hardware warm-up (first-byte accessible) is modeled by delay=1:
-        // the delay phase sets blocking=false, and the 1 M-cycle lag between
-        // compute_blocking and read_byte means the CPU gets one free OAM read
-        // before blocking takes effect. No explicit warm-up exception needed.
         true // actively copying
     }
 }
@@ -536,12 +532,18 @@ impl Bus {
             return;
         }
         // Write during active DMA bus conflict: the CPU's write value appears
-        // on the data bus. DMA copies this value to OAM instead of reading
-        // from the source. The write doesn't reach its target address.
+        // on the data bus. The DMA pipeline is holding a byte that was read
+        // in the previous M-cycle — the CPU's write replaces that byte's
+        // value before it gets flushed to OAM.
         if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
             && self.oam_dma_same_bus(addr)
         {
-            self.oam_dma.bus_conflict_value = Some(val);
+            // Replace the pending pipeline byte (from previous step's read)
+            // with the CPU's write value. This models the bus conflict where
+            // the CPU's data appears on the shared bus during the DMA cycle.
+            if let Some((idx, _)) = self.oam_dma.pending_write {
+                self.oam_dma.pending_write = Some((idx, val));
+            }
             return;
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
