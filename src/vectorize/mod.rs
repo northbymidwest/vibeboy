@@ -12,8 +12,6 @@
 
 pub mod contour;
 pub mod graph;
-#[cfg(feature = "gpu")]
-pub mod gpu_rasterize;
 pub mod rasterize;
 pub mod voronoi;
 
