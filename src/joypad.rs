@@ -70,4 +70,14 @@ impl Joypad {
     pub fn clear_interrupt(&mut self) {
         self.interrupt = false;
     }
+
+    /// Get the raw button state (for preserving across rewind).
+    pub fn buttons(&self) -> u8 {
+        self.buttons
+    }
+
+    /// Restore raw button state (after rewind snapshot restore).
+    pub fn set_buttons_raw(&mut self, buttons: u8) {
+        self.buttons = buttons;
+    }
 }

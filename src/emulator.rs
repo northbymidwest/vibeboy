@@ -235,6 +235,11 @@ impl Emulator {
         if let Some(snap) = self.rewind_buffer.pop() {
             // Preserve APU filter state across restore for clean audio
             let filter_state = self.bus.apu.save_filter_state();
+            // Preserve current button state — buttons reflect the frontend's
+            // live input, not historical emulator state. Without this, rewinding
+            // restores stale button presses from the snapshot, causing keys to
+            // appear "stuck" after rewind ends.
+            let buttons = self.bus.joypad.buttons();
             self.restore_snapshot(&snap);
             self.bus.apu.restore_filter_state(&filter_state);
             // Re-allocate output buffers (cleared before serialization to save space)
@@ -245,13 +250,18 @@ impl Emulator {
             if self.bus.ppu.sgb_mode && self.bus.ppu.shade_buffer.len() != 160 * 144 {
                 self.bus.ppu.shade_buffer.resize(160 * 144, 0);
             }
-            // Regenerate frame buffer (and audio) from restored VRAM/PPU state
+            // Regenerate frame buffer (and audio) from restored VRAM/PPU state.
+            // Use the snapshot's historical button state for this step so the
+            // re-emulated audio matches the original frame.
             self.bus.clear_frame_ready();
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
                 cycles += self.step();
                 if cycles >= CYCLES_PER_FRAME * 2 { break; }
             }
+            // NOW restore the frontend's current button state so stale
+            // presses from the snapshot don't persist after rewind ends.
+            self.bus.joypad.set_buttons_raw(buttons);
             true
         } else {
             false
