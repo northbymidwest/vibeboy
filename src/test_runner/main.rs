@@ -204,16 +204,16 @@ fn main() {
             run_tests(&path, harness.as_ref(), verbose, quiet);
         }
         Command::GenBootrom { out, model } => {
-            let rom = match model.as_str() {
-                "cgb" => vibeboy::bootrom::cgb_boot_rom(),
-                "dmg" => vibeboy::bootrom::dmg_boot_rom(),
+            let rom: &[u8] = match model.as_str() {
+                "cgb" => vibeboy::bootrom::CGB,
+                "dmg" => vibeboy::bootrom::DMG,
                 other => {
                     eprintln!("Unknown boot ROM model: {other}. Available: cgb, dmg");
                     std::process::exit(1);
                 }
             };
-            std::fs::write(&out, &rom).unwrap();
-            eprintln!("Generated {model} boot ROM: {out} ({} bytes)", rom.len());
+            std::fs::write(&out, rom).unwrap();
+            eprintln!("Wrote {model} boot ROM: {out} ({} bytes)", rom.len());
         }
         Command::Screenshot {
             path,

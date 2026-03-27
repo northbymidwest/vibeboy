@@ -1,6 +1,10 @@
 use std::process::Command;
 use std::path::Path;
 
+// Boot ROM generators (build-time only, not part of the runtime library).
+#[path = "build_support/bootrom/mod.rs"]
+mod bootrom;
+
 /// Shader stage info for cross-compilation.
 struct ShaderInfo {
     glsl_src: &'static str,
@@ -293,6 +297,11 @@ const SHADERS: &[ShaderInfo] = &[
 ];
 
 fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // Generate boot ROMs
+    generate_boot_roms(&out_dir);
+
     // Compile shaders when any GPU feature is enabled
     if std::env::var("CARGO_FEATURE_SDL3_GPU_SHADERS").is_err()
         && std::env::var("CARGO_FEATURE_WEB").is_err()
@@ -302,7 +311,6 @@ fn main() {
     }
 
     let shader_dir = Path::new("src/shaders");
-    let out_dir = std::env::var("OUT_DIR").unwrap();
 
     let glsl_compiler = find_glsl_compiler();
     let has_spirv_cross = Command::new("spirv-cross").arg("--version").output().is_ok();
@@ -621,6 +629,20 @@ fn remap_hlsl_registers(hlsl: &str, is_compute: bool) -> String {
     }
 
     result
+}
+
+fn generate_boot_roms(out_dir: &str) {
+    let boot_dir = Path::new(out_dir).join("bootroms");
+    std::fs::create_dir_all(&boot_dir).unwrap();
+
+    let cgb = bootrom::cgb_boot_rom();
+    std::fs::write(boot_dir.join("cgb_boot.bin"), &cgb).unwrap();
+
+    let dmg = bootrom::dmg_boot_rom();
+    std::fs::write(boot_dir.join("dmg_boot.bin"), &dmg).unwrap();
+
+    // Re-run if generator source changes
+    println!("cargo:rerun-if-changed=build_support/bootrom");
 }
 
 fn find_glsl_compiler() -> Option<(String, bool)> {
