@@ -40,7 +40,7 @@ pub fn boot_rom_path(model: GbModel) -> &'static str {
     }
 }
 
-/// Load a boot ROM: explicit path > auto-detect by model > None.
+/// Load a boot ROM: explicit path > file on disk > built-in > None.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_boot_rom(model: GbModel, bootrom_path: Option<&Path>, no_boot: bool) -> Option<Vec<u8>> {
     if no_boot {
@@ -49,7 +49,12 @@ pub fn load_boot_rom(model: GbModel, bootrom_path: Option<&Path>, no_boot: bool)
     if let Some(p) = bootrom_path {
         return std::fs::read(p).ok();
     }
-    std::fs::read(boot_rom_path(model)).ok()
+    // Try external file first (official/custom boot ROMs)
+    if let Ok(data) = std::fs::read(boot_rom_path(model)) {
+        return Some(data);
+    }
+    // Fall back to built-in boot ROM
+    crate::bootrom::builtin(model).map(|b| b.to_vec())
 }
 
 // ── Controls printout ─────────────────────────────────────────────────────

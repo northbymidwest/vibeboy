@@ -91,7 +91,8 @@ impl WasmEmulator {
         let checksum = ((rom_arc[0x14E] as u16) << 8) | rom_arc[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
-        let emu = Emulator::new(rom_arc.clone(), None, model, None, clock::default_clock());
+        let boot_rom = crate::bootrom::builtin(model).map(|b| b.to_vec());
+        let emu = Emulator::new(rom_arc.clone(), boot_rom, model, None, clock::default_clock());
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 

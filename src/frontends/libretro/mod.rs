@@ -212,6 +212,7 @@ fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
     };
     std::fs::read(sys_dir.join("vibeboy").join(filename)).ok()
         .or_else(|| std::fs::read(sys_dir.join(filename)).ok())
+        .or_else(|| crate::bootrom::builtin(model).map(|b| b.to_vec()))
 }
 
 // ── libretro API implementation ─────────────────────────────────────────────
