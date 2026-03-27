@@ -45,13 +45,15 @@ let btn_left = null, btn_right = null, btn_start = null, btn_select = null;
 
 const canvas = document.getElementById('screen');
 const canvas2d = document.getElementById('screen-2d');
-const dropZone = document.getElementById('drop-zone');
+const dropZone = document.getElementById('canvas-wrapper');
+const romPrompt = document.getElementById('rom-prompt');
 const fileInput = document.getElementById('file-input');
 const statusEl = document.getElementById('status');
 const filterBar = document.getElementById('filter-bar');
 const filterSelect = document.getElementById('filter-select');
 const modelSelect = document.getElementById('model-select');
 const forceCpuCheckbox = document.getElementById('force-cpu');
+const skipBootCheckbox = document.getElementById('skip-boot');
 const loadingOverlay = document.getElementById('loading-overlay');
 const loadingText = loadingOverlay ? loadingOverlay.querySelector('.loading-text') : null;
 const loadingError = loadingOverlay ? loadingOverlay.querySelector('.loading-error') : null;
@@ -620,7 +622,15 @@ async function startEmulator(romBytes) {
   state.kbRewindHeld = false;
   state.kbFastFwdHeld = false;
 
+  // Hide ROM prompt, show we have a ROM loaded
+  if (romPrompt) romPrompt.classList.add('hidden');
+  dropZone.classList.add('has-rom');
+
   state.emu = new WasmEmulator(new Uint8Array(romBytes));
+  if (skipBootCheckbox.checked) {
+    state.emu.set_skip_boot(true);
+    state.emu.set_model(modelSelect.value);
+  }
   const w = state.emu.width();
   const h = state.emu.height();
 
@@ -733,9 +743,9 @@ function setupUI() {
   }
 
   const openRomBtn = document.getElementById('open-rom-btn');
-  if (openRomBtn) openRomBtn.addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('click', () => fileInput.click());
-  document.getElementById('canvas-wrapper').addEventListener('dblclick', () => fileInput.click());
+  if (openRomBtn) openRomBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+  dropZone.addEventListener('click', () => { if (!state.emu) fileInput.click(); });
+  dropZone.addEventListener('dblclick', () => fileInput.click());
   fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
   dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('hover'); });
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('hover'));
@@ -756,9 +766,16 @@ function setupUI() {
   // Force CPU toggle
   forceCpuCheckbox.addEventListener('change', () => updateRenderMode());
 
+  // Skip boot toggle — applies on next model change or ROM load
+  skipBootCheckbox.addEventListener('change', () => {
+    if (!state.emu) return;
+    state.emu.set_skip_boot(skipBootCheckbox.checked);
+  });
+
   // Model change
   modelSelect.addEventListener('change', () => {
     if (!state.emu) return;
+    state.emu.set_skip_boot(skipBootCheckbox.checked);
     state.emu.set_model(modelSelect.value);
     if (state.emu.has_battery()) {
       const saved = localStorage.getItem(state.emu.save_key());

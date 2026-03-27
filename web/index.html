@@ -17,16 +17,14 @@
     </select>
   </div>
 
-  <div id="drop-zone" role="button" aria-label="Drop or select a ROM file">
-    <button id="open-rom-btn" type="button">Open ROM</button><br>
-    Drop a .gb / .gbc ROM here<br>
-    <small>or click to browse, or select a built-in ROM above</small>
-    <input type="file" id="file-input" accept=".gb,.gbc,.sgb,.bin" aria-label="Select ROM file">
-  </div>
-
-  <div id="canvas-wrapper">
+  <div id="canvas-wrapper" role="button" aria-label="Drop or select a ROM file">
     <canvas id="screen" width="160" height="144" role="img" aria-label="Game Boy screen"></canvas>
     <canvas id="screen-2d" width="160" height="144" style="display:none;" role="img" aria-label="Game Boy screen"></canvas>
+    <div id="rom-prompt">
+      <button id="open-rom-btn" type="button">Open ROM</button><br>
+      Drop a .gb / .gbc ROM here
+    </div>
+    <input type="file" id="file-input" accept=".gb,.gbc,.sgb,.bin" aria-label="Select ROM file">
   </div>
 
   <!-- Touch controls overlay (visible on touch devices only) -->
@@ -59,6 +57,9 @@
       <option value="cgb">CGB</option>
       <option value="agb">AGB</option>
     </select>
+    <label style="color:#aaa; font-size:0.85em; cursor:pointer; user-select:none;">
+      <input type="checkbox" id="skip-boot" style="margin-right:4px; vertical-align:middle;">Skip Boot
+    </label>
     <select id="filter-select" aria-label="Scaling filter">
       <!-- Populated from Rust filter registry via filter_registry_json() -->
     </select>

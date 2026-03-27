@@ -49,6 +49,7 @@ pub struct WasmEmulator {
     save_key: String,
     scale_filter: scaling::ScaleFilter,
     vec_cache: Option<vectorize::VectorizeCache>,
+    skip_boot: bool,
     // GPU state (initialized async after construction)
     gpu: Option<GpuState>,
 }
@@ -106,6 +107,7 @@ impl WasmEmulator {
             save_key,
             scale_filter: scaling::ScaleFilter::VectorizeGpu,
             vec_cache: None,
+            skip_boot: false,
             gpu: None,
         })
     }
@@ -415,12 +417,21 @@ impl WasmEmulator {
             "agb" => GbModel::Agb,
             _ => return false,
         };
-        self.emu = Emulator::new(self.rom.clone(), None, model, None, clock::default_clock());
+        let boot_rom = if self.skip_boot { None } else {
+            crate::bootrom::builtin(model).map(|b| b.to_vec())
+        };
+        self.emu = Emulator::new(self.rom.clone(), boot_rom, model, None, clock::default_clock());
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];
         self.vec_cache = None;
         true
+    }
+
+    /// Set whether to skip the boot ROM animation.
+    /// Takes effect on next set_model() or ROM load.
+    pub fn set_skip_boot(&mut self, skip: bool) {
+        self.skip_boot = skip;
     }
 
     /// Render the current frame via WebGPU.
