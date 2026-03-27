@@ -20,6 +20,7 @@ impl Bus {
             blocking:     was_blocking,
             pending_write: None,
             bus_conflict_value: None,
+            last_bus_byte: 0xFF,
         };
     }
 
@@ -66,6 +67,7 @@ impl Bus {
                 }
             };
             self.oam_dma.pending_write = Some((self.oam_dma.progress as usize, byte));
+            self.oam_dma.last_bus_byte = byte;
         }
 
         self.oam_dma.bus_conflict_value = None;
@@ -177,6 +179,7 @@ impl Bus {
     /// timer, serial, and APU do not advance. PPU continues rendering.
     pub fn tick_speed_switch_idle(&mut self) {
         let bus_cycles = if self.double_speed { 2u32 } else { 4 };
+        self.sync_ppu_dma_bus_byte();
         let ppu_flags = self.ppu.step(bus_cycles);
         self.if_ |= ppu_flags;
     }
@@ -300,6 +303,7 @@ impl Bus {
         self.apu.set_div_counter(new_div);
 
         if ppu_cycles > 0 {
+            self.sync_ppu_dma_bus_byte();
             let ppu_flags = self.ppu.step(ppu_cycles);
             self.if_ |= ppu_flags;
         }

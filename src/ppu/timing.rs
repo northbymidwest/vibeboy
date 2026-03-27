@@ -811,19 +811,30 @@ impl Ppu {
 
     // ---- OAM scan ----
 
+    /// Read an OAM byte for internal PPU use. During OAM DMA, the PPU reads
+    /// the current DMA bus byte instead of the stored OAM value, because DMA
+    /// owns the OAM data bus.
+    fn oam_read(&self, addr: usize) -> u8 {
+        if let Some(b) = self.dma_bus_byte {
+            b
+        } else {
+            self.oam[addr]
+        }
+    }
+
     pub(super) fn oam_scan(&mut self) {
         self.scanline_sprites.clear();
         let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
         let ly = self.ly as i16;
 
         for i in 0..40usize {
-            let sprite_y = self.oam[i * 4] as i16 - 16;
-            let sprite_x = self.oam[i * 4 + 1];
-            let tile_idx = self.oam[i * 4 + 2];
-            let attrs = self.oam[i * 4 + 3];
+            let sprite_y = self.oam_read(i * 4) as i16 - 16;
+            let sprite_x = self.oam_read(i * 4 + 1);
+            let tile_idx = self.oam_read(i * 4 + 2);
+            let attrs = self.oam_read(i * 4 + 3);
 
             if ly >= sprite_y && ly < sprite_y + sprite_height {
-                self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs, i as u8));
+                self.scanline_sprites.push((self.oam_read(i * 4), sprite_x, tile_idx, attrs, i as u8));
                 if self.scanline_sprites.len() >= 10 {
                     break;
                 }
@@ -841,12 +852,12 @@ impl Ppu {
         self.oam_scan_index += 1;
         let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
         let ly = self.ly as i16;
-        let sprite_y = self.oam[i * 4] as i16 - 16;
-        let sprite_x = self.oam[i * 4 + 1];
-        let tile_idx = self.oam[i * 4 + 2];
-        let attrs = self.oam[i * 4 + 3];
+        let sprite_y = self.oam_read(i * 4) as i16 - 16;
+        let sprite_x = self.oam_read(i * 4 + 1);
+        let tile_idx = self.oam_read(i * 4 + 2);
+        let attrs = self.oam_read(i * 4 + 3);
         if ly >= sprite_y && ly < sprite_y + sprite_height {
-            self.scanline_sprites.push((self.oam[i * 4], sprite_x, tile_idx, attrs, i as u8));
+            self.scanline_sprites.push((self.oam_read(i * 4), sprite_x, tile_idx, attrs, i as u8));
         }
     }
 }

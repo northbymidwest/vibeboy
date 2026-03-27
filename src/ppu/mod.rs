@@ -239,6 +239,9 @@ pub struct Ppu {
     pub oam_accessible: bool,
     /// OAM write accessible (false during Mode 2 early and Mode 3; unblocked at Mode 2 index 37)
     pub oam_write_accessible: bool,
+    /// During OAM DMA, the PPU reads the current DMA bus byte instead of stored
+    /// OAM values. Set by Bus before each PPU step, None when DMA is not active.
+    pub dma_bus_byte: Option<u8>,
 
     // Output
     pub frame_buffer: Vec<u32>,
@@ -447,6 +450,7 @@ impl Ppu {
             vram_write_accessible: true,
             oam_accessible: true, // VBlank: accessible
             oam_write_accessible: true,
+            dma_bus_byte: None,
 
             frame_buffer: vec![0u32; 160 * 144],
             frame_ready: false,
