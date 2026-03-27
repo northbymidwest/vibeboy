@@ -1,4 +1,16 @@
-//! Scanline rasterizer with 2x2 supersampling for anti-aliased edges.
+//! Scanline rasterizer with analytical anti-aliasing.
+//!
+//! Processes ALL paths simultaneously per scanline row. At each pixel,
+//! edge crossings determine which color region is active. Boundary pixels
+//! (where an edge crosses within the pixel) get analytically blended
+//! between the two adjacent region colors based on the crossing position.
+//!
+//! Two Y samples per pixel row (at y+0.25 and y+0.75) provide vertical AA.
+//! Each sample uses analytical X coverage for horizontal AA. The two samples
+//! are averaged to produce the final pixel color.
+//!
+//! This eliminates seam artifacts from the painter's algorithm: adjacent
+//! regions blend directly (red↔blue) without background color bleeding.
 
 use super::super::contour::{ColorPath, PathSegment};
 
@@ -25,7 +37,6 @@ impl Edge {
         }
     }
 
-    /// X intersection at scanline y. Precomputed dx/dy reduces to 1 sub + 1 fma.
     #[inline(always)]
     pub(super) fn intersect_x(&self, sy: f64) -> f64 {
         self.x0 + (sy - self.y0) * self.dx_per_dy
@@ -58,6 +69,24 @@ pub(super) fn flatten_quad(
     flatten_quad(midx, midy, mx12, my12, x1, y1, tol_sq, edges);
 }
 
+/// Edge with color tag for global multi-path rasterization.
+struct ColorEdge {
+    x0: f64,
+    y0: f64,
+    dx_per_dy: f64,
+    y_min: f64,
+    y_max: f64,
+    dir: i32,
+    color: u32,
+}
+
+impl ColorEdge {
+    #[inline(always)]
+    fn intersect_x(&self, sy: f64) -> f64 {
+        self.x0 + (sy - self.y0) * self.dx_per_dy
+    }
+}
+
 /// Extract edges from path segments, scaled to output space.
 pub(super) fn extract_edges(segments: &[PathSegment], sx: f64, sy: f64, tol_sq: f64, edges: &mut Vec<Edge>) {
     edges.clear();
@@ -83,7 +112,6 @@ pub(super) fn extract_edges(segments: &[PathSegment], sx: f64, sy: f64, tol_sq: 
 }
 
 /// Rasterize vector paths to an ARGB pixel buffer.
-/// Returns Vec<u32> of size (width*scale) * (height*scale).
 pub fn rasterize(
     paths: &[ColorPath],
     width: usize,
@@ -95,8 +123,12 @@ pub fn rasterize(
     buf
 }
 
-/// Rasterize vector paths at a floating-point scale factor.
-/// Output dimensions are `(width * scale).round()` x `(height * scale).round()`.
+/// Rasterize vector paths at a floating-point scale factor with analytical AA.
+///
+/// All paths are processed simultaneously per scanline. Edge crossings from
+/// every path are sorted by X, and the active color tracks which region we're
+/// inside. Boundary pixels blend the two adjacent colors analytically.
+/// Two Y samples per pixel row provide vertical anti-aliasing.
 pub fn rasterize_scaled(
     paths: &[ColorPath],
     width: usize,
@@ -111,201 +143,184 @@ pub fn rasterize_scaled(
     let sy = scale;
     let tol_sq = 0.25;
 
-    let mut edges = Vec::new();
-    let mut sorted: Vec<usize> = Vec::new();
-    let mut coverage = vec![0u8; out_w];
-
-    // Bucket sort: O(n) distribution into per-row buckets, then flatten.
-    let mut bucket_heads: Vec<u32> = Vec::new();
-    let mut bucket_next: Vec<u32> = Vec::new();
+    // Build global edge list from all paths, tagged with color.
+    let mut all_edges: Vec<ColorEdge> = Vec::new();
+    let mut tmp_edges: Vec<Edge> = Vec::new();
 
     for path in paths {
-        if path.segments.is_empty() {
-            continue;
+        if path.segments.is_empty() { continue; }
+        extract_edges(&path.segments, sx, sy, tol_sq, &mut tmp_edges);
+        for e in &tmp_edges {
+            all_edges.push(ColorEdge {
+                x0: e.x0, y0: e.y0, dx_per_dy: e.dx_per_dy,
+                y_min: e.y_min, y_max: e.y_max, dir: e.dir,
+                color: path.color,
+            });
         }
-        if path.color == bg_color {
-            continue;
-        }
-
-        extract_edges(&path.segments, sx, sy, tol_sq, &mut edges);
-        if edges.is_empty() {
-            continue;
-        }
-        // Linked-list bucket sort: O(n) with zero per-bucket allocation.
-        bucket_heads.clear();
-        bucket_heads.resize(out_h, u32::MAX);
-        bucket_next.clear();
-        bucket_next.resize(edges.len(), u32::MAX);
-        for (i, e) in edges.iter().enumerate() {
-            let row = (e.y_min.floor() as usize).min(out_h - 1);
-            bucket_next[i] = bucket_heads[row];
-            bucket_heads[row] = i as u32;
-        }
-        sorted.clear();
-        sorted.reserve(edges.len());
-        for row in 0..out_h {
-            let mut idx = bucket_heads[row];
-            while idx != u32::MAX {
-                sorted.push(idx as usize);
-                idx = bucket_next[idx as usize];
-            }
-        }
-
-        coverage[..out_w].fill(0);
-
-        rasterize_path(
-            &edges,
-            &sorted,
-            path.color,
-            &mut buffer,
-            out_w,
-            out_h,
-            &mut coverage,
-        );
     }
 
-    (buffer, out_w, out_h)
-}
-
-/// Rasterize a single path's edges with 2x2 supersampling and nonzero winding.
-fn rasterize_path(
-    edges: &[Edge],
-    sorted: &[usize],
-    fill_color: u32,
-    buffer: &mut [u32],
-    out_w: usize,
-    out_h: usize,
-    coverage: &mut [u8],
-) {
-    let mut dirty_min = out_w;
-    let mut dirty_max = 0usize;
-
-    // Y bounding box
-    let mut y_min_f = f64::MAX;
-    let mut y_max_f = f64::MIN;
-    for e in edges {
-        if e.y_min < y_min_f { y_min_f = e.y_min; }
-        if e.y_max > y_max_f { y_max_f = e.y_max; }
+    if all_edges.is_empty() {
+        return (buffer, out_w, out_h);
     }
-    let py_start = (y_min_f.floor() as usize).min(out_h);
-    let py_end = (y_max_f.ceil() as usize).min(out_h);
 
-    let mut isects: [Vec<(f64, i32)>; 2] = [Vec::new(), Vec::new()];
+    // Bucket sort edges by starting row for scanline sweep.
+    let mut bucket_heads = vec![u32::MAX; out_h];
+    let mut bucket_next = vec![u32::MAX; all_edges.len()];
+    for (i, e) in all_edges.iter().enumerate() {
+        let row = (e.y_min.floor() as usize).min(out_h - 1);
+        bucket_next[i] = bucket_heads[row];
+        bucket_heads[row] = i as u32;
+    }
+    let mut sorted: Vec<usize> = Vec::with_capacity(all_edges.len());
+    for row in 0..out_h {
+        let mut idx = bucket_heads[row];
+        while idx != u32::MAX {
+            sorted.push(idx as usize);
+            idx = bucket_next[idx as usize];
+        }
+    }
+
+    let mut crossings: Vec<(f64, u32, i32)> = Vec::new();
     let mut scan_start = 0usize;
+    let mut winding_state: Vec<(u32, i32)> = Vec::new();
 
-    for py in py_start..py_end {
+    // Two row buffers for the two Y samples
+    let mut row_a = vec![bg_color; out_w];
+    let mut row_b = vec![bg_color; out_w];
+
+    for py in 0..out_h {
         let y_top = py as f64;
         let y_bot = y_top + 1.0;
 
-        // Reset dirty coverage
-        if dirty_min <= dirty_max {
-            for c in &mut coverage[dirty_min..=dirty_max.min(out_w - 1)] {
-                *c = 0;
-            }
-            dirty_min = out_w;
-            dirty_max = 0;
-        }
-
-        // Advance past edges above this row
+        // Advance past edges fully above this row
         while scan_start < sorted.len() {
-            if edges[sorted[scan_start]].y_max <= y_top {
+            if all_edges[sorted[scan_start]].y_max <= y_top {
                 scan_start += 1;
             } else {
                 break;
             }
         }
 
-        // Collect intersections for both sub-scanlines
-        for buf in isects.iter_mut() { buf.clear(); }
+        // Render two sub-scanlines at y+0.25 and y+0.75 for vertical AA
+        let y_samples = [y_top + 0.25, y_top + 0.75];
 
-        for i in scan_start..sorted.len() {
-            let e = &edges[sorted[i]];
-            if e.y_min >= y_bot { break; }
+        for (si, &y_sample) in y_samples.iter().enumerate() {
+            let row_buf = if si == 0 { &mut row_a } else { &mut row_b };
+            row_buf.fill(bg_color);
 
-            let sy0 = y_top + 0.25;
-            let sy1 = y_top + 0.75;
-            if sy0 >= e.y_min && sy0 < e.y_max {
-                isects[0].push((e.intersect_x(sy0), e.dir));
+            // Collect crossings at this Y from all active edges
+            crossings.clear();
+            for i in scan_start..sorted.len() {
+                let e = &all_edges[sorted[i]];
+                if e.y_min >= y_bot { break; }
+                if y_sample >= e.y_min && y_sample < e.y_max {
+                    crossings.push((e.intersect_x(y_sample), e.color, e.dir));
+                }
             }
-            if sy1 >= e.y_min && sy1 < e.y_max {
-                isects[1].push((e.intersect_x(sy1), e.dir));
+
+            if crossings.is_empty() {
+                // No crossings — entire row is bg_color (already filled)
+                continue;
             }
-        }
 
-        // Process each sub-scanline with nonzero winding rule
-        for si in 0..2 {
-            let isect = &mut isects[si];
-            if isect.is_empty() { continue; }
+            crossings.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
-            isect.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            // Sweep left to right with winding state
+            let mut active_color = bg_color;
+            let mut last_px = 0usize;
+            winding_state.clear();
 
-            let mut winding = 0i32;
-            let mut i = 0;
-            while i < isect.len() {
-                winding += isect[i].1;
-
-                if winding != 0 {
-                    let x_enter = isect[i].0;
-                    let mut j = i + 1;
-                    while j < isect.len() {
-                        winding += isect[j].1;
-                        if winding == 0 { break; }
-                        j += 1;
-                    }
-
-                    let x_exit = if j < isect.len() {
-                        isect[j].0
-                    } else {
+            for &(x_cross, edge_color, dir) in &crossings {
+                // Update winding for this color
+                let mut found = false;
+                for (c, w) in winding_state.iter_mut() {
+                    if *c == edge_color {
+                        *w += dir;
+                        found = true;
                         break;
-                    };
-
-                    let px_start = (x_enter.max(0.0) as usize).min(out_w);
-                    let px_end = ((x_exit.ceil() as usize).min(out_w)).max(px_start);
-
-                    if px_start < dirty_min { dirty_min = px_start; }
-                    if px_end > 0 && px_end - 1 > dirty_max { dirty_max = px_end - 1; }
-
-                    // Fixed-point coverage
-                    let enter_fp = (x_enter * 256.0).round() as i64;
-                    let exit_fp = (x_exit * 256.0).round() as i64;
-
-                    for px in px_start..px_end {
-                        let base = (px as i64) * 256;
-                        if base + 64 >= enter_fp && base + 64 < exit_fp { coverage[px] += 1; }
-                        if base + 192 >= enter_fp && base + 192 < exit_fp { coverage[px] += 1; }
                     }
-
-                    i = j + 1;
-                } else {
-                    i += 1;
                 }
+                if !found {
+                    winding_state.push((edge_color, dir));
+                }
+
+                // Active color: region with nonzero winding, or keep current
+                // (to prevent seams at sub-pixel gaps between adjacent regions)
+                let new_color = winding_state.iter()
+                    .find(|(_, w)| *w != 0)
+                    .map(|(c, _)| *c)
+                    .unwrap_or(active_color);
+
+                if new_color == active_color { continue; }
+
+                // Off-screen left: just update color
+                if x_cross < 0.0 {
+                    active_color = new_color;
+                    continue;
+                }
+                let cross_px = x_cross.floor() as usize;
+                let solid_end = cross_px.min(out_w);
+
+                // Fill solid pixels before crossing
+                if last_px < solid_end {
+                    row_buf[last_px..solid_end].fill(active_color);
+                }
+
+                // Blend boundary pixel with analytical X coverage
+                if cross_px < out_w {
+                    let frac = (x_cross - cross_px as f64).clamp(0.0, 1.0) as f32;
+                    row_buf[cross_px] = lerp_color(active_color, new_color, frac);
+                    last_px = cross_px + 1;
+                } else {
+                    last_px = solid_end;
+                }
+
+                active_color = new_color;
+            }
+
+            // Fill remaining pixels
+            if last_px < out_w {
+                row_buf[last_px..out_w].fill(active_color);
             }
         }
 
-        // Write pixels
-        if dirty_min <= dirty_max {
-            let row_start = py * out_w;
-            let end = dirty_max.min(out_w - 1);
-            let mut px = dirty_min;
-            while px <= end {
-                let cov = coverage[px];
-                if cov == 0 { px += 1; continue; }
-                if cov >= 4 {
-                    let run_start = px;
-                    while px <= end && coverage[px] >= 4 {
-                        px += 1;
-                    }
-                    buffer[row_start + run_start..row_start + px].fill(fill_color);
-                } else {
-                    buffer[row_start + px] = blend4(buffer[row_start + px], fill_color, cov);
-                    px += 1;
-                }
+        // Average the two Y samples into the output buffer
+        let row_start = py * out_w;
+        for px in 0..out_w {
+            let a = row_a[px];
+            let b = row_b[px];
+            if a == b {
+                buffer[row_start + px] = a;
+            } else {
+                buffer[row_start + px] = avg_color(a, b);
             }
         }
     }
+
+    (buffer, out_w, out_h)
 }
 
-/// Blend two ARGB colors with 2x2 coverage (0..4).
+/// Linearly interpolate two ARGB colors.
+/// `t` = 0.0 → color_a, `t` = 1.0 → color_b.
+#[inline(always)]
+fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
+    let inv = 1.0 - t;
+    let r = ((a >> 16) & 0xFF) as f32 * inv + ((b >> 16) & 0xFF) as f32 * t;
+    let g = ((a >> 8) & 0xFF) as f32 * inv + ((b >> 8) & 0xFF) as f32 * t;
+    let bl = (a & 0xFF) as f32 * inv + (b & 0xFF) as f32 * t;
+    0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (bl as u32)
+}
+
+/// Average two ARGB colors (50/50 blend).
+#[inline(always)]
+fn avg_color(a: u32, b: u32) -> u32 {
+    // Byte-parallel average: (a & b) + ((a ^ b) >> 1) with mask to prevent carry leak
+    let mask = 0x00FEFEFE;
+    let avg = (a & b & mask) + (((a ^ b) & mask) >> 1);
+    0xFF000000 | avg
+}
+
+/// Blend two ARGB colors with 2x2 coverage (0..4). Kept for other rasterizers.
 #[inline(always)]
 pub(super) fn blend4(bg: u32, fg: u32, coverage: u8) -> u32 {
     let alpha = coverage as u32;
