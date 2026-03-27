@@ -13,8 +13,9 @@ use super::data::*;
 /// CGB boot ROM total size: 0x0000-0x00FF + 0x0200-0x08FF = 2304 bytes.
 const CGB_BOOT_ROM_SIZE: usize = 0x0900;
 
-/// Generate the complete CGB boot ROM.
-pub fn build() -> Vec<u8> {
+/// Generate the complete CGB boot ROM. If `agb` is true, sets B=0x01
+/// in the post-boot register state (GBA running in GBC mode).
+pub fn build(agb: bool) -> Vec<u8> {
     let mut a = Asm::new();
 
     // ================================================================
@@ -422,7 +423,7 @@ pub fn build() -> Vec<u8> {
     a.ld_a(0x90); a.ldh_n_a(0x6A); // OCPS
     a.ld_a(0x91); a.ldh_n_a(0x40); // LCDC
 
-    a.ld_b(0x00);
+    a.ld_b(if agb { 0x01 } else { 0x00 });
     a.ld_c(0x00);
     a.xor_a(); // F = $80 (Z flag set)
     a.ld_sp(0xFFFE);

@@ -638,6 +638,9 @@ fn generate_boot_roms(out_dir: &str) {
     let cgb = bootrom::cgb_boot_rom();
     std::fs::write(boot_dir.join("cgb_boot.bin"), &cgb).unwrap();
 
+    let agb = bootrom::agb_boot_rom();
+    std::fs::write(boot_dir.join("agb_boot.bin"), &agb).unwrap();
+
     let dmg = bootrom::dmg_boot_rom();
     std::fs::write(boot_dir.join("dmg_boot.bin"), &dmg).unwrap();
 

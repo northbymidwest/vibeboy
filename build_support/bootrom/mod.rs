@@ -10,7 +10,12 @@ mod data;
 
 /// Generate the built-in CGB boot ROM (2304 bytes).
 pub fn cgb_boot_rom() -> Vec<u8> {
-    cgb::build()
+    cgb::build(false)
+}
+
+/// Generate the built-in AGB boot ROM (2304 bytes, B=0x01 for GBA-in-GBC mode).
+pub fn agb_boot_rom() -> Vec<u8> {
+    cgb::build(true)
 }
 
 /// Generate the built-in DMG boot ROM (256 bytes).
