@@ -49,6 +49,12 @@ class EmuAudioProcessor extends AudioWorkletProcessor {
       this.buf = this.buf.slice(this.pos);
       this.pos = 0;
     }
+    // Report buffer level to main thread every ~50ms (128 samples at 96kHz ≈ 1.3ms)
+    this._reportCounter = (this._reportCounter || 0) + 1;
+    if (this._reportCounter >= 38) {
+      this.port.postMessage({ buffered: this.buf.length - this.pos });
+      this._reportCounter = 0;
+    }
     return true;
   }
 }
