@@ -1,1 +1,50 @@
+# gh-pages: only deploy web assets, ignore everything else
+
+# ROMs and save data
+*.gb
+*.gbc
+*.sav
+*.ss
+
+# Build artifacts
+target/
+pkg/
+!pkg/vibeboy.js
+!pkg/vibeboy_bg.wasm
+
+# Images and screenshots
+*.png
+!apple-touch-icon.png
+*.svg
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Source files (pulled temporarily for wasm builds)
+src/
+build.rs
+build_support/
+Cargo.toml
+Cargo.lock
 web/
+
+# Other directories
+bootroms/
+game-boy-test-roms/
+roms/
+scripts/
+tools/
+resources/
+lib/
+.cargo/
+.claude/
+vectorize-tests/
+
+# Misc
+*.dylib
+*.wav
+*.raw
+*.o
+*.wasm
+!vibeboy_bg.wasm
