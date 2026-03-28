@@ -1,0 +1,368 @@
+/* VibeBoy — main stylesheet */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #1a1a2e;
+  color: #eee;
+  font-family: -apple-system, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+h1 { margin-bottom: 12px; font-size: 1.4em; color: #8be9fd; }
+
+/* ── Drop zone ─────────────────────────────────────────── */
+
+/* ── Canvas wrapper (also serves as drop zone) ────────── */
+
+#canvas-wrapper {
+  position: relative;
+  resize: both;
+  overflow: hidden;
+  border: 2px solid #333;
+  border-radius: 4px;
+  width: 640px;
+  height: 576px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  cursor: pointer;
+}
+#canvas-wrapper.has-rom { cursor: default; }
+#canvas-wrapper.hover { border-color: #8be9fd; }
+
+/* ── ROM prompt overlay (shown before ROM is loaded) ──── */
+
+#rom-prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #aaa;
+  font-size: 0.95em;
+  z-index: 10;
+  pointer-events: none;
+}
+#rom-prompt.hidden { display: none; }
+
+#open-rom-btn {
+  display: inline-block;
+  margin-bottom: 10px;
+  padding: 10px 28px;
+  background: #8be9fd;
+  color: #1a1a2e;
+  border: none;
+  border-radius: 6px;
+  font-size: 1em;
+  font-weight: bold;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  pointer-events: auto;
+}
+#open-rom-btn:hover { background: #a4f0ff; }
+#open-rom-btn:active { background: #6dd5eb; }
+
+#file-input { display: none; }
+#canvas-wrapper canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* ── Status / controls ─────────────────────────────────── */
+
+#status {
+  margin-top: 8px;
+  font-size: 0.8em;
+  color: #666;
+}
+#controls {
+  margin-top: 4px;
+  font-size: 0.85em;
+  color: #888;
+  text-align: center;
+}
+
+input[type="file"] { display: none; }
+
+/* ── ROM selector ──────────────────────────────────────── */
+
+#rom-selector {
+  margin-bottom: 12px;
+}
+#rom-selector.hidden { display: none; }
+#rom-selector select {
+  background: #2a2a4e;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 0.95em;
+  cursor: pointer;
+}
+#rom-selector select:hover { border-color: #8be9fd; }
+
+/* ── Filter bar selects ────────────────────────────────── */
+
+#filter-bar {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+#filter-bar select,
+#model-select,
+#filter-select {
+  background: #2a2a4e;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.9em;
+}
+
+/* ── Fullscreen button ─────────────────────────────────── */
+
+#fullscreen-btn {
+  background: #2a2a4e;
+  color: #aaa;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+#fullscreen-btn:hover { border-color: #8be9fd; color: #eee; }
+
+/* ── Loading overlay ───────────────────────────────────── */
+
+#loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 26, 46, 0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  transition: opacity 0.3s;
+}
+#loading-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #333;
+  border-top-color: #8be9fd;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 14px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text {
+  font-size: 1em;
+  color: #8be9fd;
+}
+
+.loading-error {
+  color: #ff5555;
+  font-size: 0.9em;
+  margin-top: 8px;
+}
+
+/* ── Toast notifications ───────────────────────────────── */
+
+#toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  background: rgba(40, 40, 70, 0.92);
+  color: #eee;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  border: 1px solid #555;
+  opacity: 0;
+  animation: toast-in 0.25s ease forwards, toast-out 0.3s ease 1.7s forwards;
+  pointer-events: none;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* ── Touch controls overlay ────────────────────────────── */
+
+#touch-controls {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40vh;
+  pointer-events: none;
+  z-index: 100;
+  touch-action: none;
+}
+#touch-controls.visible { display: block; }
+
+/* D-pad */
+.dpad {
+  position: absolute;
+  left: 20px;
+  bottom: 60px;
+  width: clamp(120px, 28vw, 160px);
+  height: clamp(120px, 28vw, 160px);
+  pointer-events: auto;
+  touch-action: none;
+}
+.dpad-btn {
+  position: absolute;
+  width: clamp(40px, 8vw, 56px);
+  height: clamp(40px, 8vw, 56px);
+  background: rgba(255, 255, 255, 0.15);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: clamp(16px, 3.5vw, 22px);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  pointer-events: auto;
+}
+.dpad-btn.active { background: rgba(255, 255, 255, 0.35); }
+.dpad-center {
+  position: absolute;
+  width: clamp(40px, 8vw, 56px);
+  height: clamp(40px, 8vw, 56px);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+.dpad-up    { left: 50%; transform: translateX(-50%); top: 0; }
+.dpad-down  { left: 50%; transform: translateX(-50%); bottom: 0; }
+.dpad-left  { left: 0; top: 50%; transform: translateY(-50%); }
+.dpad-right { right: 0; top: 50%; transform: translateY(-50%); }
+
+/* A/B buttons */
+.action-buttons {
+  position: absolute;
+  right: 20px;
+  bottom: 70px;
+  width: clamp(120px, 28vw, 160px);
+  height: clamp(90px, 20vw, 120px);
+  pointer-events: auto;
+  touch-action: none;
+}
+.action-btn {
+  position: absolute;
+  width: clamp(44px, 10vw, 64px);
+  height: clamp(44px, 10vw, 64px);
+  background: rgba(255, 255, 255, 0.15);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: clamp(14px, 3.5vw, 20px);
+  font-weight: bold;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  pointer-events: auto;
+}
+.action-btn.active { background: rgba(255, 255, 255, 0.35); }
+.btn-a { right: 0; top: 0; }
+.btn-b { left: 0; bottom: 0; }
+
+/* Start / Select */
+.meta-buttons {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 20px;
+  pointer-events: auto;
+  touch-action: none;
+}
+.meta-btn {
+  padding: 8px 22px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 14px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  pointer-events: auto;
+}
+.meta-btn.active { background: rgba(255, 255, 255, 0.3); }
+
+/* ── Mobile responsive ─────────────────────────────────── */
+
+@media (max-width: 767px) {
+  body {
+    justify-content: flex-start;
+    padding-top: 8px;
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+    height: 100%;
+  }
+  h1 { font-size: 1.1em; margin-bottom: 6px; }
+  #canvas-wrapper {
+    width: 96vw !important;
+    height: auto !important;
+    aspect-ratio: 160 / 144;
+    max-height: 50vh;
+    resize: none;
+  }
+  #status { font-size: 0.7em; margin-top: 4px; }
+  #filter-bar { font-size: 0.8em; flex-wrap: wrap; justify-content: center; }
+  #filter-bar select { font-size: 0.8em; padding: 3px 6px; }
+  #controls.desktop-only { display: none; }
+  #rom-selector select { font-size: 0.85em; padding: 4px 8px; }
+}
