@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::apu;
 use crate::clock;
 use crate::emulator::Emulator;
 use crate::model::GbModel;

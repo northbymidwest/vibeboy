@@ -285,6 +285,8 @@ impl GpuPipelines {
             ScaleFilter::Sai2x => SP_SAI2X,
             ScaleFilter::Super2xSai => SP_SUPER_SAI2X,
             ScaleFilter::SuperEagle => SP_SUPER_EAGLE,
+            ScaleFilter::Nearest => SP_NEAREST,
+            ScaleFilter::Bilinear => SP_BILINEAR,
             _ => return,
         };
 
