@@ -409,8 +409,11 @@ impl Apu {
         self.hpf_prev_in_r = r;
 
         if !self.headless {
-            self.sample_buf.push(self.hpf_left);
-            self.sample_buf.push(self.hpf_right);
+            // Clamp to [-1, 1] — the BLIP sinc filter overshoots on sharp
+            // transitions (Gibbs phenomenon), which would cause hard digital
+            // clipping in audio backends.
+            self.sample_buf.push(self.hpf_left.clamp(-1.0, 1.0));
+            self.sample_buf.push(self.hpf_right.clamp(-1.0, 1.0));
         }
     }
 
