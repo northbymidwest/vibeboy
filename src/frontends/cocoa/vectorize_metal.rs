@@ -41,7 +41,7 @@ fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
     let ns_src = NSString::from_str(src);
     let lib = device.newLibraryWithSource_options_error(&ns_src, None)
         .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
-    let func = lib.newFunctionWithName(ns_string!("main0"))?;
+    let func = lib.newFunctionWithName(ns_string!("main_0"))?;
     device.newComputePipelineStateWithFunction_error(&func)
         .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
 }

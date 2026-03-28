@@ -134,7 +134,7 @@ fn load_compute_pipeline(
     let ns_src = NSString::from_str(src);
     let lib = dev.newLibraryWithSource_options_error(&ns_src, None)
         .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
-    let func_name = ns_string!("main0");
+    let func_name = ns_string!("main_0");
     let func = lib.newFunctionWithName(func_name)?;
     dev.newComputePipelineStateWithFunction_error(&func)
         .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
@@ -326,9 +326,9 @@ impl MetalRenderer {
         enc.setComputePipelineState(pipeline);
         unsafe {
             enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
-            enc.setBuffer_offset_atIndex(Some(&diag_buf), 0, 1);
+            enc.setBuffer_offset_atIndex(Some(&px_buf), 0, 1);
             enc.setBuffer_offset_atIndex(Some(&reg_buf), 0, 2);
-            enc.setBuffer_offset_atIndex(Some(&px_buf), 0, 3);
+            enc.setBuffer_offset_atIndex(Some(&diag_buf), 0, 3);
             enc.setTexture_atIndex(Some(out_tex), 0);
             enc.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize { width: ((out_w + 15) / 16) as usize, height: ((out_h + 15) / 16) as usize, depth: 1 },

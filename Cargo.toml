@@ -87,7 +87,6 @@ path = "src/frontends/gtk/main.rs"
 required-features = ["gtk-ui"]
 
 [build-dependencies]
-naga = { version = "29", features = ["spv-in", "wgsl-out"] }
 
 [features]
 default = ["native", "sdl3-gpu-shaders"]

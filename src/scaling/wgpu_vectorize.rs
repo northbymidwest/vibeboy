@@ -165,7 +165,10 @@ impl WgpuVectorizePipeline {
             })
         };
 
-        // Pre-create all bind groups
+        // Pre-create all bind groups.
+        // WGSL group mapping: group 0 = read storage (vk set 0),
+        //   group 1 = RW storage/texture (vk set 1), group 2 = uniforms (vk set 2).
+        // Exception: update_tjunction has uniforms in group 1 and RW+read in group 0.
         let bg_sim = [
             bg(&self.sim_graph, 0, &[wgpu::BindGroupEntry { binding: 0, resource: px_buf.as_entire_binding() }]),
             bg(&self.sim_graph, 1, &[wgpu::BindGroupEntry { binding: 0, resource: graph_buf.as_entire_binding() }]),
@@ -205,6 +208,7 @@ impl WgpuVectorizePipeline {
             bg(&self.optimizer, 1, &[wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() }]),
             bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt.as_entire_binding() }]),
         ];
+        // update_tjunction: uniforms at vk set 1 (group 1), all buffers at vk set 0 (group 0)
         let bg_tjunc = [
             bg(&self.tjunction, 0, &[
                 wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
@@ -456,30 +460,9 @@ impl WgpuSharedChainRasterizer {
             count: None,
         };
 
-        // Group 0: edges (b0), row_ranges (b1), edge_indices (b2)
-        let bgl_buffers = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vr_bgl0"),
-            entries: &[storage_entry(0), storage_entry(1), storage_entry(2)],
-        });
-
-        // Group 1: output texture
-        let bgl_texture = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vr_bgl1"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            }],
-        });
-
-        // Group 2: uniforms
+        // Group 0: uniforms
         let bgl_uniform = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vr_bgl2"),
+            label: Some("vr_bgl0"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -487,6 +470,27 @@ impl WgpuSharedChainRasterizer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        // Group 1: edges (b0), row_ranges (b1), edge_indices (b2)
+        let bgl_buffers = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_bgl1"),
+            entries: &[storage_entry(0), storage_entry(1), storage_entry(2)],
+        });
+
+        // Group 2: output texture
+        let bgl_texture = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_bgl2"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
             }],
@@ -563,8 +567,8 @@ impl WgpuSharedChainRasterizer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        // Group 0: storage buffers
-        let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Group 0: storage buffers (vk set 0)
+        let bg_buffers = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vr_bg0"),
             layout: &self.bgl_buffers,
             entries: &[
@@ -574,8 +578,8 @@ impl WgpuSharedChainRasterizer {
             ],
         });
 
-        // Group 1: output texture
-        let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Group 1: output texture (vk set 1)
+        let bg_texture = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vr_bg1"),
             layout: &self.bgl_texture,
             entries: &[
@@ -583,8 +587,8 @@ impl WgpuSharedChainRasterizer {
             ],
         });
 
-        // Group 2: uniforms
-        let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Group 2: uniforms (vk set 2)
+        let bg_uniform = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vr_bg2"),
             layout: &self.bgl_uniform,
             entries: &[
@@ -598,9 +602,9 @@ impl WgpuSharedChainRasterizer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bg0, &[]);
-            pass.set_bind_group(1, &bg1, &[]);
-            pass.set_bind_group(2, &bg2, &[]);
+            pass.set_bind_group(0, &bg_buffers, &[]);
+            pass.set_bind_group(1, &bg_texture, &[]);
+            pass.set_bind_group(2, &bg_uniform, &[]);
             pass.dispatch_workgroups(
                 (out_w + 15) / 16,
                 (out_h + 15) / 16,
@@ -713,7 +717,7 @@ impl WgpuDiffusionRasterizer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        // Bind groups (auto-derived layout from pipeline)
+        // Bind groups: group 0=storage read (vk set 0), 1=texture (vk set 1), 2=uniforms (vk set 2)
         let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("diff_bg0"),
             layout: &self.pipeline.get_bind_group_layout(0),
@@ -825,7 +829,7 @@ impl WgpuSplineDiffusionPipeline {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        // Pass 1 bind groups (auto-derived layout)
+        // Pass 1 bind groups: group 0=read storage (vk set 0), 1=RW storage (vk set 1), 2=uniforms (vk set 2)
         let bg1_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sd_p1_bg0"),
             layout: &self.pass1.get_bind_group_layout(0),
@@ -895,7 +899,7 @@ impl WgpuSplineDiffusionPipeline {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-        // Pass 2 bind groups
+        // Pass 2 bind groups: group 0=read storage (vk set 0), 1=texture (vk set 1), 2=uniforms (vk set 2)
         let bg2_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sd_p2_bg0"),
             layout: &self.pass2.get_bind_group_layout(0),
