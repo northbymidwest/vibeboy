@@ -93,7 +93,7 @@ impl WasmEmulator {
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
         let boot_rom = crate::bootrom::builtin(model).map(|b| b.to_vec());
-        let emu = Emulator::new(rom_arc.clone(), boot_rom, model, None, clock::default_clock());
+        let emu = Emulator::new(rom_arc.clone(), boot_rom, model, None, clock::default_clock(), apu::DEFAULT_SAMPLE_RATE);
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
@@ -420,7 +420,7 @@ impl WasmEmulator {
         let boot_rom = if self.skip_boot { None } else {
             crate::bootrom::builtin(model).map(|b| b.to_vec())
         };
-        self.emu = Emulator::new(self.rom.clone(), boot_rom, model, None, clock::default_clock());
+        self.emu = Emulator::new(self.rom.clone(), boot_rom, model, None, clock::default_clock(), apu::DEFAULT_SAMPLE_RATE);
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];

@@ -150,7 +150,7 @@ impl App {
         self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
-        let mut emu = Emulator::new(rom, boot_rom, self.model, None, clock::default_clock());
+        let mut emu = Emulator::new(rom, boot_rom, self.model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
         ui_util::load_sav(&mut emu, path);
         let is_sgb = emu.is_sgb();
         self.src_w = if is_sgb { SGB_W } else { GB_W };

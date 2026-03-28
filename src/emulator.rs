@@ -52,6 +52,7 @@ impl Emulator {
         model: GbModel,
         snes_rom: Option<Vec<u8>>,
         clock: std::sync::Arc<dyn Clock>,
+        sample_rate: u32,
     ) -> Self {
         let rom: std::sync::Arc<[u8]> = rom.into();
         let has_boot = boot_rom.is_some();
@@ -61,7 +62,7 @@ impl Emulator {
         } else {
             cpu.regs = Registers::post_boot_with_rom(model, Some(&rom));
         }
-        let mut bus = Bus::new(rom, boot_rom, model, clock);
+        let mut bus = Bus::new(rom, boot_rom, model, clock, sample_rate);
 
         // When no boot ROM, set post-boot IO register values
         if !has_boot {

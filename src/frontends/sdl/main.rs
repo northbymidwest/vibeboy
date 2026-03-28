@@ -234,7 +234,7 @@ fn main() {
     }
     eprintln!();
 
-    let mut emu = Emulator::new(rom, boot_rom, model, snes_rom, clock::default_clock());
+    let mut emu = Emulator::new(rom, boot_rom, model, snes_rom, clock::default_clock(), AUDIO_SAMPLE_RATE);
     ui_util::load_sav(&mut emu, &rom_path);
     let mut sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 

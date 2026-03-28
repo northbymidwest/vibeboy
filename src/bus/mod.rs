@@ -210,7 +210,7 @@ fn init_hram(model: GbModel) -> [u8; 0x7F] {
 }
 
 impl Bus {
-    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel, clock: std::sync::Arc<dyn Clock>) -> Self {
+    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel, clock: std::sync::Arc<dyn Clock>, sample_rate: u32) -> Self {
         let boot_rom_active = boot_rom.is_some();
 
         let mut ppu = Ppu::new();
@@ -270,7 +270,7 @@ impl Bus {
             ppu,
             timer,
             joypad,
-            apu: if boot_rom_active { Apu::reset(model.cpu_clock_rate(), model.is_cgb()) } else { Apu::new(model.cpu_clock_rate(), model.is_cgb(), model.is_sgb()) },
+            apu: if boot_rom_active { Apu::reset(model.cpu_clock_rate(), model.is_cgb(), sample_rate) } else { Apu::new(model.cpu_clock_rate(), model.is_cgb(), model.is_sgb(), sample_rate) },
             wram: init_wram(model),
             wram_bank: 1,
             hram: init_hram(model),
@@ -349,10 +349,14 @@ impl Bus {
         self.ppu = s.ppu.clone();
         self.timer = s.timer.clone();
         self.joypad = s.joypad.clone();
-        // Preserve the existing sample_buf allocation when restoring APU state
+        // Preserve the existing sample_buf allocation and frontend-configured
+        // sample rate when restoring APU state (save states may come from a
+        // frontend running at a different rate).
         let saved_buf = std::mem::take(&mut self.apu.sample_buf);
+        let saved_rate = self.apu.sample_rate();
         self.apu = s.apu.clone();
         self.apu.sample_buf = saved_buf;
+        self.apu.set_sample_rate(saved_rate);
         self.wram = s.wram;
         self.wram_bank = s.wram_bank;
         self.hram = s.hram;

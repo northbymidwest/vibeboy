@@ -114,9 +114,8 @@ static LIB_NAME: &[u8] = b"VibeBoy\0";
 static LIB_VERSION: &[u8] = b"0.1.0\0";
 static EXTENSIONS: &[u8] = b"gb|gbc|sgb\0";
 
-// Audio output rate (libretro standard). We downsample from 96kHz.
+// Audio output rate (libretro standard). APU produces this rate directly.
 const AUDIO_RATE: f64 = 48000.0;
-const DOWNSAMPLE_FACTOR: usize = 2; // 96kHz / 2 = 48kHz
 
 // Global state (libretro API is C-style, single-threaded, no context object).
 // We use raw pointer access to avoid Rust 2024's static_mut_refs lint.
@@ -333,7 +332,7 @@ pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
         let model = get_model_from_options().unwrap_or_else(|| detect_model(&rom));
         let boot_rom = load_boot_rom(model);
 
-        let emu = Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock());
+        let emu = Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_RATE as u32);
 
         std::ptr::addr_of_mut!(CORE).write(Some(CoreState {
             emu,
@@ -411,14 +410,12 @@ pub extern "C" fn retro_run() {
             );
         }
 
-        // Audio: drain samples, downsample from 96kHz to 48kHz, convert to i16
+        // Audio: drain samples (already at 48kHz), convert to i16
         let samples = core.emu.drain_audio_samples();
         if !samples.is_empty() {
             if let Some(batch_cb) = audio_batch_cb() {
-                let downsampled = ui_util::downsample_audio(&samples, DOWNSAMPLE_FACTOR);
-
                 core.audio_buf_i16.clear();
-                for &s in &downsampled {
+                for &s in &samples {
                     core.audio_buf_i16.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
                 }
 
@@ -435,7 +432,7 @@ pub extern "C" fn retro_reset() {
         if let Some(core) = core_mut() {
             let model = get_model_from_options().unwrap_or_else(|| detect_model(&core.rom));
             let boot_rom = load_boot_rom(model);
-            core.emu = Emulator::new(core.rom.clone(), boot_rom, model, None, clock::default_clock());
+            core.emu = Emulator::new(core.rom.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_RATE as u32);
             core.model = model;
         }
     }

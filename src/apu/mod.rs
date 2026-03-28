@@ -119,7 +119,8 @@ impl BlipBuf {
 
 // ── APU top level ──────────────────────────────────────────────────────────
 
-const SAMPLE_RATE: u32 = 96_000;
+/// Default sample rate when not specified by a frontend.
+pub const DEFAULT_SAMPLE_RATE: u32 = 96_000;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apu {
@@ -184,6 +185,9 @@ pub struct Apu {
 
     // CGB mode flag (affects power-off behavior)
     is_cgb: bool,
+
+    // Output sample rate (e.g. 96_000 or 48_000)
+    sample_rate: u32,
 }
 
 /// Transient APU filter state not included in serde snapshots.
@@ -220,7 +224,7 @@ impl Apu {
         self.hpf_prev_in_r = state.hpf_prev_in_r;
     }
 
-    pub fn new(cpu_clock_rate: u32, is_cgb: bool, is_sgb: bool) -> Self {
+    pub fn new(cpu_clock_rate: u32, is_cgb: bool, is_sgb: bool, sample_rate: u32) -> Self {
         let mut apu = Apu {
             ch1: SquareCh::new(),
             sweep: Sweep::new(),
@@ -247,9 +251,10 @@ impl Apu {
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
             hpf_prev_in_r: 0.0,
-            sample_accum_tick: SAMPLE_RATE as u64,
+            sample_accum_tick: sample_rate as u64,
             sample_accum_thresh: cpu_clock_rate as u64,
             is_cgb,
+            sample_rate,
         };
         // Post-boot CH1 state: registers match what boot ROM left behind
         apu.ch1.duty = 2;
@@ -265,7 +270,7 @@ impl Apu {
     }
 
     /// Hardware reset state for use with boot ROM execution.
-    pub fn reset(cpu_clock_rate: u32, is_cgb: bool) -> Self {
+    pub fn reset(cpu_clock_rate: u32, is_cgb: bool, sample_rate: u32) -> Self {
         Apu {
             ch1: SquareCh::new(),
             sweep: Sweep::new(),
@@ -292,10 +297,21 @@ impl Apu {
             hpf_right: 0.0,
             hpf_prev_in_l: 0.0,
             hpf_prev_in_r: 0.0,
-            sample_accum_tick: SAMPLE_RATE as u64,
+            sample_accum_tick: sample_rate as u64,
             sample_accum_thresh: cpu_clock_rate as u64,
             is_cgb,
+            sample_rate,
         }
+    }
+
+    /// Current output sample rate.
+    pub fn sample_rate(&self) -> u32 { self.sample_rate }
+
+    /// Change the output sample rate (used when restoring save states across
+    /// frontends that may run at different rates).
+    pub fn set_sample_rate(&mut self, rate: u32) {
+        self.sample_rate = rate;
+        self.sample_accum_tick = rate as u64;
     }
 
     /// Update the DIV counter from the bus (called each tick).
