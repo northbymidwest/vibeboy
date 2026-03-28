@@ -330,3 +330,82 @@ pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: b
 
     vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
 }
+
+pub fn cmd_audio_dump(
+    rom_path: &Path,
+    model: Option<GbModel>,
+    frames: u32,
+    out: &str,
+    sample_rate: u32,
+) {
+    let rom = fs::read(rom_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read ROM: {e}");
+        std::process::exit(1);
+    });
+
+    let model = model.unwrap_or_else(|| vibeboy::ui_util::auto_detect_model(&rom));
+    let boot_rom = vibeboy::bootrom::builtin(model).map(|b| b.to_vec());
+
+    let mut emu = vibeboy::emulator::Emulator::new(
+        rom, boot_rom, model, None,
+        vibeboy::clock::default_clock(),
+        sample_rate,
+    );
+    // Audio enabled (not headless) so samples accumulate
+    emu.set_headless(false);
+
+    let mut all_samples: Vec<f32> = Vec::new();
+
+    for _ in 0..frames {
+        emu.step_frame();
+        let samples = emu.drain_audio_samples();
+        all_samples.extend_from_slice(&samples);
+    }
+
+    // Write WAV file (PCM 32-bit float, stereo)
+    let num_samples = all_samples.len() / 2; // stereo pairs
+    let byte_rate = sample_rate * 2 * 4; // channels * bytes_per_sample
+    let data_size = (all_samples.len() * 4) as u32;
+
+    let mut wav = Vec::with_capacity(44 + data_size as usize);
+    // RIFF header
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    // fmt chunk
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav.extend_from_slice(&3u16.to_le_bytes()); // format = IEEE float
+    wav.extend_from_slice(&2u16.to_le_bytes()); // channels
+    wav.extend_from_slice(&sample_rate.to_le_bytes()); // sample rate
+    wav.extend_from_slice(&byte_rate.to_le_bytes()); // byte rate
+    wav.extend_from_slice(&8u16.to_le_bytes()); // block align (2 channels * 4 bytes)
+    wav.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
+    // data chunk
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    for &s in &all_samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+
+    fs::write(out, &wav).unwrap_or_else(|e| {
+        eprintln!("Failed to write WAV: {e}");
+        std::process::exit(1);
+    });
+
+    let duration = num_samples as f64 / sample_rate as f64;
+    let peak = all_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+
+    // Count clipped samples (at exactly ±1.0 after clamp)
+    let clipped = all_samples.iter().filter(|&&s| s == 1.0 || s == -1.0).count();
+
+    // Max sample-to-sample delta
+    let max_delta = all_samples.windows(2)
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0) // only check within same channel
+        .map(|(_, w)| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+
+    eprintln!("Wrote {out}: {num_samples} stereo samples, {duration:.2}s at {sample_rate}Hz");
+    eprintln!("  peak={peak:.4}, clipped={clipped}, max_delta={max_delta:.4}");
+}

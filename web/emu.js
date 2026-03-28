@@ -28,6 +28,7 @@ const state = {
   accelX: 0,
   accelY: 0,
   deviceMotionHandler: null,
+  audioBuffered: 0,
   gpPrevState: {},
   rumbleWasOn: false,
   saveFlushScheduled: false,
@@ -194,6 +195,12 @@ async function initAudio() {
     state.audioWorklet = new AudioWorkletNode(state.audioCtx, 'emu-audio', {
       outputChannelCount: [2],
     });
+    state.audioWorklet.port.onmessage = (e) => {
+      if (e.data && typeof e.data.buffered === 'number') {
+        state.audioBuffered = e.data.buffered;
+        state._audioReportReceived = true;
+      }
+    };
     state.audioWorklet.connect(state.audioCtx.destination);
     console.log('AudioWorklet initialized at', state.audioCtx.sampleRate, 'Hz');
   } catch (e) {
@@ -539,11 +546,34 @@ function frame(timestamp) {
     checkForPrint();
     updateRumble();
   } else {
-    while (state.emuTime >= GB_FRAME_MS) {
+    // Audio-driven timing gated by wall clock: only step when enough
+    // time has elapsed (handles >60Hz displays), then use the AudioWorklet
+    // buffer level to fine-tune how many frames to step.
+    let framesNeeded = 0;
+    if (state.emuTime >= GB_FRAME_MS) {
+      // Time gate passed — at least one frame is due
+      if (state.audioWorklet && state._audioReportReceived) {
+        const samplesPerFrame = 96000 / 60 * 2;
+        const targetFill = samplesPerFrame * 3;  // ~50ms
+        const maxFill = samplesPerFrame * 8;     // ~133ms
+        const queued = state.audioBuffered;
+
+        if (queued < targetFill / 2) framesNeeded = 2;
+        else if (queued < targetFill) framesNeeded = 1;
+        else if (queued > maxFill) framesNeeded = 0;
+        else framesNeeded = 1;
+      } else {
+        framesNeeded = 1;
+      }
+      state.emuTime -= GB_FRAME_MS;
+      // Consume any extra accumulated time (don't let it pile up)
+      if (state.emuTime > GB_FRAME_MS) state.emuTime = GB_FRAME_MS;
+    }
+
+    for (let i = 0; i < framesNeeded; i++) {
       if (state.cameraActive) feedCameraFrame();
       state.emu.step_frame();
       if (state.audioWorklet) pushAudioSamples();
-      state.emuTime -= GB_FRAME_MS;
       stepped = true;
       checkForPrint();
       updateRumble();

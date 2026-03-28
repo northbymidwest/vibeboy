@@ -19,3 +19,4 @@ pkg/
 web/pkg/
 *.ss
 vibeboy_libretro.dylib
+*.wav

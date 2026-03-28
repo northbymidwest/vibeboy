@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 const BLIP_WIDTH: usize = 64;
 const BLIP_PHASES: usize = 256;
-const BLIP_BUF_SIZE: usize = BLIP_WIDTH * 2; // 128
+const BLIP_BUF_SIZE: usize = 4096; // Must be power-of-2, large enough that sinc taps never wrap into unread data
 const BLIP_ONE: i32 = 0x10000; // 65536
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -44,7 +44,11 @@ fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
     use std::sync::LazyLock;
     static TABLE: LazyLock<Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>> = LazyLock::new(|| {
         let n = BLIP_WIDTH * BLIP_PHASES;
-        let lowpass = 15.0_f64 / 16.0;
+        // Lowpass cutoff as a fraction of Nyquist. Lower values reduce sinc
+        // overshoot (Gibbs phenomenon) at the cost of high-frequency rolloff.
+        // 0.85 gives ~35% overshoot and 41 kHz cutoff at 96 kHz — well above
+        // audible range and close to the real Game Boy's analog rolloff.
+        let lowpass = 0.85_f64;
         let mut master = vec![0.0_f64; n];
 
         for i in 0..n {
@@ -122,6 +126,23 @@ impl BlipBuf {
 /// Default sample rate when not specified by a frontend.
 pub const DEFAULT_SAMPLE_RATE: u32 = 96_000;
 
+/// Compute HPF alpha for the coupling capacitor model.
+/// Uses a per-T-cycle base of 0.9999991 which gives a ~0.6 Hz cutoff
+/// (matching the real Game Boy hardware RC time constant) at any sample rate.
+fn compute_hpf_alpha(cpu_clock_rate: u32, sample_rate: u32) -> f32 {
+    const BASE_PER_TCYCLE: f64 = 0.9999991;
+    let cycles_per_sample = cpu_clock_rate as f64 / sample_rate as f64;
+    BASE_PER_TCYCLE.powf(cycles_per_sample) as f32
+}
+
+/// DAC ramp maximum value (fully on). The ramp increments/decrements by
+/// DAC_RAMP_STEP per M-cycle (~4 T-cycles), so the full ramp takes
+/// DAC_RAMP_MAX / DAC_RAMP_STEP M-cycles. At 4 MHz that's ~60us — fast
+/// enough to be inaudible but slow enough to prevent hard step transients.
+const DAC_RAMP_MAX: u32 = 256;
+/// Per-M-cycle ramp increment. 256 / 4 = 64 M-cycles ≈ 61us at 4.19 MHz.
+const DAC_RAMP_STEP: u32 = 4;
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apu {
     ch1: SquareCh,
@@ -188,6 +209,16 @@ pub struct Apu {
 
     // Output sample rate (e.g. 96_000 or 48_000)
     sample_rate: u32,
+
+    // High-pass filter coefficient, computed from sample rate.
+    // Models the coupling capacitor with ~0.6 Hz cutoff (matching real hardware).
+    hpf_alpha: f32,
+
+    // DAC discharge/charge ramp per channel (smooths DAC on/off transitions to
+    // prevent hard step functions that cause BLIP overshoot and audible clicks).
+    // Fixed-point 0..DAC_RAMP_MAX, where DAC_RAMP_MAX = fully on.
+    dac_ramp: [u32; 4],
+
 }
 
 /// Transient APU filter state not included in serde snapshots.
@@ -255,6 +286,8 @@ impl Apu {
             sample_accum_thresh: cpu_clock_rate as u64,
             is_cgb,
             sample_rate,
+            hpf_alpha: compute_hpf_alpha(cpu_clock_rate, sample_rate),
+            dac_ramp: [0; 4],
         };
         // Post-boot CH1 state: registers match what boot ROM left behind
         apu.ch1.duty = 2;
@@ -265,6 +298,7 @@ impl Apu {
         if !is_sgb {
             apu.ch1.dac_on = true;
             apu.ch1.enabled = true;
+            apu.dac_ramp[0] = DAC_RAMP_MAX; // CH1 DAC starts on post-boot
         }
         apu
     }
@@ -301,6 +335,8 @@ impl Apu {
             sample_accum_thresh: cpu_clock_rate as u64,
             is_cgb,
             sample_rate,
+            hpf_alpha: compute_hpf_alpha(cpu_clock_rate, sample_rate),
+            dac_ramp: [0; 4],
         }
     }
 
@@ -312,6 +348,7 @@ impl Apu {
     pub fn set_sample_rate(&mut self, rate: u32) {
         self.sample_rate = rate;
         self.sample_accum_tick = rate as u64;
+        self.hpf_alpha = compute_hpf_alpha(self.sample_accum_thresh as u32, rate);
     }
 
     /// Update the DIV counter from the bus (called each tick).
@@ -333,18 +370,46 @@ impl Apu {
         if self.lf_div { 1 } else { 0 }
     }
 
+    // ── DAC discharge/charge ramp ──────────────────────────────────────────
+
+    /// Advance DAC ramps toward their target (on or off) by one M-cycle step.
+    fn advance_dac_ramps(&mut self) {
+        let targets = [
+            self.ch1.dac_on, self.ch2.dac_on,
+            self.ch3.dac_on, self.ch4.dac_on,
+        ];
+        for (ramp, &on) in self.dac_ramp.iter_mut().zip(&targets) {
+            if on {
+                *ramp = (*ramp + DAC_RAMP_STEP).min(DAC_RAMP_MAX);
+            } else {
+                *ramp = ramp.saturating_sub(DAC_RAMP_STEP);
+            }
+        }
+    }
+
     // ── Integer mixing (for BLIP delta detection) ─────────────────────────
 
     /// Compute current mixed L/R as integers.
+    /// DAC ramps are applied as a smoothstep multiplier so that DAC on/off
+    /// transitions produce a smooth curve instead of a hard step.
     fn mix_integer(&self) -> (i32, i32) {
-        let dac = |digital: u8, dac_on: bool| -> i32 {
-            if dac_on { digital as i32 * 2 - 15 } else { 0 }
+        let dac_smooth = |digital: u8, ramp: u32| -> i32 {
+            if ramp == 0 { return 0; }
+            let raw = digital as i32 * 2 - 15;
+            if ramp >= DAC_RAMP_MAX { return raw; }
+            // Smoothstep: 3t² - 2t³ where t = ramp / DAC_RAMP_MAX
+            // Using fixed-point: t is ramp/256, so t² = ramp²/65536, etc.
+            let t = ramp as i64;
+            let t2 = t * t; // 0..65536
+            let t3 = t2 * t; // 0..16777216
+            let smooth = (3 * t2 * 256 - 2 * t3) / (256 * 256); // 0..256
+            (raw as i64 * smooth / DAC_RAMP_MAX as i64) as i32
         };
 
-        let o1 = dac(self.ch1.output(), self.ch1.dac_on);
-        let o2 = dac(self.ch2.output(), self.ch2.dac_on);
-        let o3 = dac(self.ch3.output(), self.ch3.dac_on);
-        let o4 = dac(self.ch4.output(), self.ch4.dac_on);
+        let o1 = dac_smooth(self.ch1.output(), self.dac_ramp[0]);
+        let o2 = dac_smooth(self.ch2.output(), self.dac_ramp[1]);
+        let o3 = dac_smooth(self.ch3.output(), self.dac_ramp[2]);
+        let o4 = dac_smooth(self.ch4.output(), self.dac_ramp[3]);
 
         let mut left = 0i32;
         let mut right = 0i32;
@@ -373,17 +438,22 @@ impl Apu {
     }
 
     /// Record a mix delta to the BLIP buffer if the mixed output has changed.
+    /// `force` bypasses the quick-check (used when NR50/NR51 change).
     #[inline]
-    fn record_mix_delta(&mut self) {
-        // Quick check: skip mix_integer if no channel output changed
-        let o = (self.ch1.output() as u32)
-            | ((self.ch2.output() as u32) << 8)
-            | ((self.ch3.output() as u32) << 16)
-            | ((self.ch4.output() as u32) << 24);
-        if o == self.prev_channel_outputs {
-            return;
+    fn record_mix_delta_inner(&mut self, force: bool) {
+        if !force {
+            // Quick check: skip mix_integer if no channel output changed AND
+            // no DAC ramp is in transit.
+            let o = (self.ch1.output() as u32)
+                | ((self.ch2.output() as u32) << 8)
+                | ((self.ch3.output() as u32) << 16)
+                | ((self.ch4.output() as u32) << 24);
+            let ramps_settled = self.dac_ramp.iter().all(|&r| r == 0 || r >= DAC_RAMP_MAX);
+            if o == self.prev_channel_outputs && ramps_settled {
+                return;
+            }
+            self.prev_channel_outputs = o;
         }
-        self.prev_channel_outputs = o;
 
         let (new_l, new_r) = self.mix_integer();
         let dl = new_l - self.prev_left;
@@ -396,22 +466,24 @@ impl Apu {
         }
     }
 
-    /// Emit one 96 kHz sample from the BLIP buffer, then apply HPF.
+    #[inline]
+    fn record_mix_delta(&mut self) { self.record_mix_delta_inner(false); }
+
+    /// Emit one sample from the BLIP buffer, then apply HPF.
     fn emit_sample(&mut self) {
         let (l, r) = self.blip.read();
-        let l = l / 480.0;
-        let r = r / 480.0;
+        // 480 = max theoretical amplitude (4 channels × 15 DAC × 2 sides × vol 8).
+        // Scale by 1.35 headroom to absorb sinc overshoot without hard clipping.
+        let l = l / 648.0;
+        let r = r / 648.0;
 
-        const HPF_ALPHA: f32 = 0.9993;
-        self.hpf_left  = HPF_ALPHA * (self.hpf_left + l - self.hpf_prev_in_l);
-        self.hpf_right = HPF_ALPHA * (self.hpf_right + r - self.hpf_prev_in_r);
+        let alpha = self.hpf_alpha;
+        self.hpf_left  = alpha * (self.hpf_left + l - self.hpf_prev_in_l);
+        self.hpf_right = alpha * (self.hpf_right + r - self.hpf_prev_in_r);
         self.hpf_prev_in_l = l;
         self.hpf_prev_in_r = r;
 
         if !self.headless {
-            // Clamp to [-1, 1] — the BLIP sinc filter overshoots on sharp
-            // transitions (Gibbs phenomenon), which would cause hard digital
-            // clipping in audio backends.
             self.sample_buf.push(self.hpf_left.clamp(-1.0, 1.0));
             self.sample_buf.push(self.hpf_right.clamp(-1.0, 1.0));
         }
@@ -453,6 +525,7 @@ impl Apu {
             }
         }
 
+        self.advance_dac_ramps();
         self.record_mix_delta();
 
         self.sample_accum += cycles as u64 * tick;

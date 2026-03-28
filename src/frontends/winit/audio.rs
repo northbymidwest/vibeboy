@@ -45,7 +45,7 @@ impl AudioRing {
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         if self.write_pos >= self.read_pos {
             self.write_pos - self.read_pos
         } else {
@@ -63,10 +63,6 @@ impl AudioRing {
     }
 
     pub fn push(&mut self, samples: &[f32]) {
-        // If buffer is more than half full, skip ahead to stay low-latency
-        if self.len() > self.capacity / 2 {
-            self.read_pos = self.write_pos;
-        }
         if self.downsample_ratio <= 1 {
             for &s in samples {
                 self.push_one(s);

@@ -134,6 +134,23 @@ enum Command {
         /// Path to ROM file
         path: PathBuf,
     },
+    /// Dump APU audio to a WAV file
+    AudioDump {
+        /// Path to ROM file
+        path: PathBuf,
+        /// Number of frames to run
+        #[arg(long, default_value = "300")]
+        frames: u32,
+        /// Output WAV file path
+        #[arg(long, default_value = "audio.wav")]
+        out: String,
+        /// Hardware model override
+        #[arg(long, value_parser = parse_model)]
+        model: Option<GbModel>,
+        /// Sample rate (default 96000)
+        #[arg(long, default_value = "96000")]
+        sample_rate: u32,
+    },
 }
 
 #[derive(clap::Args)]
@@ -266,6 +283,9 @@ fn main() {
         }
         Command::Calibrate { path } => {
             debug_commands::cmd_calibrate(&path);
+        }
+        Command::AudioDump { path, frames, out, model, sample_rate } => {
+            commands::cmd_audio_dump(&path, model, frames, &out, sample_rate);
         }
     }
 }

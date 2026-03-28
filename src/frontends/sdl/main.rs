@@ -312,17 +312,16 @@ fn main() {
     };
 
     // ── Audio ─────────────────────────────────────────────────────────────────
-    sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "512");
-    let spec = AudioSpec {
+    sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "2048");
+    let emu_audio_spec = AudioSpec {
         freq:     Some(AUDIO_SAMPLE_RATE as i32),
         channels: Some(2),
         format:   Some(AudioFormat::F32LE),
     };
-    let audio_device = audio.open_playback_device(&spec).unwrap();
-    let audio_stream = audio.new_playback_stream(&spec, None).unwrap();
+    let audio_device = audio.open_playback_device(&emu_audio_spec).unwrap();
+    let audio_stream = audio.new_playback_stream(&emu_audio_spec, None).unwrap();
     audio_device.bind_stream(&audio_stream).unwrap();
     audio_device.resume();
-    audio_stream.clear().unwrap();
 
     // ── Camera (webcam for Pocket Camera mapper, only if cart has camera) ──
     let camera_thread = if emu.has_camera() {
@@ -567,20 +566,26 @@ fn main() {
         }
         emu.set_rewinding(backspace_held);
 
-        // Accumulate elapsed wall time and run enough emulation frames to keep up.
-        // This decouples emulation speed from the display refresh rate — on a 30Hz
-        // monitor with vsync, we run 2 frames per loop iteration.
+        // ── Frame stepping ────────────────────────────────────────────────────
+        // Audio-driven timing: use the audio queue depth to decide when to step
+        // the emulator. This synchronizes emulation speed to the audio device's
+        // clock, preventing buffer underruns (crackling) and overruns (latency).
+        //
+        // Target: keep ~40ms of audio queued. Step a frame if below target,
+        // skip if above. Special modes (rewind, fast-forward, pause) bypass this.
+        let audio_target_bytes: i32 = (AUDIO_SAMPLE_RATE as i32 / 25) * 2 * 4; // ~40ms stereo f32
+        let audio_max_bytes: i32 = audio_target_bytes * 3; // ~120ms cap
+
+        // Also track wall time for non-audio modes and FPS display
         let elapsed = frame_start.elapsed();
         frame_start = Instant::now();
         emu_time_debt += elapsed;
-        // Cap catchup to avoid spiral of death (e.g. window was being dragged)
         let max_debt = frame_dur * 4;
         if emu_time_debt > max_debt { emu_time_debt = max_debt; }
 
         let emu_start = Instant::now();
         let mut frames_stepped: u32 = 0;
         if paused && !step_one_frame {
-            // Consume time but don't step emulation
             emu_time_debt = Duration::ZERO;
         } else if step_one_frame {
             emu.step_frame_runahead(runahead);
@@ -588,20 +593,18 @@ fn main() {
             step_one_frame = false;
             emu_time_debt = Duration::ZERO;
         } else if backspace_held {
-            // Rewind at 3x speed — collect audio from all 3 frames
+            // Rewind at 3x speed
             let mut all_audio = Vec::with_capacity(19200);
             for _ in 0..3 {
                 emu.rewind_one_frame();
                 all_audio.extend_from_slice(&emu.drain_audio_samples());
             }
-            // Reverse entire stream then downsample 3x to fit one display frame
             ui_util::reverse_audio(&mut all_audio);
             let resampled = ui_util::downsample_audio(&all_audio, 3);
             let _ = audio_stream.put_data_f32(&resampled);
             frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
         } else if fast_forward {
-            // Run 4 frames per wall-clock frame, accumulate all audio
             for _ in 0..4 {
                 emu.step_frame();
             }
@@ -615,15 +618,30 @@ fn main() {
                 emu_time_debt -= slow_dur;
             }
         } else {
-            while emu_time_debt >= frame_dur {
+            // Audio-driven: step frames while the audio queue needs filling.
+            let queued = audio_stream.queued_bytes().unwrap_or(audio_target_bytes);
+            let frames_needed = if queued < audio_target_bytes {
+                // Below target: step 1–2 frames to catch up
+                if queued < audio_target_bytes / 2 { 2u32 } else { 1 }
+            } else if queued > audio_max_bytes {
+                // Way over target: skip stepping to let the queue drain
+                0
+            } else {
+                // Near target: step 1 frame to maintain level
+                1
+            };
+            for i in 0..frames_needed {
                 // Only runahead on the last frame (the one we display)
-                if emu_time_debt - frame_dur < frame_dur {
+                if i == frames_needed - 1 {
                     emu.step_frame_runahead(runahead);
                 } else {
                     emu.step_frame();
                 }
                 frames_stepped += 1;
-                emu_time_debt -= frame_dur;
+            }
+            // Keep time debt roughly in sync (for FPS counter accuracy)
+            if frames_stepped > 0 {
+                emu_time_debt = emu_time_debt.saturating_sub(frame_dur * frames_stepped);
             }
         }
         let emu_elapsed = emu_start.elapsed();
@@ -649,26 +667,11 @@ fn main() {
         // ── Audio ─────────────────────────────────────────────────────────────
         let samples = emu.drain_audio_samples();
         if !samples.is_empty() {
-            // If too much audio is queued, clear it to reduce latency.
-            let max_queued_bytes: i32 = 3200 * 2 * 4 * 2; // ~2 frames * stereo * sizeof(f32)
-            if let Ok(queued) = audio_stream.queued_bytes() {
-                if queued > max_queued_bytes {
-                    let _ = audio_stream.clear();
-                }
-            }
-
             if fast_forward {
-                // Resample 4 frames of audio down to 1 frame: low-pass filter + decimate
                 let resampled = ui_util::downsample_audio(&samples, 4);
                 let _ = audio_stream.put_data_f32(&resampled);
             } else {
-                // Cap audio per frame to ~1 frame worth (stereo f32 at 96000/60 ≈ 3200 floats).
-                let max_samples = 3200 * 2;
-                if samples.len() <= max_samples {
-                    let _ = audio_stream.put_data_f32(&samples);
-                } else {
-                    let _ = audio_stream.put_data_f32(&samples[samples.len() - max_samples..]);
-                }
+                let _ = audio_stream.put_data_f32(&samples);
             }
         }
 

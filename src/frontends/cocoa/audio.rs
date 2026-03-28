@@ -128,7 +128,7 @@ impl AudioRingBuffer {
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         if self.write_pos >= self.read_pos {
             self.write_pos - self.read_pos
         } else {
@@ -137,13 +137,10 @@ impl AudioRingBuffer {
     }
 
     pub fn write(&mut self, data: &[f32]) {
-        // If buffer is more than half full, skip ahead to stay low-latency
-        if self.len() > self.capacity / 2 {
-            self.read_pos = self.write_pos;
-        }
         for &sample in data {
             let next = (self.write_pos + 1) % self.capacity;
             if next == self.read_pos {
+                // Buffer full — overwrite oldest sample
                 self.read_pos = (self.read_pos + 1) % self.capacity;
             }
             self.buffer[self.write_pos] = sample;

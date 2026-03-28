@@ -577,8 +577,25 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     frames_stepped = 0;
                                 }
                             } else {
-                                st.emu.step_frame();
-                                frames_stepped = 1;
+                                // Audio-driven timing: step based on ring buffer fill level
+                                let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2;
+                                let target_fill = samples_per_frame * 3;
+                                let max_fill = samples_per_frame * 8;
+                                let queued = st.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+
+                                frames_stepped = if queued < target_fill / 2 {
+                                    2
+                                } else if queued < target_fill {
+                                    1
+                                } else if queued > max_fill {
+                                    0
+                                } else {
+                                    1
+                                };
+
+                                for _ in 0..frames_stepped {
+                                    st.emu.step_frame();
+                                }
                                 let samples = st.emu.drain_audio_samples();
                                 if !samples.is_empty() {
                                     let mut ring = st.audio_ring.lock().unwrap();

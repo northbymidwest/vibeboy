@@ -418,10 +418,29 @@ impl AppState {
                 self.emu_time_debt -= slow_dur;
             }
         } else {
-            while self.emu_time_debt >= self.frame_dur {
+            // Audio-driven timing: use ring buffer fill level to decide
+            // how many frames to step, synchronizing to the audio device's
+            // clock. Time debt is still consumed for sleep-based pacing.
+            let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
+            let target_fill = samples_per_frame * 3; // ~50ms
+            let max_fill = samples_per_frame * 8;    // ~133ms
+            let queued = self.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+
+            let frames_needed = if queued < target_fill / 2 {
+                2u32
+            } else if queued < target_fill {
+                1
+            } else if queued > max_fill {
+                0
+            } else {
+                1
+            };
+
+            for _ in 0..frames_needed {
                 self.emu.step_frame();
-                self.emu_time_debt -= self.frame_dur;
             }
+            // Always consume time debt so sleep pacing still works
+            self.emu_time_debt = self.emu_time_debt.saturating_sub(self.frame_dur);
         }
 
         // Printer
@@ -438,12 +457,7 @@ impl AppState {
             let to_write: std::borrow::Cow<[f32]> = if fast_forward {
                 std::borrow::Cow::Owned(ui_util::downsample_audio(&samples, 4))
             } else {
-                let max_samples = 3200 * 2;
-                if samples.len() <= max_samples {
-                    std::borrow::Cow::Borrowed(&samples[..])
-                } else {
-                    std::borrow::Cow::Borrowed(&samples[samples.len() - max_samples..])
-                }
+                std::borrow::Cow::Borrowed(&samples[..])
             };
             if let Ok(mut ring) = self.audio_ring.lock() {
                 ring.write(&to_write);

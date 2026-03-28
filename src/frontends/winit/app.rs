@@ -338,7 +338,26 @@ impl App {
                     }
                 }
             } else {
-                emu.step_frame();
+                // Audio-driven timing: use ring buffer fill level to decide
+                // whether to step, synchronizing to the audio device's clock.
+                let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
+                let target_fill = samples_per_frame * 3; // ~50ms
+                let max_fill = samples_per_frame * 8;    // ~133ms
+                let queued = self.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+
+                let frames_needed = if queued < target_fill / 2 {
+                    2u32
+                } else if queued < target_fill {
+                    1
+                } else if queued > max_fill {
+                    0
+                } else {
+                    1
+                };
+
+                for _ in 0..frames_needed {
+                    emu.step_frame();
+                }
                 let samples = emu.drain_audio_samples();
                 if !samples.is_empty() {
                     if let Ok(mut ring) = self.audio_ring.lock() {

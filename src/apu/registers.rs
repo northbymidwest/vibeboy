@@ -41,13 +41,16 @@ impl Apu {
                 if self.ch4.enabled { v |= 0x08; }
                 v
             }
-            // Wave RAM: when CH3 is active, redirect to current sample position
+            // Wave RAM: CGB always reads addressed byte; DMG redirects to current sample
             0xFF30..=0xFF3F => {
                 if self.ch3.enabled {
-                    if !self.is_cgb && !self.ch3.wave_form_just_read {
-                        return 0xFF;
+                    if self.is_cgb {
+                        self.ch3.wave_ram[(addr - 0xFF30) as usize]
+                    } else if self.ch3.wave_form_just_read {
+                        self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize]
+                    } else {
+                        0xFF
                     }
-                    self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize]
                 } else {
                     self.ch3.wave_ram[(addr - 0xFF30) as usize]
                 }
@@ -57,13 +60,17 @@ impl Apu {
     }
 
     pub fn write(&mut self, addr: u16, val: u8) {
-        // Wave RAM: when CH3 is active, redirect write to current sample position
+        // Wave RAM: CGB always writes to addressed byte; DMG redirects to current sample
         if (0xFF30..=0xFF3F).contains(&addr) {
             if self.ch3.enabled {
-                if !self.is_cgb && !self.ch3.wave_form_just_read {
-                    return;
+                if self.is_cgb {
+                    // CGB: wave RAM is always directly addressable, even while playing
+                    self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
+                } else if self.ch3.wave_form_just_read {
+                    // DMG: write redirects to current sample position (only if just read)
+                    self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize] = val;
                 }
-                self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize] = val;
+                // DMG without wave_form_just_read: write is dropped
             } else {
                 self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
             }
@@ -274,11 +281,11 @@ impl Apu {
             // ── Global ─────────────────────────────────────────────────────
             0xFF24 => {
                 self.nr50 = val;
-                self.record_mix_delta();
+                self.record_mix_delta_inner(true);
             }
             0xFF25 => {
                 self.nr51 = val;
-                self.record_mix_delta();
+                self.record_mix_delta_inner(true);
             }
             _ => {}
         }
