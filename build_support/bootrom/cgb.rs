@@ -49,7 +49,7 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.db(&tiles);
     a.label("after_tiles");
 
-    // Copy tile data to VRAM at $8010 (tiles 1-10)
+    // Copy tile data to VRAM at $8010 (tiles 1-11)
     a.ld_hl_imm(0x8010);
     a.ld_de_label("tile_data");
     a.ld_b((tiles.len() & 0xFF) as u8);
@@ -61,29 +61,35 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.jr_nz("cpy");
 
     // --- Tilemap + attributes ---
+    // 8 split tiles at col 6 center the 56px logo on the 160px screen
     let tmap = 0x9800 + 8 * 32 + 6; // "VIBEBOY" at row 8, col 6
     let swatch = 0x9800 + 10 * 32 + 8; // swatch bar at row 10, col 8
 
     // Bank 0: tile indices
     a.ld_hl_imm(tmap);
     a.ld_a(1);
-    for i in 0..7 {
+    for i in 0..8 {
         a.ld_hli_a();
-        if i < 6 { a.inc_a(); }
+        if i < 7 { a.inc_a(); }
     }
-    // Swatch: tiles 0 (color0), 8 (color1), 9 (color2), 10 (color3)
+    // Swatch: tiles 0 (color0), 9 (color1), 10 (color2), 11 (color3)
     a.ld_hl_imm(swatch);
     a.xor_a(); a.ld_hli_a();
-    a.ld_a(8); a.ld_hli_a();
     a.ld_a(9); a.ld_hli_a();
     a.ld_a(10); a.ld_hli_a();
+    a.ld_a(11); a.ld_hli_a();
 
-    // Bank 1: palette attributes
+    // Bank 1: palette attributes (one per split tile, 8 entries)
+    // Each split tile straddles two letters; assign the right letter's palette
+    // so the color transitions happen at the letter boundary.
     a.ld_a(1);
     a.ldh_n_a(0x4F); // VBK = 1
     a.ld_hl_imm(tmap);
-    for p in 0..7u8 {
-        a.ld_a(p);
+    for p in 0..8u8 {
+        // Split tile p contains right half of letter p-1 and left half of letter p.
+        // Tile 0: [blank|V_left] → palette 0 (V)
+        // Tile 7: [Y_right|blank] → palette 6 (Y)
+        a.ld_a(p.min(6));
         a.ld_hli_a();
     }
     // Swatch tiles: all use palette 7

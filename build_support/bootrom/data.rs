@@ -3,30 +3,40 @@
 //! Palette data is original (no copyrighted colors). Checksum/disambiguation
 //! tables match the publicly documented CGB boot ROM algorithm.
 
-/// 8x8 1bpp font for "VIBEBOY" logo. Each letter is 16 bytes (lo+hi planes
-/// identical, giving a solid color-3 glyph).
-fn make_tile(rows: &[u8; 8]) -> [u8; 16] {
-    let mut tile = [0u8; 16];
-    for (i, &row) in rows.iter().enumerate() {
-        tile[i * 2] = row;
-        tile[i * 2 + 1] = row;
-    }
-    tile
+/// 8x8 1bpp font for "VIBEBOY" logo, split across tiles for centering.
+///
+/// 7 letters = 56px on 160px screen. True center is pixel 52, which isn't
+/// on a tile boundary. We split each letter at the 4px midpoint so that
+/// each tile contains the right half of one letter and left half of the next,
+/// with blank padding on the edges. This produces 8 tiles that, placed at
+/// column 6 (pixel 48), center the visible content at pixel 52.
+///
+/// Tile layout: [pad4|V_L] [V_R|I_L] [I_R|B_L] ... [Y_R|pad4]
+fn make_split_row(left_byte: u8, right_byte: u8) -> u8 {
+    // Left 4px of tile = right 4px of left_byte; right 4px = left 4px of right_byte
+    ((left_byte & 0x0F) << 4) | (right_byte >> 4)
 }
 
 pub fn font_tiles() -> Vec<u8> {
-    let letters: [(&str, [u8; 8]); 7] = [
-        ("V", [0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x6C, 0x38, 0x10]),
-        ("I", [0x7C, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x7C]),
-        ("B", [0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xC6, 0xFC]),
-        ("E", [0xFE, 0xC0, 0xC0, 0xFC, 0xC0, 0xC0, 0xC0, 0xFE]),
-        ("B", [0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xC6, 0xFC]),
-        ("O", [0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C]),
-        ("Y", [0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x10, 0x10, 0x10]),
+    let glyphs: [[u8; 8]; 7] = [
+        [0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x6C, 0x38, 0x10], // V
+        [0x7C, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x7C], // I
+        [0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xC6, 0xFC], // B
+        [0xFE, 0xC0, 0xC0, 0xFC, 0xC0, 0xC0, 0xC0, 0xFE], // E
+        [0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xC6, 0xFC], // B
+        [0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C], // O
+        [0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x10, 0x10, 0x10], // Y
     ];
     let mut data = Vec::new();
-    for (_, rows) in &letters {
-        data.extend_from_slice(&make_tile(rows));
+    // 8 split tiles: tile 0 = [blank|V_left], tiles 1-6 = [prev_right|next_left], tile 7 = [Y_right|blank]
+    for t in 0..8 {
+        for row in 0..8 {
+            let left = if t > 0 { glyphs[t - 1][row] } else { 0 };
+            let right = if t < 7 { glyphs[t][row] } else { 0 };
+            let byte = make_split_row(left, right);
+            data.push(byte); // lo plane
+            data.push(byte); // hi plane (same = color 3)
+        }
     }
     // Swatch tiles: solid color 1 (lo=FF,hi=00), color 2 (lo=00,hi=FF), color 3 (lo=FF,hi=FF)
     for (lo, hi) in &[(0xFF, 0x00), (0x00, 0xFF), (0xFF, 0xFF)] {
