@@ -343,7 +343,7 @@ impl WgpuScalePipeline {
 
         if filter == WgpuScaleFilter::SuperXbr {
             // Super xBR: 3-pass pipeline with intermediate buffer
-            // Shader layout: group 0=uniforms, 1=pixels, 2=intermed(rw), 3=texture
+            // Shader layout: group 0=pixels, 1=intermed(rw), 2=texture, 3=uniforms
             let intermed_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sxbr_intermed"),
                 size: (out_w * out_h * 4) as u64,
@@ -351,27 +351,27 @@ impl WgpuScalePipeline {
                 mapped_at_creation: false,
             });
 
-            let bg1_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg0_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(1),
+                layout: &pipeline.get_bind_group_layout(0),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: bufs.px_buf.as_entire_binding(),
                 }],
             });
 
-            let bg2_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg1_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(2),
+                layout: &pipeline.get_bind_group_layout(1),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: intermed_buf.as_entire_binding(),
                 }],
             });
 
-            let bg3_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bg2_sxbr = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(3),
+                layout: &pipeline.get_bind_group_layout(2),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&tex_view),
@@ -395,7 +395,7 @@ impl WgpuScalePipeline {
 
                 pass_bgs.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
-                    layout: &pipeline.get_bind_group_layout(0),
+                    layout: &pipeline.get_bind_group_layout(3),
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
                         resource: pass_uni_buf.as_entire_binding(),
@@ -409,20 +409,20 @@ impl WgpuScalePipeline {
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &pass_bgs[pass_idx], &[]);
+                pass.set_bind_group(0, &bg0_sxbr, &[]);
                 pass.set_bind_group(1, &bg1_sxbr, &[]);
                 pass.set_bind_group(2, &bg2_sxbr, &[]);
-                pass.set_bind_group(3, &bg3_sxbr, &[]);
+                pass.set_bind_group(3, &pass_bgs[pass_idx], &[]);
                 pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
             }
         } else {
-            // Standard single-pass filters: group 0=uniforms, 1=pixels, 2=texture
+            // Standard single-pass filters: group 0=pixels, 1=texture, 2=uniforms
             let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: bufs.uni_buf.as_entire_binding(),
+                    resource: bufs.px_buf.as_entire_binding(),
                 }],
             });
             let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -430,7 +430,7 @@ impl WgpuScalePipeline {
                 layout: &pipeline.get_bind_group_layout(1),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: bufs.px_buf.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
                 }],
             });
             let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -438,7 +438,7 @@ impl WgpuScalePipeline {
                 layout: &pipeline.get_bind_group_layout(2),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                    resource: bufs.uni_buf.as_entire_binding(),
                 }],
             });
 
