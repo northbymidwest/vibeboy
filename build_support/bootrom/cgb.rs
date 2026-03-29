@@ -203,9 +203,9 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.dec_b();
     a.jr_nz("clr_oam");
 
-    // Clear HRAM scratch ($FF80-$FF86)
+    // Clear HRAM scratch ($FF80-$FF85), preserving $FF86 (saved combo)
     a.xor_a();
-    for i in 0x80..0x87u8 {
+    for i in 0x80..0x86u8 {
         a.ldh_n_a(i);
     }
 
