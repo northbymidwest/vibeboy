@@ -212,7 +212,11 @@ pub fn build(mgb: bool) -> Vec<u8> {
 
     // ================================================================
     // Handoff: disable boot ROM
+    // Place LDH at $00FE so PC lands exactly at $0100 (game entry point).
+    // After the write to $FF50 the boot ROM is unmapped, so any bytes
+    // between here and $0100 would execute from cartridge ROM.
     // ================================================================
+    a.pad_to(0x00FE);
     a.ldh_n_a(0x50); // A=$01 disables boot ROM mapping
 
     a.into_rom(DMG_BOOT_ROM_SIZE)
