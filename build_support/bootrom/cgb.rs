@@ -79,17 +79,15 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ld_a(10); a.ld_hli_a();
     a.ld_a(11); a.ld_hli_a();
 
-    // Bank 1: palette attributes (one per split tile, 8 entries)
-    // Each split tile straddles two letters; assign the right letter's palette
-    // so the color transitions happen at the letter boundary.
+    // Bank 1: palette attributes for split tiles.
+    // Each split tile uses color 2 for the left letter and color 3 for the right.
+    // Tiles 0 ([blank|V]) and 7 ([Y|blank]) share palette 0; palette 7 is for swatch.
+    // Attribute map: [0, 1, 2, 3, 4, 5, 6, 0]
     a.ld_a(1);
     a.ldh_n_a(0x4F); // VBK = 1
     a.ld_hl_imm(tmap);
-    for p in 0..8u8 {
-        // Split tile p contains right half of letter p-1 and left half of letter p.
-        // Tile 0: [blank|V_left] → palette 0 (V)
-        // Tile 7: [Y_right|blank] → palette 6 (Y)
-        a.ld_a(p.min(6));
+    for &p in &[0u8, 1, 2, 3, 4, 5, 6, 0] {
+        a.ld_a(p);
         a.ld_hli_a();
     }
     // Swatch tiles: all use palette 7
@@ -100,14 +98,31 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ldh_n_a(0x4F); // VBK = 0
 
     // --- Rainbow palettes (BG palettes 0-6) ---
+    // Each palette has: color0=white, color1=light, color2=left letter, color3=right letter.
+    // Pal 0: color2=Y, color3=V (tiles 0+7)  Pal 1: color2=V, color3=I
+    // Pal 2: color2=I, color3=B              Pal 3: color2=B, color3=E
+    // Pal 4: color2=E, color3=B              Pal 5: color2=B, color3=O
+    // Pal 6: color2=O, color3=Y
+    let pal_pairs: [(usize, usize); 7] = [
+        (6, 0), // pal 0: Y left, V right
+        (0, 1), // pal 1: V left, I right
+        (1, 2), // pal 2: I left, B right
+        (2, 3), // pal 3: B left, E right
+        (3, 4), // pal 4: E left, B right
+        (4, 5), // pal 5: B left, O right
+        (5, 6), // pal 6: O left, Y right
+    ];
     a.ld_a(0x80);
     a.ldh_n_a(0x68); // BCPS: auto-inc
-    for &color in &LOGO_COLORS {
-        let r = color & 0x1F;
-        let g = (color >> 5) & 0x1F;
-        let b = (color >> 10) & 0x1F;
-        let light = ((r + 31) / 2) | (((g + 31) / 2) << 5) | (((b + 31) / 2) << 10);
-        for c in &[0x7FFF, light, color, color] {
+    for &(left_idx, right_idx) in &pal_pairs {
+        let left_color = LOGO_COLORS[left_idx];
+        let right_color = LOGO_COLORS[right_idx];
+        // color0 = white, color1 = light blend, color2 = left letter, color3 = right letter
+        let lr = left_color & 0x1F;
+        let lg = (left_color >> 5) & 0x1F;
+        let lb = (left_color >> 10) & 0x1F;
+        let light = ((lr + 31) / 2) | (((lg + 31) / 2) << 5) | (((lb + 31) / 2) << 10);
+        for c in &[0x7FFF, light, left_color, right_color] {
             a.ld_a(*c as u8); a.ldh_n_a(0x69);
             a.ld_a((*c >> 8) as u8); a.ldh_n_a(0x69);
         }

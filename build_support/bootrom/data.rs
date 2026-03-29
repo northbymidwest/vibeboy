@@ -3,7 +3,7 @@
 //! Palette data is original (no copyrighted colors). Checksum/disambiguation
 //! tables match the publicly documented CGB boot ROM algorithm.
 
-/// 8x8 1bpp font for "VIBEBOY" logo, split across tiles for centering.
+/// 8x8 2bpp font for "VIBEBOY" logo, split across tiles for centering.
 ///
 /// 7 letters = 56px on 160px screen. True center is pixel 52, which isn't
 /// on a tile boundary. We split each letter at the 4px midpoint so that
@@ -11,12 +11,13 @@
 /// with blank padding on the edges. This produces 8 tiles that, placed at
 /// column 6 (pixel 48), center the visible content at pixel 52.
 ///
+/// Each tile uses two CGB color indices so both halves keep their letter's
+/// color: left half = color 2 (hi=1, lo=0), right half = color 3 (hi=1, lo=1).
+/// Each tile's palette maps color 2 → left letter's color, color 3 → right letter's.
+/// Tiles 0 and 7 share a palette (each only uses one color), freeing palette 7
+/// for the swatch bar.
+///
 /// Tile layout: [pad4|V_L] [V_R|I_L] [I_R|B_L] ... [Y_R|pad4]
-fn make_split_row(left_byte: u8, right_byte: u8) -> u8 {
-    // Left 4px of tile = right 4px of left_byte; right 4px = left 4px of right_byte
-    ((left_byte & 0x0F) << 4) | (right_byte >> 4)
-}
-
 pub fn font_tiles() -> Vec<u8> {
     let glyphs: [[u8; 8]; 7] = [
         [0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x6C, 0x38, 0x10], // V
@@ -28,14 +29,18 @@ pub fn font_tiles() -> Vec<u8> {
         [0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x10, 0x10, 0x10], // Y
     ];
     let mut data = Vec::new();
-    // 8 split tiles: tile 0 = [blank|V_left], tiles 1-6 = [prev_right|next_left], tile 7 = [Y_right|blank]
     for t in 0..8 {
         for row in 0..8 {
             let left = if t > 0 { glyphs[t - 1][row] } else { 0 };
             let right = if t < 7 { glyphs[t][row] } else { 0 };
-            let byte = make_split_row(left, right);
-            data.push(byte); // lo plane
-            data.push(byte); // hi plane (same = color 3)
+            // Combined glyph bits for this split tile row
+            let combined = ((left & 0x0F) << 4) | (right >> 4);
+            // Left half pixels → color 2 (lo=0, hi=1)
+            // Right half pixels → color 3 (lo=1, hi=1)
+            let lo = combined & 0x0F; // only right-half bits in lo plane
+            let hi = combined; // all glyph bits in hi plane
+            data.push(lo);
+            data.push(hi);
         }
     }
     // Swatch tiles: solid color 1 (lo=FF,hi=00), color 2 (lo=00,hi=FF), color 3 (lo=FF,hi=FF)
