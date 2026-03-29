@@ -54,10 +54,6 @@ void main(uint3 tid: SV_DispatchThreadID) {
     // Pinned nodes don't move
     if ((flags & 1u) != 0u) return;
 
-    // Touch all buffers to prevent spirv-cross from dropping them
-    int _dummy_nbr = neighbor_data[0];
-    float _dummy_orig = orig_pos[0];
-
     int prev_idx = neighbor_data[i * 4u];
     int next_idx = neighbor_data[i * 4u + 1u];
     if (prev_idx < 0 || next_idx < 0) return;
