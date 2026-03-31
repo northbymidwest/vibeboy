@@ -41,12 +41,12 @@ impl Apu {
                 if self.ch4.enabled { v |= 0x08; }
                 v
             }
-            // Wave RAM: CGB always reads addressed byte; DMG redirects to current sample
+            // Wave RAM: when CH3 is active, access redirects to current sample position.
+            // CGB: always accessible (no timing restriction).
+            // DMG: only accessible on the same cycle CH3 reads (wave_form_just_read).
             0xFF30..=0xFF3F => {
                 if self.ch3.enabled {
-                    if self.is_cgb {
-                        self.ch3.wave_ram[(addr - 0xFF30) as usize]
-                    } else if self.ch3.wave_form_just_read {
+                    if self.is_cgb || self.ch3.wave_form_just_read {
                         self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize]
                     } else {
                         0xFF
@@ -60,17 +60,13 @@ impl Apu {
     }
 
     pub fn write(&mut self, addr: u16, val: u8) {
-        // Wave RAM: CGB always writes to addressed byte; DMG redirects to current sample
+        // Wave RAM: when CH3 is active, access redirects to current sample position.
+        // CGB: always accessible. DMG: only when wave_form_just_read.
         if (0xFF30..=0xFF3F).contains(&addr) {
             if self.ch3.enabled {
-                if self.is_cgb {
-                    // CGB: wave RAM is always directly addressable, even while playing
-                    self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
-                } else if self.ch3.wave_form_just_read {
-                    // DMG: write redirects to current sample position (only if just read)
+                if self.is_cgb || self.ch3.wave_form_just_read {
                     self.ch3.wave_ram[(self.ch3.sample_pos >> 1) as usize] = val;
                 }
-                // DMG without wave_form_just_read: write is dropped
             } else {
                 self.ch3.wave_ram[(addr - 0xFF30) as usize] = val;
             }

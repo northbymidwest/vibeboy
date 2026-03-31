@@ -441,9 +441,10 @@ impl Emulator {
                         self.cpu.halted = false;
                         if self.cpu.ime {
                             self.cpu.begin_interrupt_dispatch();
-                        } else {
-                            self.cpu.halt_bug = true;
                         }
+                        // IME=false: just un-halt and continue. No halt_bug —
+                        // that only triggers when HALT is first executed with
+                        // an interrupt already pending.
                     }
                     break;
                 }
@@ -493,7 +494,9 @@ impl Emulator {
                     self.bus.ie = 0;
                 }
 
-                // HALT with IME=false: detect halt_bug (pending interrupt skips next opcode fetch)
+                // HALT with IME=false: detect halt_bug (pending interrupt skips next opcode fetch).
+                // This only triggers when HALT is first executed with an interrupt already
+                // pending, NOT when the CPU wakes from halt later.
                 if self.cpu.halted && !self.cpu.ime {
                     self.bus.flush_ppu_deferred();
                     let pending = self.bus.ie & self.bus.if_ & 0x1F;
