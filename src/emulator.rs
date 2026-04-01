@@ -260,6 +260,10 @@ impl Emulator {
                 cycles += self.step();
                 if cycles >= CYCLES_PER_FRAME * 2 { break; }
             }
+            // SGB post-processing: apply palettes to the regenerated frame.
+            if self.model.is_sgb() && self.snes.is_none() {
+                self.bus.apply_sgb_palettes();
+            }
             // NOW restore the frontend's current button state so stale
             // presses from the snapshot don't persist after rewind ends.
             self.bus.joypad.set_buttons_raw(buttons);

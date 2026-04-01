@@ -1063,7 +1063,11 @@ impl Bus {
     pub fn capture_sgb_freeze(&mut self) {
         if let Some(ref mut sgb) = self.sgb {
             if sgb.mask_mode == 1 {
-                let buf = sgb.frozen_buffer.get_or_insert_with(|| vec![0u32; 160 * 144]);
+                let len = self.ppu.frame_buffer.len();
+                let buf = sgb.frozen_buffer.get_or_insert_with(|| vec![0u32; len]);
+                if buf.len() != len {
+                    buf.resize(len, 0);
+                }
                 buf.copy_from_slice(&self.ppu.frame_buffer);
             }
         }
