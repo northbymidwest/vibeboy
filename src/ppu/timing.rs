@@ -230,9 +230,6 @@ impl Ppu {
                     self.ly = self.ly.wrapping_add(1);
 
                     if self.cgb_mode {
-                        // CGB: all changes (LY, coincidence, mode) are deferred
-                        // to the line-start handler. Mode 2 VBlank pulsing also
-                        // happens at line-start dot 3 (lines 144-152), not here.
                         self.line_start_pending = true;
                         self.line_start_is_vblank = self.ly >= 144;
                     } else {
@@ -299,9 +296,6 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            // CGB VBlank line wraps: mode 2 pulsing is handled
-                            // by the line-start handler at dot 3 (lines 145-151).
-                            // No pulse at the wrap point — that would double-fire.
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
                         } else {
@@ -441,20 +435,19 @@ impl Ppu {
 
     /// CGB line-start sequence: handles the delayed LY visibility and mode transitions
     /// that occur during dots 1-4 of each new scanline on CGB hardware.
-    /// State machine: 2T idle → 1T ly_for_comp/-1+mode2 → 1T oam_scan+lsp_clear.
+    /// State machine: 2T idle → 1T (LY visible + ly_for_comp/-1 + mode2) → 1T mode2 entry.
     fn handle_cgb_line_start(&mut self) {
         if !self.line_start_is_vblank {
             // Active line (0-143)
             match self.dot {
                 1 => {
-                    // State 35 start: LY becomes visible in IO register
+                    // LY becomes visible in IO register
                     self.visible_ly = self.ly;
                 }
                 2 => {
-                    // State 35 end: idle
+                    // Idle
                 }
                 3 => {
-                    // State 6 equivalent: ly_for_comparison and mode update
                     if self.ly == 0 {
                         self.ly_for_comparison = 0;
                     } else {
@@ -518,15 +511,12 @@ impl Ppu {
         } else {
             // VBlank line (144-153)
             match self.dot {
-                1 => {
-                    // LY becomes visible in IO register
-                    self.visible_ly = self.ly;
-                }
-                2 => {
+                1 | 2 => {
                     // Idle
                 }
                 3 => {
-                    // Clear ly_for_comparison briefly (creates coincidence gap)
+                    // LY becomes visible + ly_for_comparison clears.
+                    self.visible_ly = self.ly;
                     self.ly_for_comparison = -1;
                     self.update_coincidence();
                     // Update stat_irq_line BEFORE the mode 2 pulse so that any
