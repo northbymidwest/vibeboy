@@ -657,9 +657,10 @@ impl Ppu {
             self.shade_buffer[fb_idx] = shade;
         }
 
-        // On real DMG, the LCD doesn't display the first frame after LCD enable.
-        // Suppress pixel output (render white) for that frame.
-        if self.lcd_first_frame {
+        // On real DMG/CGB, the LCD doesn't display the first frame after LCD
+        // enable. Suppress pixel output (render white) for that frame.
+        // SGB: the SNES PPU always displays the game output, so render normally.
+        if self.lcd_first_frame && !self.sgb_mode {
             self.frame_buffer[fb_idx] = 0x00FFFFFF;
         } else {
             self.frame_buffer[fb_idx] = color32;
