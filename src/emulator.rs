@@ -179,6 +179,12 @@ impl Emulator {
                 cycles += self.step();
                 if cycles >= CYCLES_PER_FRAME * 2 { break; }
             }
+            // SGB: apply palettes so the ahead frame has correct colors
+            if self.model.is_sgb() && self.snes.is_none() {
+                self.bus.apply_sgb_palettes();
+                self.bus.check_sgb_transfer();
+                self.bus.capture_sgb_freeze();
+            }
         }
         self.headless = was_headless;
 
