@@ -516,14 +516,24 @@ impl Emulator {
                     }
                 }
 
-                // STOP: handle speed switch if armed
-                if self.cpu.opcode == 0x10 && self.cpu.speed_switch_remaining == 0
-                    && self.bus.speed_switch_armed()
-                {
-                    self.bus.do_speed_switch_prepare();
-                    self.cpu.speed_switch_remaining = 2050;
-                    self.cpu.speed_switch_toggle_at = 2050 / 2;
-                    self.cpu.halted = true;
+                // STOP: handle speed switch or halt-like behavior.
+                // On CGB with speed switch armed: enter 2050-cycle speed switch.
+                // If a button is held during STOP: behave as HALT instead of STOP
+                // (hardware doesn't enter low-power mode when buttons are pressed).
+                // Otherwise: enter low-power STOP mode (halted until button press).
+                if self.cpu.opcode == 0x10 && self.cpu.speed_switch_remaining == 0 {
+                    if self.bus.speed_switch_armed() {
+                        self.bus.do_speed_switch_prepare();
+                        self.cpu.speed_switch_remaining = 2050;
+                        self.cpu.speed_switch_toggle_at = 2050 / 2;
+                        self.cpu.halted = true;
+                    } else if self.bus.joypad.any_pressed() {
+                        // Button held: STOP acts as HALT variant
+                        self.cpu.halted = true;
+                    } else {
+                        // Normal STOP: halt until button press or interrupt
+                        self.cpu.halted = true;
+                    }
                 }
 
                 // Interrupt check moved to start of step() to match hardware

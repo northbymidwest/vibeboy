@@ -80,4 +80,9 @@ impl Joypad {
     pub fn set_buttons_raw(&mut self, buttons: u8) {
         self.buttons = buttons;
     }
+
+    /// Check if any button is currently pressed.
+    pub fn any_pressed(&self) -> bool {
+        self.buttons != 0
+    }
 }
