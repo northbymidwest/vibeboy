@@ -9,13 +9,38 @@ struct Uniforms {
     uint num_edges;
     uint bg_color;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<float> edge_data : register(t0, space0);
-[[vk::binding(1, 0)]] StructuredBuffer<uint> row_data : register(t1, space0);
-[[vk::binding(2, 0)]] StructuredBuffer<uint> edge_indices : register(t2, space0);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<float> edge_data : register(t0, space0);
+#else
+StructuredBuffer<float> edge_data;
+#endif
+[[vk::binding(1, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> row_data : register(t1, space0);
+#else
+StructuredBuffer<uint> row_data;
+#endif
+[[vk::binding(2, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> edge_indices : register(t2, space0);
+#else
+StructuredBuffer<uint> edge_indices;
+#endif
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+WTexture2D<float4> output_img : register(u0, space1);
+#else
+WTexture2D<float4> output_img;
+#endif
 
 // Edge field accessors (32 bytes per edge = 8 floats)
 float edge_x0(uint i)        { return edge_data[i * 8u + 0u]; }

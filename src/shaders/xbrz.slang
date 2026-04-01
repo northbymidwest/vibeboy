@@ -17,11 +17,26 @@ struct Uniforms {
     uint _pad1;
     uint _pad2;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels : register(t0, space0);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> pixels : register(t0, space0);
+#else
+StructuredBuffer<uint> pixels;
+#endif
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+WTexture2D<float4> output_img : register(u0, space1);
+#else
+WTexture2D<float4> output_img;
+#endif
 
 // -- Constants --
 

@@ -12,13 +12,38 @@ struct Uniforms {
     float radius;
     uint _pad;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> src_pixels : register(t0, space0);
-[[vk::binding(1, 0)]] StructuredBuffer<uint> src_regions : register(t1, space0);
-[[vk::binding(2, 0)]] StructuredBuffer<uint> diag_states : register(t2, space0);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> src_pixels : register(t0, space0);
+#else
+StructuredBuffer<uint> src_pixels;
+#endif
+[[vk::binding(1, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> src_regions : register(t1, space0);
+#else
+StructuredBuffer<uint> src_regions;
+#endif
+[[vk::binding(2, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> diag_states : register(t2, space0);
+#else
+StructuredBuffer<uint> diag_states;
+#endif
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+WTexture2D<float4> output_img : register(u0, space1);
+#else
+WTexture2D<float4> output_img;
+#endif
 
 // Unpack corner diagonal state from packed uint.
 // corner: 0=TL, 1=TR, 2=BR, 3=BL

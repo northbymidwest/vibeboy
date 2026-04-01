@@ -121,6 +121,7 @@ fn run_slangc(src: &Path, target: &str, out: &Path) {
     // defaults to a library target (lib_6_x) which dxc cannot validate.
     if target == "dxil" {
         cmd.arg("-profile").arg("cs_6_0");
+        cmd.arg("-DDXIL_TARGET");
     }
     let output = cmd.arg("-o")
         .arg(out.to_str().unwrap())

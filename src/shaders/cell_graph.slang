@@ -11,12 +11,37 @@ struct Uniforms {
     uint graph_stride; // 2*img_w + 1
     uint corners_w;    // img_w + 1
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> graph : register(t0, space0);
-[[vk::binding(0, 1)]] RWStructuredBuffer<float> positions : register(u0, space1);
-[[vk::binding(1, 1)]] RWStructuredBuffer<int> neighbors : register(u1, space1);
-[[vk::binding(2, 1)]] RWStructuredBuffer<uint> flags : register(u2, space1);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> graph : register(t0, space0);
+#else
+StructuredBuffer<uint> graph;
+#endif
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+RWStructuredBuffer<float> positions : register(u0, space1);
+#else
+RWStructuredBuffer<float> positions;
+#endif
+[[vk::binding(1, 1)]]
+#ifdef DXIL_TARGET
+RWStructuredBuffer<int> neighbors : register(u1, space1);
+#else
+RWStructuredBuffer<int> neighbors;
+#endif
+[[vk::binding(2, 1)]]
+#ifdef DXIL_TARGET
+RWStructuredBuffer<uint> flags : register(u2, space1);
+#else
+RWStructuredBuffer<uint> flags;
+#endif
 
 uint g(int gx, int gy) {
     gx = clamp(gx, 0, int(u.graph_stride) - 1);

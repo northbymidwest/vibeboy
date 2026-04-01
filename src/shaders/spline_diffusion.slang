@@ -14,12 +14,32 @@ struct Uniforms {
     float radius;
     uint scale_int;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> src_pixels : register(t0, space0);
-[[vk::binding(1, 0)]] StructuredBuffer<uint> region_colors : register(t1, space0);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> src_pixels : register(t0, space0);
+#else
+StructuredBuffer<uint> src_pixels;
+#endif
+[[vk::binding(1, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> region_colors : register(t1, space0);
+#else
+StructuredBuffer<uint> region_colors;
+#endif
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+WTexture2D<float4> output_img : register(u0, space1);
+#else
+WTexture2D<float4> output_img;
+#endif
 
 // Gaussian-blend nearby source pixel centroids within the same spline-bounded
 // region as the sample point. Returns (r, g, b, total_weight) in 0-255 scale.

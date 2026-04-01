@@ -12,13 +12,43 @@ struct Uniforms {
     float max_move;       // unused
     float positional_scale; // 2.5
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
+[[vk::binding(0, 2)]]
+#ifdef DXIL_TARGET
+ConstantBuffer<Uniforms> u : register(b0, space2);
+#else
+ConstantBuffer<Uniforms> u;
+#endif
 
-[[vk::binding(0, 0)]] StructuredBuffer<float> pos_in : register(t0, space0);
-[[vk::binding(1, 0)]] StructuredBuffer<float> orig_pos : register(t1, space0);
-[[vk::binding(2, 0)]] StructuredBuffer<int> neighbor_data : register(t2, space0);
-[[vk::binding(3, 0)]] StructuredBuffer<uint> node_flags : register(t3, space0);
-[[vk::binding(0, 1)]] RWStructuredBuffer<float> pos_out : register(u0, space1);
+[[vk::binding(0, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<float> pos_in : register(t0, space0);
+#else
+StructuredBuffer<float> pos_in;
+#endif
+[[vk::binding(1, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<float> orig_pos : register(t1, space0);
+#else
+StructuredBuffer<float> orig_pos;
+#endif
+[[vk::binding(2, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<int> neighbor_data : register(t2, space0);
+#else
+StructuredBuffer<int> neighbor_data;
+#endif
+[[vk::binding(3, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> node_flags : register(t3, space0);
+#else
+StructuredBuffer<uint> node_flags;
+#endif
+[[vk::binding(0, 1)]]
+#ifdef DXIL_TARGET
+RWStructuredBuffer<float> pos_out : register(u0, space1);
+#else
+RWStructuredBuffer<float> pos_out;
+#endif
 
 static const int NEWTON_ITER = 3;
 
