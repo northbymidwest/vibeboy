@@ -979,22 +979,23 @@ impl Bus {
     pub fn apply_sgb_palettes(&mut self) {
         if let Some(ref sgb) = self.sgb {
             if sgb.boot_pending {
-                // Hide uninitialized game output until first SGB command arrives
-                // (real hardware shows the SNES boot animation during this period)
                 for p in self.ppu.frame_buffer.iter_mut() {
                     *p = 0x00000000;
                 }
                 return;
             }
+            // Always apply SGB palettes to frame_buffer first, regardless
+            // of mask mode. MASK_EN commands can arrive mid-frame (via
+            // joypad writes), changing mask_mode before this runs. Without
+            // this, capture_sgb_freeze would capture DMG-colored pixels.
+            sgb.apply_palettes(&self.ppu.shade_buffer, &mut self.ppu.frame_buffer);
+
+            // Then apply mask mode overrides
             match sgb.mask_mode {
-                0 => {
-                    // Normal: remap using shade buffer
-                    sgb.apply_palettes(&self.ppu.shade_buffer, &mut self.ppu.frame_buffer);
-                }
-                1 => {
-                    // Freeze: show frozen buffer
-                    // (frozen_buffer captured at mask time — nothing to do here,
-                    //  the emulator will use frozen_buffer directly)
+                0 | 1 => {
+                    // 0 = normal (palettes already applied above)
+                    // 1 = freeze (capture_sgb_freeze will grab the
+                    //     palette-applied frame_buffer)
                 }
                 2 => {
                     // Black screen
