@@ -147,23 +147,21 @@ impl Ppu {
                     self.mode = 0;
                     self.mode_for_interrupt = 0;
                     if self.cgb_mode && self.double_speed {
-                        // CGB double-speed: defer STAT bits, accessibility,
-                        // and IRQ by 1T
+                        // CGB double-speed: STAT bits, accessibility deferred
+                        // by 1T. hblank_entered fires immediately so HDMA
+                        // transfer detection isn't delayed.
+                        self.hblank_entered = true;
                         self.mode0_stat_dot = self.dot + 1;
                     } else if self.cgb_mode {
-                        // CGB normal speed: STAT mode bits and accessibility
-                        // change immediately; STAT interrupt fires 1T later.
+                        // CGB normal speed: STAT mode bits clear immediately,
+                        // OAM/VRAM stay blocked for 1T. hblank_entered fires
+                        // immediately for HDMA.
                         self.stat = self.stat & !0x03;
-                        self.oam_accessible = true;
-                        self.oam_write_accessible = true;
-                        self.vram_accessible = true;
-                        self.vram_write_accessible = true;
                         self.hblank_entered = true;
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
-                        // DMG and CGB normal speed: STAT mode bits and
-                        // accessibility change immediately; only the STAT
-                        // interrupt fires 1T later.
+                        // DMG: STAT mode bits and accessibility change
+                        // immediately. STAT interrupt fires 1T later.
                         self.stat = self.stat & !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
