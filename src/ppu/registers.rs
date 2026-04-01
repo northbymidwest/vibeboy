@@ -266,8 +266,6 @@ impl Ppu {
                     && self.lcdc & 0x20 != 0 && self.wy_triggered && self.position_in_line >= 0
                 {
                     let wx_screen = if val >= 7 { val - 7 } else { 0 };
-                    // Allow trigger if position just passed the WX point (off-by-1
-                    // from mid-M-cycle write timing in normal speed)
                     let tolerance = if self.double_speed { 0 } else { 1 };
                     let px = self.position_in_line as u8;
                     if px >= wx_screen && px <= wx_screen + tolerance {

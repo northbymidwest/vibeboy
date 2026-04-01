@@ -707,19 +707,21 @@ impl Bus {
     #[allow(dead_code)]
     fn is_ppu_conflict_register(&self, addr: u16) -> bool {
         match addr {
-            // CGB LCDC tile_sel_glitch
+            // CGB LCDC tile_sel_glitch (normal speed)
             0xFF40 if self.model.is_cgb() && !self.double_speed => true,
             // DMG LCDC complex glitch
             0xFF40 if !self.model.is_cgb() => true,
             // DMG SCY READ_NEW
             0xFF42 if !self.model.is_cgb() => true,
-            // DMG/CGB-double SCX
+            // DMG/CGB-double SCX (2T early)
             0xFF43 if !self.model.is_cgb() || self.double_speed => true,
+            // CGB LYC WRITE_CPU (normal speed)
+            0xFF45 if self.model.is_cgb() && !self.double_speed => true,
+            // CGB palette (normal speed, 2T early)
+            0xFF47..=0xFF49 if self.model.is_cgb() && !self.double_speed => true,
             // DMG palette glitch
             0xFF47..=0xFF49 if !self.model.is_cgb() => true,
-            // WY READ_NEW
-            0xFF4A => true,
-            // DMG WX
+            // DMG WX wx_just_changed
             0xFF4B if !self.model.is_cgb() => true,
             _ => false,
         }

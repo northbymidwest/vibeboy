@@ -139,6 +139,21 @@ impl Bus {
                     }
                 }
             }
+            // CGB palette writes: write takes effect 2T early (no OR glitch).
+            // Hardware: advance(pending-2), write, pending=6.
+            0xFF47..=0xFF49 if self.model.is_cgb() && !self.double_speed => {
+                if self.ppu_deferred > 2 {
+                    let flush = self.ppu_deferred - 2;
+                    let flags = self.ppu.step(flush);
+                    self.if_ |= flags;
+                    self.ppu_deferred = 2;
+                }
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+            }
             // DMG palette writes: -2T conflict with bus glitch (old|new at T3)
             // Hardware timing: 2T old → 1T (old|new) glitch → remaining T with new
             0xFF47..=0xFF49 if !self.model.is_cgb() => {
@@ -260,6 +275,19 @@ impl Bus {
                     self.if_ |= self.ppu.if_flags;
                     self.ppu.if_flags = 0;
                 }
+            }
+            // CGB LYC (normal speed): WRITE_CPU — write takes effect 1T later.
+            // Hardware: advance(pending+1), write, pending=3.
+            0xFF45 if self.model.is_cgb() && !self.double_speed => {
+                self.flush_ppu_deferred();
+                let flags = self.ppu.step(1);
+                self.if_ |= flags;
+                self.ppu.write(addr, val);
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
+                self.ppu_tick_debt += 1;
             }
             // DMG WX: READ_OLD + wx_just_changed flag for 1T after write
             0xFF4B if !self.model.is_cgb() => {
