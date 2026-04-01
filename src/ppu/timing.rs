@@ -224,18 +224,6 @@ impl Ppu {
                 } else {
                     456
                 };
-                // CGB mode 2 STAT quirk at VBlank entry: inject STAT IF 2T
-                // before the line wrap so it falls in a different HALT half-cycle
-                // than VBlank IF (which fires at dot 2 of line 144). This 4T
-                // separation is required by vblank_stat_intr-C. We also set
-                // stat_irq_line so the wrap-point update_stat_irq doesn't
-                // double-fire.
-                if self.cgb_mode && self.ly == 143 && self.dot == line_end - 2 {
-                    if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                        self.if_flags |= 0x02;
-                        self.stat_irq_line = true;
-                    }
-                }
                 if self.dot >= line_end {
                     self.lcd_first_line_short = false;
                     self.dot = 0;
