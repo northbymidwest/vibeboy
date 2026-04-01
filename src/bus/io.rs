@@ -276,6 +276,10 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
+            // TODO: CGB STAT needs split-write conflict handler (LYC enable bit
+            // transitions 1T later in normal speed, HBlank enable bit in double
+            // speed). Requires PPU-internal support for partial STAT writes
+            // without triggering the full write handler's IRQ logic.
             // CGB LYC (normal speed): WRITE_CPU — write takes effect 1T later.
             // Hardware: advance(pending+1), write, pending=3.
             0xFF45 if self.model.is_cgb() && !self.double_speed => {
