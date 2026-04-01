@@ -654,7 +654,7 @@ fn dispatch_stages_1_4b(
             &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false)],
         ).expect("opt pass");
         cp.bind_compute_pipeline(&pipelines.optimizer);
-        cp.bind_compute_storage_buffers(0, &[cur_in.clone(), pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, &[cur_in.clone(), orig_pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
         #[repr(C)] struct U { num_nodes: u32, gradient_step: f32, max_move: f32, positional_scale: f32 }
         cmd.push_compute_uniform_data(0, &U {
             num_nodes: num_cps, gradient_step: 0.01, max_move: 0.25, positional_scale: 2.5 });

@@ -463,21 +463,45 @@ fn build_cell_graph(
         let is_llur = (diag & 2) != 0 && (diag & 1) == 0;
 
         if !is_ullr && !is_llur {
+            // No resolved diagonal: check for 3/4-way junction needing slot routing.
+            // Slot 0 = main pair, slot 1 = stem (3-way) or second pair (4-way).
+            let t_bnd_n = g(2 * cx, 2 * cy - 1) == 0;
+            let t_bnd_e = g(2 * cx + 1, 2 * cy) == 0;
+            let t_bnd_s = g(2 * cx, 2 * cy + 1) == 0;
+            let t_bnd_w = g(2 * cx - 1, 2 * cy) == 0;
+            let t_count = t_bnd_n as u32 + t_bnd_e as u32 + t_bnd_s as u32 + t_bnd_w as u32;
+            if t_count >= 3 {
+                // Determine main pair (same priority order as main())
+                let (pair0, pair1) = if t_bnd_n && t_bnd_s {
+                    (0, 2)
+                } else if t_bnd_e && t_bnd_w {
+                    (1, 3)
+                } else if t_bnd_n && t_bnd_e {
+                    (0, 1)
+                } else if t_bnd_n && t_bnd_w {
+                    (0, 3)
+                } else if t_bnd_s && t_bnd_e {
+                    (2, 1)
+                } else {
+                    (2, 3)
+                };
+                // Map from_dir to the boundary direction at the target corner
+                let target_side = from_dir ^ 2;
+                if target_side != pair0 && target_side != pair1 {
+                    return base + 1;
+                }
+            }
             return base;
         }
 
         let slot;
         if from_dir == 0 {
-            // from North
             slot = if is_llur { 1 } else { 0 };
         } else if from_dir == 1 {
-            // from East
             slot = 0;
         } else if from_dir == 2 {
-            // from South
             slot = if is_ullr { 1 } else { 0 };
         } else {
-            // from West
             slot = 1;
         }
 
@@ -1101,12 +1125,11 @@ fn build_cell_graph(
                     );
                 }
             } else {
-                // Valence 4 cross-junction: pinned, pick N-S as spline pair
+                // Valence 4 cross-junction: two crossing curve pairs, both pinned
                 write_cp_full(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-    
                     base,
                     pos,
                     n_idx,
@@ -1114,6 +1137,20 @@ fn build_cell_graph(
                     1,
                     0,
                     2,
+                    icx,
+                    icy,
+                );
+                write_cp_full(
+                    &mut positions,
+                    &mut neighbors,
+                    &mut flags,
+                    base + 1,
+                    pos,
+                    e_idx,
+                    w_idx,
+                    1,
+                    1,
+                    3,
                     icx,
                     icy,
                 );

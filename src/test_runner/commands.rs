@@ -191,7 +191,17 @@ fn try_gpu_filter(
 ) -> Option<(Vec<u32>, usize, usize)> {
     #[cfg(feature = "sdl3-gpu-shaders")]
     {
-        if is_vectorize {
+        if filter_name == "vectorize-gpu" {
+            if let Some((pix, w, h)) = scaling::sdl::gpu_full_pipeline_screenshot(
+                raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, scale,
+            ) {
+                return Some((pix, w as usize, h as usize));
+            }
+            eprintln!(
+                "GPU full pipeline screenshot failed for filter '{}', falling back to CPU",
+                filter_name
+            );
+        } else if is_vectorize {
             let s = scale as f64;
             if let Some((pix, w, h)) = scaling::sdl::gpu_vectorize_screenshot(
                 raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s, is_adaptive,
