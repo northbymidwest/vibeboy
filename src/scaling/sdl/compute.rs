@@ -486,8 +486,9 @@ pub struct GpuVectorizePipelines {
 
 pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipelines> {
     fn make(device: &gpu::Device, spirv: &[u8], msl: &[u8], dxil: &[u8],
-            ro_bufs: u32, rw_bufs: u32, rw_tex: u32, threads: (u32,u32,u32)) -> Option<gpu::ComputePipeline> {
-        device.create_compute_pipeline()
+            ro_bufs: u32, rw_bufs: u32, rw_tex: u32, threads: (u32,u32,u32),
+            label: &str) -> Option<gpu::ComputePipeline> {
+        let result = device.create_compute_pipeline()
             .with_code(gpu::ShaderFormat::SPIRV, spirv)
             .with_entrypoint(c"main")
             .with_uniform_buffers(1)
@@ -515,44 +516,48 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
                 .with_readwrite_storage_buffers(rw_bufs)
                 .with_readwrite_storage_textures(rw_tex)
                 .with_thread_count(threads.0, threads.1, threads.2)
-                .build()).ok()
+                .build());
+        match result {
+            Ok(p) => Some(p),
+            Err(e) => { eprintln!("vectorize-gpu: {label} pipeline failed: {e}"); None }
+        }
     }
 
     let sim = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.dxil")),
-        1, 1, 0, (16, 16, 1))?; // ro: pixels, rw: graph
+        1, 1, 0, (16, 16, 1), "similarity_graph")?;
 
     let resolve = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.dxil")),
-        1, 1, 0, (16, 16, 1))?; // ro: graph_snapshot (set 0), rw: graph (set 1)
+        1, 1, 0, (16, 16, 1), "resolve_crossings")?;
 
     let cell = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.dxil")),
-        1, 3, 0, (16, 16, 1))?; // ro: graph, rw: positions, neighbors, flags
+        1, 3, 0, (16, 16, 1), "cell_graph")?;
 
     let opt = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.dxil")),
-        4, 1, 0, (256, 1, 1))?; // ro: pos_in, orig, neighbors, flags; rw: pos_out
+        4, 1, 0, (256, 1, 1), "optimize_energy")?;
 
     let tjunc = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.dxil")),
-        2, 1, 0, (256, 1, 1))?; // ro: neighbors, flags; rw: positions
+        2, 1, 0, (256, 1, 1), "update_tjunction")?;
 
     let rast = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.dxil")),
-        5, 0, 1, (256, 1, 1))?; // ro: pixels, positions, orig_positions, flags, neighbors; rw_tex: output (tile-based, 256 threads)
+        5, 0, 1, (256, 1, 1), "cell_rasterizer")?;
 
     eprintln!("Full GPU vectorize pipeline ready (6 stages)");
     Some(GpuVectorizePipelines { sim_graph: sim, resolve, cell_graph: cell, optimizer: opt, tjunction: tjunc, rasterizer: rast, buf_cache: None })
