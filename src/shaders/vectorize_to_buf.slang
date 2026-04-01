@@ -12,12 +12,12 @@ struct Uniforms {
     uint num_edges;
     uint bg_color;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<float> edge_data;
-[[vk::binding(1, 0)]] StructuredBuffer<uint> row_data;
-[[vk::binding(2, 0)]] StructuredBuffer<uint> edge_indices;
-[[vk::binding(0, 1)]] RWStructuredBuffer<uint> out_colors;
+[[vk::binding(0, 0)]] StructuredBuffer<float> edge_data : register(t0, space0);
+[[vk::binding(1, 0)]] StructuredBuffer<uint> row_data : register(t1, space0);
+[[vk::binding(2, 0)]] StructuredBuffer<uint> edge_indices : register(t2, space0);
+[[vk::binding(0, 1)]] RWStructuredBuffer<uint> out_colors : register(u0, space1);
 
 float edge_x0(uint i)        { return edge_data[i * 8u + 0u]; }
 float edge_y0(uint i)        { return edge_data[i * 8u + 1u]; }

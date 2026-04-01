@@ -17,15 +17,15 @@ struct Uniforms {
     uint tiles_w;   // ceil(img_w / 2)
     uint tiles_h;   // ceil(img_h / 2)
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels;
-[[vk::binding(1, 0)]] StructuredBuffer<float> cp_positions;
-[[vk::binding(2, 0)]] StructuredBuffer<float> orig_positions;
-[[vk::binding(3, 0)]] StructuredBuffer<uint> cp_flags;
-[[vk::binding(4, 0)]] StructuredBuffer<int> cp_neighbors;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels : register(t0, space0);
+[[vk::binding(1, 0)]] StructuredBuffer<float> cp_positions : register(t1, space0);
+[[vk::binding(2, 0)]] StructuredBuffer<float> orig_positions : register(t2, space0);
+[[vk::binding(3, 0)]] StructuredBuffer<uint> cp_flags : register(t3, space0);
+[[vk::binding(4, 0)]] StructuredBuffer<int> cp_neighbors : register(t4, space0);
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img;
+[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
 
 static const uint MAX_TILE_CPS = 98u;  // 7x7 corners x 2 slots
 

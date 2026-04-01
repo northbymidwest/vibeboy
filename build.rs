@@ -97,7 +97,9 @@ fn main() {
         // WGSL — WTexture2D emits write access directly, no post-processing needed.
         run_slangc(&src, "wgsl", &wgsl);
 
-        // DXIL (requires dxc, only available on Windows)
+        // DXIL (requires dxc, only available on Windows).
+        // The .slang sources have explicit register(tN,space0) / register(uN,space1) /
+        // register(bN,space2) annotations matching SDL3 D3D12's type-based space grouping.
         if has_dxc {
             run_slangc(&src, "dxil", &dxil);
         } else {
@@ -109,13 +111,18 @@ fn main() {
 
 /// Run slangc to compile a shader to a specific target.
 fn run_slangc(src: &Path, target: &str, out: &Path) {
-    let output = Command::new("slangc")
-        .arg(src.to_str().unwrap())
+    let mut cmd = Command::new("slangc");
+    cmd.arg(src.to_str().unwrap())
         .arg("-I")
         .arg("src/shaders") // Resolve `import modules.color;` etc.
         .arg("-target")
-        .arg(target)
-        .arg("-o")
+        .arg(target);
+    // DXIL needs an explicit compute shader profile; without it slangc
+    // defaults to a library target (lib_6_x) which dxc cannot validate.
+    if target == "dxil" {
+        cmd.arg("-profile").arg("cs_6_0");
+    }
+    let output = cmd.arg("-o")
         .arg(out.to_str().unwrap())
         .output();
 

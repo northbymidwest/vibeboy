@@ -12,13 +12,13 @@ struct Uniforms {
     float radius;
     uint _pad;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> src_pixels;
-[[vk::binding(1, 0)]] StructuredBuffer<uint> src_regions;
-[[vk::binding(2, 0)]] StructuredBuffer<uint> diag_states;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> src_pixels : register(t0, space0);
+[[vk::binding(1, 0)]] StructuredBuffer<uint> src_regions : register(t1, space0);
+[[vk::binding(2, 0)]] StructuredBuffer<uint> diag_states : register(t2, space0);
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img;
+[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
 
 // Unpack corner diagonal state from packed uint.
 // corner: 0=TL, 1=TR, 2=BR, 3=BL

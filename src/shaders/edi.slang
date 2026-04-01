@@ -14,11 +14,11 @@ struct Uniforms {
     uint _pad1;
     uint _pad2;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels : register(t0, space0);
 [[vk::image_format("rgba8")]]
-[[vk::binding(0, 1)]] WTexture2D<float4> output_img;
+[[vk::binding(0, 1)]] WTexture2D<float4> output_img : register(u0, space1);
 
 static const float FLAT_THRESHOLD = 500.0;
 static const float SHARP_THRESHOLD = 8000.0;

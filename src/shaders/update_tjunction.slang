@@ -12,11 +12,11 @@ struct Uniforms {
     uint _pad1;
     uint _pad2;
 };
-[[vk::binding(0, 1)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 1)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(1, 0)]] StructuredBuffer<int> neighbor_data;
-[[vk::binding(2, 0)]] StructuredBuffer<uint> node_flags;
-[[vk::binding(0, 0)]] RWStructuredBuffer<float> positions;
+[[vk::binding(1, 0)]] StructuredBuffer<int> neighbor_data : register(t1, space0);
+[[vk::binding(2, 0)]] StructuredBuffer<uint> node_flags : register(t2, space0);
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> positions : register(u0, space1);
 
 [shader("compute")]
 [numthreads(256, 1, 1)]

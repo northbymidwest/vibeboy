@@ -11,12 +11,12 @@ struct Uniforms {
     uint graph_stride; // 2*img_w + 1
     uint corners_w;    // img_w + 1
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> graph;
-[[vk::binding(0, 1)]] RWStructuredBuffer<float> positions;
-[[vk::binding(1, 1)]] RWStructuredBuffer<int> neighbors;
-[[vk::binding(2, 1)]] RWStructuredBuffer<uint> flags;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> graph : register(t0, space0);
+[[vk::binding(0, 1)]] RWStructuredBuffer<float> positions : register(u0, space1);
+[[vk::binding(1, 1)]] RWStructuredBuffer<int> neighbors : register(u1, space1);
+[[vk::binding(2, 1)]] RWStructuredBuffer<uint> flags : register(u2, space1);
 
 uint g(int gx, int gy) {
     gx = clamp(gx, 0, int(u.graph_stride) - 1);

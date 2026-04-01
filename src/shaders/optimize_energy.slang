@@ -12,13 +12,13 @@ struct Uniforms {
     float max_move;       // unused
     float positional_scale; // 2.5
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<float> pos_in;
-[[vk::binding(1, 0)]] StructuredBuffer<float> orig_pos;
-[[vk::binding(2, 0)]] StructuredBuffer<int> neighbor_data;
-[[vk::binding(3, 0)]] StructuredBuffer<uint> node_flags;
-[[vk::binding(0, 1)]] RWStructuredBuffer<float> pos_out;
+[[vk::binding(0, 0)]] StructuredBuffer<float> pos_in : register(t0, space0);
+[[vk::binding(1, 0)]] StructuredBuffer<float> orig_pos : register(t1, space0);
+[[vk::binding(2, 0)]] StructuredBuffer<int> neighbor_data : register(t2, space0);
+[[vk::binding(3, 0)]] StructuredBuffer<uint> node_flags : register(t3, space0);
+[[vk::binding(0, 1)]] RWStructuredBuffer<float> pos_out : register(u0, space1);
 
 static const int NEWTON_ITER = 3;
 

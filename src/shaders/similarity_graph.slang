@@ -15,10 +15,10 @@ struct Uniforms {
     uint graph_stride; // = 2*img_w + 1
     uint _pad;
 };
-[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u;
+[[vk::binding(0, 2)]] ConstantBuffer<Uniforms> u : register(b0, space2);
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels;
-[[vk::binding(0, 1)]] RWStructuredBuffer<uint> graph;
+[[vk::binding(0, 0)]] StructuredBuffer<uint> pixels : register(t0, space0);
+[[vk::binding(0, 1)]] RWStructuredBuffer<uint> graph : register(u0, space1);
 
 uint px(uint x, uint y) { return pixels[y * u.img_w + x]; }
 
