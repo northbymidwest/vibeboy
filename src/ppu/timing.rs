@@ -243,18 +243,8 @@ impl Ppu {
 
                     if self.cgb_mode {
                         // CGB: all changes (LY, coincidence, mode) are deferred
-                        // to the line-start handler. ly_for_comparison and coincidence
-                        // update happen at dot 3-4, not at the wrap.
-                        //
-                        // CGB VBlank line wraps (144-152): pulse mode_for_interrupt
-                        // through 2 to create a proper rising edge for mode 2 STAT
-                        // even when mode 1 is holding stat_irq_line high.
-                        if self.ly >= 144 && self.ly <= 152 {
-                            self.mode_for_interrupt = 2;
-                            self.update_stat_irq();
-                            self.mode_for_interrupt = -1;
-                            self.update_stat_irq();
-                        }
+                        // to the line-start handler. Mode 2 VBlank pulsing also
+                        // happens at line-start dot 3 (lines 144-152), not here.
                         self.line_start_pending = true;
                         self.line_start_is_vblank = self.ly >= 144;
                     } else {
@@ -321,15 +311,9 @@ impl Ppu {
                     } else {
                         self.ly = self.ly.wrapping_add(1);
                         if self.cgb_mode {
-                            // CGB VBlank line wraps (145-152): pulse mode_for_interrupt
-                            // through 2 to create a proper rising edge for mode 2 STAT
-                            // even when mode 1 is holding stat_irq_line high.
-                            if self.ly >= 145 && self.ly <= 152 {
-                                self.mode_for_interrupt = 2;
-                                self.update_stat_irq();
-                                self.mode_for_interrupt = 1;
-                                self.update_stat_irq();
-                            }
+                            // CGB VBlank line wraps: mode 2 pulsing is handled
+                            // by the line-start handler at dot 3 (lines 145-151).
+                            // No pulse at the wrap point — that would double-fire.
                             self.line_start_pending = true;
                             self.line_start_is_vblank = true;
                         } else {
@@ -557,10 +541,13 @@ impl Ppu {
                     // Clear ly_for_comparison briefly (creates coincidence gap)
                     self.ly_for_comparison = -1;
                     self.update_coincidence();
-                    // Mode 2 STAT source: direct IF injection for VBlank lines
-                    // Mode 2 STAT source for VBlank lines 145-151.
+                    // Update stat_irq_line BEFORE the mode 2 pulse so that any
+                    // stale high from the pre-VBlank injection is cleared. Without
+                    // this, the mode 2 rising edge is blocked on line 144.
+                    self.update_stat_irq();
+                    // Mode 2 STAT source for VBlank lines 144-152.
                     // Uses mode_for_interrupt pulse for proper edge detection.
-                    if self.ly >= 145 && self.ly <= 151 {
+                    if self.ly >= 144 && self.ly <= 152 {
                         self.mode_for_interrupt = 2;
                         self.update_stat_irq();
                         self.mode_for_interrupt = 1;
