@@ -431,38 +431,36 @@ impl Ppu {
         }
     }
 
-    /// CGB line-start sequence: handles the delayed LY visibility and mode transitions
-    /// that occur during dots 1-4 of each new scanline on CGB hardware.
-    /// State machine: 2T idle → 1T (LY visible + ly_for_comp/-1 + mode2) → 1T mode2 entry.
+    /// CGB line-start sequence matching hardware timing:
+    ///   Dot 1-2: idle (OAM write blocking ramps up)
+    ///   Dot 3: LY visible + OAM read blocked + ly_for_comp=-1 + mode 2 IRQ source
+    ///   Dot 4: STAT bits=2 + ly_for_comp=actual + full mode 2 entry
     fn handle_cgb_line_start(&mut self) {
         if !self.line_start_is_vblank {
             // Active line (0-143)
             match self.dot {
-                1 => {
-                    // LY becomes visible in IO register
-                    self.visible_ly = self.ly;
-                }
-                2 => {
-                    // Idle
+                1 | 2 => {
+                    // Idle — OAM write blocking ramps up
                 }
                 3 => {
+                    // LY visible + OAM read blocked + mode 2 IRQ source.
+                    // All happen simultaneously at 3T after line start.
+                    self.visible_ly = self.ly;
+                    self.oam_accessible = false;
                     if self.ly == 0 {
                         self.ly_for_comparison = 0;
                     } else {
                         self.ly_for_comparison = -1;
                         self.mode_for_interrupt = 2;
                     }
-                    // Clear STAT mode bits (still mode 0 internally)
                     self.stat &= !0x03;
                     self.update_coincidence();
                     self.update_stat_irq();
                 }
                 4 => {
                     if self.lcd_first_line {
-                        // LCD first line: pulse mode_for_interrupt to fire the
-                        // mode 2 STAT IRQ, but DON'T enter actual mode 2.
-                        // STAT bits stay 0, mode stays 0. The mode 0 handler
-                        // will do the direct transition to mode 3 at dot 78.
+                        // LCD first line: pulse mode_for_interrupt but don't
+                        // enter mode 2. Mode 0 handler transitions at dot 78.
                         self.ly_for_comparison = self.ly as i16;
                         self.update_coincidence();
                         if self.lcdc & 0x20 != 0 && self.ly == self.wy {
@@ -473,11 +471,11 @@ impl Ppu {
                         self.mode_for_interrupt = -1;
                         self.update_stat_irq();
                     } else {
-                        // Normal line: full mode 2 entry
+                        // Full mode 2 entry: STAT bits, OAM write blocked,
+                        // ly_for_comparison set to actual line.
                         self.mode = 2;
                         self.stat = (self.stat & !0x03) | 0x02;
                         self.mode_for_interrupt = 2;
-                        self.oam_accessible = false;
                         self.oam_write_accessible = false;
                         self.vram_accessible = true;
                         self.vram_write_accessible = true;
@@ -490,12 +488,10 @@ impl Ppu {
                         self.scanline_sprites.clear();
                         self.oam_scan_index = 0;
                         self.update_stat_irq();
-                        // Immediately clear mode_for_interrupt
                         self.mode_for_interrupt = -1;
                         self.update_stat_irq();
                     }
                     self.line_start_pending = false;
-                    // Apply lsp-deferred LYC write now that line-start is done
                     if let Some(lyc) = self.pending_lyc.take() {
                         self.lyc = lyc;
                         if self.lcdc & 0x80 != 0 {
