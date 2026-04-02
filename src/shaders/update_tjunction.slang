@@ -45,6 +45,23 @@ void main(uint3 tid: SV_DispatchThreadID) {
     if (i >= u.num_nodes) return;
 
     uint flags = node_flags[i];
+
+    // Valence-4 crossing: inverse B-spline correction so the curve passes
+    // through the grid corner (current position) at t=0.5.
+    // CP = (G - 0.125*prev - 0.125*next) / 0.75
+    if ((flags & IS_CROSSING) != 0u) {
+        int prev_idx = neighbor_data[i * 4u];
+        int next_idx = neighbor_data[i * 4u + 1u];
+        if (prev_idx < 0 || next_idx < 0) return;
+        float2 prev_pos = float2(positions[uint(prev_idx) * 2u], positions[uint(prev_idx) * 2u + 1u]);
+        float2 grid_pos = float2(positions[i * 2u], positions[i * 2u + 1u]);
+        float2 next_pos = float2(positions[uint(next_idx) * 2u], positions[uint(next_idx) * 2u + 1u]);
+        float2 corrected = (grid_pos - 0.125 * prev_pos - 0.125 * next_pos) / 0.75;
+        positions[i * 2u] = corrected.x;
+        positions[i * 2u + 1u] = corrected.y;
+        return;
+    }
+
     if ((flags & IS_TJUNCTION) == 0u) return;
 
     int prev_idx = neighbor_data[i * 4u];
@@ -60,7 +77,8 @@ void main(uint3 tid: SV_DispatchThreadID) {
     positions[i * 2u + 1u] = corrected.y;
 
     // Update the stem CP at the other slot (i ^ 1) so it terminates
-    // exactly ON the smooth curve.
+    // exactly ON the smooth curve. Skip if the other slot is also a
+    // T-junction (i.e., this is a valence-4 crossing, not a T+stem pair).
     uint stem = i ^ 1u;
     if (stem < u.num_nodes && node_flags[stem] == 1u) {
         float2 on_curve = 0.125 * prev_pos + 0.75 * corrected + 0.125 * next_pos;

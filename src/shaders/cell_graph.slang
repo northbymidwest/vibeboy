@@ -397,8 +397,11 @@ void main(uint3 tid: SV_DispatchThreadID) {
         }
 
     } else {
-        // Valence 4 cross-junction: two crossing curve pairs, both pinned
-        write_cp_full(base, pos, n_idx, s_idx, 1u, 0, 2, int(cx), int(cy));
-        write_cp_full(base + 1, pos, e_idx, w_idx, 1u, 1, 3, int(cx), int(cy));
+        // Valence 4 cross-junction: inverse-correct both CPs so their
+        // B-spline curves pass through the grid corner at t=0.5.
+        // IS_CORNER prevents optimizer movement, IS_CROSSING triggers
+        // inverse correction in update_tjunction.
+        write_cp_full(base, pos, n_idx, s_idx, 2u | IS_CORNER | IS_CROSSING, 0, 2, int(cx), int(cy));
+        write_cp_full(base + 1, pos, e_idx, w_idx, 2u | IS_CORNER | IS_CROSSING, 1, 3, int(cx), int(cy));
     }
 }

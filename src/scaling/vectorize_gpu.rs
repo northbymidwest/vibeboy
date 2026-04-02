@@ -12,6 +12,7 @@
 
 const IS_CORNER: u32 = 16;
 const IS_TJUNCTION: u32 = 32;
+const IS_CROSSING: u32 = 64;
 
 const NEWTON_ITER: i32 = 3;
 
@@ -1125,7 +1126,8 @@ fn build_cell_graph(
                     );
                 }
             } else {
-                // Valence 4 cross-junction: two crossing curve pairs, both pinned
+                // Valence 4 cross-junction: inverse-correct both CPs so their
+                // B-spline curves pass through the grid corner at t=0.5.
                 write_cp_full(
                     &mut positions,
                     &mut neighbors,
@@ -1134,7 +1136,7 @@ fn build_cell_graph(
                     pos,
                     n_idx,
                     s_idx,
-                    1,
+                    2 | IS_CORNER | IS_CROSSING,
                     0,
                     2,
                     icx,
@@ -1148,7 +1150,7 @@ fn build_cell_graph(
                     pos,
                     e_idx,
                     w_idx,
-                    1,
+                    2 | IS_CORNER | IS_CROSSING,
                     1,
                     3,
                     icx,
@@ -1276,6 +1278,38 @@ fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], nu
     let mut updates: Vec<(usize, f32, f32)> = Vec::new();
     let mut stem_updates: Vec<(usize, f32, f32)> = Vec::new();
 
+    // Valence-4 crossings: inverse B-spline correction
+    let mut crossing_updates: Vec<(usize, f32, f32)> = Vec::new();
+    for i in 0..num_cps {
+        if (flags[i] & IS_CROSSING) == 0 {
+            continue;
+        }
+        let prev_idx = neighbors[i * 4];
+        let next_idx = neighbors[i * 4 + 1];
+        if prev_idx < 0 || next_idx < 0 {
+            continue;
+        }
+        let prev_pos = (
+            positions[prev_idx as usize * 2],
+            positions[prev_idx as usize * 2 + 1],
+        );
+        let grid_pos = (positions[i * 2], positions[i * 2 + 1]);
+        let next_pos = (
+            positions[next_idx as usize * 2],
+            positions[next_idx as usize * 2 + 1],
+        );
+        let corrected = (
+            (grid_pos.0 - 0.125 * prev_pos.0 - 0.125 * next_pos.0) / 0.75,
+            (grid_pos.1 - 0.125 * prev_pos.1 - 0.125 * next_pos.1) / 0.75,
+        );
+        crossing_updates.push((i, corrected.0, corrected.1));
+    }
+    for (i, x, y) in crossing_updates {
+        positions[i * 2] = x;
+        positions[i * 2 + 1] = y;
+    }
+
+    // T-junctions
     for i in 0..num_cps {
         if (flags[i] & IS_TJUNCTION) == 0 {
             continue;
