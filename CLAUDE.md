@@ -251,6 +251,8 @@ All shaders are authored in GLSL and cross-compiled at build time to multiple ba
 
 Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles. WGSL files are loaded via `include_str!` for wgpu/WebGPU backends.
 
+**Shader recompilation gotcha:** Editing `.slang` source files may not trigger a rebuild due to cargo's incremental compilation caching the build script output. Run `cargo clean -p vibeboy --release` to force `build.rs` to re-run `slangc`. Verify with `grep` on `.metal` files in `target/release/build/vibeboy-*/out/`.
+
 ## Tools & Scripts
 
 ### Disassemblers (`tools/`)
