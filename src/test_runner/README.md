@@ -78,6 +78,8 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 
 
 Vectorize a standalone PNG image. Uses `--filter` to select the vectorize pipeline variant and `--cpu-filter` to force CPU-only rendering.
 
+Supported filters: `vectorize` (default), `vectorize-diffusion`, `vectorize-spline-diffusion`, `vectorize-gpu`, `vectorize-legacy`, `edge`, `gpu-full`.
+
 ```bash
 # Vectorize to SVG (filter doesn't matter for SVG output)
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
@@ -98,10 +100,36 @@ cargo run --release --bin test_runner -- vectorize input.png --out output.png --
 cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 4 --cpu-filter
 ```
 
-### Other Commands
+### Audio Dump
+
+Dump APU audio to a WAV file.
 
 ```bash
+# Dump 300 frames of audio at 96kHz
+cargo run --release --bin test_runner -- audio-dump path/to/rom.gb --frames 300 --out audio.wav
 
+# Custom sample rate
+cargo run --release --bin test_runner -- audio-dump path/to/rom.gb --frames 600 --out audio.wav --sample-rate 48000
+
+# Force hardware model
+cargo run --release --bin test_runner -- audio-dump path/to/rom.gb --frames 300 --model cgb
+```
+
+### Boot ROM Generation
+
+Generate built-in boot ROMs to files.
+
+```bash
+# Generate CGB boot ROM (default)
+cargo run --release --bin test_runner -- gen-bootrom --out bootroms/vibeboy_cgb_boot.bin
+
+# Generate DMG/MGB/AGB boot ROM
+cargo run --release --bin test_runner -- gen-bootrom --out bootroms/vibeboy_dmg_boot.bin --model dmg
+```
+
+### Debug Commands
+
+```bash
 # Analyze frame buffer (debug)
 cargo run --release --bin test_runner -- analyze path/to/rom.gb --frames 300
 
@@ -143,7 +171,9 @@ src/test_runner/
 │   ├── gambatte.rs      Screenshot hex digit recognition
 │   ├── gbmicrotest.rs   HRAM result check
 │   └── tearoom.rs       Screenshot comparison against reference PNGs
-├── commands.rs          screenshot, vectorize, analyze, trace-timer, calibrate
+├── commands.rs          screenshot, vectorize, audio-dump
+├── debug_commands.rs    analyze, trace-timer, calibrate
 ├── model.rs             Model detection + boot ROM resolution
+├── svg.rs               SVG export for vectorized frames
 └── util.rs              Shared helpers (make_emu, collect_roms, parse_keys)
 ```

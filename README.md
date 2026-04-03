@@ -62,7 +62,7 @@ Gamepad: D-pad/left stick, South=B, East=A, Start, Back=Select, L1=Rewind, R1=Fa
 
 ### Scaling Filters
 
-18 distinct scaling algorithms, each available as both CPU and GPU compute shader:
+39 scaling filter options across 19 algorithm modules, each available as both CPU and GPU compute shader:
 
 ```bash
 cargo run --release -- path/to/rom.gb --filter hq4x
@@ -101,7 +101,7 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **Printer**: Game Boy Printer emulation (PNG output on native, browser download on web)
 - **Save states**: 10 slots (0-9), serde + bincode serialization, rewind (~10 minutes, reverse-delta compressed)
 - **Runahead**: `--runahead N` for reduced input latency (SDL frontend)
-- **Scaling**: 18 distinct pixel-art scaling algorithms, all with GPU compute shader acceleration
+- **Scaling**: 39 scaling filter options across 19 algorithm modules, all with GPU compute shader acceleration
 - **Vectorization**: Kopf-Lischinski pixel-art vectorizer with scanline, diffusion, and spline-diffusion rasterizers; full GPU pipeline; SVG export
 - **6 frontends**: SDL3, native macOS Cocoa/Metal, winit/wgpu, GTK4, WebAssembly/WebGPU, libretro
 - **Browser**: WebGPU rendering, on-screen touch controls, gamepad, AudioWorklet at 96 kHz, webcam, accelerometer (DeviceMotion for MBC7), localStorage persistence, mobile-responsive
@@ -150,7 +150,7 @@ src/
 ├── serial.rs        Link cable / serial port
 ├── printer.rs       Game Boy Printer (memory-queued output)
 ├── scaling/         18 CPU scaling filters + GPU compute pipelines
-├── shaders/         GLSL 4.50 compute shaders (cross-compiled to SPIR-V/MSL/DXIL/WGSL)
+├── shaders/         Slang compute shaders (cross-compiled to SPIR-V/MSL/DXIL/WGSL)
 ├── vectorize/       Kopf-Lischinski pixel-art vectorizer
 ├── util.rs          Pure utility functions (no I/O)
 ├── ui_util.rs       Frontend utilities (filesystem, gamepad, FPS counter)

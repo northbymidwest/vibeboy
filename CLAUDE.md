@@ -12,15 +12,15 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 
 **macOS:**
 - Rust toolchain, SDL3 (via Homebrew: `brew install sdl3`)
-- For GPU shaders: `brew install shaderc spirv-cross`
+- For GPU shaders: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH)
 
 **Windows:**
 - Rust toolchain (MSVC), Visual Studio Build Tools
-- [LunarG Vulkan SDK](https://vulkan.lunarg.com/) — provides `glslc`, `spirv-cross`, and `dxc` for shader compilation
+- [Slang](https://github.com/shader-slang/slang/releases) — shader compiler (`slangc`). Optional: `dxc` for DXIL output (Direct3D 12)
 - SDL3 development libraries: download the [SDL3-devel-VC](https://github.com/libsdl-org/SDL/releases) zip, place `SDL3.lib` and `SDL3.dll` in the project's `lib/` directory. The `.cargo/config.toml` already points the linker there. Copy `SDL3.dll` next to the built `.exe` (or add `lib/` to your PATH).
 
 **Linux:**
-- Rust toolchain, SDL3 dev package, `glslc` or `glslangValidator`
+- Rust toolchain, SDL3 dev package, [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH)
 
 ```bash
 cargo build --release
@@ -156,10 +156,10 @@ Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
 - `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. `new_vectorize_cache()` for cache initialization. 18 distinct scaling algorithms across 19 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms.
+- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. `new_vectorize_cache()` for cache initialization. 39 filter entries across 19 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms.
 - `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
 - `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
-- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from GLSL via naga at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
+- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from Slang via `slangc` at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
 
 ### Clock abstraction (`src/clock.rs`)
 `Clock` trait provides wall-clock time to RTC cartridges (MBC3, HuC3, TAMA5). The core emulator never reads the system clock directly — frontends inject a `SystemClock` (native) or `JsClock` (wasm) via `Arc<dyn Clock>`.
@@ -222,34 +222,34 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 
 ### GPU shaders (`src/shaders/`)
 
-All shaders are compute shaders authored in GLSL 4.50. Fragment shaders have been removed; all scaling filters now use compute pipelines.
+All shaders are compute shaders authored in [Slang](https://github.com/shader-slang/slang). All scaling filters use compute pipelines.
 
 **Compute shaders (scaling filters):**
-- `nearest_aa.comp`, `bicubic.comp`, `dcci.comp`, `eagle.comp`, `edi.comp`, `epx.comp`, `hqx.comp`, `lcd_grid.comp`, `mmpx.comp`, `nedi.comp`, `omniscale.comp`, `omniscale_legacy.comp`, `scale3x.comp`, `super_xbr.comp`, `xbr.comp`, `xbrz.comp`: GPU compute versions of the pixel scaling filters
+- `nearest.slang`, `nearest_aa.slang`, `bilinear.slang`, `bicubic.slang`, `dcci.slang`, `eagle.slang`, `edi.slang`, `epx.slang`, `hqx.slang`, `lcd_grid.slang`, `mmpx.slang`, `nedi.slang`, `omniscale.slang`, `omniscale_legacy.slang`, `sai2x.slang`, `super_sai2x.slang`, `super_eagle.slang`, `scale3x.slang`, `super_xbr.slang`, `xbr.slang`, `xbrz.slang`: GPU compute versions of the pixel scaling filters
 
 **Compute shaders (rasterization):**
-- `vectorize_raster.comp`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
-- `vectorize_to_buf.comp`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion -- produces hard region boundaries)
-- `spline_diffusion.comp`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2x2 supersampling (pass 2 of spline-diffusion)
-- `diffusion_raster.comp`: Voronoi diffusion with packed diagonal state ownership (2 bits per corner)
+- `vectorize_raster.slang`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
+- `vectorize_to_buf.slang`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion -- produces hard region boundaries)
+- `spline_diffusion.slang`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2x2 supersampling (pass 2 of spline-diffusion)
+- `diffusion_raster.slang`: Voronoi diffusion with packed diagonal state ownership (2 bits per corner)
 
 **Compute shaders (full GPU vectorize pipeline):**
-- `similarity_graph.comp`: Builds (2W+1)x(2H+1) connectivity graph with binary color matching
-- `resolve_crossings.comp`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
-- `cell_graph.comp`: Creates B-spline control points at grid corners, T-junction merging and position correction, corner detection with `DONT_OPTIMIZE_*` flags
-- `update_tjunction.comp`: T-junction position update pass
-- `optimize_energy.comp`: Double-buffered gradient descent optimizer -- kappa^2 smoothness + (2.5d)^4 positional energy, max move 0.25px
-- `cell_rasterizer.comp`: Renders optimized B-spline curves to final output
+- `similarity_graph.slang`: Builds (2W+1)x(2H+1) connectivity graph with binary color matching
+- `resolve_crossings.slang`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
+- `cell_graph.slang`: Creates B-spline control points at grid corners, T-junction merging and position correction, corner detection with `DONT_OPTIMIZE_*` flags
+- `update_tjunction.slang`: T-junction position update pass
+- `optimize_energy.slang`: Double-buffered gradient descent optimizer -- kappa^2 smoothness + (2.5d)^4 positional energy, max move 0.25px
+- `cell_rasterizer.slang`: Renders optimized B-spline curves to final output
 
 **Shader cross-compilation (`build.rs`):**
 
-All shaders are authored in GLSL and cross-compiled at build time to multiple backend formats:
-1. GLSL -> SPIR-V via `glslc` (Vulkan backend, all platforms)
-2. SPIR-V -> MSL via `spirv-cross --msl` (Metal backend, macOS) -- requires per-shader `[[buffer(N)]]` index remapping (`msl_buffer_remap` in `ShaderInfo`) because MSL uses a single buffer namespace for all resource types
-3. SPIR-V -> HLSL -> DXIL via `spirv-cross --hlsl` + `dxc` (Direct3D 12 backend, Windows) -- requires automated register/space normalization (`remap_hlsl_registers`) because spirv-cross assigns HLSL spaces based on SPIR-V descriptor sets, but SDL3 D3D12 expects type-based grouping: `t[n] space0` (SRVs), `u[n] space1` (UAVs), `b[n] space2` (CBVs)
-4. SPIR-V -> WGSL via `naga` (WebGPU backend, browser/wgpu) -- naga is a Rust build dependency; converts at build time. Note: `cell_rasterizer.comp` has barriers restructured for WGSL uniformity rules (naga copies `workgroup_id` to a private variable, losing uniformity proof).
+All shaders are authored in Slang and cross-compiled at build time via `slangc` to multiple backend formats:
+1. Slang -> SPIR-V (`-target spirv`, Vulkan/SDL3 backend)
+2. Slang -> MSL (`-target metal`, Metal backend, macOS)
+3. Slang -> DXIL (`-target dxil`, Direct3D 12 backend, Windows) -- requires `dxc`. Slang source files use explicit `register(tN,space0)` / `register(uN,space1)` / `register(bN,space2)` annotations matching SDL3 D3D12's type-based space grouping
+4. Slang -> WGSL (`-target wgsl`, WebGPU backend, browser/wgpu)
 
-Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles. WGSL files are loaded via `include_str!` for wgpu/WebGPU backends.
+Shared shader modules live in `src/shaders/modules/` and are imported via `import modules.color;` etc. Runtime shader loading tries SPIR-V first, then DXIL, then MSL. DXIL files are empty stubs on non-Windows builds so `include_bytes!` always compiles. WGSL files are loaded via `include_str!` for wgpu/WebGPU backends.
 
 **Shader recompilation gotcha:** Editing `.slang` source files may not trigger a rebuild due to cargo's incremental compilation caching the build script output. Run `cargo clean -p vibeboy --release` to force `build.rs` to re-run `slangc`. Verify with `grep` on `.metal` files in `target/release/build/vibeboy-*/out/`.
 
