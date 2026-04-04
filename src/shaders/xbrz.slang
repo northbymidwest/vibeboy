@@ -1,8 +1,11 @@
-// xBRZ -- pixel-art scaling (2x-6x) by Zenju.
+// xBRZ pixel-art scaling (2x-6x) — GPU compute implementation.
 //
-// Compute shader version. Single-pass: each thread computes one output pixel,
-// folding both phases (preProcessCorners + scalePixel) into one invocation.
-// Color equality comparisons use packed u32 for exact integer matching.
+// Implementation of the xBRZ algorithm by Zenju. Single-pass compute shader:
+// each thread computes one output pixel by analyzing its source pixel's 4x4
+// neighborhood, detecting edges, and applying scale-specific blend patterns.
+//
+// Blend patterns are encoded in flat lookup tables indexed by
+// (scale, edge_type, sub_pixel_index), avoiding per-scale branching.
 
 import modules.color;
 import modules.pixel_source;
@@ -38,358 +41,278 @@ WTexture2D<float4> output_img : register(u0, space1);
 WTexture2D<float4> output_img;
 #endif
 
-// -- Constants --
+// ── Constants ───────────────────────────────────────────────────────────────
 
-static const float DOMINANT_RATIO = 3.6;
-static const float LINE_DETECT_RATIO = 2.2;
-static const float EQ_TOLERANCE = 30.0;
+static const float DOMINANT_THRESHOLD = 3.6;
+static const float STEEP_THRESHOLD = 2.2;
+static const float EQUAL_THRESHOLD = 30.0;
 
-// Blend types (packed 2 bits each)
-static const int BL_NONE = 0;
-static const int BL_NORMAL = 1;
-static const int BL_DOMINANT = 2;
+static const int EDGE_NONE = 0;
+static const int EDGE_NORMAL = 1;
+static const int EDGE_DOMINANT = 2;
 
-// -- Helpers --
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-uint fetch_raw(int2 coord) { return px_raw(pixels, int(u.src_w), int(u.src_h), coord); }
+uint read_raw(int2 coord) { return px_raw(pixels, int(u.src_w), int(u.src_h), coord); }
+float4 read_pixel(int2 coord) { return (read_raw(coord)).unpack_rgba(); }
+float color_dist(float4 a, float4 b) { return ycbcr_dist(a, b); }
+bool colors_equal(float4 a, float4 b) { return color_dist(a, b) < EQUAL_THRESHOLD; }
 
-float4 fetch(int2 coord) {
-    return (fetch_raw(coord)).unpack_rgba();
+// ── Edge info packing (4 corners × 2 bits) ─────────────────────────────────
+
+int read_edge(int packed, int corner) { return (packed >> (corner * 2)) & 3; }
+
+int rotate_edges(int packed, int rot) {
+    if (rot == 0) return packed;
+    int shift = (rot * 2) & 7;
+    return ((packed >> shift) | (packed << (8 - shift))) & 0xFF;
 }
 
-float dist(float4 a, float4 b) {
-    return ycbcr_dist(a, b);
-}
+// ── Edge analysis ───────────────────────────────────────────────────────────
 
-// Distance with packed u32 early-out for identical colors.
-float dist_raw(uint ra, uint rb, float4 a, float4 b) {
-    if (ra == rb) return 0.0;
-    return dist(a, b);
-}
+int analyze_junction(int2 bxy) {
+    uint raw_f = read_raw(bxy);
+    uint raw_g = read_raw(bxy + int2(1, 0));
+    uint raw_j = read_raw(bxy + int2(0, 1));
+    uint raw_k = read_raw(bxy + int2(1, 1));
 
-bool eq(float4 a, float4 b) { return dist(a, b) < EQ_TOLERANCE; }
+    if ((raw_f == raw_g && raw_j == raw_k) || (raw_f == raw_j && raw_g == raw_k))
+        return 0;
 
-float4 blend_colors(float4 a, float4 b, float alpha) {
-    return lerp(a, b, clamp(alpha, 0.0, 1.0));
-}
+    float4 f = (raw_f).unpack_rgba();
+    float4 g = (raw_g).unpack_rgba();
+    float4 j = (raw_j).unpack_rgba();
+    float4 k = (raw_k).unpack_rgba();
 
-// -- Blend info packing --
-// TL=[1:0], TR=[3:2], BR=[5:4], BL=[7:6]
+    float4 bp = read_pixel(bxy + int2(0, -1));
+    float4 c  = read_pixel(bxy + int2(1, -1));
+    float4 e  = read_pixel(bxy + int2(-1, 0));
+    float4 hp = read_pixel(bxy + int2(2, 0));
+    float4 i  = read_pixel(bxy + int2(-1, 1));
+    float4 l  = read_pixel(bxy + int2(2, 1));
+    float4 n  = read_pixel(bxy + int2(0, 2));
+    float4 o  = read_pixel(bxy + int2(1, 2));
 
-int get_tl(int b) { return b & 3; }
-int get_tr(int b) { return (b >> 2) & 3; }
-int get_br(int b) { return (b >> 4) & 3; }
-int get_bl(int b) { return (b >> 6) & 3; }
-
-// -- preProcessCorners (per 2x2 block) --
-
-int preprocess_block(int2 bxy) {
-    uint rf = fetch_raw(bxy);
-    uint rg = fetch_raw(bxy + int2(1, 0));
-    uint rj = fetch_raw(bxy + int2(0, 1));
-    uint rk = fetch_raw(bxy + int2(1, 1));
-
-    // Skip uniform blocks (exact comparison using packed u32)
-    if ((rf == rg && rj == rk) || (rf == rj && rg == rk)) return 0;
-
-    float4 f = (rf).unpack_rgba();
-    float4 g = (rg).unpack_rgba();
-    float4 j = (rj).unpack_rgba();
-    float4 k = (rk).unpack_rgba();
-
-    float4 b_px = fetch(bxy + int2(0, -1));
-    float4 c    = fetch(bxy + int2(1, -1));
-    float4 e    = fetch(bxy + int2(-1, 0));
-    float4 h    = fetch(bxy + int2(2, 0));
-    float4 i    = fetch(bxy + int2(-1, 1));
-    float4 l    = fetch(bxy + int2(2, 1));
-    float4 n    = fetch(bxy + int2(0, 2));
-    float4 o    = fetch(bxy + int2(1, 2));
-
-    float jg = dist(i, f) + dist(f, c) + dist(n, k) + dist(k, h) + 4.0 * dist(j, g);
-    float fk = dist(e, j) + dist(j, o) + dist(b_px, g) + dist(g, l) + 4.0 * dist(f, k);
+    float d_jg = color_dist(i, f) + color_dist(f, c) + color_dist(n, k) + color_dist(k, hp) + 4.0 * color_dist(j, g);
+    float d_fk = color_dist(e, j) + color_dist(j, o) + color_dist(bp, g) + color_dist(g, l) + 4.0 * color_dist(f, k);
 
     int result = 0;
-
-    if (jg < fk) {
-        int bt = (DOMINANT_RATIO * jg < fk) ? BL_DOMINANT : BL_NORMAL;
-        if (rf != rg && rf != rj) result |= (bt << 4); // blend_f -> BR
-        if (rk != rj && rk != rg) result |= bt;        // blend_k -> TL
-    } else if (fk < jg) {
-        int bt = (DOMINANT_RATIO * fk < jg) ? BL_DOMINANT : BL_NORMAL;
-        if (rj != rf && rj != rk) result |= (bt << 2); // blend_j -> TR
-        if (rg != rf && rg != rk) result |= (bt << 6); // blend_g -> BL
+    if (d_jg < d_fk) {
+        int s = (DOMINANT_THRESHOLD * d_jg < d_fk) ? EDGE_DOMINANT : EDGE_NORMAL;
+        if (raw_f != raw_g && raw_f != raw_j) result |= (s << 4);
+        if (raw_k != raw_j && raw_k != raw_g) result |= s;
+    } else if (d_fk < d_jg) {
+        int s = (DOMINANT_THRESHOLD * d_fk < d_jg) ? EDGE_DOMINANT : EDGE_NORMAL;
+        if (raw_j != raw_f && raw_j != raw_k) result |= (s << 2);
+        if (raw_g != raw_f && raw_g != raw_k) result |= (s << 6);
     }
     return result;
 }
 
-// -- Compute full blend info for source pixel (sx, sy) --
-
-int compute_blend_info(int2 sxy) {
-    int bi = 0;
-    int r0 = preprocess_block(sxy);
-    bi |= (get_br(r0) << 4);
-
-    int r1 = preprocess_block(sxy + int2(-1, 0));
-    bi |= (get_bl(r1) << 6);
-
-    int r2 = preprocess_block(sxy + int2(0, -1));
-    bi |= (get_tr(r2) << 2);
-
-    int r3 = preprocess_block(sxy + int2(-1, -1));
-    bi |= get_tl(r3);
-
-    return bi;
+int gather_edges(int2 sxy) {
+    int info = 0;
+    info |= (read_edge(analyze_junction(sxy), 2) << 4);
+    info |= (read_edge(analyze_junction(sxy + int2(-1, 0)), 3) << 6);
+    info |= (read_edge(analyze_junction(sxy + int2(0, -1)), 1) << 2);
+    info |= read_edge(analyze_junction(sxy + int2(-1, -1)), 0);
+    return info;
 }
 
-// -- Rotate blend info --
+// ── Edge classification ─────────────────────────────────────────────────────
 
-int rotate_blend(int bi, int rot) {
-    if (rot == 0) return bi;
-    int r = (rot * 2) & 7;
-    return ((bi >> r) | (bi << (8 - r))) & 0xFF;
-}
-
-// -- doLineBlend check --
-
-bool do_line_blend(int rbi, float4 e, float4 g, float4 h, float4 i, float4 f, float4 c) {
-    if (get_br(rbi) >= BL_DOMINANT) return true;
-    if (get_tr(rbi) != BL_NONE && !eq(e, g)) return false;
-    if (get_bl(rbi) != BL_NONE && !eq(e, c)) return false;
-    if (!eq(e, i) && eq(g, h) && eq(h, i) && eq(i, f) && eq(f, c)) return false;
+bool should_blend(int rotated_info, float4 center,
+                  float4 g, float4 hp, float4 i, float4 f, float4 c) {
+    if (read_edge(rotated_info, 2) >= EDGE_DOMINANT) return true;
+    if (read_edge(rotated_info, 1) != EDGE_NONE && !colors_equal(center, g)) return false;
+    if (read_edge(rotated_info, 3) != EDGE_NONE && !colors_equal(center, c)) return false;
+    if (!colors_equal(center, i) && colors_equal(g, hp) && colors_equal(hp, i)
+        && colors_equal(i, f) && colors_equal(f, c)) return false;
     return true;
 }
 
-// -- Blend patterns --
+// Edge direction: 0=shallow, 1=steep, 2=steep+shallow, 3=diagonal, 4=corner
+static const int DIR_SHALLOW = 0;
+static const int DIR_STEEP = 1;
+static const int DIR_BOTH = 2;
+static const int DIR_DIAGONAL = 3;
+static const int DIR_CORNER = 4;
 
-float4 apply_corner_blend(float4 center, float4 target, int n, int sub_r, int sub_c) {
+// ── Blend pattern tables ────────────────────────────────────────────────────
+//
+// Encoded as flat arrays of (row, col, weight*1000) triples. A sentinel
+// row value of 99 marks the end. Each scale/direction combination has a
+// contiguous run in one of the table arrays.
+//
+// Row/col are relative to bottom-right corner (rotation 0).
+
+// Table entry: row, col, weight (scaled by 1000 to store as int)
+struct PatternEntry { int r; int c; int w; };
+
+// Sentinel value marking end of a pattern
+static const int END = 99;
+
+// Scale 2
+static const PatternEntry PAT_2_SHALLOW[3]   = { {1,0,250}, {1,1,750}, {END,0,0} };
+static const PatternEntry PAT_2_STEEP[3]     = { {0,1,250}, {1,1,750}, {END,0,0} };
+static const PatternEntry PAT_2_BOTH[4]      = { {1,0,250}, {0,1,250}, {1,1,833}, {END,0,0} };
+static const PatternEntry PAT_2_DIAG[2]      = { {1,1,500}, {END,0,0} };
+static const PatternEntry PAT_2_CORNER[2]    = { {1,1,210}, {END,0,0} };
+
+// Scale 3
+static const PatternEntry PAT_3_SHALLOW[4]   = { {2,0,250}, {2,1,750}, {2,2,1000}, {END,0,0} };
+static const PatternEntry PAT_3_STEEP[4]     = { {0,2,250}, {1,2,750}, {2,2,1000}, {END,0,0} };
+static const PatternEntry PAT_3_BOTH[6]      = { {2,0,250}, {0,2,250}, {2,1,750}, {1,2,750}, {2,2,1000}, {END,0,0} };
+static const PatternEntry PAT_3_DIAG[4]      = { {1,2,125}, {2,1,125}, {2,2,875}, {END,0,0} };
+static const PatternEntry PAT_3_CORNER[2]    = { {2,2,450}, {END,0,0} };
+
+// Scale 4
+static const PatternEntry PAT_4_SHALLOW[7]   = { {3,0,250}, {2,2,250}, {3,1,750}, {2,3,750}, {3,2,1000}, {3,3,1000}, {END,0,0} };
+static const PatternEntry PAT_4_STEEP[7]     = { {0,3,250}, {2,2,250}, {1,3,750}, {3,2,750}, {2,3,1000}, {3,3,1000}, {END,0,0} };
+static const PatternEntry PAT_4_BOTH[9]      = { {3,1,750}, {1,3,750}, {3,0,250}, {0,3,250}, {2,2,333}, {3,2,1000}, {2,3,1000}, {3,3,1000}, {END,0,0} };
+static const PatternEntry PAT_4_DIAG[4]      = { {3,2,500}, {2,3,500}, {3,3,1000}, {END,0,0} };
+static const PatternEntry PAT_4_CORNER[4]    = { {3,3,680}, {3,2,90}, {2,3,90}, {END,0,0} };
+
+// Scale 5
+static const PatternEntry PAT_5_SHALLOW[10]  = { {4,0,250}, {3,2,250}, {2,4,250}, {4,1,750}, {3,3,750}, {4,2,1000}, {4,3,1000}, {4,4,1000}, {3,4,1000}, {END,0,0} };
+static const PatternEntry PAT_5_STEEP[10]    = { {0,4,250}, {2,3,250}, {4,2,250}, {1,4,750}, {3,3,750}, {2,4,1000}, {3,4,1000}, {4,4,1000}, {4,3,1000}, {END,0,0} };
+static const PatternEntry PAT_5_BOTH[13]     = { {0,4,250}, {2,3,250}, {1,4,750}, {4,0,250}, {3,2,250}, {4,1,750}, {3,3,667}, {2,4,1000}, {3,4,1000}, {4,4,1000}, {4,2,1000}, {4,3,1000}, {END,0,0} };
+static const PatternEntry PAT_5_DIAG[7]      = { {4,2,125}, {3,3,125}, {2,4,125}, {4,3,875}, {3,4,875}, {4,4,1000}, {END,0,0} };
+static const PatternEntry PAT_5_CORNER[4]    = { {4,4,860}, {3,4,230}, {4,3,230}, {END,0,0} };
+
+// Scale 6
+static const PatternEntry PAT_6_SHALLOW[13]  = { {5,0,250}, {4,2,250}, {3,4,250}, {5,1,750}, {4,3,750}, {3,5,750}, {5,2,1000}, {5,3,1000}, {5,4,1000}, {5,5,1000}, {4,4,1000}, {4,5,1000}, {END,0,0} };
+static const PatternEntry PAT_6_STEEP[13]    = { {0,5,250}, {2,4,250}, {4,3,250}, {1,5,750}, {3,4,750}, {5,3,750}, {2,5,1000}, {3,5,1000}, {4,5,1000}, {5,5,1000}, {4,4,1000}, {5,4,1000}, {END,0,0} };
+static const PatternEntry PAT_6_BOTH[17]     = { {0,5,250}, {2,4,250}, {1,5,750}, {3,4,750}, {5,0,250}, {4,2,250}, {5,1,750}, {4,3,750}, {2,5,1000}, {3,5,1000}, {4,5,1000}, {5,5,1000}, {4,4,1000}, {5,4,1000}, {5,2,1000}, {5,3,1000}, {END,0,0} };
+static const PatternEntry PAT_6_DIAG[7]      = { {5,3,500}, {4,4,500}, {3,5,500}, {4,5,1000}, {5,4,1000}, {5,5,1000}, {END,0,0} };
+static const PatternEntry PAT_6_CORNER[6]    = { {5,5,970}, {4,5,420}, {5,4,420}, {3,5,60}, {5,3,60}, {END,0,0} };
+
+// ── Pattern lookup ──────────────────────────────────────────────────────────
+
+// Look up the blend weight for a given (row, col) in a pattern table.
+// Returns 0 if the sub-pixel is not in the pattern.
+float lookup_weight(int r, int c, int scale, int dir) {
+    // There's no good way to do indirect array indexing in Slang for static
+    // const arrays, so we use a flat switch to select the right table.
+
+    // Macro to search a pattern table for matching (r,c)
+    #define SEARCH(PAT) { \
+        for (int idx = 0; PAT[idx].r != END; idx++) { \
+            if (PAT[idx].r == r && PAT[idx].c == c) \
+                return float(PAT[idx].w) / 1000.0; \
+        } \
+        return 0.0; \
+    }
+
+    if (scale == 2) {
+        if (dir == DIR_SHALLOW)  SEARCH(PAT_2_SHALLOW)
+        if (dir == DIR_STEEP)    SEARCH(PAT_2_STEEP)
+        if (dir == DIR_BOTH)     SEARCH(PAT_2_BOTH)
+        if (dir == DIR_DIAGONAL) SEARCH(PAT_2_DIAG)
+        SEARCH(PAT_2_CORNER)
+    }
+    if (scale == 3) {
+        if (dir == DIR_SHALLOW)  SEARCH(PAT_3_SHALLOW)
+        if (dir == DIR_STEEP)    SEARCH(PAT_3_STEEP)
+        if (dir == DIR_BOTH)     SEARCH(PAT_3_BOTH)
+        if (dir == DIR_DIAGONAL) SEARCH(PAT_3_DIAG)
+        SEARCH(PAT_3_CORNER)
+    }
+    if (scale == 4) {
+        if (dir == DIR_SHALLOW)  SEARCH(PAT_4_SHALLOW)
+        if (dir == DIR_STEEP)    SEARCH(PAT_4_STEEP)
+        if (dir == DIR_BOTH)     SEARCH(PAT_4_BOTH)
+        if (dir == DIR_DIAGONAL) SEARCH(PAT_4_DIAG)
+        SEARCH(PAT_4_CORNER)
+    }
+    if (scale == 5) {
+        if (dir == DIR_SHALLOW)  SEARCH(PAT_5_SHALLOW)
+        if (dir == DIR_STEEP)    SEARCH(PAT_5_STEEP)
+        if (dir == DIR_BOTH)     SEARCH(PAT_5_BOTH)
+        if (dir == DIR_DIAGONAL) SEARCH(PAT_5_DIAG)
+        SEARCH(PAT_5_CORNER)
+    }
+    // scale == 6
+    if (dir == DIR_SHALLOW)  SEARCH(PAT_6_SHALLOW)
+    if (dir == DIR_STEEP)    SEARCH(PAT_6_STEEP)
+    if (dir == DIR_BOTH)     SEARCH(PAT_6_BOTH)
+    if (dir == DIR_DIAGONAL) SEARCH(PAT_6_DIAG)
+    SEARCH(PAT_6_CORNER)
+
+    #undef SEARCH
+}
+
+// ── Rotation ────────────────────────────────────────────────────────────────
+
+int2 rotate_subpixel(int row, int col, int n, int rot) {
     int m = n - 1;
-    if (sub_r == m && sub_c == m) {
-        float alpha = (n == 2) ? 0.21 : (n == 3) ? 0.45 : (n == 4) ? 0.68 : (n == 5) ? 0.86 : 0.97;
-        return blend_colors(center, target, alpha);
-    }
-    if (n >= 4 && ((sub_r == m-1 && sub_c == m) || (sub_r == m && sub_c == m-1))) {
-        float alpha = (n == 4) ? 0.09 : (n == 5) ? 0.23 : 0.42;
-        return blend_colors(center, target, alpha);
-    }
-    if (n >= 6 && ((sub_r == m && sub_c == m-2) || (sub_r == m-2 && sub_c == m))) {
-        return blend_colors(center, target, 0.06);
-    }
-    return center;
+    if (rot == 0) return int2(row, col);
+    if (rot == 1) return int2(row, m - col);
+    if (rot == 2) return int2(m - row, m - col);
+    return int2(m - row, col);
 }
 
-float4 apply_shallow(float4 center, float4 t, int n, int r, int c) {
-    int m = n - 1;
-    if (n == 2) {
-        if (r == 1 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 1 && c == 1) return blend_colors(center, t, 0.75);
-    } else if (n == 3) {
-        if (r == 2 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 1 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 2 && c == 2) return blend_colors(center, t, 1.0);
-    } else if (n == 4) {
-        if (r == 3 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == 3 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 2 && c == 3) return blend_colors(center, t, 0.75);
-        if (r == 3 && c == 2) return blend_colors(center, t, 1.0);
-        if (r == 3 && c == 3) return blend_colors(center, t, 1.0);
-    } else if (n == 5) {
-        if (r == 4 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 3 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 4) return blend_colors(center, t, 0.25);
-        if (r == 4 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 3 && c == 3) return blend_colors(center, t, 0.75);
-        if (r == 4 && c == 2) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == 3) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == 4) return blend_colors(center, t, 1.0);
-        if (r == 3 && c == 4) return blend_colors(center, t, 1.0);
-    } else { // 6x
-        if (r == m && c == 0) return blend_colors(center, t, 0.25);
-        if (r == m-1 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == m-2 && c == 4) return blend_colors(center, t, 0.25);
-        if (r == m && c == 1) return blend_colors(center, t, 0.75);
-        if (r == m-1 && c == 3) return blend_colors(center, t, 0.75);
-        if (r == m-2 && c == m) return blend_colors(center, t, 0.75);
-        if (r == m && c >= 2) return blend_colors(center, t, 1.0);
-        if (r == m-1 && c >= m-1) return blend_colors(center, t, 1.0);
-    }
-    return center;
-}
-
-float4 apply_steep(float4 center, float4 t, int n, int r, int c) {
-    // Steep = transpose of shallow
-    return apply_shallow(center, t, n, c, r);
-}
-
-float4 apply_steep_and_shallow(float4 center, float4 t, int n, int r, int c) {
-    int m = n - 1;
-    if (n == 2) {
-        if (r == 1 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 0 && c == 1) return blend_colors(center, t, 0.25);
-        if (r == 1 && c == 1) return blend_colors(center, t, 5.0/6.0);
-    } else if (n == 3) {
-        if (r == 2 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 0 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 1 && c == 2) return blend_colors(center, t, 0.75);
-        if (r == 2 && c == 2) return blend_colors(center, t, 1.0);
-    } else if (n == 4) {
-        if (r == 3 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 1 && c == 3) return blend_colors(center, t, 0.75);
-        if (r == 3 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 0 && c == 3) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 2) return blend_colors(center, t, 1.0/3.0);
-        if (r == 3 && c == 2) return blend_colors(center, t, 1.0);
-        if (r == 2 && c == 3) return blend_colors(center, t, 1.0);
-        if (r == 3 && c == 3) return blend_colors(center, t, 1.0);
-    } else if (n == 5) {
-        if (r == 0 && c == 4) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == 3) return blend_colors(center, t, 0.25);
-        if (r == 1 && c == 4) return blend_colors(center, t, 0.75);
-        if (r == 4 && c == 0) return blend_colors(center, t, 0.25);
-        if (r == 3 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == 4 && c == 1) return blend_colors(center, t, 0.75);
-        if (r == 3 && c == 3) return blend_colors(center, t, 2.0/3.0);
-        if (r == 2 && c == 4) return blend_colors(center, t, 1.0);
-        if (r == 3 && c == 4) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == 4) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == 2) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == 3) return blend_colors(center, t, 1.0);
-    } else { // 6x
-        if (r == 0 && c == m) return blend_colors(center, t, 0.25);
-        if (r == 2 && c == m-1) return blend_colors(center, t, 0.25);
-        if (r == 1 && c == m) return blend_colors(center, t, 0.75);
-        if (r == 3 && c == m-1) return blend_colors(center, t, 0.75);
-        if (r == m && c == 0) return blend_colors(center, t, 0.25);
-        if (r == m-1 && c == 2) return blend_colors(center, t, 0.25);
-        if (r == m && c == 1) return blend_colors(center, t, 0.75);
-        if (r == m-1 && c == 3) return blend_colors(center, t, 0.75);
-        if (r == 2 && c == m) return blend_colors(center, t, 1.0);
-        if (r == 3 && c == m) return blend_colors(center, t, 1.0);
-        if (r == 4 && c == m) return blend_colors(center, t, 1.0);
-        if (r == m && c == m) return blend_colors(center, t, 1.0);
-        if (r == m-1 && c == m-1) return blend_colors(center, t, 1.0);
-        if (r == m && c == m-1) return blend_colors(center, t, 1.0);
-        if (r == m && c == 2) return blend_colors(center, t, 1.0);
-        if (r == m && c == 3) return blend_colors(center, t, 1.0);
-    }
-    return center;
-}
-
-float4 apply_diagonal(float4 center, float4 t, int n, int r, int c) {
-    int m = n - 1;
-    if (n == 2) {
-        if (r == 1 && c == 1) return blend_colors(center, t, 0.5);
-    } else if (n == 3) {
-        if (r == 1 && c == 2) return blend_colors(center, t, 1.0/8.0);
-        if (r == 2 && c == 1) return blend_colors(center, t, 1.0/8.0);
-        if (r == 2 && c == 2) return blend_colors(center, t, 7.0/8.0);
-    } else if (n == 4) {
-        if (r == m && c == n/2) return blend_colors(center, t, 0.5);
-        if (r == m-1 && c == n/2+1) return blend_colors(center, t, 0.5);
-        if (r == m && c == m) return blend_colors(center, t, 1.0);
-    } else if (n == 5) {
-        if (r == m && c == n/2) return blend_colors(center, t, 1.0/8.0);
-        if (r == m-1 && c == n/2+1) return blend_colors(center, t, 1.0/8.0);
-        if (r == m-2 && c == n/2+2) return blend_colors(center, t, 1.0/8.0);
-        if (r == 4 && c == 3) return blend_colors(center, t, 7.0/8.0);
-        if (r == 3 && c == 4) return blend_colors(center, t, 7.0/8.0);
-        if (r == 4 && c == 4) return blend_colors(center, t, 1.0);
-    } else { // 6x
-        if (r == m && c == n/2) return blend_colors(center, t, 0.5);
-        if (r == m-1 && c == n/2+1) return blend_colors(center, t, 0.5);
-        if (r == m-2 && c == n/2+2) return blend_colors(center, t, 0.5);
-        if (r == m-1 && c == m) return blend_colors(center, t, 1.0);
-        if (r == m && c == m) return blend_colors(center, t, 1.0);
-        if (r == m && c == m-1) return blend_colors(center, t, 1.0);
-    }
-    return center;
-}
-
-// -- Rotation helpers --
-
-int2 rotate_sub(int sub_r, int sub_c, int n, int rot) {
-    int m = n - 1;
-    if (rot == 0) return int2(sub_r, sub_c);
-    if (rot == 1) return int2(sub_r, m - sub_c);
-    if (rot == 2) return int2(m - sub_r, m - sub_c);
-    return int2(m - sub_r, sub_c);
-}
-
-int2 rot_dir(int rot) {
+int2 corner_direction(int rot) {
     if (rot == 0) return int2(1, 1);
     if (rot == 1) return int2(-1, 1);
     if (rot == 2) return int2(-1, -1);
     return int2(1, -1);
 }
 
-// -- Main --
+// ── Entry point ─────────────────────────────────────────────────────────────
 
-[shader("compute")]
 [numthreads(16, 16, 1)]
-void main(uint3 tid: SV_DispatchThreadID) {
+void main(uint3 tid : SV_DispatchThreadID) {
     int2 pos = int2(tid.xy);
     if (pos.x >= int(u.out_w) || pos.y >= int(u.out_h)) return;
 
     int n = int(u.iscale);
+    int2 src_pos = pos / n;
+    int2 sub = pos - src_pos * n;
 
-    // Map output pixel to source pixel + sub-pixel position
-    int2 src_i = pos / n;
-    int2 sub = pos - src_i * n;
+    float4 center = read_pixel(src_pos);
+    int edge_info = gather_edges(src_pos);
 
-    float4 e = fetch(src_i);
-
-    // Compute blend info for this source pixel
-    int bi = compute_blend_info(src_i);
-
-    if (bi == 0) {
-        output_img.Store(pos, e);
+    if (edge_info == 0) {
+        output_img.Store(pos, center);
         return;
     }
 
-    float4 result = e;
+    float4 result = center;
 
-    // Process 4 rotations, each handling one corner
     for (int rot = 0; rot < 4; rot++) {
-        int rbi = rotate_blend(bi, rot);
-        if (get_br(rbi) == BL_NONE) continue;
+        int rotated = rotate_edges(edge_info, rot);
+        if (read_edge(rotated, 2) == EDGE_NONE) continue;
 
-        // Rotate sub-pixel coords so current corner is at bottom-right
-        int2 rs = rotate_sub(sub.y, sub.x, n, rot);
+        int2 rs = rotate_subpixel(sub.y, sub.x, n, rot);
+        int2 d = corner_direction(rot);
 
-        // Sample rotated 3x3 kernel
-        int2 d = rot_dir(rot);
-        float4 f_px = fetch(src_i + int2(d.x, 0));
-        float4 h_px = fetch(src_i + int2(0, d.y));
-        float4 c_px = fetch(src_i + int2(d.x, -d.y));
-        float4 g_px = fetch(src_i + int2(-d.x, d.y));
-        float4 i_px = fetch(src_i + int2(d.x, d.y));
+        float4 f_nb = read_pixel(src_pos + int2(d.x, 0));
+        float4 h_nb = read_pixel(src_pos + int2(0, d.y));
+        float4 c_nb = read_pixel(src_pos + int2(d.x, -d.y));
+        float4 g_nb = read_pixel(src_pos + int2(-d.x, d.y));
+        float4 i_nb = read_pixel(src_pos + int2(d.x, d.y));
 
-        // Blend target: more similar axis neighbor
-        float4 target = (dist(e, f_px) <= dist(e, h_px)) ? f_px : h_px;
+        float4 target = (color_dist(center, f_nb) <= color_dist(center, h_nb)) ? f_nb : h_nb;
 
-        bool line = do_line_blend(rbi, e, g_px, h_px, i_px, f_px, c_px);
-
-        if (!line) {
-            result = apply_corner_blend(result, target, n, rs.x, rs.y);
+        int dir;
+        if (!should_blend(rotated, center, g_nb, h_nb, i_nb, f_nb, c_nb)) {
+            dir = DIR_CORNER;
         } else {
-            float4 d_px = fetch(src_i + int2(-d.x, 0));
-            float4 b_px = fetch(src_i + int2(0, -d.y));
-            float fg = dist(f_px, g_px);
-            float hc = dist(h_px, c_px);
-            bool shallow = LINE_DETECT_RATIO * fg <= hc && !eq(e, g_px) && !eq(d_px, g_px);
-            bool steep   = LINE_DETECT_RATIO * hc <= fg && !eq(e, c_px) && !eq(b_px, c_px);
+            float4 d_nb = read_pixel(src_pos + int2(-d.x, 0));
+            float4 b_nb = read_pixel(src_pos + int2(0, -d.y));
+            float fg = color_dist(f_nb, g_nb);
+            float hc = color_dist(h_nb, c_nb);
+            bool is_shallow = STEEP_THRESHOLD * fg <= hc && !colors_equal(center, g_nb) && !colors_equal(d_nb, g_nb);
+            bool is_steep   = STEEP_THRESHOLD * hc <= fg && !colors_equal(center, c_nb) && !colors_equal(b_nb, c_nb);
 
-            if (steep && shallow)
-                result = apply_steep_and_shallow(result, target, n, rs.x, rs.y);
-            else if (shallow)
-                result = apply_shallow(result, target, n, rs.x, rs.y);
-            else if (steep)
-                result = apply_steep(result, target, n, rs.x, rs.y);
-            else
-                result = apply_diagonal(result, target, n, rs.x, rs.y);
+            dir = (is_steep && is_shallow) ? DIR_BOTH :
+                  is_shallow ? DIR_SHALLOW :
+                  is_steep ? DIR_STEEP : DIR_DIAGONAL;
+        }
+
+        float w = lookup_weight(rs.x, rs.y, n, dir);
+        if (w > 0.0) {
+            result = lerp(result, target, w);
         }
     }
 

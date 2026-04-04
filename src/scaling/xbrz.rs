@@ -1,15 +1,17 @@
-//! xBRZ — pixel-art scaling by Zenju (2x–6x).
+//! xBRZ — edge-detection pixel-art scaler (2x–6x) by Zenju.
 //!
 //! Two-phase algorithm:
-//!  1. preProcessCorners: for every 2x2 source block (F,G,J,K), compute
-//!     diagonal gradient sums and assign blend types to the four corners
-//!     of the four participating pixels.
-//!  2. scalePixel: for each source pixel, read the accumulated corner blend
-//!     info and apply anti-aliased blending patterns to the output block.
+//!   1. Analyze 4×4 neighborhoods to determine which corners have edges
+//!      and whether those edges are dominant (strong) or normal.
+//!   2. For each corner, classify the edge direction (steep/shallow/diagonal)
+//!      and apply a scale-specific blend pattern to the output block.
+//!
+//! Every output pixel is either the center color or a weighted blend between
+//! the center and one edge neighbor, preserving the pixel-art aesthetic.
 
-use super::get;
-use super::blend_argb;
-use super::color_dist_bt2020 as dist;
+use super::{get, color_dist_bt2020};
+
+// ── Scale factor enum ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XbrzScale { Xbrz2x, Xbrz3x, Xbrz4x, Xbrz5x, Xbrz6x }
@@ -17,440 +19,394 @@ pub enum XbrzScale { Xbrz2x, Xbrz3x, Xbrz4x, Xbrz5x, Xbrz6x }
 impl XbrzScale {
     pub fn factor(self) -> u32 {
         match self {
-            XbrzScale::Xbrz2x => 2, XbrzScale::Xbrz3x => 3,
-            XbrzScale::Xbrz4x => 4, XbrzScale::Xbrz5x => 5,
-            XbrzScale::Xbrz6x => 6,
+            Self::Xbrz2x => 2, Self::Xbrz3x => 3, Self::Xbrz4x => 4,
+            Self::Xbrz5x => 5, Self::Xbrz6x => 6,
         }
     }
 }
 
-const DOMINANT_RATIO: f32 = 3.6;
-const LINE_DETECT_RATIO: f32 = 2.2;
-const EQ_TOLERANCE: f32 = 30.0;
+// ── Perceptual color helpers ────────────────────────────────────────────────
+
+/// Two colors are perceptually "equal" if their BT.2020 distance is small.
+const EQUAL_THRESHOLD: f32 = 30.0;
 
 #[inline(always)]
-fn eq(a: u32, b: u32) -> bool { dist(a, b) < EQ_TOLERANCE }
+fn dist(a: u32, b: u32) -> f32 { color_dist_bt2020(a, b) }
 
-// ── Blend info packed into a u8: 2 bits per corner ─────────────────────────
-// Matches C++ layout: TL=[1:0], TR=[3:2], BR=[5:4], BL=[7:6]
-const BL_NONE: u8 = 0;
-const BL_NORMAL: u8 = 1;
-const BL_DOMINANT: u8 = 2;
+#[inline(always)]
+fn colors_equal(a: u32, b: u32) -> bool { dist(a, b) < EQUAL_THRESHOLD }
 
-#[inline(always)] fn get_tl(b: u8) -> u8 { b & 3 }
-#[inline(always)] fn get_tr(b: u8) -> u8 { (b >> 2) & 3 }
-#[inline(always)] fn get_br(b: u8) -> u8 { (b >> 4) & 3 }
-#[inline(always)] fn get_bl(b: u8) -> u8 { (b >> 6) & 3 }
-#[inline(always)] fn set_tl(b: &mut u8, v: u8) { *b |= v & 3; }
-#[inline(always)] fn set_tr(b: &mut u8, v: u8) { *b |= (v & 3) << 2; }
-#[inline(always)] fn set_br(b: &mut u8, v: u8) { *b |= (v & 3) << 4; }
-#[inline(always)] fn set_bl(b: &mut u8, v: u8) { *b |= (v & 3) << 6; }
+// ── Edge strength per corner ────────────────────────────────────────────────
 
-// ── Phase 1: preProcessCorners ─────────────────────────────────────────────
+/// Edge strength: none, normal, or dominant (strong diagonal).
+const EDGE_NONE: u8 = 0;
+const EDGE_NORMAL: u8 = 1;
+const EDGE_DOMINANT: u8 = 2;
 
-fn pre_process_corners(src: &[u32], w: usize, h: usize, blend: &mut [u8]) {
-    let iw = w as isize;
-    let ih = h as isize;
-    for y in 0..h as isize {
-        for x in 0..w as isize {
-            let f = get(src, w, h, x, y);
-            let g = get(src, w, h, x+1, y);
-            let j = get(src, w, h, x, y+1);
-            let k = get(src, w, h, x+1, y+1);
+/// Ratio threshold for dominant vs normal edges.
+const DOMINANT_THRESHOLD: f32 = 3.6;
 
-            // Skip uniform blocks (exact pixel comparison)
-            if (f == g && j == k) || (f == j && g == k) { continue; }
+/// Pack four 2-bit edge values into a single byte.
+/// Layout: corner0=[1:0], corner1=[3:2], corner2=[5:4], corner3=[7:6]
+#[inline(always)] fn pack_edge(c0: u8, c1: u8, c2: u8, c3: u8) -> u8 {
+    c0 | (c1 << 2) | (c2 << 4) | (c3 << 6)
+}
+#[inline(always)] fn read_edge(packed: u8, corner: u8) -> u8 {
+    (packed >> (corner * 2)) & 3
+}
+#[inline(always)] fn write_edge(packed: &mut u8, corner: u8, val: u8) {
+    let shift = corner * 2;
+    *packed = (*packed & !(3 << shift)) | (val << shift);
+}
 
-            let b = get(src, w, h, x, y-1);
-            let c = get(src, w, h, x+1, y-1);
-            let e = get(src, w, h, x-1, y);
-            let hp = get(src, w, h, x+2, y);
-            let i = get(src, w, h, x-1, y+1);
-            let l = get(src, w, h, x+2, y+1);
-            let n = get(src, w, h, x, y+2);
-            let o = get(src, w, h, x+1, y+2);
+/// Rotate the packed edge info by 90° clockwise: 0→1→2→3→0
+#[inline(always)]
+fn rotate_edges(packed: u8) -> u8 {
+    let c0 = packed & 3;
+    let c1 = (packed >> 2) & 3;
+    let c2 = (packed >> 4) & 3;
+    let c3 = (packed >> 6) & 3;
+    c1 | (c2 << 2) | (c3 << 4) | (c0 << 6)
+}
 
-            let jg = dist(i, f) + dist(f, c) + dist(n, k) + dist(k, hp) + 4.0 * dist(j, g);
-            let fk = dist(e, j) + dist(j, o) + dist(b, g) + dist(g, l) + 4.0 * dist(f, k);
+/// Analyze the junction at position (jx, jy) — the meeting point of pixels
+/// (jx,jy), (jx+1,jy), (jx,jy+1), (jx+1,jy+1). Returns a packed byte
+/// with edge strengths for all 4 corners of the junction.
+///
+/// The 4×4 neighborhood centered on the junction:
+/// ```
+///       b  c
+///   e   f  g  h
+///   i   j  k  l
+///       n  o
+/// ```
+fn analyze_junction(src: &[u32], w: usize, h: usize, jx: isize, jy: isize) -> u8 {
+    let f = get(src, w, h, jx,     jy);
+    let g = get(src, w, h, jx + 1, jy);
+    let j = get(src, w, h, jx,     jy + 1);
+    let k = get(src, w, h, jx + 1, jy + 1);
 
-            if jg < fk {
-                let bt = if DOMINANT_RATIO * jg < fk { BL_DOMINANT } else { BL_NORMAL };
-                // Exact pixel comparison (not threshold-based eq)
-                if f != g && f != j {
-                    set_br(&mut blend[y as usize * w + x as usize], bt);
-                }
-                if k != j && k != g {
-                    let kx = (x + 1).min(iw - 1) as usize;
-                    let ky = (y + 1).min(ih - 1) as usize;
-                    set_tl(&mut blend[ky * w + kx], bt);
-                }
-            } else if fk < jg {
-                let bt = if DOMINANT_RATIO * fk < jg { BL_DOMINANT } else { BL_NORMAL };
-                if j != f && j != k {
-                    let jy = (y + 1).min(ih - 1) as usize;
-                    set_tr(&mut blend[jy * w + x as usize], bt);
-                }
-                if g != f && g != k {
-                    let gx = (x + 1).min(iw - 1) as usize;
-                    set_bl(&mut blend[y as usize * w + gx], bt);
-                }
-            }
+    // Uniform 2×2 blocks have no edges
+    if (f == g && j == k) || (f == j && g == k) { return 0; }
+
+    let b  = get(src, w, h, jx,     jy - 1);
+    let c  = get(src, w, h, jx + 1, jy - 1);
+    let e  = get(src, w, h, jx - 1, jy);
+    let h_ = get(src, w, h, jx + 2, jy);
+    let i  = get(src, w, h, jx - 1, jy + 1);
+    let l  = get(src, w, h, jx + 2, jy + 1);
+    let n  = get(src, w, h, jx,     jy + 2);
+    let o  = get(src, w, h, jx + 1, jy + 2);
+
+    let d_jg = dist(i, f) + dist(f, c) + dist(n, k) + dist(k, h_) + 4.0 * dist(j, g);
+    let d_fk = dist(e, j) + dist(j, o) + dist(b, g) + dist(g, l) + 4.0 * dist(f, k);
+
+    let mut result = 0u8;
+    if d_jg < d_fk {
+        let s = if DOMINANT_THRESHOLD * d_jg < d_fk { EDGE_DOMINANT } else { EDGE_NORMAL };
+        // j-g diagonal wins: affects f(BR=corner2) and k(TL=corner0)
+        if f != g && f != j { write_edge(&mut result, 2, s); }
+        if k != j && k != g { write_edge(&mut result, 0, s); }
+    } else if d_fk < d_jg {
+        let s = if DOMINANT_THRESHOLD * d_fk < d_jg { EDGE_DOMINANT } else { EDGE_NORMAL };
+        // f-k diagonal wins: affects g(BL=corner3) and j(TR=corner1)
+        if g != f && g != k { write_edge(&mut result, 3, s); }
+        if j != f && j != k { write_edge(&mut result, 1, s); }
+    }
+    result
+}
+
+/// For each pixel, gather edge info from the 4 surrounding junctions.
+/// Each pixel's 4 corners come from 4 different junctions.
+fn analyze_edges(src: &[u32], w: usize, h: usize) -> Vec<u8> {
+    let mut edges = vec![0u8; w * h];
+    for py in 0..h {
+        for px in 0..w {
+            let ix = px as isize;
+            let iy = py as isize;
+
+            // Junction at (px, py) = bottom-right junction of pixel (px, py)
+            let j_br = analyze_junction(src, w, h, ix, iy);
+            // Junction at (px-1, py) = bottom-left junction
+            let j_bl = analyze_junction(src, w, h, ix - 1, iy);
+            // Junction at (px, py-1) = top-right junction
+            let j_tr = analyze_junction(src, w, h, ix, iy - 1);
+            // Junction at (px-1, py-1) = top-left junction
+            let j_tl = analyze_junction(src, w, h, ix - 1, iy - 1);
+
+            // Gather: each junction contributes one corner to this pixel
+            let mut info = 0u8;
+            write_edge(&mut info, 0, read_edge(j_tl, 0)); // TL corner from TL junction's TL
+            write_edge(&mut info, 1, read_edge(j_tr, 1)); // TR corner from TR junction's TR
+            write_edge(&mut info, 2, read_edge(j_br, 2)); // BR corner from BR junction's BR
+            write_edge(&mut info, 3, read_edge(j_bl, 3)); // BL corner from BL junction's BL
+            edges[py * w + px] = info;
         }
     }
+    edges
 }
 
-// ── Phase 2: scalePixel ────────────────────────────────────────────────────
+// ── Edge classification ─────────────────────────────────────────────────────
 
+/// Ratio for steep/shallow line detection.
+const STEEP_THRESHOLD: f32 = 2.2;
+
+/// Whether a corner should receive line blending (vs being left sharp).
 #[inline(always)]
-fn rot_idx(row: usize, col: usize, n: usize, rot: u8) -> usize {
-    match rot {
-        0 => row * n + col,
-        1 => row * n + (n - 1 - col),
-        2 => (n - 1 - row) * n + (n - 1 - col),
-        3 => (n - 1 - row) * n + col,
-        _ => unreachable!(),
-    }
-}
-
-#[inline(always)]
-fn bset(block: &mut [u32], n: usize, rot: u8, r: usize, c: usize, color: u32, alpha: f32) {
-    let idx = rot_idx(r, c, n, rot);
-    if alpha >= 1.0 {
-        block[idx] = color;
-    } else {
-        block[idx] = blend_argb(block[idx], color, alpha);
-    }
-}
-
-/// Rotate blend info so that the current corner maps to BottomRight position.
-fn rotate_blend(bi: u8, rot: u8) -> u8 {
-    // Rotate the 4 corner fields clockwise by `rot` positions
-    match rot {
-        0 => bi,
-        1 => (get_tl(bi) << 6) | (get_bl(bi) << 4) | (get_tl(bi)) | (get_tr(bi) << 2),
-        _ => {
-            // General rotation: shift the 8-bit value
-            let r = (rot * 2) & 7;
-            (bi >> r) | (bi << (8 - r))
-        }
-    }
-}
-
-/// Check if line blending should be used for the bottom-right corner.
-fn do_line_blend(bi: u8, e: u32, g: u32, h: u32, i: u32, f: u32, c: u32) -> bool {
-    if get_br(bi) >= BL_DOMINANT { return true; }
-    if get_tr(bi) != BL_NONE && !eq(e, g) { return false; }
-    if get_bl(bi) != BL_NONE && !eq(e, c) { return false; }
-    if !eq(e, i) && eq(g, h) && eq(h, i) && eq(i, f) && eq(f, c) { return false; }
+fn should_blend(edge_info: u8, center: u32, pixels: &CornerPixels) -> bool {
+    // Dominant edges always blend
+    if read_edge(edge_info, 2) >= EDGE_DOMINANT { return true; }
+    // Conflicting adjacent edges suppress blending
+    if read_edge(edge_info, 1) != EDGE_NONE && !colors_equal(center, pixels.g) { return false; }
+    if read_edge(edge_info, 3) != EDGE_NONE && !colors_equal(center, pixels.c) { return false; }
+    // Continuous same-color band suppresses blending
+    if !colors_equal(center, pixels.i)
+        && colors_equal(pixels.g, pixels.h)
+        && colors_equal(pixels.h, pixels.i)
+        && colors_equal(pixels.i, pixels.f)
+        && colors_equal(pixels.f, pixels.c)
+    { return false; }
     true
 }
 
-fn scale_pixel(
-    src: &[u32], w: usize, h: usize,
-    blend_info: &[u8], px: usize, py: usize,
-    n: usize, block: &mut [u32],
+/// The 8 relevant neighbor pixels for a corner (after rotation, these are
+/// always relative to the bottom-right corner).
+struct CornerPixels {
+    b: u32, c: u32,     // top-center, top-right
+    f: u32, g: u32,     // center-right, bottom-right (the edge pixel)
+    h: u32, i: u32,     // bottom-center, bottom-right-far
+    d: u32, _e: u32,    // far-right, far-right-bottom
+}
+
+/// Edge direction classification.
+enum EdgeDir { Steep, Shallow, SteepAndShallow, Diagonal }
+
+/// Classify the edge direction at a corner.
+///
+/// `center` = the pixel being scaled
+/// `cp.f` = right neighbor, `cp.h` = bottom neighbor, `cp.g` = diagonal
+/// `cp.c` = top-right, `cp.b` = top, `cp.d` = far-right
+///
+/// Shallow = edge runs mostly horizontal (f-g distance is small relative to h-c).
+/// Steep = edge runs mostly vertical (h-c distance is small relative to f-g).
+fn classify_edge(center: u32, cp: &CornerPixels) -> EdgeDir {
+    let fg = dist(cp.f, cp.g);
+    let hc = dist(cp.h, cp.c);
+
+    let is_shallow = STEEP_THRESHOLD * fg <= hc
+        && !colors_equal(center, cp.g) && !colors_equal(cp.d, cp.g);
+    let is_steep = STEEP_THRESHOLD * hc <= fg
+        && !colors_equal(center, cp.c) && !colors_equal(cp.b, cp.c);
+
+    match (is_steep, is_shallow) {
+        (true, true) => EdgeDir::SteepAndShallow,
+        (true, false) => EdgeDir::Steep,
+        (false, true) => EdgeDir::Shallow,
+        (false, false) => EdgeDir::Diagonal,
+    }
+}
+
+// ── Blend pattern application ───────────────────────────────────────────────
+
+/// A single blend instruction: write `weight` of the edge color at (row, col)
+/// within the NxN output block.
+struct BlendOp { row: u8, col: u8, weight: f32 }
+
+/// Apply a set of blend operations to an output block.
+/// Coordinates are rotated by `rotation` (0-3 for 0°/90°/180°/270°).
+fn apply_blend(
+    out: &mut [u32], out_w: usize,
+    base_x: usize, base_y: usize, n: usize,
+    rotation: u8, center: u32, edge: u32,
+    ops: &[BlendOp],
 ) {
-    let e = src[py * w + px];
-    let bi = blend_info[py * w + px];
-    for p in block.iter_mut() { *p = e; }
-    if bi == 0 { return; }
-
-    let ix = px as isize;
-    let iy = py as isize;
-
-    for rot in 0..4u8 {
-        // Rotate blend info so current corner is at BottomRight
-        let rbi = rotate_blend(bi, rot);
-        if get_br(rbi) == BL_NONE { continue; }
-
-        let (dx, dy) = match rot {
-            0 => (1_isize, 1_isize),
-            1 => (-1, 1),
-            2 => (-1, -1),
-            3 => (1, -1),
-            _ => unreachable!(),
-        };
-
-        // 3x3 rotated kernel: a b c / d e f / g h i
-        let f_px = get(src, w, h, ix + dx, iy);
-        let h_px = get(src, w, h, ix, iy + dy);
-        let c_px = get(src, w, h, ix + dx, iy - dy);
-        let g_px = get(src, w, h, ix - dx, iy + dy);
-        let i_px = get(src, w, h, ix + dx, iy + dy);
-
-        // Blend target: more similar axis neighbor
-        let target = if dist(e, f_px) <= dist(e, h_px) { f_px } else { h_px };
-
-        let line = do_line_blend(rbi, e, g_px, h_px, i_px, f_px, c_px);
-
-        if !line {
-            blend_corner(block, n, rot, target);
+    for op in ops {
+        let (r, c) = rotate_coord(op.row as usize, op.col as usize, n, rotation);
+        let idx = (base_y + r) * out_w + (base_x + c);
+        if op.weight >= 1.0 {
+            out[idx] = edge;
         } else {
-            let d_px = get(src, w, h, ix - dx, iy);
-            let b_px = get(src, w, h, ix, iy - dy);
-            let fg = dist(f_px, g_px);
-            let hc = dist(h_px, c_px);
-            let shallow = LINE_DETECT_RATIO * fg <= hc && !eq(e, g_px) && !eq(d_px, g_px);
-            let steep   = LINE_DETECT_RATIO * hc <= fg && !eq(e, c_px) && !eq(b_px, c_px);
-
-            match (steep, shallow) {
-                (true, true)   => blend_steep_and_shallow(block, n, rot, target),
-                (false, true)  => blend_shallow(block, n, rot, target),
-                (true, false)  => blend_steep(block, n, rot, target),
-                (false, false) => blend_diagonal(block, n, rot, target),
-            }
+            out[idx] = weighted_mix(center, edge, op.weight);
         }
     }
 }
 
-// ── Blending patterns ──────────────────────────────────────────────────────
-// All positions are (row, col) in the NxN output block, oriented so the
-// blended corner is at (n-1, n-1) (bottom-right). Rotation handles the
-// other three corners.
-
-fn blend_corner(block: &mut [u32], n: usize, rot: u8, t: u32) {
+/// Map blend-table coordinates (relative to bottom-right corner) to the
+/// actual output block position for each rotation.
+/// rot 0 = BR: no flip. rot 1 = BL: flip col. rot 2 = TL: flip both. rot 3 = TR: flip row.
+#[inline(always)]
+fn rotate_coord(row: usize, col: usize, n: usize, rotation: u8) -> (usize, usize) {
     let m = n - 1;
-    match n {
-        2 => { bset(block, 2, rot, 1, 1, t, 0.21); }
-        3 => { bset(block, 3, rot, 2, 2, t, 0.45); }
-        4 => {
-            bset(block, 4, rot, 3, 3, t, 0.68);
-            bset(block, 4, rot, 3, 2, t, 0.09);
-            bset(block, 4, rot, 2, 3, t, 0.09);
-        }
-        5 => {
-            bset(block, 5, rot, 4, 4, t, 0.86);
-            bset(block, 5, rot, 4, 3, t, 0.23);
-            bset(block, 5, rot, 3, 4, t, 0.23);
-        }
-        _ => {
-            bset(block, n, rot, m, m, t, 0.97);
-            bset(block, n, rot, m-1, m, t, 0.42);
-            bset(block, n, rot, m, m-1, t, 0.42);
-            bset(block, n, rot, m, m-2, t, 0.06);
-            bset(block, n, rot, m-2, m, t, 0.06);
-        }
+    match rotation & 3 {
+        0 => (row, col),
+        1 => (row, m - col),
+        2 => (m - row, m - col),
+        _ => (m - row, col),
     }
 }
 
-fn blend_shallow(block: &mut [u32], n: usize, rot: u8, t: u32) {
-    let m = n - 1;
-    match n {
-        2 => {
-            bset(block, 2, rot, 1, 0, t, 0.25);
-            bset(block, 2, rot, 1, 1, t, 0.75);
-        }
-        3 => {
-            bset(block, 3, rot, 2, 0, t, 0.25);
-            bset(block, 3, rot, 1, 2, t, 0.25);
-            bset(block, 3, rot, 2, 1, t, 0.75);
-            bset(block, 3, rot, 2, 2, t, 1.0);
-        }
-        4 => {
-            bset(block, 4, rot, 3, 0, t, 0.25);
-            bset(block, 4, rot, 2, 2, t, 0.25);
-            bset(block, 4, rot, 3, 1, t, 0.75);
-            bset(block, 4, rot, 2, 3, t, 0.75);
-            bset(block, 4, rot, 3, 2, t, 1.0);
-            bset(block, 4, rot, 3, 3, t, 1.0);
-        }
-        5 => {
-            bset(block, 5, rot, 4, 0, t, 0.25);
-            bset(block, 5, rot, 3, 2, t, 0.25);
-            bset(block, 5, rot, 2, 4, t, 0.25);
-            bset(block, 5, rot, 4, 1, t, 0.75);
-            bset(block, 5, rot, 3, 3, t, 0.75);
-            bset(block, 5, rot, 4, 2, t, 1.0);
-            bset(block, 5, rot, 4, 3, t, 1.0);
-            bset(block, 5, rot, 4, 4, t, 1.0);
-            bset(block, 5, rot, 3, 4, t, 1.0);
-        }
-        _ => { // 6x
-            bset(block, n, rot, m, 0, t, 0.25);
-            bset(block, n, rot, m-1, 2, t, 0.25);
-            bset(block, n, rot, m-2, 4, t, 0.25);
-            bset(block, n, rot, m, 1, t, 0.75);
-            bset(block, n, rot, m-1, 3, t, 0.75);
-            bset(block, n, rot, m-2, m, t, 0.75);
-            bset(block, n, rot, m, 2, t, 1.0);
-            bset(block, n, rot, m, 3, t, 1.0);
-            bset(block, n, rot, m, 4, t, 1.0);
-            bset(block, n, rot, m, m, t, 1.0);
-            bset(block, n, rot, m-1, m-1, t, 1.0);
-            bset(block, n, rot, m-1, m, t, 1.0);
-        }
+/// Weighted blend between two XRGB pixels.
+#[inline(always)]
+fn weighted_mix(a: u32, b: u32, w: f32) -> u32 {
+    let inv = 1.0 - w;
+    let r = (((a >> 16) & 0xFF) as f32 * inv + ((b >> 16) & 0xFF) as f32 * w + 0.5) as u32;
+    let g = (((a >> 8) & 0xFF) as f32 * inv + ((b >> 8) & 0xFF) as f32 * w + 0.5) as u32;
+    let b_ = ((a & 0xFF) as f32 * inv + (b & 0xFF) as f32 * w + 0.5) as u32;
+    (r.min(255) << 16) | (g.min(255) << 8) | b_.min(255)
+}
+
+// ── Per-scale blend tables ──────────────────────────────────────────────────
+//
+// Each table defines which output pixels to blend for a given edge direction.
+// Coordinates are relative to the bottom-right corner (rotation 0); the
+// apply_blend function handles the other 3 rotations.
+//
+// The blend weights are chosen to approximate anti-aliased edges at each
+// scale factor. These specific values define the xBRZ visual style.
+
+macro_rules! ops {
+    ($(($r:expr, $c:expr, $w:expr)),+ $(,)?) => {
+        &[$(BlendOp { row: $r, col: $c, weight: $w }),+]
     }
 }
 
-fn blend_steep(block: &mut [u32], n: usize, rot: u8, t: u32) {
-    let m = n - 1;
+// Blend tables derived from the xBRZ algorithm specification.
+// Each table encodes which sub-pixels get blended and at what weight.
+// Coordinates are relative to the bottom-right corner (rotation 0).
+
+fn shallow_ops(n: usize) -> &'static [BlendOp] {
     match n {
-        2 => {
-            bset(block, 2, rot, 0, 1, t, 0.25);
-            bset(block, 2, rot, 1, 1, t, 0.75);
-        }
-        3 => {
-            bset(block, 3, rot, 0, 2, t, 0.25);
-            bset(block, 3, rot, 2, 1, t, 0.25);
-            bset(block, 3, rot, 1, 2, t, 0.75);
-            bset(block, 3, rot, 2, 2, t, 1.0);
-        }
-        4 => {
-            bset(block, 4, rot, 0, 3, t, 0.25);
-            bset(block, 4, rot, 2, 2, t, 0.25);
-            bset(block, 4, rot, 1, 3, t, 0.75);
-            bset(block, 4, rot, 3, 2, t, 0.75);
-            bset(block, 4, rot, 2, 3, t, 1.0);
-            bset(block, 4, rot, 3, 3, t, 1.0);
-        }
-        5 => {
-            bset(block, 5, rot, 0, 4, t, 0.25);
-            bset(block, 5, rot, 2, 3, t, 0.25);
-            bset(block, 5, rot, 4, 1, t, 0.25);
-            bset(block, 5, rot, 1, 4, t, 0.75);
-            bset(block, 5, rot, 3, 3, t, 0.75);
-            bset(block, 5, rot, 2, 4, t, 1.0);
-            bset(block, 5, rot, 3, 4, t, 1.0);
-            bset(block, 5, rot, 4, 4, t, 1.0);
-            bset(block, 5, rot, 4, 3, t, 1.0);
-        }
-        _ => { // 6x
-            bset(block, n, rot, 0, m, t, 0.25);
-            bset(block, n, rot, 2, m-1, t, 0.25);
-            bset(block, n, rot, 4, m-2, t, 0.25);
-            bset(block, n, rot, 1, m, t, 0.75);
-            bset(block, n, rot, 3, m-1, t, 0.75);
-            bset(block, n, rot, m, m-2, t, 0.75);
-            bset(block, n, rot, 2, m, t, 1.0);
-            bset(block, n, rot, 3, m, t, 1.0);
-            bset(block, n, rot, 4, m, t, 1.0);
-            bset(block, n, rot, m, m, t, 1.0);
-            bset(block, n, rot, m-1, m-1, t, 1.0);
-            bset(block, n, rot, m, m-1, t, 1.0);
-        }
+        2 => ops![(1,0, 0.25), (1,1, 0.75)],
+        3 => ops![(2,0, 0.25), (1,2, 0.25), (2,1, 0.75), (2,2, 1.0)],
+        4 => ops![(3,0, 0.25), (2,2, 0.25), (3,1, 0.75), (2,3, 0.75), (3,2, 1.0), (3,3, 1.0)],
+        5 => ops![(4,0, 0.25), (3,2, 0.25), (2,4, 0.25), (4,1, 0.75), (3,3, 0.75), (4,2, 1.0), (4,3, 1.0), (4,4, 1.0), (3,4, 1.0)],
+        _ => ops![(5,0, 0.25), (4,2, 0.25), (3,4, 0.25), (5,1, 0.75), (4,3, 0.75), (3,5, 0.75), (5,2, 1.0), (5,3, 1.0), (5,4, 1.0), (5,5, 1.0), (4,4, 1.0), (4,5, 1.0)],
     }
 }
 
-fn blend_steep_and_shallow(block: &mut [u32], n: usize, rot: u8, t: u32) {
-    let m = n - 1;
+fn steep_ops(n: usize) -> &'static [BlendOp] {
+    // Steep = transpose of shallow (swap row/col)
     match n {
-        2 => {
-            bset(block, 2, rot, 1, 0, t, 0.25);
-            bset(block, 2, rot, 0, 1, t, 0.25);
-            bset(block, 2, rot, 1, 1, t, 5.0/6.0);
-        }
-        3 => {
-            bset(block, 3, rot, 2, 0, t, 0.25);
-            bset(block, 3, rot, 0, 2, t, 0.25);
-            bset(block, 3, rot, 2, 1, t, 0.75);
-            bset(block, 3, rot, 1, 2, t, 0.75);
-            bset(block, 3, rot, 2, 2, t, 1.0);
-        }
-        4 => {
-            bset(block, 4, rot, 3, 1, t, 0.75);
-            bset(block, 4, rot, 1, 3, t, 0.75);
-            bset(block, 4, rot, 3, 0, t, 0.25);
-            bset(block, 4, rot, 0, 3, t, 0.25);
-            bset(block, 4, rot, 2, 2, t, 1.0/3.0);
-            bset(block, 4, rot, 3, 2, t, 1.0);
-            bset(block, 4, rot, 2, 3, t, 1.0);
-            bset(block, 4, rot, 3, 3, t, 1.0);
-        }
-        5 => {
-            bset(block, 5, rot, 0, 4, t, 0.25);
-            bset(block, 5, rot, 2, 3, t, 0.25);
-            bset(block, 5, rot, 1, 4, t, 0.75);
-            bset(block, 5, rot, 4, 0, t, 0.25);
-            bset(block, 5, rot, 3, 2, t, 0.25);
-            bset(block, 5, rot, 4, 1, t, 0.75);
-            bset(block, 5, rot, 3, 3, t, 2.0/3.0);
-            bset(block, 5, rot, 2, 4, t, 1.0);
-            bset(block, 5, rot, 3, 4, t, 1.0);
-            bset(block, 5, rot, 4, 4, t, 1.0);
-            bset(block, 5, rot, 4, 2, t, 1.0);
-            bset(block, 5, rot, 4, 3, t, 1.0);
-        }
-        _ => { // 6x
-            bset(block, n, rot, 0, m, t, 0.25);
-            bset(block, n, rot, 2, m-1, t, 0.25);
-            bset(block, n, rot, 1, m, t, 0.75);
-            bset(block, n, rot, 3, m-1, t, 0.75);
-            bset(block, n, rot, m, 0, t, 0.25);
-            bset(block, n, rot, m-1, 2, t, 0.25);
-            bset(block, n, rot, m, 1, t, 0.75);
-            bset(block, n, rot, m-1, 3, t, 0.75);
-            bset(block, n, rot, 2, m, t, 1.0);
-            bset(block, n, rot, 3, m, t, 1.0);
-            bset(block, n, rot, 4, m, t, 1.0);
-            bset(block, n, rot, m, m, t, 1.0);
-            bset(block, n, rot, m-1, m-1, t, 1.0);
-            bset(block, n, rot, m, m-1, t, 1.0);
-            bset(block, n, rot, m, 2, t, 1.0);
-            bset(block, n, rot, m, 3, t, 1.0);
-        }
+        2 => ops![(0,1, 0.25), (1,1, 0.75)],
+        3 => ops![(0,2, 0.25), (2,1, 0.25), (1,2, 0.75), (2,2, 1.0)],
+        4 => ops![(0,3, 0.25), (2,2, 0.25), (1,3, 0.75), (3,2, 0.75), (2,3, 1.0), (3,3, 1.0)],
+        5 => ops![(0,4, 0.25), (2,3, 0.25), (4,2, 0.25), (1,4, 0.75), (3,3, 0.75), (2,4, 1.0), (3,4, 1.0), (4,4, 1.0), (4,3, 1.0)],
+        _ => ops![(0,5, 0.25), (2,4, 0.25), (4,3, 0.25), (1,5, 0.75), (3,4, 0.75), (5,3, 0.75), (2,5, 1.0), (3,5, 1.0), (4,5, 1.0), (5,5, 1.0), (4,4, 1.0), (5,4, 1.0)],
     }
 }
 
-fn blend_diagonal(block: &mut [u32], n: usize, rot: u8, t: u32) {
-    let m = n - 1;
+fn steep_and_shallow_ops(n: usize) -> &'static [BlendOp] {
     match n {
-        2 => {
-            bset(block, 2, rot, 1, 1, t, 0.5);
-        }
-        3 => {
-            bset(block, 3, rot, 1, 2, t, 1.0/8.0);
-            bset(block, 3, rot, 2, 1, t, 1.0/8.0);
-            bset(block, 3, rot, 2, 2, t, 7.0/8.0);
-        }
-        4 => {
-            bset(block, 4, rot, m, m/2, t, 0.5);
-            bset(block, 4, rot, m-1, m/2+1, t, 0.5);
-            bset(block, 4, rot, m, m, t, 1.0);
-        }
-        5 => {
-            bset(block, 5, rot, m, m/2, t, 1.0/8.0);
-            bset(block, 5, rot, m-1, m/2+1, t, 1.0/8.0);
-            bset(block, 5, rot, m-2, m/2+2, t, 1.0/8.0);
-            bset(block, 5, rot, 4, 3, t, 7.0/8.0);
-            bset(block, 5, rot, 3, 4, t, 7.0/8.0);
-            bset(block, 5, rot, 4, 4, t, 1.0);
-        }
-        _ => { // 6x
-            bset(block, n, rot, m, m/2, t, 0.5);
-            bset(block, n, rot, m-1, m/2+1, t, 0.5);
-            bset(block, n, rot, m-2, m/2+2, t, 0.5);
-            bset(block, n, rot, m-1, m, t, 1.0);
-            bset(block, n, rot, m, m, t, 1.0);
-            bset(block, n, rot, m, m-1, t, 1.0);
-        }
+        2 => ops![(0,1, 0.25), (1,0, 0.25), (1,1, 5.0/6.0)],
+        3 => ops![(0,2, 0.25), (2,0, 0.25), (2,1, 0.75), (1,2, 0.75), (2,2, 1.0)],
+        4 => ops![(0,3, 0.25), (3,0, 0.25), (3,1, 0.75), (1,3, 0.75), (2,2, 1.0/3.0), (3,2, 1.0), (2,3, 1.0), (3,3, 1.0)],
+        5 => ops![(0,4, 0.25), (2,3, 0.25), (1,4, 0.75), (4,0, 0.25), (3,2, 0.25), (4,1, 0.75), (3,3, 2.0/3.0), (2,4, 1.0), (3,4, 1.0), (4,4, 1.0), (4,2, 1.0), (4,3, 1.0)],
+        _ => ops![(0,5, 0.25), (2,4, 0.25), (1,5, 0.75), (3,4, 0.75), (5,0, 0.25), (4,2, 0.25), (5,1, 0.75), (4,3, 0.75), (2,5, 1.0), (3,5, 1.0), (4,5, 1.0), (5,5, 1.0), (4,4, 1.0), (5,4, 1.0), (5,2, 1.0), (5,3, 1.0)],
     }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
+fn diagonal_ops(n: usize) -> &'static [BlendOp] {
+    match n {
+        2 => ops![(1,1, 0.5)],
+        3 => ops![(1,2, 1.0/8.0), (2,1, 1.0/8.0), (2,2, 7.0/8.0)],
+        4 => ops![(3,2, 0.5), (2,3, 0.5), (3,3, 1.0)],
+        5 => ops![(4,2, 1.0/8.0), (3,3, 1.0/8.0), (2,4, 1.0/8.0), (4,3, 7.0/8.0), (3,4, 7.0/8.0), (4,4, 1.0)],
+        _ => ops![(5,3, 0.5), (4,4, 0.5), (3,5, 0.5), (4,5, 1.0), (5,4, 1.0), (5,5, 1.0)],
+    }
+}
 
-pub fn scale(src: &[u32], src_w: usize, src_h: usize, mode: XbrzScale) -> Vec<u32> {
+fn corner_ops(n: usize) -> &'static [BlendOp] {
+    // Corner weights approximate the area outside a quarter-circle inscribed
+    // in the NxN output block. 2x: 1-π/4 ≈ 0.2146, then geometrically scaled.
+    match n {
+        2 => ops![(1,1, 0.21)],
+        3 => ops![(2,2, 0.45)],
+        4 => ops![(3,3, 0.68), (3,2, 0.09), (2,3, 0.09)],
+        5 => ops![(4,4, 0.86), (4,3, 0.23), (3,4, 0.23)],
+        _ => ops![(5,5, 0.97), (5,4, 0.42), (4,5, 0.42), (5,3, 0.06), (3,5, 0.06)],
+    }
+}
+
+// ── Main scaling function ───────────────────────────────────────────────────
+
+/// Scale an image using xBRZ at the specified scale factor (2x–6x).
+pub fn scale(src: &[u32], w: usize, h: usize, mode: XbrzScale) -> Vec<u32> {
     let n = mode.factor() as usize;
-    let dst_w = src_w * n;
-    let dst_h = src_h * n;
-    let mut dst = vec![0u32; dst_w * dst_h];
+    let ow = w * n;
+    let oh = h * n;
+    let mut out = vec![0u32; ow * oh];
 
-    // Phase 1: preprocess all corners
-    let mut blend_info = vec![0u8; src_w * src_h];
-    pre_process_corners(src, src_w, src_h, &mut blend_info);
+    // Phase 1: analyze edges
+    let edges = analyze_edges(src, w, h);
 
     // Phase 2: scale each pixel
-    let mut block = vec![0u32; n * n];
-    for y in 0..src_h {
-        for x in 0..src_w {
-            scale_pixel(src, src_w, src_h, &blend_info, x, y, n, &mut block);
-            let dx = x * n;
-            let dy = y * n;
+    for py in 0..h {
+        for px in 0..w {
+            let center = get(src, w, h, px as isize, py as isize);
+            let ox = px * n;
+            let oy = py * n;
+
+            // Fill entire output block with center color
             for r in 0..n {
                 for c in 0..n {
-                    dst[(dy + r) * dst_w + dx + c] = block[r * n + c];
+                    out[(oy + r) * ow + (ox + c)] = center;
                 }
+            }
+
+            let edge_info = edges[py * w + px];
+            if edge_info == 0 { continue; } // no edges, block is uniform
+
+            let ix = px as isize;
+            let iy = py as isize;
+
+            // Process each of 4 corners via rotation.
+            // rot 0 = BR corner, rot 1 = BL, rot 2 = TL, rot 3 = TR.
+            // Direction vectors point from center toward the corner being processed.
+            const DIRS: [(isize, isize); 4] = [(1, 1), (-1, 1), (-1, -1), (1, -1)];
+
+            for rotation in 0u8..4 {
+                // Rotate edge info to bring current corner to position 2 (bottom-right)
+                let rotated = {
+                    let mut r = edge_info;
+                    for _ in 0..rotation { r = rotate_edges(r); }
+                    r
+                };
+
+                if read_edge(rotated, 2) == EDGE_NONE { continue; }
+
+                // Gather neighbors using direction vectors.
+                // (dx, dy) points toward the corner being processed.
+                let (dx, dy) = DIRS[rotation as usize];
+                let cp = CornerPixels {
+                    f: get(src, w, h, ix + dx, iy),          // horizontal toward corner
+                    h: get(src, w, h, ix, iy + dy),          // vertical toward corner
+                    g: get(src, w, h, ix - dx, iy + dy),     // opposite-horizontal, same-vertical
+                    i: get(src, w, h, ix + dx, iy + dy),     // the diagonal corner itself
+                    c: get(src, w, h, ix + dx, iy - dy),     // horizontal toward, vertical away
+                    b: get(src, w, h, ix, iy - dy),          // vertical away from corner
+                    d: get(src, w, h, ix - dx, iy),          // horizontal away from corner
+                    _e: get(src, w, h, ix - dx, iy - dy),    // opposite diagonal
+                };
+
+                // Blend target: the closer of the two orthogonal neighbors
+                let target = if dist(center, cp.f) <= dist(center, cp.h) { cp.f } else { cp.h };
+
+                if !should_blend(rotated, center, &cp) {
+                    // Even without line blending, corners get a small AA blend
+                    apply_blend(&mut out, ow, ox, oy, n, rotation, center, target, corner_ops(n));
+                    continue;
+                }
+
+                let dir = classify_edge(center, &cp);
+                let ops = match dir {
+                    EdgeDir::Shallow => shallow_ops(n),
+                    EdgeDir::Steep => steep_ops(n),
+                    EdgeDir::SteepAndShallow => steep_and_shallow_ops(n),
+                    EdgeDir::Diagonal => diagonal_ops(n),
+                };
+                apply_blend(&mut out, ow, ox, oy, n, rotation, center, target, ops);
             }
         }
     }
-    dst
+    out
 }
