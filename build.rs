@@ -94,7 +94,7 @@ fn main() {
         // Metal
         run_slangc(&src, "metal", &msl);
 
-        // WGSL — WTexture2D emits write access directly, no post-processing needed.
+        // WGSL
         run_slangc(&src, "wgsl", &wgsl);
 
         // DXIL (requires dxc, only available on Windows).

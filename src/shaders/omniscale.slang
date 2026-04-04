@@ -64,7 +64,7 @@ float aa_band(float d, float hw) {
 }
 
 static const int NUM_RULES = 55;
-static int RULE_MASK[55] = {
+static const int RULE_MASK[55] = {
     191,219,219,239, 11,254,254,
     111,91,191,223,159,207,239,
     63,251,187,127,175,235, 11,11, 47,
@@ -74,7 +74,7 @@ static int RULE_MASK[55] = {
     79,159,47,190,238,126,235,59,
     11,11
 };
-static int RULE_VAL[55] = {
+static const int RULE_VAL[55] = {
     55,19,73,109, 11,74,26,
     42,10,58,90,138,138,78,
     14,90,138,90,138,138, 8,2, 47,
@@ -84,7 +84,7 @@ static int RULE_VAL[55] = {
     75,27,11,10,10,10,75,27,
     1,0
 };
-static int RULE_COND[55] = {
+static const int RULE_COND[55] = {
     1,1,2,2, 3,3,3,
     3,3,3,3,3,3,3,
     3,3,3,3,3,3, 0,0, 0,
@@ -94,7 +94,7 @@ static int RULE_COND[55] = {
     0,0,0,0,0,0,0,0,
     0,0
 };
-static int RULE_ACT[55] = {
+static const int RULE_ACT[55] = {
     0,0,1,1, 2,2,2,
     3,3,3,3,3,3,3,
     3,3,3,3,3,3, 4,5, 6,
