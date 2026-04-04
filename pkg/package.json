@@ -1,0 +1,21 @@
+{
+  "name": "vibeboy",
+  "type": "module",
+  "description": "Game Boy / Game Boy Color emulator with pixel-art vectorization",
+  "version": "0.1.0",
+  "license": "0BSD",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/northbymidwest/vibeboy"
+  },
+  "files": [
+    "vibeboy_bg.wasm",
+    "vibeboy.js",
+    "vibeboy.d.ts"
+  ],
+  "main": "vibeboy.js",
+  "types": "vibeboy.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
