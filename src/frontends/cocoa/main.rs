@@ -19,6 +19,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use objc2::{msg_send, sel, MainThreadOnly};
@@ -109,6 +110,74 @@ struct Cli {
     /// Scaling filter
     #[arg(long, default_value = "nearest", value_parser = parse_filter)]
     filter: String,
+}
+
+// ── CFRunLoopTimer (for emulation during menu tracking) ─────────────────────
+
+#[allow(non_snake_case)]
+unsafe extern "C" {
+    fn CFRunLoopGetMain() -> *mut c_void;
+    fn CFRunLoopAddTimer(rl: *mut c_void, timer: *mut c_void, mode: *const c_void);
+    fn CFRunLoopRemoveTimer(rl: *mut c_void, timer: *mut c_void, mode: *const c_void);
+    fn CFRunLoopTimerCreate(
+        allocator: *const c_void,
+        fireDate: f64,
+        interval: f64,
+        flags: u64,
+        order: i64,
+        callout: unsafe extern "C" fn(timer: *mut c_void, info: *mut c_void),
+        context: *mut CFRunLoopTimerContext,
+    ) -> *mut c_void;
+    fn CFRunLoopTimerInvalidate(timer: *mut c_void);
+    fn CFAbsoluteTimeGetCurrent() -> f64;
+    fn CFRelease(cf: *mut c_void);
+    static kCFRunLoopCommonModes: *const c_void;
+    static kCFAllocatorDefault: *const c_void;
+}
+
+#[repr(C)]
+struct CFRunLoopTimerContext {
+    version: isize,
+    info: *mut c_void,
+    retain: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+    release: Option<unsafe extern "C" fn(*const c_void)>,
+    copy_description: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+}
+
+/// Context passed to the frame timer callback.
+struct FrameTimerInfo {
+    state: *mut AppState,
+    window: *const NSWindow,
+    frame_start: *mut Instant,
+    running: bool,
+}
+
+/// Called by CFRunLoopTimer at frame rate. Steps emulation, renders, updates
+/// FPS, and flushes saves. Fires on kCFRunLoopCommonModes so it continues
+/// during menu tracking, keeping audio-driven emulation smooth.
+unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void) {
+    let ctx = &mut *(info as *mut FrameTimerInfo);
+    if !ctx.running { return; }
+    let state = &mut *ctx.state;
+    let window = &*ctx.window;
+    let frame_start = &mut *ctx.frame_start;
+
+    let _pool = objc2_foundation::NSAutoreleasePool::new();
+
+    state.update_input();
+    state.step_emulation(frame_start);
+
+    if let Some(content_view) = window.contentView() {
+        state.render(window, &content_view);
+    }
+
+    let emu_time = frame_start.elapsed();
+    if let Some((f, ms)) = state.fps.update(1, emu_time) {
+        state.overlay_fps = f;
+        state.overlay_emu_ms = ms;
+    }
+
+    state.sav_flusher.poll(&state.emu);
 }
 
 // ── AppState ─────────────────────────────────────────────────────────────────
@@ -383,9 +452,14 @@ impl AppState {
         let slow_motion = self.keys_down.contains(&K_MINUS);
         self.emu.set_rewinding(backspace_held);
 
-        // Accumulate elapsed time
+        // Accumulate elapsed time, capped to prevent catch-up bursts if the app
+        // is backgrounded or otherwise stalled for an extended period.
         self.emu_time_debt += frame_start.elapsed();
         *frame_start = Instant::now();
+        let max_debt = self.frame_dur * 3;
+        if self.emu_time_debt > max_debt {
+            self.emu_time_debt = max_debt;
+        }
 
         if self.paused && self.step_one_frame {
             self.emu.step_frame();
@@ -939,15 +1013,51 @@ fn main() {
 
         let mut frame_start = Instant::now();
 
-        // ── Main loop ────────────────────────────────────────────────────────
+        // ── Frame timer ─────────────────────────────────────────────────────
+        // A CFRunLoopTimer on kCFRunLoopCommonModes drives emulation + render.
+        // This fires during both normal operation and menu tracking, keeping
+        // audio-driven emulation smooth when macOS blocks the main thread for
+        // modal menu interaction.
+        let mut timer_info = FrameTimerInfo {
+            state: &mut state as *mut AppState,
+            window: &*window as *const NSWindow,
+            frame_start: &mut frame_start as *mut Instant,
+            running: true,
+        };
+        let timer = {
+            let mut ctx = CFRunLoopTimerContext {
+                version: 0,
+                info: &mut timer_info as *mut FrameTimerInfo as *mut c_void,
+                retain: None,
+                release: None,
+                copy_description: None,
+            };
+            let t = CFRunLoopTimerCreate(
+                kCFAllocatorDefault,
+                CFAbsoluteTimeGetCurrent(),
+                frame_dur.as_secs_f64(),
+                0, 0,
+                frame_timer_callback,
+                &mut ctx,
+            );
+            CFRunLoopAddTimer(CFRunLoopGetMain(), t, kCFRunLoopCommonModes);
+            t
+        };
+
+        // ── Main loop (events only) ─────────────────────────────────────────
         'running: loop {
             let _pool = objc2_foundation::NSAutoreleasePool::new();
 
-            // Poll events
+            // Block until the next event or the frame timer fires.
+            // NSDate with frame_dur timeout avoids busy-waiting while still
+            // allowing the timer to wake us for the next frame.
+            let wait_until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(
+                frame_dur.as_secs_f64(),
+            );
             loop {
                 let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                     NSEventMask::Any,
-                    None, // don't wait
+                    Some(&wait_until),
                     NSDefaultRunLoopMode,
                     true,
                 ) else {
@@ -996,7 +1106,9 @@ fn main() {
                     }
                 }
 
-                // Always dispatch events so menus and window chrome work
+                // Dispatch events so menus and window chrome work.
+                // During menu tracking, sendEvent blocks — but the frame timer
+                // fires on kCFRunLoopCommonModes and keeps emulation running.
                 app.sendEvent(&event);
             }
 
@@ -1008,36 +1120,13 @@ fn main() {
             if !window.isVisible() {
                 break 'running;
             }
-
-            // Update input (gamepad, camera, accelerometer)
-            state.update_input();
-
-            // Step emulation
-            state.step_emulation(&mut frame_start);
-
-            // Render
-            state.render(&window, &content_view);
-
-            // FPS counter
-            let emu_time = frame_start.elapsed();
-            if let Some((f, ms)) = state.fps.update(1, emu_time) {
-                state.overlay_fps = f;
-                state.overlay_emu_ms = ms;
-            }
-
-            // Periodic save RAM flush
-            state.sav_flusher.poll(&state.emu);
-
-            // Frame rate cap
-            if state.emu_time_debt < state.frame_dur {
-                let remaining = state.frame_dur.saturating_sub(state.emu_time_debt);
-                if remaining > Duration::from_millis(2) {
-                    std::thread::sleep(remaining - Duration::from_millis(2));
-                }
-            }
         }
 
         // Cleanup
+        timer_info.running = false;
+        CFRunLoopTimerInvalidate(timer);
+        CFRelease(timer);
+
         close_accel(&state.accel_source);
         drop(state.camera.take());
 
