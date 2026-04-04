@@ -29,6 +29,7 @@ const SHADERS: &[&str] = &[
     "omniscale",
     "omniscale_legacy",
     "super_xbr",
+    "scalefx",
     "similarity_graph",
     "resolve_crossings",
     "cell_graph",

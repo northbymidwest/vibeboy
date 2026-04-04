@@ -285,6 +285,170 @@ init_scale_pipeline!(init_sai2x_compute_pipeline, "sai2x");
 init_scale_pipeline!(init_super_sai2x_compute_pipeline, "super_sai2x");
 init_scale_pipeline!(init_super_eagle_compute_pipeline, "super_eagle");
 
+// ScaleFX uses 4 RW storage buffers for intermediate pass data
+pub fn init_scalefx_compute_pipeline(device: &gpu::Device) -> Option<gpu::ComputePipeline> {
+    let comp_spirv = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.spv"));
+    let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.metal"));
+    let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.dxil"));
+
+    let pipeline = device.create_compute_pipeline()
+        .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
+        .with_entrypoint(c"main")
+        .with_uniform_buffers(1)
+        .with_readonly_storage_buffers(1)
+        .with_readwrite_storage_buffers(5)
+        .with_readwrite_storage_textures(1)
+        .with_thread_count(16, 16, 1)
+        .build()
+        .or_else(|_| if !comp_dxil.is_empty() {
+            device.create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                .with_entrypoint(c"main")
+                .with_uniform_buffers(1)
+                .with_readonly_storage_buffers(1)
+                .with_readwrite_storage_buffers(5)
+                .with_readwrite_storage_textures(1)
+                .with_thread_count(16, 16, 1)
+                .build()
+        } else { Err(sdl3::get_error()) })
+        .or_else(|_| device.create_compute_pipeline()
+            .with_code(gpu::ShaderFormat::MSL, comp_msl)
+            .with_entrypoint(c"main_0")
+            .with_uniform_buffers(1)
+            .with_readonly_storage_buffers(1)
+            .with_readwrite_storage_buffers(5)
+            .with_readwrite_storage_textures(1)
+            .with_thread_count(16, 16, 1)
+            .build());
+
+    match pipeline {
+        Ok(p) => { eprintln!("scalefx compute pipeline ready"); Some(p) }
+        Err(e) => { eprintln!("scalefx compute pipeline failed: {e}"); None }
+    }
+}
+
+pub fn scalefx_compute_and_blit(
+    device: &gpu::Device,
+    window: &sdl3::video::Window,
+    gpu_tex: &gpu::Texture<'static>,
+    pipeline: &gpu::ComputePipeline,
+    pixels: &[u32],
+    src_w: u32, src_h: u32,
+    out_w: u32, out_h: u32,
+    is_9x: bool,
+) {
+    let cmd = device.acquire_command_buffer().expect("cmd buf");
+
+    let px_bytes = unsafe {
+        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+    };
+    let px_size = px_bytes.len().max(4) as u32;
+    let px_xfer = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+        .with_size(px_size).build().expect("px transfer");
+    {
+        let mut map = px_xfer.map::<u8>(device, true);
+        map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
+        map.unmap();
+    }
+    let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
+    let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
+    let px_buf = device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf");
+
+    // For 9x: intermediate buffers need to be sized for the larger (3x) second pass.
+    // First pass: src_w × src_h intermediates, 3x output.
+    // Second pass: (src_w*3) × (src_h*3) intermediates, 9x output.
+    let max_intermediate = if is_9x { src_w * 3 * src_h * 3 } else { src_w * src_h };
+    let buf_size = (max_intermediate * 16).max(16);
+    let buf0 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf0");
+    let buf1 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf1");
+    let buf2 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf2");
+    let buf3 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf3");
+
+    // px_out: pass 4 writes packed XRGB pixels here; for 9x, second pass reads this as input
+    // px_out2: separate write target for the second pass (avoids RO/RW aliasing on px_out)
+    // Always sized for the first pass 4 output — shader writes unconditionally.
+    let px_out_size = (src_w * 3 * src_h * 3 * 4).max(4);
+    let px_out = device.create_buffer().with_usage(rw).with_size(px_out_size).build().expect("sfx px_out");
+    let px_out2_size = if is_9x { (out_w * out_h * 4).max(4) } else { 4 };
+    let px_out2 = device.create_buffer().with_usage(rw).with_size(px_out2_size).build().expect("sfx px_out2");
+
+    #[repr(C)]
+    struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+
+    // Upload pixels
+    {
+        let cp = device.begin_copy_pass(&cmd).expect("copy pass");
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
+            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
+        device.end_copy_pass(cp);
+    }
+
+    // Helper: dispatch 5 ScaleFX passes
+    let dispatch_5_passes = |cmd: &gpu::CommandBuffer, px_src: &gpu::Buffer, px_dst: &gpu::Buffer,
+                              sw: u32, sh: u32, ow: u32, oh: u32, first: bool| {
+        let sd_x = (sw + 15) / 16;
+        let sd_y = (sh + 15) / 16;
+        let od_x = (ow + 15) / 16;
+        let od_y = (oh + 15) / 16;
+
+        for pass_idx in 0u32..5 {
+            let cp = device.begin_compute_pass(
+                cmd,
+                &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex)
+                    .with_cycle(first && pass_idx == 0)],
+                &[
+                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf0.clone()).with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf1.clone()).with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf2.clone()).with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf3.clone()).with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&px_dst.clone()).with_cycle(false),
+                ],
+            ).expect("compute pass");
+            cp.bind_compute_pipeline(pipeline);
+            cp.bind_compute_storage_buffers(0, &[px_src.clone()]);
+            cmd.push_compute_uniform_data(0, &Uniforms {
+                src_w: sw, src_h: sh, out_w: ow, out_h: oh, pass: pass_idx, _pad: [0; 3],
+            });
+            let (dx, dy) = if pass_idx < 4 { (sd_x, sd_y) } else { (od_x, od_y) };
+            cp.dispatch(dx, dy, 1);
+            device.end_compute_pass(cp);
+        }
+    };
+
+    // First 3x pass: writes packed output to px_out
+    let mid_w = src_w * 3;
+    let mid_h = src_h * 3;
+    dispatch_5_passes(&cmd, &px_buf, &px_out, src_w, src_h, mid_w, mid_h, true);
+
+    if is_9x {
+        // Second 3x pass: reads px_out, writes to px_out2 (separate buffer to avoid aliasing)
+        dispatch_5_passes(&cmd, &px_out, &px_out2, mid_w, mid_h, out_w, out_h, false);
+    }
+
+    let blit_w = if is_9x { out_w } else { mid_w };
+    let blit_h = if is_9x { out_h } else { mid_h };
+
+    let (swapchain_raw, sw_w, sw_h) = acquire_swapchain(&cmd, window);
+    if !swapchain_raw.is_null() {
+        let (vx, vy, vw, vh) = aspect_viewport(blit_w, blit_h, sw_w, sw_h);
+        let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
+        blit_info.source.texture = gpu_tex.raw();
+        blit_info.source.w = blit_w;
+        blit_info.source.h = blit_h;
+        blit_info.destination.texture = swapchain_raw;
+        blit_info.destination.x = vx as u32;
+        blit_info.destination.y = vy as u32;
+        blit_info.destination.w = vw as u32;
+        blit_info.destination.h = vh as u32;
+        blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
+        blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
+        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+    }
+    submit_and_sync(device, cmd, swapchain_raw.is_null());
+}
+
 /// Dispatch a scaling compute shader and blit to the swapchain.
 /// `uniforms` must be exactly 32 bytes (8 × u32) matching the shader's uniform block.
 pub fn scale_compute_and_blit(

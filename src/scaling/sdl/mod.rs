@@ -30,6 +30,7 @@ pub use compute::{
     init_sai2x_compute_pipeline,
     init_super_sai2x_compute_pipeline,
     init_super_eagle_compute_pipeline,
+    init_scalefx_compute_pipeline, scalefx_compute_and_blit,
 };
 pub use screenshot::{
     gpu_screenshot,

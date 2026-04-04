@@ -70,7 +70,7 @@ pub(super) struct MetalRenderer {
     pub tex_w: u32,
     pub tex_h: u32,
     // Compute scaling pipelines (lazily initialized)
-    scale_compute: [Option<ComputePipeline>; 21],
+    scale_compute: [Option<ComputePipeline>; 22],
     pub compute_out_tex: Option<Texture>,
     pub compute_out_w: u32,
     pub compute_out_h: u32,
@@ -515,6 +515,8 @@ impl MetalRenderer {
                 (19, include_bytes!(concat!(env!("OUT_DIR"), "/super_sai2x_comp.metal"))),
             ScaleFilter::SuperEagle =>
                 (20, include_bytes!(concat!(env!("OUT_DIR"), "/super_eagle_comp.metal"))),
+            ScaleFilter::ScaleFx | ScaleFilter::ScaleFx9x =>
+                return self.run_scalefx_compute(filter, pixels, src_w, src_h, disp_w, disp_h),
             _ => return None,
         };
 
@@ -590,6 +592,105 @@ impl MetalRenderer {
         encoder.endEncoding();
         cmd.commit();
 
+        Some((self.compute_out_tex.as_deref()?, out_w, out_h))
+    }
+
+    /// ScaleFX 5-pass (3x) or 10-pass (9x) compute dispatch.
+    fn run_scalefx_compute(
+        &mut self,
+        filter: scaling::ScaleFilter,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+        _disp_w: u32, _disp_h: u32,
+    ) -> Option<(&ProtocolObject<dyn MTLTexture>, u32, u32)> {
+        use scaling::ScaleFilter;
+        let is_9x = matches!(filter, ScaleFilter::ScaleFx9x);
+        let mid_w = src_w * 3;
+        let mid_h = src_h * 3;
+        let out_w = if is_9x { src_w * 9 } else { mid_w };
+        let out_h = if is_9x { src_h * 9 } else { mid_h };
+
+        let msl: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.metal"));
+        self.ensure_scale_compute(21, msl)?;
+        let pipeline = self.scale_compute[21].as_deref()?;
+
+        // Resize output texture
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        // Upload source pixels
+        let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
+
+        // Intermediate float4 buffers (sized for the larger pass in 9x mode)
+        let max_pixels = if is_9x { mid_w * mid_h } else { src_w * src_h };
+        let f4_size = (max_pixels as usize) * 16;
+        let buf0 = make_buf_empty(&self.device, f4_size);
+        let buf1 = make_buf_empty(&self.device, f4_size);
+        let buf2 = make_buf_empty(&self.device, f4_size);
+        let buf3 = make_buf_empty(&self.device, f4_size);
+
+        // px_out / px_out2: packed XRGB output for chaining 9x.
+        // Always sized for the pass 4 output — the shader writes to px_out unconditionally.
+        let px_out_size = (mid_w * mid_h * 4) as usize;
+        let px_out = make_buf_empty(&self.device, px_out_size);
+        let px_out2_size = if is_9x { (out_w * out_h * 4) as usize } else { 4 };
+        let px_out2 = make_buf_empty(&self.device, px_out2_size);
+
+        #[repr(C)]
+        struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+
+        let cmd = self.command_queue.commandBuffer()?;
+
+        // Helper: dispatch 5 ScaleFX passes
+        // Metal buffer layout: 0=uniforms, 1=pixels, 2=buf0, 3=buf1, 4=buf2, 5=buf3, 6=px_out, texture(0)=output
+        let dispatch_5 = |cmd: &ProtocolObject<dyn MTLCommandBuffer>,
+                          px_src: &ProtocolObject<dyn MTLBuffer>,
+                          px_dst: &ProtocolObject<dyn MTLBuffer>,
+                          sw: u32, sh: u32, ow: u32, oh: u32| {
+            for pass_idx in 0u32..5 {
+                let unis = Uniforms { src_w: sw, src_h: sh, out_w: ow, out_h: oh, pass: pass_idx, _pad: [0; 3] };
+                let uni_buf = make_buf(&self.device, &unis as *const _ as *const u8, 32);
+                let encoder = cmd.computeCommandEncoder().unwrap();
+                encoder.setComputePipelineState(pipeline);
+                unsafe {
+                    encoder.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+                    encoder.setBuffer_offset_atIndex(Some(px_src), 0, 1);
+                    encoder.setBuffer_offset_atIndex(Some(&buf0), 0, 2);
+                    encoder.setBuffer_offset_atIndex(Some(&buf1), 0, 3);
+                    encoder.setBuffer_offset_atIndex(Some(&buf2), 0, 4);
+                    encoder.setBuffer_offset_atIndex(Some(&buf3), 0, 5);
+                    encoder.setBuffer_offset_atIndex(Some(px_dst), 0, 6);
+                    encoder.setTexture_atIndex(Some(out_tex), 0);
+                    let (dx, dy) = if pass_idx < 4 {
+                        (((sw + 15) / 16) as usize, ((sh + 15) / 16) as usize)
+                    } else {
+                        (((ow + 15) / 16) as usize, ((oh + 15) / 16) as usize)
+                    };
+                    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                        MTLSize { width: dx, height: dy, depth: 1 },
+                        MTLSize { width: 16, height: 16, depth: 1 },
+                    );
+                }
+                encoder.endEncoding();
+            }
+        };
+
+        // First 3x pass
+        dispatch_5(&cmd, &px_buf, &px_out, src_w, src_h, mid_w, mid_h);
+
+        if is_9x {
+            // Second 3x pass: read from px_out, write to px_out2
+            dispatch_5(&cmd, &px_out, &px_out2, mid_w, mid_h, out_w, out_h);
+        }
+
+        cmd.commit();
         Some((self.compute_out_tex.as_deref()?, out_w, out_h))
     }
 

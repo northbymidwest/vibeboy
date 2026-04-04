@@ -19,6 +19,7 @@ pub mod super_xbr;
 pub mod vectorize_gpu;
 pub mod xbr;
 pub mod xbrz;
+pub mod scalefx;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod sdl;
 #[cfg(feature = "gpu")]
@@ -179,6 +180,10 @@ pub enum ScaleFilter {
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     /// CPU implementation of the full GPU vectorize pipeline.
     VectorizeGpu,
+    /// ScaleFX 3x edge interpolation (Sp00kyFox).
+    ScaleFx,
+    /// ScaleFX 9x (two ScaleFX passes chained: 3x → 3x).
+    ScaleFx9x,
 }
 
 /// Filter metadata: (variant, cli_name, display_name, scale_factor).
@@ -232,6 +237,8 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Vectorize,        cli_name: "vectorize",    display_name: "Vectorize",      factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeAdaptive, cli_name: "vectorize-adaptive", display_name: "Vectorize Adaptive", factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeGpu,     cli_name: "vectorize-gpu", display_name: "Vectorize GPU", factor: 0 },
+    FilterInfo { filter: ScaleFilter::ScaleFx,          cli_name: "scalefx",      display_name: "ScaleFX",       factor: 3 },
+    FilterInfo { filter: ScaleFilter::ScaleFx9x,        cli_name: "scalefx-9x",   display_name: "ScaleFX 9x",    factor: 9 },
 ];
 
 impl ScaleFilter {
@@ -487,6 +494,14 @@ pub fn cpu_scale(
                 &paths, src, sw, sh, bg_color, scale,
             );
             (s, w as u32, h as u32)
+        }
+        ScaleFilter::ScaleFx => {
+            let s = scalefx::scale(src, sw, sh);
+            (s, sw as u32 * 3, sh as u32 * 3)
+        }
+        ScaleFilter::ScaleFx9x => {
+            let s = scalefx::scale9x(src, sw, sh);
+            (s, sw as u32 * 9, sh as u32 * 9)
         }
         ScaleFilter::Nearest => {
             let mut out = vec![0u32; disp_w * disp_h];

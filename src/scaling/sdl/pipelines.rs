@@ -30,6 +30,7 @@ const SP_BILINEAR: usize = 17;
 const SP_SAI2X: usize = 18;
 const SP_SUPER_SAI2X: usize = 19;
 const SP_SUPER_EAGLE: usize = 20;
+const SP_SCALEFX: usize = 21;
 
 /// Owns the SDL3 GPU device and all lazily-initialized shader pipelines.
 pub struct GpuPipelines {
@@ -45,7 +46,7 @@ pub struct GpuPipelines {
     // All scaling filters now use compute pipelines instead.
 
     // Lazily-initialized compute pipelines (scaling filters)
-    scale_pipelines: [Option<gpu::ComputePipeline>; 21],
+    scale_pipelines: [Option<gpu::ComputePipeline>; 22],
 
     // Vectorize compute pipelines
     vectorize_compute: Option<gpu::ComputePipeline>,
@@ -181,6 +182,8 @@ impl GpuPipelines {
                 Some((SP_SUPER_SAI2X, super::init_super_sai2x_compute_pipeline)),
             ScaleFilter::SuperEagle =>
                 Some((SP_SUPER_EAGLE, super::init_super_eagle_compute_pipeline)),
+            ScaleFilter::ScaleFx | ScaleFilter::ScaleFx9x =>
+                Some((SP_SCALEFX, super::init_scalefx_compute_pipeline)),
             _ => None,
         };
 
@@ -287,6 +290,7 @@ impl GpuPipelines {
             ScaleFilter::SuperEagle => SP_SUPER_EAGLE,
             ScaleFilter::Nearest => SP_NEAREST,
             ScaleFilter::Bilinear => SP_BILINEAR,
+            ScaleFilter::ScaleFx | ScaleFilter::ScaleFx9x => SP_SCALEFX,
             _ => return,
         };
 
@@ -298,7 +302,8 @@ impl GpuPipelines {
             | ScaleFilter::Sai2x | ScaleFilter::Super2xSai | ScaleFilter::SuperEagle
             => (src_w * 2, src_h * 2),
             ScaleFilter::LcdGrid => (src_w * 4, src_h * 4),
-            ScaleFilter::Scale3x => (src_w * 3, src_h * 3),
+            ScaleFilter::Scale3x | ScaleFilter::ScaleFx => (src_w * 3, src_h * 3),
+            ScaleFilter::ScaleFx9x => (src_w * 9, src_h * 9),
             ScaleFilter::Epx | ScaleFilter::Scale2x => (src_w * 2, src_h * 2),
             ScaleFilter::Scale4x => (src_w * 4, src_h * 4),
             ScaleFilter::Hqx(h) => { let f = h.factor(); (src_w * f, src_h * f) }
@@ -309,6 +314,16 @@ impl GpuPipelines {
 
         self.resize_texture(out_w, out_h);
         let pipeline = self.scale_pipelines[idx].as_ref().unwrap();
+
+        // ScaleFX uses a special 5-pass dispatch with 4 intermediate buffers
+        if matches!(filter, ScaleFilter::ScaleFx | ScaleFilter::ScaleFx9x) {
+            let is_9x = matches!(filter, ScaleFilter::ScaleFx9x);
+            super::scalefx_compute_and_blit(
+                &self.device, window, &self.tex, pipeline,
+                pixels, src_w, src_h, out_w, out_h, is_9x,
+            );
+            return;
+        }
 
         // Super xBR uses a special 3-pass dispatch
         if matches!(filter, ScaleFilter::SuperXbr) {
