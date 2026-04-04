@@ -494,7 +494,7 @@ impl MetalRenderer {
             ScaleFilter::OmniScaleLegacy =>
                 (9, include_bytes!(concat!(env!("OUT_DIR"), "/omniscale_legacy_comp.metal"))),
             ScaleFilter::SuperXbr =>
-                (10, include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.metal"))),
+                return self.run_super_xbr_compute(pixels, src_w, src_h),
             ScaleFilter::Edi =>
                 (11, include_bytes!(concat!(env!("OUT_DIR"), "/edi_comp.metal"))),
             ScaleFilter::Nedi =>
@@ -590,6 +590,62 @@ impl MetalRenderer {
             );
         }
         encoder.endEncoding();
+        cmd.commit();
+
+        Some((self.compute_out_tex.as_deref()?, out_w, out_h))
+    }
+
+    /// Super xBR 3-pass compute dispatch.
+    /// Metal buffer layout: 0=uniforms, 1=pixels, 2=intermed, texture(0)=output
+    fn run_super_xbr_compute(
+        &mut self,
+        pixels: &[u32],
+        src_w: u32, src_h: u32,
+    ) -> Option<(&ProtocolObject<dyn MTLTexture>, u32, u32)> {
+        let out_w = src_w * 2;
+        let out_h = src_h * 2;
+
+        let msl: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.metal"));
+        self.ensure_scale_compute(10, msl)?;
+        let pipeline = self.scale_compute[10].as_deref()?;
+
+        if self.compute_out_w != out_w || self.compute_out_h != out_h {
+            self.compute_out_tex = Some(make_texture(
+                &self.device, out_w, out_h,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            ));
+            self.compute_out_w = out_w;
+            self.compute_out_h = out_h;
+        }
+        let out_tex = self.compute_out_tex.as_ref()?;
+
+        let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
+        let intermed = make_buf_empty(&self.device, (out_w * out_h * 4) as usize);
+
+        #[repr(C)]
+        struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+
+        let cmd = self.command_queue.commandBuffer()?;
+        let dispatch_x = ((out_w + 15) / 16) as usize;
+        let dispatch_y = ((out_h + 15) / 16) as usize;
+
+        for pass_idx in 0u32..3 {
+            let unis = Uniforms { src_w, src_h, out_w, out_h, pass: pass_idx, _pad: [0; 3] };
+            let uni_buf = make_buf(&self.device, &unis as *const _ as *const u8, 32);
+            let encoder = cmd.computeCommandEncoder().unwrap();
+            encoder.setComputePipelineState(pipeline);
+            unsafe {
+                encoder.setBuffer_offset_atIndex(Some(&uni_buf), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(&px_buf), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(&intermed), 0, 2);
+                encoder.setTexture_atIndex(Some(out_tex), 0);
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: dispatch_x, height: dispatch_y, depth: 1 },
+                    MTLSize { width: 16, height: 16, depth: 1 },
+                );
+            }
+            encoder.endEncoding();
+        }
         cmd.commit();
 
         Some((self.compute_out_tex.as_deref()?, out_w, out_h))
