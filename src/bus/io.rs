@@ -118,42 +118,27 @@ impl Bus {
             0xFF69 | 0xFF6B if !self.model.is_cgb() || self.dmg_compat => {}
             // VBK, BGPI, OBPI: ignore on non-CGB only (accessible in compat)
             0xFF4F | 0xFF68 | 0xFF6A if !self.model.is_cgb() => {}
-            // CGB LCDC (double speed): READ_OLD + tile_sel_glitch on ANY
-            // TILE_SEL change (both directions, not just 1→0).
-            0xFF40 if self.model.is_cgb() && self.double_speed => {
-                self.flush_ppu_deferred();
+            // CGB LCDC: write applies at M-cycle end (READ_OLD). After the
+            // write, if TILE_SEL (bit 4) changed, step 1 PPU T-cycle with
+            // tile_sel_glitch set, and borrow that T from the next M-cycle.
+            //
+            // DS fires the glitch on ANY TILE_SEL transition (both directions);
+            // normal-speed fires only on 1→0. This asymmetry may itself be a
+            // compensating error and is worth revisiting once write timing is
+            // clean.
+            0xFF40 if self.model.is_cgb() => {
                 let old_lcdc = self.ppu.lcdc;
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                // tile_sel_glitch on ANY TILE_SEL change (either direction)
-                if (old_lcdc ^ val) & 0x10 != 0 {
+                self.split_tick_write(addr, val, 0);
+                let tile_sel_changed = (old_lcdc ^ val) & 0x10 != 0;
+                let glitch = if self.double_speed {
+                    tile_sel_changed
+                } else {
+                    (old_lcdc & 0x10) != 0 && (val & 0x10) == 0
+                };
+                if glitch {
                     self.ppu.tile_sel_glitch = true;
                     let flags = self.ppu.step(1);
                     self.if_ |= flags;
-                    self.ppu.tile_sel_glitch = false;
-                    self.ppu_tick_debt += 1;
-                    if self.ppu.if_flags != 0 {
-                        self.if_ |= self.ppu.if_flags;
-                        self.ppu.if_flags = 0;
-                    }
-                }
-            }
-            // CGB LCDC (normal speed): handle tile_sel_glitch when TILE_SEL transitions 1→0
-            0xFF40 if self.model.is_cgb() && !self.double_speed => {
-                self.flush_ppu_deferred();
-                let old_lcdc = self.ppu.lcdc;
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                // TILE_SEL (bit 4) transition 1→0: 1T glitch window
-                if (old_lcdc & 0x10) != 0 && (val & 0x10) == 0 {
-                    self.ppu.tile_sel_glitch = true;
-                    self.ppu.step(1);
                     self.ppu.tile_sel_glitch = false;
                     self.ppu_tick_debt += 1;
                     if self.ppu.if_flags != 0 {
