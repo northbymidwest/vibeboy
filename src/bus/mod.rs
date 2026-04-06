@@ -924,6 +924,35 @@ impl Bus {
         }
     }
 
+    /// Write a PPU register at a split-point within the current M-cycle.
+    ///
+    /// `early_cpu_t` is how many CPU T-cycles early the write takes effect,
+    /// i.e. how many T-cycles of new value should run before the M-cycle ends.
+    /// For example, `early_cpu_t = 2` means "write takes effect 2 T-cycles
+    /// before M-cycle end" — the last 2 CPU T-cycles use the new value.
+    ///
+    /// Handles speed-mode scaling: in double-speed, 1 PPU T-cycle = 2 CPU
+    /// T-cycles, so `early_cpu_t` is divided by 2 internally to get the
+    /// equivalent number of PPU T-cycles to keep deferred for the new value.
+    ///
+    /// This replaces the per-register conflict-handler boilerplate of
+    /// `if ppu_deferred > N { flush - N; deferred = N } write(val)`.
+    pub fn split_tick_write(&mut self, addr: u16, val: u8, early_cpu_t: u32) {
+        let keep_ppu_t = if self.double_speed { early_cpu_t / 2 } else { early_cpu_t };
+        if self.ppu_deferred > keep_ppu_t {
+            let flush = self.ppu_deferred - keep_ppu_t;
+            self.sync_ppu_dma_bus_byte();
+            let flags = self.ppu.step(flush);
+            self.if_ |= flags;
+            self.ppu_deferred = keep_ppu_t;
+        }
+        self.ppu.write(addr, val);
+        if self.ppu.if_flags != 0 {
+            self.if_ |= self.ppu.if_flags;
+            self.ppu.if_flags = 0;
+        }
+    }
+
     // ── Speed switch (called by CPU on STOP) ──────────────────────────────────
 
     /// Check if a speed switch is armed (KEY1 bit 0 set).
