@@ -147,11 +147,10 @@ impl Bus {
                     }
                 }
             }
-            // CGB palette writes: write takes effect 2 CPU T-cycles early
-            // (no OR glitch — that's a DMG-only thing).
-            // Hardware: advance(pending - 2 CPU T), write, keep last 2 CPU T
-            // with new value. split_tick_write handles speed-mode scaling.
-            0xFF47..=0xFF49 if self.model.is_cgb() => {
+            // CGB palette writes (normal speed): write takes effect 2 PPU T
+            // early. No OR glitch (that's DMG-only).
+            // CGB DS palettes fall through to READ_OLD default (flush + write).
+            0xFF47..=0xFF49 if self.model.is_cgb() && !self.double_speed => {
                 self.split_tick_write(addr, val, 2);
             }
             // DMG palette writes: -2T conflict with bus glitch (old|new at T3)
@@ -195,36 +194,14 @@ impl Bus {
                     self.ppu.if_flags = 0;
                 }
             }
-            // DMG SCY: READ_NEW conflict (hardware: advance(pending-1), write, pending=5)
-            // Flush all but 1T with old value, then write new value.
+            // DMG SCY: write takes effect 1 PPU T-cycle early (READ_NEW).
             0xFF42 if !self.model.is_cgb() => {
-                if self.ppu_deferred > 1 {
-                    let flush = self.ppu_deferred - 1;
-                    let flags = self.ppu.step(flush);
-                    self.if_ |= flags;
-                    self.ppu_deferred = 1;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
+                self.split_tick_write(addr, val, 1);
             }
-            // DMG/CGB-double SCX: SCX_DMG conflict (write takes effect 2T early)
-            // Hardware: advance(pending-2), write, pending=6.
+            // DMG / CGB-double SCX: write takes effect 2 CPU T-cycles early.
+            // In CGB DS this scales to 1 PPU T via split_tick_write.
             0xFF43 if !self.model.is_cgb() || self.double_speed => {
-                // Flush all but 2T with old SCX value
-                if self.ppu_deferred > 2 {
-                    let flush = self.ppu_deferred - 2;
-                    let flags = self.ppu.step(flush);
-                    self.if_ |= flags;
-                    self.ppu_deferred = 2;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
+                self.split_tick_write(addr, val, 2);
             }
             // DMG LCDC: conflict handler with glitch timing
             // Hardware: advance(pending-2), write glitch(old | (new & BG_EN)), advance(1), write real, pending=5
@@ -280,21 +257,18 @@ impl Bus {
             // transitions 1T later in normal speed, HBlank enable bit in double
             // speed). Requires PPU-internal support for partial STAT writes
             // without triggering the full write handler's IRQ logic.
-            // CGB LYC: write takes effect 1 CPU T-cycle late (WRITE_CPU).
-            // In DS, -1 CPU T / 2 = 0 PPU T, so DS LYC degrades to
-            // flush-then-write (matching the previous READ_OLD fallback).
-            0xFF45 if self.model.is_cgb() => {
+            // CGB LYC (normal speed): write takes effect 1 PPU T late (WRITE_CPU).
+            // CGB DS LYC: falls through to READ_OLD default (flush + write);
+            // keeping the previous behavior until we have tests pinning down
+            // the actual hardware timing in DS.
+            0xFF45 if self.model.is_cgb() && !self.double_speed => {
                 self.split_tick_write(addr, val, -1);
             }
-            // DMG WX: READ_OLD + wx_just_changed flag for 1T after write
+            // DMG WX: write applies at M-cycle end (READ_OLD), then 1 PPU T
+            // is stepped with wx_just_changed set to suppress window trigger,
+            // borrowing that T from the next M-cycle via ppu_tick_debt.
             0xFF4B if !self.model.is_cgb() => {
-                self.flush_ppu_deferred();
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                // Tick 1T with wx_just_changed to suppress window trigger
+                self.split_tick_write(addr, val, 0);
                 self.ppu.wx_just_changed = true;
                 let flags = self.ppu.step(1);
                 self.if_ |= flags;

@@ -926,28 +926,23 @@ impl Bus {
 
     /// Write a PPU register at a split-point within the current M-cycle.
     ///
-    /// `early_cpu_t` is signed offset from M-cycle end in CPU T-cycles:
-    ///   - Positive: write applies *before* M-cycle end. E.g. `2` = "2 CPU T
-    ///     early" — the last 2 CPU T-cycles of the M-cycle use the new value.
+    /// `early_ppu_t` is a signed offset from M-cycle end in PPU T-cycles:
+    ///   - Positive: write applies *before* M-cycle end. E.g. `2` = "keep the
+    ///     last 2 PPU T-cycles deferred so they use the new value."
     ///   - Zero: write applies at M-cycle end (same as flush-then-write).
-    ///   - Negative: write applies *after* M-cycle end. E.g. `-1` = "1 CPU T
-    ///     late" — an extra T is stepped with the old value now, and 1T of
-    ///     debt is borrowed from the next M-cycle via ppu_tick_debt.
+    ///   - Negative: write applies *after* M-cycle end. E.g. `-1` = "step 1
+    ///     extra PPU T now with the old value, borrow that T from the next
+    ///     M-cycle via ppu_tick_debt."
     ///
-    /// Handles speed-mode scaling: in double-speed, 1 PPU T-cycle = 2 CPU
-    /// T-cycles, so the CPU-T offset is divided by 2 internally. Rounding
-    /// toward zero means sub-T-cycle offsets in DS (e.g. -1 CPU T) become
-    /// zero-offset, which is equivalent to flush-then-write in DS.
+    /// No speed-mode scaling — the caller passes PPU T-cycles directly.
+    /// If hardware behavior is most naturally expressed in CPU T-cycles and
+    /// differs between normal and double-speed, the caller should match on
+    /// `self.double_speed` and pass the appropriate PPU-T value per mode.
     ///
     /// This replaces the per-register conflict-handler boilerplate of
     /// `if ppu_deferred > N { flush - N; deferred = N } write(val)` and the
-    /// `ppu_tick_debt += 1` late-write pattern.
-    pub fn split_tick_write(&mut self, addr: u16, val: u8, early_cpu_t: i32) {
-        let cpu_to_ppu = |cpu_t: i32| -> i32 {
-            if self.double_speed { cpu_t / 2 } else { cpu_t }
-        };
-        let early_ppu_t = cpu_to_ppu(early_cpu_t);
-
+    /// `ppu_tick_debt += N` late-write pattern.
+    pub fn split_tick_write(&mut self, addr: u16, val: u8, early_ppu_t: i32) {
         if early_ppu_t >= 0 {
             // EARLY: flush deferred beyond `keep`, leaving that many PPU T
             // of the current M-cycle to be stepped later with the new value.
