@@ -295,18 +295,11 @@ impl Bus {
             // transitions 1T later in normal speed, HBlank enable bit in double
             // speed). Requires PPU-internal support for partial STAT writes
             // without triggering the full write handler's IRQ logic.
-            // CGB LYC (normal speed): WRITE_CPU — write takes effect 1T later.
-            // Hardware: advance(pending+1), write, pending=3.
-            0xFF45 if self.model.is_cgb() && !self.double_speed => {
-                self.flush_ppu_deferred();
-                let flags = self.ppu.step(1);
-                self.if_ |= flags;
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                self.ppu_tick_debt += 1;
+            // CGB LYC: write takes effect 1 CPU T-cycle late (WRITE_CPU).
+            // In DS, -1 CPU T / 2 = 0 PPU T, so DS LYC degrades to
+            // flush-then-write (matching the previous READ_OLD fallback).
+            0xFF45 if self.model.is_cgb() => {
+                self.split_tick_write(addr, val, -1);
             }
             // DMG WX: READ_OLD + wx_just_changed flag for 1T after write
             0xFF4B if !self.model.is_cgb() => {

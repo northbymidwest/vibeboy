@@ -926,26 +926,58 @@ impl Bus {
 
     /// Write a PPU register at a split-point within the current M-cycle.
     ///
-    /// `early_cpu_t` is how many CPU T-cycles early the write takes effect,
-    /// i.e. how many T-cycles of new value should run before the M-cycle ends.
-    /// For example, `early_cpu_t = 2` means "write takes effect 2 T-cycles
-    /// before M-cycle end" — the last 2 CPU T-cycles use the new value.
+    /// `early_cpu_t` is signed offset from M-cycle end in CPU T-cycles:
+    ///   - Positive: write applies *before* M-cycle end. E.g. `2` = "2 CPU T
+    ///     early" — the last 2 CPU T-cycles of the M-cycle use the new value.
+    ///   - Zero: write applies at M-cycle end (same as flush-then-write).
+    ///   - Negative: write applies *after* M-cycle end. E.g. `-1` = "1 CPU T
+    ///     late" — an extra T is stepped with the old value now, and 1T of
+    ///     debt is borrowed from the next M-cycle via ppu_tick_debt.
     ///
     /// Handles speed-mode scaling: in double-speed, 1 PPU T-cycle = 2 CPU
-    /// T-cycles, so `early_cpu_t` is divided by 2 internally to get the
-    /// equivalent number of PPU T-cycles to keep deferred for the new value.
+    /// T-cycles, so the CPU-T offset is divided by 2 internally. Rounding
+    /// toward zero means sub-T-cycle offsets in DS (e.g. -1 CPU T) become
+    /// zero-offset, which is equivalent to flush-then-write in DS.
     ///
     /// This replaces the per-register conflict-handler boilerplate of
-    /// `if ppu_deferred > N { flush - N; deferred = N } write(val)`.
-    pub fn split_tick_write(&mut self, addr: u16, val: u8, early_cpu_t: u32) {
-        let keep_ppu_t = if self.double_speed { early_cpu_t / 2 } else { early_cpu_t };
-        if self.ppu_deferred > keep_ppu_t {
-            let flush = self.ppu_deferred - keep_ppu_t;
-            self.sync_ppu_dma_bus_byte();
-            let flags = self.ppu.step(flush);
-            self.if_ |= flags;
-            self.ppu_deferred = keep_ppu_t;
+    /// `if ppu_deferred > N { flush - N; deferred = N } write(val)` and the
+    /// `ppu_tick_debt += 1` late-write pattern.
+    pub fn split_tick_write(&mut self, addr: u16, val: u8, early_cpu_t: i32) {
+        let cpu_to_ppu = |cpu_t: i32| -> i32 {
+            if self.double_speed { cpu_t / 2 } else { cpu_t }
+        };
+        let early_ppu_t = cpu_to_ppu(early_cpu_t);
+
+        if early_ppu_t >= 0 {
+            // EARLY: flush deferred beyond `keep`, leaving that many PPU T
+            // of the current M-cycle to be stepped later with the new value.
+            let keep = early_ppu_t as u32;
+            if self.ppu_deferred > keep {
+                let flush = self.ppu_deferred - keep;
+                self.sync_ppu_dma_bus_byte();
+                let flags = self.ppu.step(flush);
+                self.if_ |= flags;
+                self.ppu_deferred = keep;
+            }
+        } else {
+            // LATE: flush all deferred with the old value, then step `|late|`
+            // extra PPU T-cycles with old value, borrowing them from the next
+            // M-cycle via ppu_tick_debt.
+            let late = (-early_ppu_t) as u32;
+            if self.ppu_deferred > 0 {
+                self.sync_ppu_dma_bus_byte();
+                let flags = self.ppu.step(self.ppu_deferred);
+                self.if_ |= flags;
+                self.ppu_deferred = 0;
+            }
+            if late > 0 {
+                self.sync_ppu_dma_bus_byte();
+                let flags = self.ppu.step(late);
+                self.if_ |= flags;
+                self.ppu_tick_debt += late;
+            }
         }
+
         self.ppu.write(addr, val);
         if self.ppu.if_flags != 0 {
             self.if_ |= self.ppu.if_flags;
