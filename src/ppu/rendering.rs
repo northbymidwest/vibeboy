@@ -219,9 +219,27 @@ impl Ppu {
         // with X=0 always getting 5. Uses tile slot grouping where
         // consecutive sprites in the same slot skip the alignment penalty.
         if self.cgb_mode {
-            let phase = self.fetcher.cycle_tick as u32;
-            let wait = if phase == 0 { 0 } else { 6 - phase };
-            self.sprite_alignment_delay = (wait + 1) as u8;
+            // Wait for BG fetcher to reach GetTileDataHighT2 (the end of its
+            // 6-state tile fetch cycle), then 1 extra T for the post-loop
+            // fetcher advance + setup. cycle_tick is unreliable here because
+            // it wraps mod-6 but the fetcher cycle is 7+ T when Push stalls
+            // — use the state itself.
+            //
+            // Push state is special: it stalls until the fifo drains, then
+            // transitions to GetTileT1 to start a new cycle. From Push we
+            // need: (drain time, unknown) + 5 advances to H_T2. We use the
+            // worst case (1 + 5 = 6) which mostly self-corrects on real
+            // input — see if it hurts.
+            let wait_to_h_t2 = match self.fetcher.state {
+                super::FetcherState::GetTileT1         => 5,
+                super::FetcherState::GetTileT2         => 4,
+                super::FetcherState::GetTileDataLowT1  => 3,
+                super::FetcherState::GetTileDataLowT2  => 2,
+                super::FetcherState::GetTileDataHighT1 => 1,
+                super::FetcherState::GetTileDataHighT2 => 0,
+                super::FetcherState::Push              => 6,
+            };
+            self.sprite_alignment_delay = (wait_to_h_t2 + 1) as u8;
         } else {
             let sprite_x = self.scanline_sprites[sprite_idx].1;
             let adjusted = sprite_x.wrapping_add(self.scx);

@@ -97,7 +97,7 @@ impl PixelFifo {
 /// BG/Window tile fetcher states. Each state takes exactly 1 T-cycle.
 /// States come in pairs: T1 (latch/address) and T2 (VRAM read/execute).
 /// Push stalls (repeats) if the BG FIFO is not yet empty.
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 enum FetcherState {
     GetTileT1,
     GetTileT2,
