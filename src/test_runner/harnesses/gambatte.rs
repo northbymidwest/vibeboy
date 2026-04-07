@@ -71,42 +71,81 @@ fn gambatte_tile_matches(fb: &[u32], tile_x: usize, digit: usize) -> bool {
 
 /// Parse gambatte test: extract expected hex from filename, determine model(s).
 /// Returns (expected_hex, is_dmg, is_cgb).
-fn parse_gambatte_test(path: &Path) -> Option<(String, bool, bool)> {
+/// Parsed expected outputs from a gambatte test ROM filename.
+/// Possible formats:
+///   - `..._dmg08_cgb04c_outHEX.gbc`: same expected hex for DMG and CGB
+///   - `..._dmg08_outHEX_cgb04c_outHEX.gbc`: separate DMG and CGB outputs
+///   - `..._dmg08_outHEX.gbc`: DMG-only
+///   - `..._cgb04c_outHEX.gbc`: CGB-only
+///   - `..._outHEX.gbc`: model unspecified, default CGB
+struct GambatteExpected {
+    dmg_hex: Option<String>,
+    cgb_hex: Option<String>,
+}
+
+fn is_hex(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn parse_gambatte_test(path: &Path) -> Option<GambatteExpected> {
     let stem = path.file_stem()?.to_str()?;
-    let is_dmg;
-    let is_cgb;
-    let hex_str;
+
+    let dmg_hex;
+    let cgb_hex;
 
     if let Some(pos) = stem.find("dmg08_cgb04c_out") {
-        is_dmg = true;
-        is_cgb = true;
-        hex_str = &stem[pos + 16..];
-    } else if let Some(pos) = stem.find("dmg08_out") {
-        is_dmg = true;
-        is_cgb = stem.contains("cgb04c_out");
-        hex_str = &stem[pos + 9..];
-    } else if let Some(pos) = stem.find("cgb04c_out") {
-        is_dmg = false;
-        is_cgb = true;
-        hex_str = &stem[pos + 10..];
+        // Shared output: both DMG and CGB expect the same hex.
+        let hex = &stem[pos + 16..];
+        if !is_hex(hex) || hex.starts_with("audio") {
+            return None;
+        }
+        dmg_hex = Some(hex.to_uppercase());
+        cgb_hex = Some(hex.to_uppercase());
+    } else if let Some(d_pos) = stem.find("dmg08_out") {
+        // DMG output present. May also have separate CGB output.
+        let after_dmg = &stem[d_pos + 9..];
+        // DMG hex runs until '_' or end of stem.
+        let dmg_end = after_dmg.find('_').unwrap_or(after_dmg.len());
+        let dh = &after_dmg[..dmg_end];
+        if !is_hex(dh) || dh.starts_with("audio") {
+            return None;
+        }
+        dmg_hex = Some(dh.to_uppercase());
+        cgb_hex = if let Some(c_pos) = stem.find("cgb04c_out") {
+            let ch = &stem[c_pos + 10..];
+            let ch_end = ch.find('_').unwrap_or(ch.len());
+            let ch = &ch[..ch_end];
+            if is_hex(ch) { Some(ch.to_uppercase()) } else { None }
+        } else {
+            None
+        };
+    } else if let Some(c_pos) = stem.find("cgb04c_out") {
+        let hex = &stem[c_pos + 10..];
+        let hex_end = hex.find('_').unwrap_or(hex.len());
+        let hex = &hex[..hex_end];
+        if !is_hex(hex) || hex.starts_with("audio") {
+            return None;
+        }
+        dmg_hex = None;
+        cgb_hex = Some(hex.to_uppercase());
     } else if let Some(pos) = stem.rfind("_out") {
-        is_dmg = false;
-        is_cgb = true;
-        hex_str = &stem[pos + 4..];
+        let hex = &stem[pos + 4..];
+        let hex_end = hex.find('_').unwrap_or(hex.len());
+        let hex = &hex[..hex_end];
+        if !is_hex(hex) || hex.starts_with("audio") {
+            return None;
+        }
+        dmg_hex = None;
+        cgb_hex = Some(hex.to_uppercase());
     } else {
         return None;
     }
 
-    // Skip audio tests
-    if hex_str.starts_with("audio") {
+    if dmg_hex.is_none() && cgb_hex.is_none() {
         return None;
     }
 
-    if hex_str.is_empty() || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-
-    Some((hex_str.to_uppercase(), is_dmg, is_cgb))
+    Some(GambatteExpected { dmg_hex, cgb_hex })
 }
 
 pub struct GambatteHarness {
@@ -123,50 +162,68 @@ impl TestHarness for GambatteHarness {
             return TestResult::Err;
         };
 
-        let Some((expected_hex, is_dmg, is_cgb)) = parse_gambatte_test(path) else {
+        let Some(expected) = parse_gambatte_test(path) else {
             return TestResult::Skip;
         };
 
-        // Determine which model to test
-        let model = if let Some(m) = self.force_model {
-            m
-        } else if is_dmg && !is_cgb {
-            GbModel::Dmg
+        // Determine which model variants to run.
+        let mut runs: Vec<(GbModel, &str)> = Vec::new();
+        if let Some(m) = self.force_model {
+            // Forced model: use whichever expected value applies, prefer the
+            // matching one. If neither applies, skip.
+            let hex = match m {
+                GbModel::Dmg | GbModel::Dmg0 | GbModel::Mgb => expected.dmg_hex.as_deref(),
+                _ => expected.cgb_hex.as_deref(),
+            };
+            if let Some(h) = hex {
+                runs.push((m, h));
+            } else {
+                return TestResult::Skip;
+            }
         } else {
-            // Default to CGB for cgb-only or dual tests
-            GbModel::Cgb
-        };
-
-        let mut emu = make_emu(rom, None, model);
-
-        // Run for 15 frames
-        for _ in 0..15 {
-            emu.step_frame();
+            if let Some(ref h) = expected.dmg_hex {
+                runs.push((GbModel::Dmg, h));
+            }
+            if let Some(ref h) = expected.cgb_hex {
+                runs.push((GbModel::Cgb, h));
+            }
         }
 
-        let fb = emu.frame_buffer();
+        if runs.is_empty() {
+            return TestResult::Skip;
+        }
 
-        // Compare each hex digit
-        for (i, c) in expected_hex.chars().enumerate() {
-            let Some(digit) = gambatte_digit_index(c) else {
-                return TestResult::Err;
-            };
-            if !gambatte_tile_matches(fb, i, digit) {
-                if verbose {
-                    // Show what we got vs expected
-                    let mut actual = String::new();
-                    for d in 0..16usize {
-                        if gambatte_tile_matches(fb, i, d) {
-                            actual = format!("{:X}", d);
-                            break;
+        // Run each variant. The ROM passes only if all variants pass.
+        for (model, expected_hex) in &runs {
+            let mut emu = make_emu(rom.clone(), None, *model);
+            for _ in 0..15 {
+                emu.step_frame();
+            }
+            let fb = emu.frame_buffer();
+
+            for (i, c) in expected_hex.chars().enumerate() {
+                let Some(digit) = gambatte_digit_index(c) else {
+                    return TestResult::Err;
+                };
+                if !gambatte_tile_matches(fb, i, digit) {
+                    if verbose {
+                        let mut actual = String::new();
+                        for d in 0..16usize {
+                            if gambatte_tile_matches(fb, i, d) {
+                                actual = format!("{:X}", d);
+                                break;
+                            }
                         }
+                        if actual.is_empty() {
+                            actual = "?".to_string();
+                        }
+                        eprintln!(
+                            "  [{:?}] digit {}: expected={} got={}",
+                            model, i, c, actual
+                        );
                     }
-                    if actual.is_empty() {
-                        actual = "?".to_string();
-                    }
-                    eprintln!("  digit {}: expected={} got={}", i, c, actual);
+                    return TestResult::Fail;
                 }
-                return TestResult::Fail;
             }
         }
 

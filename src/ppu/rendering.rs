@@ -230,16 +230,18 @@ impl Ppu {
             // need: (drain time, unknown) + 5 advances to H_T2. We use the
             // worst case (1 + 5 = 6) which mostly self-corrects on real
             // input — see if it hurts.
-            let wait_to_h_t2 = match self.fetcher.state {
-                super::FetcherState::GetTileT1         => 5,
-                super::FetcherState::GetTileT2         => 4,
-                super::FetcherState::GetTileDataLowT1  => 3,
-                super::FetcherState::GetTileDataLowT2  => 2,
-                super::FetcherState::GetTileDataHighT1 => 1,
-                super::FetcherState::GetTileDataHighT2 => 0,
-                super::FetcherState::Push              => 6,
+            // Wait to reach end-of-cycle + post-loop advance, expressed as
+            // a single per-state constant.
+            let total_wait = match self.fetcher.state {
+                super::FetcherState::GetTileT1         => 6,
+                super::FetcherState::GetTileT2         => 5,
+                super::FetcherState::GetTileDataLowT1  => 4,
+                super::FetcherState::GetTileDataLowT2  => 3,
+                super::FetcherState::GetTileDataHighT1 => 2,
+                super::FetcherState::GetTileDataHighT2 => 1,
+                super::FetcherState::Push              => 7,
             };
-            self.sprite_alignment_delay = (wait_to_h_t2 + 1) as u8;
+            self.sprite_alignment_delay = total_wait as u8;
         } else {
             let sprite_x = self.scanline_sprites[sprite_idx].1;
             let adjusted = sprite_x.wrapping_add(self.scx);
