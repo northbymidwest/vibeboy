@@ -26,11 +26,21 @@ const DIR_E: u32 = 32;
 const DIR_NE: u32 = 64;
 const DIR_N: u32 = 128;
 
-/// Public entry point: runs all 6 GPU pipeline stages on CPU.
-pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<u32> {
-    let out_w = (src_w as f32 * scale_factor).ceil() as usize;
-    let out_h = (src_h as f32 * scale_factor).ceil() as usize;
+/// Intermediate output from the vectorize-gpu pipeline (stages 1-5).
+/// Contains optimized B-spline control points with connectivity and flags.
+pub struct VectorizeGpuData {
+    pub positions: Vec<f32>,
+    pub orig_positions: Vec<f32>,
+    pub neighbors: Vec<i32>,
+    pub flags: Vec<u32>,
+    pub graph: Vec<u32>,  // resolved similarity graph (2*w+1 × 2*h+1)
+    pub img_w: usize,
+    pub img_h: usize,
+}
 
+/// Run stages 1-5 of the vectorize-gpu pipeline without rasterizing.
+/// Returns intermediate CP data for SVG export or other consumers.
+pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeGpuData {
     let graph = build_similarity_graph(src, src_w, src_h);
     let graph = resolve_crossings(&graph, src_w, src_h);
     let (positions, neighbors, flags) = build_cell_graph(&graph, src_w, src_h);
@@ -44,20 +54,36 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
     let mut positions = positions;
     update_tjunctions(&mut positions, &neighbors, &flags, num_cps);
 
-    let result = rasterize(
+    VectorizeGpuData {
+        positions,
+        orig_positions,
+        neighbors,
+        flags,
+        graph,
+        img_w: src_w,
+        img_h: src_h,
+    }
+}
+
+/// Public entry point: runs all 6 GPU pipeline stages on CPU.
+pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<u32> {
+    let out_w = (src_w as f32 * scale_factor).ceil() as usize;
+    let out_h = (src_h as f32 * scale_factor).ceil() as usize;
+
+    let data = vectorize(src, src_w, src_h);
+
+    rasterize(
         src,
-        &positions,
-        &orig_positions,
-        &flags,
-        &neighbors,
-        src_w,
-        src_h,
+        &data.positions,
+        &data.orig_positions,
+        &data.flags,
+        &data.neighbors,
+        data.img_w,
+        data.img_h,
         out_w,
         out_h,
         scale_factor,
-    );
-
-    result
+    )
 }
 
 // ============================================================================

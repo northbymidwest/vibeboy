@@ -12,6 +12,11 @@ fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
     crate::svg::render_svg(&paths, w, h, bg_color)
 }
 
+fn vectorize_gpu_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
+    let data = vibeboy::scaling::vectorize_gpu::vectorize(pixels, width, height);
+    crate::gpu_svg::render_svg(&data, pixels)
+}
+
 fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
     let mut rgb = Vec::with_capacity(w * h * 3);
     for &pixel in pixels {
@@ -25,7 +30,11 @@ fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
 
 fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
     if format == "svg" || out.ends_with(".svg") {
-        let svg = vectorize_to_svg(pixels, w, h);
+        let svg = if format == "vectorize-gpu" {
+            vectorize_gpu_to_svg(pixels, w, h)
+        } else {
+            vectorize_to_svg(pixels, w, h)
+        };
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
     } else {
@@ -76,7 +85,11 @@ fn vectorize_and_save(
     out: &str, format: &str, scale: usize, use_gpu: bool,
 ) {
     if out.ends_with(".svg") {
-        let svg = vectorize_to_svg(pixels, width, height);
+        let svg = if format == "vectorize-gpu" {
+            vectorize_gpu_to_svg(pixels, width, height)
+        } else {
+            vectorize_to_svg(pixels, width, height)
+        };
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!(
             "Vectorized {}x{} image -> {} ({} bytes)",
@@ -261,6 +274,18 @@ pub fn cmd_screenshot(
         emu.step_frame();
     }
     let raw_fb = emu.frame_buffer();
+
+    // SVG export from raw framebuffer (bypass scaling)
+    if out.ends_with(".svg") {
+        let svg = if filter == Some("vectorize-gpu") {
+            vectorize_gpu_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
+        } else {
+            vectorize_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
+        };
+        fs::write(out, &svg).expect("Failed to write SVG");
+        eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
+        return;
+    }
 
     // Apply scaling filter if requested
     let scaled_buf;
