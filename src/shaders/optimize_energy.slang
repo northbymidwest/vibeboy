@@ -88,12 +88,11 @@ void main(uint3 tid: SV_DispatchThreadID) {
     int next_idx = neighbor_data[i * 4u + 1u];
     if (prev_idx < 0 || next_idx < 0) return;
 
-    // Skip optimization entirely for spans containing pinned nodes
-    // (geometric corners and crossing nodes whose positions are inverse-corrected)
-    static const uint PINNED_MASK = IS_CORNER | IS_CROSSING;
-    if ((flags & PINNED_MASK) != 0u) return;
-    if ((node_flags[uint(prev_idx)] & PINNED_MASK) != 0u) return;
-    if ((node_flags[uint(next_idx)] & PINNED_MASK) != 0u) return;
+    // Crossings are fully pinned (inverse-corrected positions).
+    // Also skip nodes adjacent to crossings.
+    if ((flags & IS_CROSSING) != 0u) return;
+    if ((node_flags[uint(prev_idx)] & IS_CROSSING) != 0u) return;
+    if ((node_flags[uint(next_idx)] & IS_CROSSING) != 0u) return;
 
     float2 n0 = read_neighbor_pos(uint(prev_idx));
     float2 n1 = read_neighbor_pos(uint(next_idx));
@@ -102,14 +101,24 @@ void main(uint3 tid: SV_DispatchThreadID) {
     float s4 = u.positional_scale * u.positional_scale;
     s4 *= s4; // 2.5^4 = 39.0625
 
+    // Corners: exclude curvature energy, keep positional energy only.
+    // The curvature term pulls the node toward the midpoint of its neighbors;
+    // at a corner (sharp angle) this would round off the corner.
+    bool exclude_curvature = (flags & IS_CORNER) != 0u;
+
     for (int iter = 0; iter < NEWTON_ITER; iter++) {
         float2 d = p - p_orig;
         float d2 = dot(d, d);
 
-        float2 grad = 4.0 * (2.0 * p - n0 - n1) + 4.0 * s4 * d2 * d;
+        // Gradient: curvature (kappa²) + positional ((2.5*dist)⁴)
+        float2 grad_curv = 4.0 * (2.0 * p - n0 - n1);
+        float2 grad_pos = 4.0 * s4 * d2 * d;
+        float2 grad = exclude_curvature ? grad_pos : (grad_curv + grad_pos);
 
-        float h00 = 8.0 + 4.0 * s4 * (2.0 * d.x * d.x + d2);
-        float h11 = 8.0 + 4.0 * s4 * (2.0 * d.y * d.y + d2);
+        // Hessian (positional part always included; curvature part conditional)
+        float curv_h = exclude_curvature ? 0.0 : 8.0;
+        float h00 = curv_h + 4.0 * s4 * (2.0 * d.x * d.x + d2);
+        float h11 = curv_h + 4.0 * s4 * (2.0 * d.y * d.y + d2);
         float h01 = 8.0 * s4 * d.x * d.y;
 
         float det = h00 * h11 - h01 * h01;

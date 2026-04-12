@@ -1239,14 +1239,15 @@ fn optimize_energy(
                 continue;
             }
 
-            // Skip optimization for spans containing corner nodes
-            if (f & IS_CORNER) != 0 {
+            // Crossings are fully pinned (inverse-corrected positions).
+            // Also skip nodes adjacent to crossings.
+            if (f & IS_CROSSING) != 0 {
                 continue;
             }
-            if (flags[prev_idx as usize] & IS_CORNER) != 0 {
+            if (flags[prev_idx as usize] & IS_CROSSING) != 0 {
                 continue;
             }
-            if (flags[next_idx as usize] & IS_CORNER) != 0 {
+            if (flags[next_idx as usize] & IS_CROSSING) != 0 {
                 continue;
             }
 
@@ -1254,7 +1255,10 @@ fn optimize_energy(
             let n1 = read_neighbor_pos(pos_in, next_idx as usize);
             let p_orig = read_pos(orig_positions, i);
 
-            // 2D Newton-Raphson: minimize E = |n0-2p+n1|² + (2.5·||p-p_orig||)⁴
+            // Corners: exclude curvature energy, keep positional energy only.
+            let exclude_curvature = (f & IS_CORNER) != 0;
+
+            // 2D Newton-Raphson: minimize E = κ²|n0-2p+n1|² + (2.5·||p-p_orig||)⁴
             // Gradient: ∇E = 4(2p-n0-n1) + 4·s⁴·||d||²·d
             // Hessian:   H = 8I + 4·s⁴·(2d⊗d + ||d||²·I)
             for _ in 0..NEWTON_ITER {
@@ -1262,11 +1266,16 @@ fn optimize_energy(
                 let dy = p.1 - p_orig.1;
                 let d2 = dx * dx + dy * dy;
 
-                let gx = 4.0 * (2.0 * p.0 - n0.0 - n1.0) + 4.0 * s4 * d2 * dx;
-                let gy = 4.0 * (2.0 * p.1 - n0.1 - n1.1) + 4.0 * s4 * d2 * dy;
+                let (gx, gy) = if exclude_curvature {
+                    (4.0 * s4 * d2 * dx, 4.0 * s4 * d2 * dy)
+                } else {
+                    (4.0 * (2.0 * p.0 - n0.0 - n1.0) + 4.0 * s4 * d2 * dx,
+                     4.0 * (2.0 * p.1 - n0.1 - n1.1) + 4.0 * s4 * d2 * dy)
+                };
 
-                let h00 = 8.0 + 4.0 * s4 * (2.0 * dx * dx + d2);
-                let h11 = 8.0 + 4.0 * s4 * (2.0 * dy * dy + d2);
+                let curv_h: f32 = if exclude_curvature { 0.0 } else { 8.0 };
+                let h00 = curv_h + 4.0 * s4 * (2.0 * dx * dx + d2);
+                let h11 = curv_h + 4.0 * s4 * (2.0 * dy * dy + d2);
                 let h01 = 8.0 * s4 * dx * dy;
 
                 let det = h00 * h11 - h01 * h01;
