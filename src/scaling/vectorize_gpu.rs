@@ -412,7 +412,7 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
             } else if anti_vote > main_vote {
                 graph_out[corner_gy * graph_stride + corner_gx] = 2; // keep anti
             } else {
-                graph_out[corner_gy * graph_stride + corner_gx] = 0; // tie: remove both
+                graph_out[corner_gy * graph_stride + corner_gx] = 0; // tie: remove both (per paper)
             }
         }
     }

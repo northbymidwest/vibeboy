@@ -6,7 +6,7 @@
 //   3. Islands -- valence-1 endpoint gets fixed weight 5 (early return on first found)
 // Fully-connected blocks (all 4 cardinal edges) remove both diagonals.
 // Single diagonals in fully-connected blocks are also removed.
-// Ties keep both diagonals (preserves thin features like Space Invaders sprites).
+// Ties remove both diagonals (per paper).
 
 // Read from a snapshot of the graph (pre-resolution state) so all threads
 // see consistent data regardless of execution order. Write to the live graph.
@@ -250,6 +250,6 @@ void main(uint3 tid: SV_DispatchThreadID) {
     } else if (anti_vote > main_vote) {
         gs(corner_gx, corner_gy, 2u); // keep anti (slash)
     } else {
-        gs(corner_gx, corner_gy, 3u); // tie: keep both (preserves thin features)
+        gs(corner_gx, corner_gy, 0u); // tie: remove both (per paper)
     }
 }
