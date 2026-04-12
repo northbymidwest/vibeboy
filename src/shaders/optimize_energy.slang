@@ -88,10 +88,12 @@ void main(uint3 tid: SV_DispatchThreadID) {
     int next_idx = neighbor_data[i * 4u + 1u];
     if (prev_idx < 0 || next_idx < 0) return;
 
-    // Skip optimization entirely for spans containing corner nodes
-    if ((flags & IS_CORNER) != 0u) return;
-    if ((node_flags[uint(prev_idx)] & IS_CORNER) != 0u) return;
-    if ((node_flags[uint(next_idx)] & IS_CORNER) != 0u) return;
+    // Skip optimization entirely for spans containing pinned nodes
+    // (geometric corners and crossing nodes whose positions are inverse-corrected)
+    static const uint PINNED_MASK = IS_CORNER | IS_CROSSING;
+    if ((flags & PINNED_MASK) != 0u) return;
+    if ((node_flags[uint(prev_idx)] & PINNED_MASK) != 0u) return;
+    if ((node_flags[uint(next_idx)] & PINNED_MASK) != 0u) return;
 
     float2 n0 = read_neighbor_pos(uint(prev_idx));
     float2 n1 = read_neighbor_pos(uint(next_idx));
