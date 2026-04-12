@@ -1239,11 +1239,7 @@ fn optimize_energy(
                 continue;
             }
 
-            // Crossings are fully pinned (inverse-corrected positions).
-            // Also skip nodes adjacent to crossings.
-            if (f & IS_CROSSING) != 0 {
-                continue;
-            }
+            // Skip nodes adjacent to crossings
             if (flags[prev_idx as usize] & IS_CROSSING) != 0 {
                 continue;
             }
@@ -1251,16 +1247,30 @@ fn optimize_energy(
                 continue;
             }
 
+            // Crossings: only process from slot 0 (even index) to avoid double-processing
+            let is_crossing = (f & IS_CROSSING) != 0;
+            if is_crossing && (i & 1) != 0 {
+                continue;
+            }
+
             let n0 = read_neighbor_pos(pos_in, prev_idx as usize);
             let n1 = read_neighbor_pos(pos_in, next_idx as usize);
             let p_orig = read_pos(orig_positions, i);
 
+            // For crossings, gather the other pair's neighbors
+            let (n2, n3) = if is_crossing && i + 1 < num_cps {
+                let other_prev = neighbors[(i + 1) * 4];
+                let other_next = neighbors[(i + 1) * 4 + 1];
+                let n2 = if other_prev >= 0 { read_neighbor_pos(pos_in, other_prev as usize) } else { (0.0, 0.0) };
+                let n3 = if other_next >= 0 { read_neighbor_pos(pos_in, other_next as usize) } else { (0.0, 0.0) };
+                (n2, n3)
+            } else {
+                ((0.0, 0.0), (0.0, 0.0))
+            };
+
             // Corners: exclude curvature energy, keep positional energy only.
             let exclude_curvature = (f & IS_CORNER) != 0;
 
-            // 2D Newton-Raphson: minimize E = κ²|n0-2p+n1|² + (2.5·||p-p_orig||)⁴
-            // Gradient: ∇E = 4(2p-n0-n1) + 4·s⁴·||d||²·d
-            // Hessian:   H = 8I + 4·s⁴·(2d⊗d + ||d||²·I)
             for _ in 0..NEWTON_ITER {
                 let dx = p.0 - p_orig.0;
                 let dy = p.1 - p_orig.1;
@@ -1269,11 +1279,16 @@ fn optimize_energy(
                 let (gx, gy) = if exclude_curvature {
                     (4.0 * s4 * d2 * dx, 4.0 * s4 * d2 * dy)
                 } else {
-                    (4.0 * (2.0 * p.0 - n0.0 - n1.0) + 4.0 * s4 * d2 * dx,
-                     4.0 * (2.0 * p.1 - n0.1 - n1.1) + 4.0 * s4 * d2 * dy)
+                    let mut cx = 4.0 * (2.0 * p.0 - n0.0 - n1.0);
+                    let mut cy = 4.0 * (2.0 * p.1 - n0.1 - n1.1);
+                    if is_crossing {
+                        cx += 4.0 * (2.0 * p.0 - n2.0 - n3.0);
+                        cy += 4.0 * (2.0 * p.1 - n2.1 - n3.1);
+                    }
+                    (cx + 4.0 * s4 * d2 * dx, cy + 4.0 * s4 * d2 * dy)
                 };
 
-                let curv_h: f32 = if exclude_curvature { 0.0 } else { 8.0 };
+                let curv_h: f32 = if exclude_curvature { 0.0 } else if is_crossing { 16.0 } else { 8.0 };
                 let h00 = curv_h + 4.0 * s4 * (2.0 * dx * dx + d2);
                 let h11 = curv_h + 4.0 * s4 * (2.0 * dy * dy + d2);
                 let h01 = 8.0 * s4 * dx * dy;
@@ -1290,6 +1305,11 @@ fn optimize_energy(
 
             pos_out[i * 2] = p.0;
             pos_out[i * 2 + 1] = p.1;
+            // Write same position to both crossing slots
+            if is_crossing && i + 1 < num_cps {
+                pos_out[(i + 1) * 2] = p.0;
+                pos_out[(i + 1) * 2 + 1] = p.1;
+            }
         }
     };
 

@@ -88,9 +88,8 @@ void main(uint3 tid: SV_DispatchThreadID) {
     int next_idx = neighbor_data[i * 4u + 1u];
     if (prev_idx < 0 || next_idx < 0) return;
 
-    // Crossings are fully pinned (inverse-corrected positions).
-    // Also skip nodes adjacent to crossings.
-    if ((flags & IS_CROSSING) != 0u) return;
+    // Skip nodes adjacent to crossings (crossing position depends on all 4 neighbors;
+    // optimizing one side without the other would break symmetry).
     if ((node_flags[uint(prev_idx)] & IS_CROSSING) != 0u) return;
     if ((node_flags[uint(next_idx)] & IS_CROSSING) != 0u) return;
 
@@ -101,10 +100,27 @@ void main(uint3 tid: SV_DispatchThreadID) {
     float s4 = u.positional_scale * u.positional_scale;
     s4 *= s4; // 2.5^4 = 39.0625
 
+    // Crossings: optimize with combined curvature from both chains.
+    // Slot 0 has N-S neighbors, slot 1 (at i+1 or i-1) has E-W neighbors.
+    // Combine all 4 neighbors' curvature into one gradient. Write same
+    // position to both slots so they stay coincident.
+    bool is_crossing = (flags & IS_CROSSING) != 0u;
+    // Only process crossings from the even slot (slot 0) to avoid double-processing.
+    if (is_crossing && (i & 1u) != 0u) return;
+
     // Corners: exclude curvature energy, keep positional energy only.
-    // The curvature term pulls the node toward the midpoint of its neighbors;
-    // at a corner (sharp angle) this would round off the corner.
     bool exclude_curvature = (flags & IS_CORNER) != 0u;
+
+    // For crossings, gather the other pair's neighbors too.
+    float2 n2 = float2(0, 0);
+    float2 n3 = float2(0, 0);
+    if (is_crossing) {
+        uint other = i + 1u;
+        int other_prev = neighbor_data[other * 4u];
+        int other_next = neighbor_data[other * 4u + 1u];
+        if (other_prev >= 0) n2 = read_neighbor_pos(uint(other_prev));
+        if (other_next >= 0) n3 = read_neighbor_pos(uint(other_next));
+    }
 
     for (int iter = 0; iter < NEWTON_ITER; iter++) {
         float2 d = p - p_orig;
@@ -112,11 +128,15 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
         // Gradient: curvature (kappa²) + positional ((2.5*dist)⁴)
         float2 grad_curv = 4.0 * (2.0 * p - n0 - n1);
+        if (is_crossing) {
+            // Add curvature from the second chain (E-W)
+            grad_curv += 4.0 * (2.0 * p - n2 - n3);
+        }
         float2 grad_pos = 4.0 * s4 * d2 * d;
         float2 grad = exclude_curvature ? grad_pos : (grad_curv + grad_pos);
 
-        // Hessian (positional part always included; curvature part conditional)
-        float curv_h = exclude_curvature ? 0.0 : 8.0;
+        // Hessian
+        float curv_h = exclude_curvature ? 0.0 : (is_crossing ? 16.0 : 8.0);
         float h00 = curv_h + 4.0 * s4 * (2.0 * d.x * d.x + d2);
         float h11 = curv_h + 4.0 * s4 * (2.0 * d.y * d.y + d2);
         float h01 = 8.0 * s4 * d.x * d.y;
@@ -130,4 +150,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
     pos_out[i * 2u] = p.x;
     pos_out[i * 2u + 1u] = p.y;
+    // Write same position to both crossing slots
+    if (is_crossing) {
+        pos_out[(i + 1u) * 2u] = p.x;
+        pos_out[(i + 1u) * 2u + 1u] = p.y;
+    }
 }
