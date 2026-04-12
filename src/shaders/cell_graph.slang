@@ -49,6 +49,70 @@ uint g(int gx, int gy) {
     return graph[gy * int(u.graph_stride) + gx];
 }
 
+// Read pixel color from the graph (stored at odd coordinates).
+uint px_color(int px, int py) {
+    px = clamp(px, 0, int(u.img_w) - 1);
+    py = clamp(py, 0, int(u.img_h) - 1);
+    return g(2 * px + 1, 2 * py + 1);
+}
+
+// Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
+void bnd_colors(int cx, int cy, int dir, out uint ca, out uint cb) {
+    switch (dir) {
+        case 0: ca = px_color(cx - 1, cy - 1); cb = px_color(cx, cy - 1); break; // N
+        case 1: ca = px_color(cx, cy - 1);      cb = px_color(cx, cy);     break; // E
+        case 2: ca = px_color(cx, cy);           cb = px_color(cx - 1, cy); break; // S
+        case 3: ca = px_color(cx - 1, cy);       cb = px_color(cx - 1, cy - 1); break; // W
+        default: ca = 0u; cb = 0u; break;
+    }
+}
+
+// Classify an edge as shading (similar colors) per paper Section 3.3.
+// YUV Euclidean distance <= 100/255.
+bool is_shading_edge(uint ca, uint cb) {
+    if (ca == cb) return true;
+    float dr = float(int((ca >> 16u) & 0xFFu) - int((cb >> 16u) & 0xFFu));
+    float dg = float(int((ca >> 8u) & 0xFFu) - int((cb >> 8u) & 0xFFu));
+    float db = float(int(ca & 0xFFu) - int(cb & 0xFFu));
+    float dy = (0.299 * dr + 0.587 * dg + 0.114 * db) / 255.0;
+    float du = 0.493 * (db / 255.0 - dy);
+    float dv = 0.877 * (dr / 255.0 - dy);
+    float threshold = 100.0 / 255.0;
+    return (dy * dy + du * du + dv * dv) <= threshold * threshold;
+}
+
+// Select the through-pair at a 3-way T-junction (paper Section 3.3).
+// dirs must be a 3-element array of the boundary directions present.
+// Returns the two through-pair directions in pair0/pair1.
+void select_tjunction_pair(int cx, int cy, int d0, int d1, int d2,
+                           out int pair0, out int pair1) {
+    // Step 1: Shading/contour classification.
+    uint ca0, cb0, ca1, cb1, ca2, cb2;
+    bnd_colors(cx, cy, d0, ca0, cb0);
+    bnd_colors(cx, cy, d1, ca1, cb1);
+    bnd_colors(cx, cy, d2, ca2, cb2);
+    bool s0 = is_shading_edge(ca0, cb0);
+    bool s1 = is_shading_edge(ca1, cb1);
+    bool s2 = is_shading_edge(ca2, cb2);
+    int shading_count = (s0 ? 1 : 0) + (s1 ? 1 : 0) + (s2 ? 1 : 0);
+
+    if (shading_count == 1) {
+        // 1 shading + 2 contour: connect the 2 contour edges.
+        if (s0) { pair0 = d1; pair1 = d2; }
+        else if (s1) { pair0 = d0; pair1 = d2; }
+        else { pair0 = d0; pair1 = d1; }
+        return;
+    }
+
+    // Step 2: Angle-based fallback — connect the pair closest to 180 degrees.
+    // At grid corners, opposite pairs (N-S=0^2, E-W=1^3) are 180 degrees;
+    // all other pairs are 90 degrees. With 3 of 4 cardinal directions,
+    // there is always exactly one opposite pair.
+    if ((d0 ^ d2) == 2) { pair0 = d0; pair1 = d2; } // d0-d2 opposite
+    else if ((d0 ^ d1) == 2) { pair0 = d0; pair1 = d1; } // d0-d1 opposite
+    else { pair0 = d1; pair1 = d2; } // d1-d2 opposite
+}
+
 // Compute the actual CP position at a neighbor grid corner, accounting for
 // which diagonal slot we'd connect to (from_dir determines the slot).
 float2 neighbor_cp_pos(int cx, int cy, int from_dir) {
@@ -116,14 +180,15 @@ int nbr_cp_idx(int cx, int cy, int from_dir) {
         uint t_count = (t_bnd_n ? 1u : 0u) + (t_bnd_e ? 1u : 0u)
                      + (t_bnd_s ? 1u : 0u) + (t_bnd_w ? 1u : 0u);
         if (t_count >= 3u) {
-            // Determine main pair (same priority order as main())
+            // Collect the 3 boundary directions and select through-pair
+            // using paper's shading/contour + angle heuristic.
+            int dirs[3]; int di = 0;
+            if (t_bnd_n) dirs[di++] = 0;
+            if (t_bnd_e) dirs[di++] = 1;
+            if (t_bnd_s) dirs[di++] = 2;
+            if (t_bnd_w) dirs[di++] = 3;
             int pair0, pair1;
-            if (t_bnd_n && t_bnd_s) { pair0 = 0; pair1 = 2; }
-            else if (t_bnd_e && t_bnd_w) { pair0 = 1; pair1 = 3; }
-            else if (t_bnd_n && t_bnd_e) { pair0 = 0; pair1 = 1; }
-            else if (t_bnd_n && t_bnd_w) { pair0 = 0; pair1 = 3; }
-            else if (t_bnd_s && t_bnd_e) { pair0 = 2; pair1 = 1; }
-            else { pair0 = 2; pair1 = 3; }
+            select_tjunction_pair(cx, cy, dirs[0], dirs[1], dirs[2], pair0, pair1);
             // Map from_dir to the boundary direction at the target corner
             int target_side = from_dir ^ 2;
             if (target_side != pair0 && target_side != pair1) return base + 1;
@@ -354,22 +419,19 @@ void main(uint3 tid: SV_DispatchThreadID) {
         write_cp_full(base, pos, nbr, -1, 1u, nbr_dir, -1, int(cx), int(cy));
 
     } else if (bnd_count == 3u) {
-        int prev = -1, next = -1;
-        int t_prev_dir = -1, t_next_dir = -1;
+        // Paper Section 3.3: select through-pair via shading/contour + angle heuristic.
+        int dirs[3]; int di = 0;
+        if (bnd_n) dirs[di++] = 0;
+        if (bnd_e) dirs[di++] = 1;
+        if (bnd_s) dirs[di++] = 2;
+        if (bnd_w) dirs[di++] = 3;
+        int t_prev_dir, t_next_dir;
+        select_tjunction_pair(int(cx), int(cy), dirs[0], dirs[1], dirs[2],
+                              t_prev_dir, t_next_dir);
 
-        if (bnd_n && bnd_s) {
-            prev = n_idx; next = s_idx; t_prev_dir = 0; t_next_dir = 2;
-        } else if (bnd_e && bnd_w) {
-            prev = e_idx; next = w_idx; t_prev_dir = 1; t_next_dir = 3;
-        } else if (bnd_n && bnd_e) {
-            prev = n_idx; next = e_idx; t_prev_dir = 0; t_next_dir = 1;
-        } else if (bnd_n && bnd_w) {
-            prev = n_idx; next = w_idx; t_prev_dir = 0; t_next_dir = 3;
-        } else if (bnd_s && bnd_e) {
-            prev = s_idx; next = e_idx; t_prev_dir = 2; t_next_dir = 1;
-        } else {
-            prev = s_idx; next = w_idx; t_prev_dir = 2; t_next_dir = 3;
-        }
+        int idx_arr[4] = { n_idx, e_idx, s_idx, w_idx };
+        int prev = idx_arr[t_prev_dir];
+        int next = idx_arr[t_next_dir];
 
         if (prev >= 0 && next >= 0) {
             int prev_slot = prev / 2;

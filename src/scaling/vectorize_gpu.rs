@@ -444,6 +444,65 @@ fn build_cell_graph(
         graph[gy * graph_stride + gx]
     };
 
+    // Read pixel color from the graph (stored at odd coordinates).
+    let px_color = |px: i32, py: i32| -> u32 {
+        let px = px.clamp(0, img_w as i32 - 1);
+        let py = py.clamp(0, img_h as i32 - 1);
+        g(2 * px + 1, 2 * py + 1)
+    };
+
+    // Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
+    let bnd_colors = |cx: i32, cy: i32, dir: i32| -> (u32, u32) {
+        match dir {
+            0 => (px_color(cx - 1, cy - 1), px_color(cx, cy - 1)),
+            1 => (px_color(cx, cy - 1), px_color(cx, cy)),
+            2 => (px_color(cx, cy), px_color(cx - 1, cy)),
+            3 => (px_color(cx - 1, cy), px_color(cx - 1, cy - 1)),
+            _ => (0, 0),
+        }
+    };
+
+    // Classify an edge as shading (similar colors) per paper Section 3.3.
+    // YUV Euclidean distance <= 100/255.
+    let is_shading_edge = |ca: u32, cb: u32| -> bool {
+        if ca == cb { return true; }
+        let dr = ((ca >> 16) & 0xFF) as f32 - ((cb >> 16) & 0xFF) as f32;
+        let dg = ((ca >> 8) & 0xFF) as f32 - ((cb >> 8) & 0xFF) as f32;
+        let db = (ca & 0xFF) as f32 - (cb & 0xFF) as f32;
+        let dy = (0.299 * dr + 0.587 * dg + 0.114 * db) / 255.0;
+        let du = 0.493 * (db / 255.0 - dy);
+        let dv = 0.877 * (dr / 255.0 - dy);
+        let threshold = 100.0 / 255.0;
+        (dy * dy + du * du + dv * dv) <= threshold * threshold
+    };
+
+    // Select the through-pair at a 3-way T-junction (paper Section 3.3).
+    let select_tjunction_pair = |cx: i32, cy: i32, d0: i32, d1: i32, d2: i32| -> (i32, i32) {
+        // Step 1: Shading/contour classification.
+        let (ca0, cb0) = bnd_colors(cx, cy, d0);
+        let (ca1, cb1) = bnd_colors(cx, cy, d1);
+        let (ca2, cb2) = bnd_colors(cx, cy, d2);
+        let s0 = is_shading_edge(ca0, cb0);
+        let s1 = is_shading_edge(ca1, cb1);
+        let s2 = is_shading_edge(ca2, cb2);
+        let shading_count = s0 as i32 + s1 as i32 + s2 as i32;
+
+        if shading_count == 1 {
+            // 1 shading + 2 contour: connect the 2 contour edges.
+            if s0 { return (d1, d2); }
+            if s1 { return (d0, d2); }
+            return (d0, d1);
+        }
+
+        // Step 2: Angle-based fallback — connect the pair closest to 180 degrees.
+        // At grid corners, opposite pairs (N-S=0^2, E-W=1^3) are 180 degrees;
+        // all other pairs are 90 degrees. With 3 of 4 cardinal directions,
+        // there is always exactly one opposite pair.
+        if (d0 ^ d2) == 2 { (d0, d2) }
+        else if (d0 ^ d1) == 2 { (d0, d1) }
+        else { (d1, d2) }
+    };
+
     let cp_base = |cx: i32, cy: i32| -> i32 {
         if cx < 0 || cy < 0 || cx >= corners_w as i32 || cy >= corners_h as i32 {
             return -1;
@@ -498,20 +557,15 @@ fn build_cell_graph(
             let t_bnd_w = g(2 * cx - 1, 2 * cy) == 0;
             let t_count = t_bnd_n as u32 + t_bnd_e as u32 + t_bnd_s as u32 + t_bnd_w as u32;
             if t_count >= 3 {
-                // Determine main pair (same priority order as main())
-                let (pair0, pair1) = if t_bnd_n && t_bnd_s {
-                    (0, 2)
-                } else if t_bnd_e && t_bnd_w {
-                    (1, 3)
-                } else if t_bnd_n && t_bnd_e {
-                    (0, 1)
-                } else if t_bnd_n && t_bnd_w {
-                    (0, 3)
-                } else if t_bnd_s && t_bnd_e {
-                    (2, 1)
-                } else {
-                    (2, 3)
-                };
+                // Collect the 3 boundary directions and select through-pair
+                // using paper's shading/contour + angle heuristic.
+                let mut dirs = [0i32; 3];
+                let mut di = 0;
+                if t_bnd_n { dirs[di] = 0; di += 1; }
+                if t_bnd_e { dirs[di] = 1; di += 1; }
+                if t_bnd_s { dirs[di] = 2; di += 1; }
+                if t_bnd_w { dirs[di] = 3; }
+                let (pair0, pair1) = select_tjunction_pair(cx, cy, dirs[0], dirs[1], dirs[2]);
                 // Map from_dir to the boundary direction at the target corner
                 let target_side = from_dir ^ 2;
                 if target_side != pair0 && target_side != pair1 {
@@ -1052,41 +1106,18 @@ fn build_cell_graph(
                     icy,
                 );
             } else if bnd_count == 3 {
-                // T-junction (valence 3)
-                let (mut prev, mut next) = (-1i32, -1i32);
-                let (mut t_prev_dir, mut t_next_dir) = (-1i32, -1i32);
+                // Paper Section 3.3: select through-pair via shading/contour + angle heuristic.
+                let mut dirs = [0i32; 3];
+                let mut di = 0;
+                if bnd_n { dirs[di] = 0; di += 1; }
+                if bnd_e { dirs[di] = 1; di += 1; }
+                if bnd_s { dirs[di] = 2; di += 1; }
+                if bnd_w { dirs[di] = 3; }
+                let (t_prev_dir, t_next_dir) = select_tjunction_pair(icx, icy, dirs[0], dirs[1], dirs[2]);
 
-                if bnd_n && bnd_s {
-                    prev = n_idx;
-                    next = s_idx;
-                    t_prev_dir = 0;
-                    t_next_dir = 2;
-                } else if bnd_e && bnd_w {
-                    prev = e_idx;
-                    next = w_idx;
-                    t_prev_dir = 1;
-                    t_next_dir = 3;
-                } else if bnd_n && bnd_e {
-                    prev = n_idx;
-                    next = e_idx;
-                    t_prev_dir = 0;
-                    t_next_dir = 1;
-                } else if bnd_n && bnd_w {
-                    prev = n_idx;
-                    next = w_idx;
-                    t_prev_dir = 0;
-                    t_next_dir = 3;
-                } else if bnd_s && bnd_e {
-                    prev = s_idx;
-                    next = e_idx;
-                    t_prev_dir = 2;
-                    t_next_dir = 1;
-                } else {
-                    prev = s_idx;
-                    next = w_idx;
-                    t_prev_dir = 2;
-                    t_next_dir = 3;
-                }
+                let idx_arr = [n_idx, e_idx, s_idx, w_idx];
+                let prev = idx_arr[t_prev_dir as usize];
+                let next = idx_arr[t_next_dir as usize];
 
                 // T-junction position correction
                 if prev >= 0 && next >= 0 {
