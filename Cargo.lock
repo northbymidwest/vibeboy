@@ -4084,12 +4084,11 @@ dependencies = [
 
 [[package]]
 name = "sdl3"
-version = "0.17.3"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce0693cede7f7901e968e5539f87174d0fb5fac5d489a3e3be52b2b4a0b49c5"
+checksum = "96e613fca5924ccab8ab8369ab292a1b4720b125e98007fbda163f4ce7176472"
 dependencies = [
  "bitflags 2.11.0",
- "lazy_static",
  "libc",
  "sdl3-sys",
 ]
