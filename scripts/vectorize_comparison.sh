@@ -84,7 +84,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — scanline CPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format raster --scale "$SCALE" 2>/dev/null
+            --out "$out" --filter raster --scale "$SCALE" 2>/dev/null
     fi
 
     # GPU scanline
@@ -92,7 +92,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — scanline GPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format raster --scale "$SCALE" --gpu 2>/dev/null
+            --out "$out" --filter raster --scale "$SCALE" --gpu 2>/dev/null
     fi
 
     # CPU spline-diffusion
@@ -100,7 +100,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — spline-diffusion CPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format spline-diffusion --scale "$SCALE" 2>/dev/null
+            --out "$out" --filter spline-diffusion --scale "$SCALE" 2>/dev/null
     fi
 
     # GPU spline-diffusion
@@ -108,7 +108,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — spline-diffusion GPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format spline-diffusion --scale "$SCALE" --gpu 2>/dev/null
+            --out "$out" --filter spline-diffusion --scale "$SCALE" --gpu 2>/dev/null
     fi
 
     # CPU edge-based (gap-free)
@@ -116,7 +116,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — edge CPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format edge --scale "$SCALE" 2>/dev/null
+            --out "$out" --filter edge --scale "$SCALE" 2>/dev/null
     fi
 
     # GPU edge-based (gap-free)
@@ -124,7 +124,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — edge GPU..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format edge --scale "$SCALE" --gpu 2>/dev/null
+            --out "$out" --filter edge --scale "$SCALE" --gpu 2>/dev/null
     fi
 
     # Full GPU vectorize pipeline
@@ -132,7 +132,7 @@ for name in "${NAMES[@]}"; do
     if should_render "$out"; then
         echo "  $name — full GPU pipeline..."
         cargo run --release --features sdl3-gpu-shaders --bin test_runner -- vectorize "$input" \
-            --out "$out" --format gpu-full --scale "$SCALE" --gpu 2>/dev/null
+            --out "$out" --filter gpu-full --scale "$SCALE" --gpu 2>/dev/null
     fi
 done
 
