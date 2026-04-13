@@ -151,8 +151,11 @@ fn compute_corner_weights(metrics: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32;
 // ---------------------------------------------------------------------------
 
 // Branchless comparison helpers (matching GPU step-function semantics).
-#[inline(always)] fn ge(a: f32, b: f32) -> f32 { if a >= b { 1.0 } else { 0.0 } }
-#[inline(always)] fn le(a: f32, b: f32) -> f32 { if a <= b { 1.0 } else { 0.0 } }
+// Matching GPU step()-based semantics:
+// Branchless comparison helpers matching GPU step()-based semantics.
+// GPU's vec_ge/scalar_ge use 1-step(a,b) which is strict >, not >=.
+#[inline(always)] fn gt(a: f32, b: f32) -> f32 { if a > b { 1.0 } else { 0.0 } }
+#[inline(always)] fn lt(a: f32, b: f32) -> f32 { if a < b { 1.0 } else { 0.0 } }
 #[inline(always)] fn leq(a: f32, b: f32) -> f32 { if a <= b { 1.0 } else { 0.0 } }
 #[inline(always)] fn inv(x: f32) -> f32 { 1.0 - x }
 
@@ -186,8 +189,8 @@ fn majority_vote(dom: [f32; 4]) -> [f32; 4] {
         let prev = dom[(i + 3) & 3];
         let opposite = dom[(i + 2) & 3];
         let unopposed = leq(next, 0.0) * leq(prev, 0.0);
-        let majority = ge(dom[i] + opposite, next + prev);
-        result[i] = (ge(dom[i], 0.0) * (unopposed + majority)).min(1.0);
+        let majority = gt(dom[i] + opposite, next + prev);
+        result[i] = (gt(dom[i], 0.0) * (unopposed + majority)).min(1.0);
     }
     result
 }
@@ -276,8 +279,8 @@ fn arbitrate_junctions(
                 let left = (ci + 1) & 3;
                 let right = (ci + 3) & 3;
                 let opposite = (ci + 2) & 3;
-                (vote[ci] + inv(vote[left]) * inv(vote[right]) * ge(stren[ci], 0.0)
-                    * (vote[opposite] + ge(stren[opposite] + stren[ci], stren[left] + stren[right])))
+                (vote[ci] + inv(vote[left]) * inv(vote[right]) * gt(stren[ci], 0.0)
+                    * (vote[opposite] + gt(stren[opposite] + stren[ci], stren[left] + stren[right])))
                 .min(1.0)
             };
 
@@ -323,9 +326,9 @@ fn arbitrate_junctions(
 
             let mut packed = [0.0f32; 4];
             for i in 0..4 {
-                let orient = ge(h_edge[i] + h_extra[i], v_edge[i] + v_extra[i]);
-                let horiz = le(h_edge[i], v_edge[i]) * jcond[i];
-                let vert = ge(h_edge[i], v_edge[i]) * jcond[i];
+                let orient = gt(h_edge[i] + h_extra[i], v_edge[i] + v_extra[i]);
+                let horiz = lt(h_edge[i], v_edge[i]) * jcond[i];
+                let vert = gt(h_edge[i], v_edge[i]) * jcond[i];
                 packed[i] = (active[i] + 2.0 * horiz + 4.0 * vert + 8.0 * orient) / 15.0;
             }
 
