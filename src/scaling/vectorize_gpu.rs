@@ -1956,16 +1956,16 @@ fn rasterize(
                             let proj_w = pw * normal.0.abs().max(normal.1.abs());
                             let frac = (0.5 + d / proj_w).clamp(0.0, 1.0);
 
-                            let r = frac * ((pos_side >> 16) & 0xFF) as f32
-                                + (1.0 - frac) * ((neg_side >> 16) & 0xFF) as f32;
-                            let g = frac * ((pos_side >> 8) & 0xFF) as f32
-                                + (1.0 - frac) * ((neg_side >> 8) & 0xFF) as f32;
-                            let b = frac * (pos_side & 0xFF) as f32
-                                + (1.0 - frac) * (neg_side & 0xFF) as f32;
-
-                            let ri = (r / 255.0 * 255.0).round().clamp(0.0, 255.0) as u32;
-                            let gi = (g / 255.0 * 255.0).round().clamp(0.0, 255.0) as u32;
-                            let bi = (b / 255.0 * 255.0).round().clamp(0.0, 255.0) as u32;
+                            // Blend in linear light (sRGB decode → blend → sRGB encode)
+                            let r0 = (((pos_side >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
+                            let g0 = (((pos_side >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
+                            let b0 = ((pos_side & 0xFF) as f32 / 255.0).powf(2.2);
+                            let r1 = (((neg_side >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
+                            let g1 = (((neg_side >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
+                            let b1 = ((neg_side & 0xFF) as f32 / 255.0).powf(2.2);
+                            let ri = ((frac * r0 + (1.0 - frac) * r1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+                            let gi = ((frac * g0 + (1.0 - frac) * g1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+                            let bi = ((frac * b0 + (1.0 - frac) * b1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
                             chunk[local_y * out_w + opx] = 0xFF000000 | (ri << 16) | (gi << 8) | bi;
                         }
                     }

@@ -373,10 +373,17 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                         float proj_w = pw * max(abs(normal.x), abs(normal.y));
                         float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
 
-                        float r = frac * float((pos_side >> 16u) & 0xFFu) + (1.0 - frac) * float((neg_side >> 16u) & 0xFFu);
-                        float g = frac * float((pos_side >> 8u) & 0xFFu) + (1.0 - frac) * float((neg_side >> 8u) & 0xFFu);
-                        float b = frac * float(pos_side & 0xFFu) + (1.0 - frac) * float(neg_side & 0xFFu);
-                        output_img.Store(int2(opx, opy), float4(r / 255.0, g / 255.0, b / 255.0, 1.0));
+                        // Blend in linear light (sRGB decode → blend → sRGB encode)
+                        float3 c0 = float3(float((pos_side >> 16u) & 0xFFu),
+                                           float((pos_side >> 8u) & 0xFFu),
+                                           float(pos_side & 0xFFu)) / 255.0;
+                        float3 c1 = float3(float((neg_side >> 16u) & 0xFFu),
+                                           float((neg_side >> 8u) & 0xFFu),
+                                           float(neg_side & 0xFFu)) / 255.0;
+                        c0 = pow(c0, float3(2.2));
+                        c1 = pow(c1, float3(2.2));
+                        float3 blended = pow(frac * c0 + (1.0 - frac) * c1, float3(1.0 / 2.2));
+                        output_img.Store(int2(opx, opy), float4(blended, 1.0));
                     }
                 }
             }
