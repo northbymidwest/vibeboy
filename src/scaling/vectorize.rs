@@ -86,10 +86,209 @@ pub fn scale_scanline(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32
     )
 }
 
+/// A line segment derived from flattening a B-spline curve span.
+/// Stored in output (scaled) coordinates with y_min < y_max.
+struct ScanEdge {
+    x_at_ymin: f32,
+    y_min: f32,
+    y_max: f32,
+    dx_per_dy: f32,
+    /// Color on the left side of the edge (relative to the original downward direction).
+    color_left: u32,
+    /// Color on the right side of the edge.
+    color_right: u32,
+}
+
+/// Blend two sRGB-packed colors in linear light.  `t` is the weight of `c0`.
+#[inline(always)]
+fn blend_linear_srgb(c0: u32, c1: u32, t: f32) -> u32 {
+    let r0 = (((c0 >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
+    let g0 = (((c0 >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
+    let b0 = ((c0 & 0xFF) as f32 / 255.0).powf(2.2);
+    let r1 = (((c1 >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
+    let g1 = (((c1 >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
+    let b1 = ((c1 & 0xFF) as f32 / 255.0).powf(2.2);
+    let ri = ((t * r0 + (1.0 - t) * r1).powf(1.0 / 2.2) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u32;
+    let gi = ((t * g0 + (1.0 - t) * g1).powf(1.0 / 2.2) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u32;
+    let bi = ((t * b0 + (1.0 - t) * b1).powf(1.0 / 2.2) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u32;
+    0xFF000000 | (ri << 16) | (gi << 8) | bi
+}
+
+/// Build the edge table from the vectorize pipeline output.
+///
+/// Walks all active CPs, flattens each B-spline span into line segments,
+/// and returns `(edges, row_start, row_end)` where `row_start[r]..row_end[r]`
+/// gives the range of edge indices that cross output row `r`.
+fn build_edge_table(
+    pixels: &[u32],
+    positions: &[f32],
+    flags: &[u32],
+    cp_neighbors: &[i32],
+    img_w: usize,
+    img_h: usize,
+    out_h: usize,
+    scale_factor: f32,
+) -> (Vec<ScanEdge>, Vec<u32>, Vec<u32>) {
+    let corners_w = img_w + 1;
+    let num_cps = corners_w * (img_h + 1) * 2;
+
+    let get_px_color = |px: i32, py: i32| -> u32 {
+        let px = px.clamp(0, img_w as i32 - 1) as usize;
+        let py = py.clamp(0, img_h as i32 - 1) as usize;
+        pixels[py * img_w + px]
+    };
+    let get_edge_colors = |icx: i32, icy: i32, dir: i32| -> (u32, u32) {
+        match dir {
+            0 => (get_px_color(icx - 1, icy - 1), get_px_color(icx, icy - 1)),
+            1 => (get_px_color(icx, icy - 1), get_px_color(icx, icy)),
+            2 => (get_px_color(icx, icy), get_px_color(icx - 1, icy)),
+            3 => (get_px_color(icx - 1, icy), get_px_color(icx - 1, icy - 1)),
+            _ => (0, 0),
+        }
+    };
+
+    let read_pos = |idx: i32| -> (f32, f32) {
+        if idx < 0 {
+            return (-1e10, -1e10);
+        }
+        let i = idx as usize;
+        (positions[i * 2], positions[i * 2 + 1])
+    };
+
+    // Track visited CPs to avoid double-processing cycles.
+    let mut visited = vec![false; num_cps];
+    let mut edges: Vec<ScanEdge> = Vec::new();
+
+    for ci in 0..num_cps {
+        if flags[ci] == 0 || visited[ci] {
+            continue;
+        }
+
+        let next_ci = cp_neighbors[ci * 4 + 1];
+        if next_ci < 0 {
+            visited[ci] = true;
+            continue;
+        }
+        let next_dir = cp_neighbors[ci * 4 + 3];
+        if next_dir < 0 {
+            visited[ci] = true;
+            continue;
+        }
+
+        visited[ci] = true;
+
+        let icx = (ci / 2 % corners_w) as i32;
+        let icy = (ci / 2 / corners_w) as i32;
+
+        let (color_left, color_right) = get_edge_colors(icx, icy, next_dir);
+        if color_left == color_right {
+            continue;
+        }
+
+        // Build the three control points for this span
+        let prev_ci = cp_neighbors[ci * 4];
+        let cp = read_pos(ci as i32);
+        let pp = if prev_ci >= 0 { read_pos(prev_ci) } else { cp };
+        let np = read_pos(next_ci);
+
+        // Determine subdivision count based on curvature * scale.
+        // Curvature proxy: distance of the control point from the chord midpoint.
+        // For a quadratic B-spline (p0,p1,p2), the span endpoints are
+        // mid(p0,p1) and mid(p1,p2), so the chord midpoint is their average.
+        let chord_mid_x = 0.25 * (pp.0 + 2.0 * cp.0 + np.0);
+        let chord_mid_y = 0.25 * (pp.1 + 2.0 * cp.1 + np.1);
+        let dev = ((cp.0 - chord_mid_x).powi(2) + (cp.1 - chord_mid_y).powi(2)).sqrt();
+        let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+
+        let inv_subdiv = 1.0 / subdiv as f32;
+        let mut prev_pt = beval(pp, cp, np, 0.0);
+
+        for s in 1..=subdiv {
+            let t = s as f32 * inv_subdiv;
+            let cur_pt = beval(pp, cp, np, t);
+
+            // Scale to output coordinates
+            let x0 = prev_pt.0 * scale_factor;
+            let y0 = prev_pt.1 * scale_factor;
+            let x1 = cur_pt.0 * scale_factor;
+            let y1 = cur_pt.1 * scale_factor;
+
+            prev_pt = cur_pt;
+
+            // Skip near-horizontal segments
+            let dy = y1 - y0;
+            if dy.abs() < 1e-6 {
+                continue;
+            }
+
+            // Ensure y_min < y_max.  If we flip the direction, swap left/right
+            // colors so that the "left of the original direction" convention holds.
+            let (ymin, ymax, x_at_ymin, cl, cr) = if y0 < y1 {
+                (y0, y1, x0, color_left, color_right)
+            } else {
+                (y1, y0, x1, color_right, color_left)
+            };
+
+            let dx_per_dy = (x1 - x0) / dy;
+
+            edges.push(ScanEdge {
+                x_at_ymin,
+                y_min: ymin,
+                y_max: ymax,
+                dx_per_dy,
+                color_left: cl,
+                color_right: cr,
+            });
+        }
+    }
+
+    // Build row index: for each output row, which edges cross it.
+    // Count edges per row first.
+    let mut row_count = vec![0u32; out_h];
+    for edge in &edges {
+        let r_start = (edge.y_min.floor() as usize).min(out_h.saturating_sub(1));
+        let r_end = (edge.y_max.ceil() as usize).min(out_h);
+        for r in r_start..r_end {
+            row_count[r] += 1;
+        }
+    }
+
+    // Prefix sum for offsets
+    let mut row_start = vec![0u32; out_h + 1];
+    for r in 0..out_h {
+        row_start[r + 1] = row_start[r] + row_count[r];
+    }
+    let total = row_start[out_h] as usize;
+
+    // Fill per-row edge index lists
+    let mut row_data = vec![0u32; total];
+    let mut fill = row_start[..out_h].to_vec();
+    for (ei, edge) in edges.iter().enumerate() {
+        let r_start_row = (edge.y_min.floor() as usize).min(out_h.saturating_sub(1));
+        let r_end_row = (edge.y_max.ceil() as usize).min(out_h);
+        for r in r_start_row..r_end_row {
+            let pos = fill[r] as usize;
+            row_data[pos] = ei as u32;
+            fill[r] += 1;
+        }
+    }
+
+    // row_start[r]..row_start[r+1] now indexes into row_data
+    // Return row_data as "row_end" is just row_start shifted by 1
+    // We'll reuse row_start (length out_h+1) with row_data
+    (edges, row_start, row_data)
+}
+
 fn rasterize_scanline(
     pixels: &[u32],
     positions: &[f32],
-    orig_positions: &[f32],
+    _orig_positions: &[f32],
     flags: &[u32],
     cp_neighbors: &[i32],
     img_w: usize,
@@ -98,8 +297,148 @@ fn rasterize_scanline(
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    // Stub: fall back to nearest-curve rasterizer until implemented
-    rasterize(pixels, positions, orig_positions, flags, cp_neighbors, img_w, img_h, out_w, out_h, scale_factor)
+    let (edges, row_offsets, row_data) =
+        build_edge_table(pixels, positions, flags, cp_neighbors, img_w, img_h, out_h, scale_factor);
+
+    let inv_scale = 1.0 / scale_factor;
+    let mut output = vec![0u32; out_w * out_h];
+
+    // Process a range of rows into a chunk of the output buffer.
+    let process_rows = |chunk: &mut [u32], start_row: usize,
+        edges: &[ScanEdge], row_offsets: &[u32], row_data: &[u32]|
+    {
+        let chunk_rows = chunk.len() / out_w;
+
+        // Per-thread scratch: x-intercepts for active edges in a row.
+        // (x_center, edge_index) pairs, sorted by x_center for the sweep.
+        let mut active: Vec<(f32, u32)> = Vec::new();
+
+        for local_y in 0..chunk_rows {
+            let opy = start_row + local_y;
+            let row_top = opy as f32;
+            let row_bot = row_top + 1.0;
+            let row_center = row_top + 0.5;
+
+            // Source pixel row for fallback color
+            let src_y = (row_center * inv_scale).floor() as i32;
+            let fb_y = src_y.clamp(0, img_h as i32 - 1) as usize;
+
+            // Fill row with nearest-neighbor fallback first
+            let row_slice = &mut chunk[local_y * out_w..(local_y + 1) * out_w];
+            for opx in 0..out_w {
+                let src_x = ((opx as f32 + 0.5) * inv_scale).floor() as i32;
+                let fb_x = src_x.clamp(0, img_w as i32 - 1) as usize;
+                row_slice[opx] = pack_color(pixels[fb_y * img_w + fb_x]);
+            }
+
+            // Gather active edges for this row
+            let rd_start = row_offsets[opy] as usize;
+            let rd_end = row_offsets[opy + 1] as usize;
+            if rd_start == rd_end {
+                continue;
+            }
+
+            active.clear();
+            for &ei in &row_data[rd_start..rd_end] {
+                let edge = &edges[ei as usize];
+                // Compute x at the center of this row, clamped to the edge's y range
+                let y_clamp = row_center.clamp(edge.y_min, edge.y_max);
+                let x_center = edge.x_at_ymin + (y_clamp - edge.y_min) * edge.dx_per_dy;
+                active.push((x_center, ei));
+            }
+
+            // Sort by x at center
+            active.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Process each active edge for AA blending
+            for &(x_center, ei) in &active {
+                let edge = &edges[ei as usize];
+
+                // Vertical coverage: fraction of this row covered by the edge
+                let y_top = edge.y_min.max(row_top);
+                let y_bot = edge.y_max.min(row_bot);
+                let v_coverage = (y_bot - y_top).clamp(0.0, 1.0);
+                if v_coverage < 1e-6 {
+                    continue;
+                }
+
+                // x intercept at top and bottom of the covered portion of this row
+                let x_at_top = edge.x_at_ymin + (y_top - edge.y_min) * edge.dx_per_dy;
+                let x_at_bot = edge.x_at_ymin + (y_bot - edge.y_min) * edge.dx_per_dy;
+
+                // Determine the range of pixels affected (edge +-1 pixel)
+                let x_min = x_at_top.min(x_at_bot).min(x_center);
+                let x_max = x_at_top.max(x_at_bot).max(x_center);
+                let px_start = ((x_min - 1.0).floor() as i32).max(0) as usize;
+                let px_end = ((x_max + 1.0).ceil() as i32).min(out_w as i32) as usize;
+
+                for opx in px_start..px_end {
+                    let px_left = opx as f32;
+                    let px_right = px_left + 1.0;
+
+                    // Compute the fraction of this pixel that is to the RIGHT of the edge.
+                    // Using trapezoidal approximation: average of the fraction at top and bottom
+                    // of the covered y-range.
+                    let frac_top = ((px_right - x_at_top) / 1.0).clamp(0.0, 1.0);
+                    let frac_bot = ((px_right - x_at_bot) / 1.0).clamp(0.0, 1.0);
+                    let coverage_right = (frac_top + frac_bot) * 0.5 * v_coverage;
+
+                    // coverage_right = fraction of pixel on the right side of the edge
+                    // (1 - coverage_right) = fraction on the left side
+                    // For full coverage (edge completely to the left), coverage_right=1 -> all right color
+                    // For zero coverage (edge completely to the right), coverage_right=0 -> all left color
+
+                    if coverage_right < 1e-4 || coverage_right > 1.0 - 1e-4 {
+                        // Fully one side — only override if it's clearly on one side
+                        if coverage_right > 0.5 {
+                            row_slice[opx] = pack_color(edge.color_right);
+                        } else {
+                            row_slice[opx] = pack_color(edge.color_left);
+                        }
+                    } else {
+                        // Partial coverage — blend
+                        // weight of color_right is coverage_right
+                        row_slice[opx] =
+                            blend_linear_srgb(edge.color_right, edge.color_left, coverage_right);
+                    }
+                }
+            }
+        }
+    };
+
+    // Parallel on native, sequential on wasm
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let rows_per_thread = (out_h + num_threads - 1) / num_threads;
+        std::thread::scope(|scope| {
+            let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
+            let edges = &edges;
+            let row_offsets = &row_offsets;
+            let row_data = &row_data;
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .enumerate()
+                .map(|(ci, chunk)| {
+                    let start = ci * rows_per_thread;
+                    scope.spawn(move || {
+                        process_rows(chunk, start, edges, row_offsets, row_data);
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        process_rows(&mut output, 0, &edges, &row_offsets, &row_data);
+    }
+
+    output
 }
 
 /// Public entry point: runs all 6 GPU pipeline stages on CPU.
