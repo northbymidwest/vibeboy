@@ -17,6 +17,7 @@ pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
 pub mod vectorize;
+pub mod vectorize_faces;
 pub mod xbr;
 pub mod xbrz;
 pub mod scalefx;
