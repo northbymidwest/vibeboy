@@ -109,6 +109,13 @@ fn vectorize_and_save(
                 },
             )
         }
+        "vectorize-scanline" => {
+            let scale_f = scale as f32;
+            let out_w = (width as f32 * scale_f).round() as usize;
+            let out_h = (height as f32 * scale_f).round() as usize;
+            let r = vibeboy::scaling::vectorize::scale_scanline(pixels, width, height, scale_f);
+            (r, out_w, out_h)
+        }
         "vectorize" | _ => {
             let scale_f = scale as f32;
             let out_w = (width as f32 * scale_f).round() as usize;
@@ -231,7 +238,7 @@ pub fn cmd_screenshot(
         (raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
     };
 
-    if matches!(format, "raster" | "gpu-full" | "vectorize") {
+    if matches!(format, "raster" | "gpu-full" | "vectorize" | "vectorize-scanline") {
         vectorize_and_save(fb, GB_FB_WIDTH, GB_FB_HEIGHT, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);

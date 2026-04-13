@@ -93,10 +93,10 @@ struct ScanEdge {
     y_min: f32,
     y_max: f32,
     dx_per_dy: f32,
-    /// Color on the left side of the edge (relative to the original downward direction).
-    color_left: u32,
-    /// Color on the right side of the edge.
-    color_right: u32,
+    /// Color to the screen-left (smaller x) of this edge.
+    left_color: u32,
+    /// Color to the screen-right (larger x) of this edge.
+    right_color: u32,
 }
 
 /// Blend two sRGB-packed colors in linear light.  `t` is the weight of `c0`.
@@ -227,23 +227,41 @@ fn build_edge_table(
                 continue;
             }
 
-            // Ensure y_min < y_max.  If we flip the direction, swap left/right
-            // colors so that the "left of the original direction" convention holds.
-            let (ymin, ymax, x_at_ymin, cl, cr) = if y0 < y1 {
-                (y0, y1, x0, color_left, color_right)
+            // Normalize to y_min < y_max (edge goes downward).
+            let (ymin, ymax, x_at_ymin) = if y0 < y1 {
+                (y0, y1, x0)
             } else {
-                (y1, y0, x1, color_right, color_left)
+                (y1, y0, x1)
             };
-
             let dx_per_dy = (x1 - x0) / dy;
+
+            // Determine screen-left/right colors.
+            // Source pixel centers for the two colors (in source coords):
+            let (p1x, p1y) = match next_dir {
+                0 => (icx as f32 - 0.5, icy as f32 - 0.5),
+                1 => (icx as f32 + 0.5, icy as f32 - 0.5),
+                2 => (icx as f32 + 0.5, icy as f32 + 0.5),
+                3 => (icx as f32 - 0.5, icy as f32 + 0.5),
+                _ => unreachable!(),
+            };
+            // Scale pixel center to output coords and compare with edge x
+            let pc_x = p1x * scale_factor;
+            let pc_y = p1y * scale_factor;
+            let edge_x_at_pc_y = x_at_ymin + (pc_y - ymin) * dx_per_dy;
+            let (left_color, right_color) = if pc_x < edge_x_at_pc_y {
+                // color_left pixel is to screen-left of the edge
+                (color_left, color_right)
+            } else {
+                (color_right, color_left)
+            };
 
             edges.push(ScanEdge {
                 x_at_ymin,
                 y_min: ymin,
                 y_max: ymax,
                 dx_per_dy,
-                color_left: cl,
-                color_right: cr,
+                left_color,
+                right_color,
             });
         }
     }
@@ -309,9 +327,16 @@ fn rasterize_scanline(
     {
         let chunk_rows = chunk.len() / out_w;
 
-        // Per-thread scratch: x-intercepts for active edges in a row.
-        // (x_center, edge_index) pairs, sorted by x_center for the sweep.
-        let mut active: Vec<(f32, u32)> = Vec::new();
+        // Per-thread scratch: active edges sorted by x for the sweep.
+        struct ActiveEdge {
+            x_center: f32,
+            x_at_top: f32,
+            x_at_bot: f32,
+            v_coverage: f32,
+            left_color: u32,
+            right_color: u32,
+        }
+        let mut active: Vec<ActiveEdge> = Vec::new();
 
         for local_y in 0..chunk_rows {
             let opy = start_row + local_y;
@@ -319,88 +344,96 @@ fn rasterize_scanline(
             let row_bot = row_top + 1.0;
             let row_center = row_top + 0.5;
 
-            // Source pixel row for fallback color
-            let src_y = (row_center * inv_scale).floor() as i32;
-            let fb_y = src_y.clamp(0, img_h as i32 - 1) as usize;
-
-            // Fill row with nearest-neighbor fallback first
             let row_slice = &mut chunk[local_y * out_w..(local_y + 1) * out_w];
-            for opx in 0..out_w {
-                let src_x = ((opx as f32 + 0.5) * inv_scale).floor() as i32;
-                let fb_x = src_x.clamp(0, img_w as i32 - 1) as usize;
-                row_slice[opx] = pack_color(pixels[fb_y * img_w + fb_x]);
-            }
 
             // Gather active edges for this row
             let rd_start = row_offsets[opy] as usize;
             let rd_end = row_offsets[opy + 1] as usize;
-            if rd_start == rd_end {
-                continue;
-            }
 
             active.clear();
             for &ei in &row_data[rd_start..rd_end] {
                 let edge = &edges[ei as usize];
-                // Compute x at the center of this row, clamped to the edge's y range
-                let y_clamp = row_center.clamp(edge.y_min, edge.y_max);
-                let x_center = edge.x_at_ymin + (y_clamp - edge.y_min) * edge.dx_per_dy;
-                active.push((x_center, ei));
-            }
-
-            // Sort by x at center
-            active.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Process each active edge for AA blending
-            for &(x_center, ei) in &active {
-                let edge = &edges[ei as usize];
-
-                // Vertical coverage: fraction of this row covered by the edge
                 let y_top = edge.y_min.max(row_top);
                 let y_bot = edge.y_max.min(row_bot);
-                let v_coverage = (y_bot - y_top).clamp(0.0, 1.0);
-                if v_coverage < 1e-6 {
-                    continue;
-                }
+                let v_coverage = y_bot - y_top;
+                if v_coverage < 1e-6 { continue; }
 
-                // x intercept at top and bottom of the covered portion of this row
+                let y_clamp = row_center.clamp(edge.y_min, edge.y_max);
+                let x_center = edge.x_at_ymin + (y_clamp - edge.y_min) * edge.dx_per_dy;
                 let x_at_top = edge.x_at_ymin + (y_top - edge.y_min) * edge.dx_per_dy;
                 let x_at_bot = edge.x_at_ymin + (y_bot - edge.y_min) * edge.dx_per_dy;
 
-                // Determine the range of pixels affected (edge +-1 pixel)
-                let x_min = x_at_top.min(x_at_bot).min(x_center);
-                let x_max = x_at_top.max(x_at_bot).max(x_center);
-                let px_start = ((x_min - 1.0).floor() as i32).max(0) as usize;
-                let px_end = ((x_max + 1.0).ceil() as i32).min(out_w as i32) as usize;
+                active.push(ActiveEdge {
+                    x_center,
+                    x_at_top,
+                    x_at_bot,
+                    v_coverage: v_coverage.min(1.0),
+                    left_color: edge.left_color,
+                    right_color: edge.right_color,
+                });
+            }
 
-                for opx in px_start..px_end {
-                    let px_left = opx as f32;
-                    let px_right = px_left + 1.0;
+            if active.is_empty() {
+                // No edges cross this row.  Use the top-left source pixel color
+                // for the entire row (this row is entirely inside one region).
+                let src_y = (row_center * inv_scale) as usize;
+                let sy = src_y.min(img_h - 1);
+                let c = pack_color(pixels[sy * img_w]);
+                for px in row_slice.iter_mut() { *px = c; }
+                continue;
+            }
 
-                    // Compute the fraction of this pixel that is to the RIGHT of the edge.
-                    // Using trapezoidal approximation: average of the fraction at top and bottom
-                    // of the covered y-range.
-                    let frac_top = ((px_right - x_at_top) / 1.0).clamp(0.0, 1.0);
-                    let frac_bot = ((px_right - x_at_bot) / 1.0).clamp(0.0, 1.0);
-                    let coverage_right = (frac_top + frac_bot) * 0.5 * v_coverage;
+            // Sort by x at center of row
+            active.sort_unstable_by(|a, b| a.x_center.partial_cmp(&b.x_center).unwrap_or(std::cmp::Ordering::Equal));
 
-                    // coverage_right = fraction of pixel on the right side of the edge
-                    // (1 - coverage_right) = fraction on the left side
-                    // For full coverage (edge completely to the left), coverage_right=1 -> all right color
-                    // For zero coverage (edge completely to the right), coverage_right=0 -> all left color
+            // Sweep left to right, filling spans between edges.
+            // Before the first edge: fill with first_edge.left_color
+            // Between edges: fill with prev_edge.right_color
+            // After the last edge: fill with last_edge.right_color
+            // At each edge boundary: analytical AA blend
 
-                    if coverage_right < 1e-4 || coverage_right > 1.0 - 1e-4 {
-                        // Fully one side — only override if it's clearly on one side
-                        if coverage_right > 0.5 {
-                            row_slice[opx] = pack_color(edge.color_right);
-                        } else {
-                            row_slice[opx] = pack_color(edge.color_left);
-                        }
+            let mut fill_x: usize = 0; // next pixel to fill
+
+            for ae in &active {
+                let x_min = ae.x_at_top.min(ae.x_at_bot).min(ae.x_center);
+                let x_max = ae.x_at_top.max(ae.x_at_bot).max(ae.x_center);
+
+                // Fill solid left_color from fill_x up to the edge
+                let solid_end = ((ae.x_center.floor() as i32).max(0) as usize).min(out_w);
+                let cl = pack_color(ae.left_color);
+                for opx in fill_x..solid_end {
+                    row_slice[opx] = cl;
+                }
+
+                // AA blend at the boundary pixel(s)
+                let aa_start = ((x_min.floor() as i32).max(0) as usize).max(fill_x);
+                let aa_end = ((x_max.ceil() as i32 + 1).min(out_w as i32)) as usize;
+
+                for opx in aa_start..aa_end {
+                    let px_right = (opx + 1) as f32;
+                    let frac_top = (px_right - ae.x_at_top).clamp(0.0, 1.0);
+                    let frac_bot = (px_right - ae.x_at_bot).clamp(0.0, 1.0);
+                    let coverage_right = (frac_top + frac_bot) * 0.5 * ae.v_coverage;
+
+                    if coverage_right < 1e-4 {
+                        row_slice[opx] = pack_color(ae.left_color);
+                    } else if coverage_right > 1.0 - 1e-4 {
+                        row_slice[opx] = pack_color(ae.right_color);
                     } else {
-                        // Partial coverage — blend
-                        // weight of color_right is coverage_right
-                        row_slice[opx] =
-                            blend_linear_srgb(edge.color_right, edge.color_left, coverage_right);
+                        row_slice[opx] = blend_linear_srgb(
+                            ae.right_color, ae.left_color, coverage_right,
+                        );
                     }
+                }
+
+                fill_x = aa_end;
+            }
+
+            // Fill remaining pixels after the last edge with last_edge.right_color
+            if let Some(last) = active.last() {
+                let cr = pack_color(last.right_color);
+                for opx in fill_x..out_w {
+                    row_slice[opx] = cr;
                 }
             }
         }
