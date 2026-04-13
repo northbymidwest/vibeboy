@@ -1953,7 +1953,7 @@ fn rasterize(
                             chunk[local_y * out_w + opx] = pack_color(center_color);
                         } else {
                             let pw = inv_scale;
-                            let proj_w = pw * (normal.0.abs() + normal.1.abs());
+                            let proj_w = pw * normal.0.abs().max(normal.1.abs());
                             let frac = (0.5 + d / proj_w).clamp(0.0, 1.0);
 
                             let r = frac * ((pos_side >> 16) & 0xFF) as f32

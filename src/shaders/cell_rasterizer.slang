@@ -370,7 +370,7 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                         output_img.Store(int2(opx, opy), (center_color).unpack_rgba());
                     } else {
                         float pw = inv_scale;
-                        float proj_w = pw * (abs(normal.x) + abs(normal.y));
+                        float proj_w = pw * max(abs(normal.x), abs(normal.y));
                         float frac = clamp(0.5 + d / proj_w, 0.0, 1.0);
 
                         float r = frac * float((pos_side >> 16u) & 0xFFu) + (1.0 - frac) * float((neg_side >> 16u) & 0xFFu);
