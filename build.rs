@@ -36,10 +36,6 @@ const SHADERS: &[&str] = &[
     "cell_rasterizer",
     "optimize_energy",
     "update_tjunction",
-    "vectorize_raster",
-    "vectorize_to_buf",
-    "spline_diffusion",
-    "diffusion_raster",
 ];
 
 fn main() {

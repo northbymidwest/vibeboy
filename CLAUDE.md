@@ -193,12 +193,6 @@ All shaders are compute shaders authored in [Slang](https://github.com/shader-sl
 **Compute shaders (scaling filters):**
 - `nearest.slang`, `nearest_aa.slang`, `bilinear.slang`, `bicubic.slang`, `dcci.slang`, `eagle.slang`, `edi.slang`, `epx.slang`, `hqx.slang`, `lcd_grid.slang`, `mmpx.slang`, `nedi.slang`, `omniscale.slang`, `omniscale_legacy.slang`, `sai2x.slang`, `super_sai2x.slang`, `super_eagle.slang`, `scale3x.slang`, `scalefx.slang`, `super_xbr.slang`, `xbr.slang`, `xbrz.slang`: GPU compute versions of the pixel scaling filters
 
-**Compute shaders (rasterization):**
-- `vectorize_raster.slang`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
-- `vectorize_to_buf.slang`: Scanline rasterizer variant writing to storage buffer with no AA (pass 1 of spline-diffusion -- produces hard region boundaries)
-- `spline_diffusion.slang`: Gaussian diffusion (gauss_k=2.5, radius=2.0) with 2x2 supersampling (pass 2 of spline-diffusion)
-- `diffusion_raster.slang`: Voronoi diffusion with packed diagonal state ownership (2 bits per corner)
-
 **Compute shaders (full GPU vectorize pipeline):**
 - `similarity_graph.slang`: Builds (2W+1)x(2H+1) connectivity graph with binary color matching
 - `resolve_crossings.slang`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
