@@ -80,66 +80,84 @@ fn main() {
         }
     }
 
+    // Collect all shader compilation jobs, then run in parallel.
+    struct ShaderJob {
+        src: std::path::PathBuf,
+        target: &'static str,
+        out: std::path::PathBuf,
+        profile: Option<&'static str>,
+        define: Option<&'static str>,
+    }
+
+    let mut jobs: Vec<ShaderJob> = Vec::new();
+
     for name in SHADERS {
         let src = shader_dir.join(format!("{name}.slang"));
-        let spv = Path::new(&out_dir).join(format!("{name}_comp.spv"));
-        let msl = Path::new(&out_dir).join(format!("{name}_comp.metal"));
-        let wgsl = Path::new(&out_dir).join(format!("{name}_comp.wgsl"));
-        let dxil = Path::new(&out_dir).join(format!("{name}_comp.dxil"));
-
         println!("cargo:rerun-if-changed={}", src.display());
 
-        // SPIR-V
-        run_slangc(&src, "spirv", &spv);
-
-        // Metal
-        run_slangc(&src, "metal", &msl);
-
-        // WGSL
-        run_slangc(&src, "wgsl", &wgsl);
+        jobs.push(ShaderJob {
+            src: src.clone(), target: "spirv",
+            out: Path::new(&out_dir).join(format!("{name}_comp.spv")),
+            profile: None, define: None,
+        });
+        jobs.push(ShaderJob {
+            src: src.clone(), target: "metal",
+            out: Path::new(&out_dir).join(format!("{name}_comp.metal")),
+            profile: None, define: None,
+        });
+        jobs.push(ShaderJob {
+            src: src.clone(), target: "wgsl",
+            out: Path::new(&out_dir).join(format!("{name}_comp.wgsl")),
+            profile: None, define: None,
+        });
 
         // DXIL (requires dxc, only available on Windows).
-        // The .slang sources have explicit register(tN,space0) / register(uN,space1) /
-        // register(bN,space2) annotations matching SDL3 D3D12's type-based space grouping.
+        let dxil = Path::new(&out_dir).join(format!("{name}_comp.dxil"));
         if has_dxc {
-            run_slangc(&src, "dxil", &dxil);
+            jobs.push(ShaderJob {
+                src: src.clone(), target: "dxil", out: dxil,
+                profile: Some("cs_6_0"), define: Some("DXIL_TARGET"),
+            });
         } else {
-            // Empty stub so include_bytes! compiles on all platforms
             let _ = std::fs::write(&dxil, b"");
         }
     }
-}
 
-/// Run slangc to compile a shader to a specific target.
-fn run_slangc(src: &Path, target: &str, out: &Path) {
-    let mut cmd = Command::new("slangc");
-    cmd.arg(src.to_str().unwrap())
-        .arg("-I")
-        .arg("src/shaders") // Resolve `import modules.color;` etc.
-        .arg("-target")
-        .arg(target);
-    // DXIL needs an explicit compute shader profile; without it slangc
-    // defaults to a library target (lib_6_x) which dxc cannot validate.
-    if target == "dxil" {
-        cmd.arg("-profile").arg("cs_6_0");
-        cmd.arg("-DDXIL_TARGET");
-    }
-    let output = cmd.arg("-o")
-        .arg(out.to_str().unwrap())
-        .output();
+    // Run all slangc invocations in parallel
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs.iter().map(|job| {
+            scope.spawn(|| {
+                let mut cmd = Command::new("slangc");
+                cmd.arg(job.src.to_str().unwrap())
+                    .arg("-I").arg("src/shaders")
+                    .arg("-target").arg(job.target);
+                if let Some(profile) = job.profile {
+                    cmd.arg("-profile").arg(profile);
+                }
+                if let Some(define) = job.define {
+                    cmd.arg(format!("-D{define}"));
+                }
+                cmd.arg("-o").arg(job.out.to_str().unwrap());
+                cmd.output()
+            })
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
-    match output {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            panic!(
-                "slangc failed for {} -> {target}:\n{stderr}",
-                src.display()
-            );
+    for (job, output) in jobs.iter().zip(results) {
+        match output {
+            Ok(o) if !o.status.success() => {
+                eprintln!("slangc failed for {} -> {}:",
+                    job.src.display(), job.target);
+                eprintln!("{}", String::from_utf8_lossy(&o.stderr));
+                panic!("Shader compilation failed");
+            }
+            Err(e) => panic!("Failed to run slangc: {e}"),
+            _ => {}
         }
-        Err(e) => panic!("Failed to run slangc for {}: {e}", src.display()),
     }
 }
+
 
 fn generate_boot_roms(out_dir: &str) {
     let boot_dir = Path::new(out_dir).join("bootroms");
