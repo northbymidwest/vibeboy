@@ -65,6 +65,43 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     }
 }
 
+/// Public entry point: runs stages 1-5, then scanline rasterizer.
+pub fn scale_scanline(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<u32> {
+    let out_w = (src_w as f32 * scale_factor).ceil() as usize;
+    let out_h = (src_h as f32 * scale_factor).ceil() as usize;
+
+    let data = vectorize(src, src_w, src_h);
+
+    rasterize_scanline(
+        src,
+        &data.positions,
+        &data.orig_positions,
+        &data.flags,
+        &data.neighbors,
+        data.img_w,
+        data.img_h,
+        out_w,
+        out_h,
+        scale_factor,
+    )
+}
+
+fn rasterize_scanline(
+    pixels: &[u32],
+    positions: &[f32],
+    orig_positions: &[f32],
+    flags: &[u32],
+    cp_neighbors: &[i32],
+    img_w: usize,
+    img_h: usize,
+    out_w: usize,
+    out_h: usize,
+    scale_factor: f32,
+) -> Vec<u32> {
+    // Stub: fall back to nearest-curve rasterizer until implemented
+    rasterize(pixels, positions, orig_positions, flags, cp_neighbors, img_w, img_h, out_w, out_h, scale_factor)
+}
+
 /// Public entry point: runs all 6 GPU pipeline stages on CPU.
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<u32> {
     let out_w = (src_w as f32 * scale_factor).ceil() as usize;

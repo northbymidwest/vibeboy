@@ -163,6 +163,8 @@ pub enum ScaleFilter {
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     /// CPU implementation of the full GPU vectorize pipeline.
     Vectorize,
+    /// CPU scanline rasterizer: analytical AA, edge-table fill.
+    VectorizeScanline,
     /// ScaleFX 3x edge interpolation (Sp00kyFox).
     ScaleFx,
     /// ScaleFX 9x (two ScaleFX passes chained: 3x → 3x).
@@ -207,6 +209,7 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::SuperEagle,       cli_name: "super-eagle",  display_name: "Super Eagle",              factor: 2 },
     FilterInfo { filter: ScaleFilter::SuperXbr,         cli_name: "super-xbr",    display_name: "Super xBR",                factor: 2 },
     FilterInfo { filter: ScaleFilter::Vectorize,     cli_name: "vectorize", display_name: "Vectorize",               factor: 0 },
+    FilterInfo { filter: ScaleFilter::VectorizeScanline, cli_name: "vectorize-scanline", display_name: "Vectorize Scanline", factor: 0 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr2x), cli_name: "xbr2x",  display_name: "xBR 2x",                  factor: 2 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr3x), cli_name: "xbr3x",  display_name: "xBR 3x",                  factor: 3 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr4x), cli_name: "xbr4x",  display_name: "xBR 4x",                  factor: 4 },
@@ -430,6 +433,13 @@ pub fn cpu_scale(
             let ow = (sw as f32 * scale_f).ceil() as usize;
             let oh = (sh as f32 * scale_f).ceil() as usize;
             let s = vectorize::scale(src, sw, sh, scale_f);
+            (s, ow as u32, oh as u32)
+        }
+        ScaleFilter::VectorizeScanline => {
+            let scale_f = (disp_w as f32 / sw as f32).min(disp_h as f32 / sh as f32);
+            let ow = (sw as f32 * scale_f).ceil() as usize;
+            let oh = (sh as f32 * scale_f).ceil() as usize;
+            let s = vectorize::scale_scanline(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
         }
         ScaleFilter::ScaleFx => {
