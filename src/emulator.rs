@@ -131,9 +131,7 @@ impl Emulator {
         let mut cycles = 0u32;
         while !self.bus.frame_ready() {
             cycles += self.step();
-            // Safety valve: if the ROM toggles LCD off before line 153,
-            // frame_ready never fires. Break after 2 frames' worth of cycles.
-            if cycles >= CYCLES_PER_FRAME * 2 {
+            if cycles >= CYCLES_PER_FRAME * 4 {
                 break;
             }
         }
@@ -177,7 +175,7 @@ impl Emulator {
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
                 cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 2 { break; }
+                if cycles >= CYCLES_PER_FRAME * 4 { break; }
             }
             // SGB: apply palettes so the ahead frame has correct colors
             if self.model.is_sgb() && self.snes.is_none() {
@@ -264,7 +262,7 @@ impl Emulator {
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
                 cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 2 { break; }
+                if cycles >= CYCLES_PER_FRAME * 4 { break; }
             }
             // SGB post-processing: apply palettes to the regenerated frame.
             if self.model.is_sgb() && self.snes.is_none() {
