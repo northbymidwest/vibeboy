@@ -404,7 +404,7 @@ impl App {
                 }
             } else if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
                 (fb, sw, sh)
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeGpu) {
+            } else if matches!(self.scale_filter, scaling::ScaleFilter::Vectorize) {
                 // Use logical pixels for vectorize output, not Retina physical pixels.
                 // The blit sampler upscales to physical resolution.
                 let scale_factor = window.scale_factor();

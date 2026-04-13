@@ -644,7 +644,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (fb, base_w, base_h, wgpu_filter)
                                 } else if st.scale_filter == scaling::ScaleFilter::Nearest {
                                     (fb, base_w, base_h, None)
-                                } else if !st.force_cpu && st.scale_filter == scaling::ScaleFilter::VectorizeGpu {
+                                } else if !st.force_cpu && st.scale_filter == scaling::ScaleFilter::Vectorize {
                                     // Full 6-stage GPU vectorize pipeline
                                     #[cfg(target_os = "linux")]
                                     {
@@ -654,7 +654,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                         let mut gc = gpu_compute.borrow_mut();
                                         if let Some(ref mut compute) = *gc {
                                             if let Some((gl_tex, gw, gh)) =
-                                                compute.vectorize_gpu(fb, base_w as u32, base_h as u32, ow, oh, s)
+                                                compute.vectorize(fb, base_w as u32, base_h as u32, ow, oh, s)
                                             {
                                                 let mut pf = pending_frame.borrow_mut();
                                                 pf.pixels.clear();

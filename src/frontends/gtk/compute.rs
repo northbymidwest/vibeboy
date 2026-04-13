@@ -14,7 +14,7 @@ pub struct GpuCompute {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: WgpuScalePipeline,
-    vectorize_gpu: WgpuVectorizePipeline,
+    vectorize: WgpuVectorizePipeline,
     /// Last output dimensions (for cache invalidation).
     last_out_w: u32,
     last_out_h: u32,
@@ -56,7 +56,7 @@ impl GpuCompute {
         .ok()?;
 
         let pipeline = WgpuScalePipeline::new(&device);
-        let vectorize_gpu = WgpuVectorizePipeline::new(&device);
+        let vectorize = WgpuVectorizePipeline::new(&device);
 
         eprintln!("GPU compute initialized (GL shared context)");
 
@@ -65,7 +65,7 @@ impl GpuCompute {
             device,
             queue,
             pipeline,
-            vectorize_gpu,
+            vectorize,
             last_out_w: 0,
             last_out_h: 0,
         })
@@ -126,7 +126,7 @@ impl GpuCompute {
 
     /// Run the full 6-stage GPU vectorize pipeline.
     /// Returns the GL texture ID and output dimensions.
-    pub fn vectorize_gpu(
+    pub fn vectorize(
         &mut self,
         pixels: &[u32],
         src_w: u32,
@@ -139,7 +139,7 @@ impl GpuCompute {
             &wgpu::CommandEncoderDescriptor { label: None },
         );
 
-        let output_tex = self.vectorize_gpu.encode(
+        let output_tex = self.vectorize.encode(
             &self.device, &self.queue, &mut encoder,
             pixels, src_w, src_h, out_w, out_h, scale,
         );

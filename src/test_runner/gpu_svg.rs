@@ -9,7 +9,7 @@
 //! and crossings.
 
 use std::collections::BTreeMap;
-use vibeboy::scaling::vectorize_gpu::VectorizeGpuData;
+use vibeboy::scaling::vectorize::VectorizeData;
 
 const IS_TJUNCTION: u32 = 32;
 const IS_CROSSING: u32 = 64;
@@ -117,7 +117,7 @@ struct DirEdge {
 /// Build directed boundary edges from Voronoi cells.
 /// For each pixel, walk its cell polygon edges. Each half-edge gets the pixel's
 /// color. Boundary edges (different colors on each side) produce directed pairs.
-fn build_cell_edges(data: &VectorizeGpuData, pixels: &[u32]) -> Vec<DirEdge> {
+fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
     let (w, h) = (data.img_w, data.img_h);
 
     // For each canonical edge (min→max), track (left_color, right_color).
@@ -234,7 +234,7 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
 /// Multiple CP slots may map to the same node; we take the first one found.
 /// Nodes on the image perimeter are always marked sharp — boundary chains
 /// terminate against the hard image edge, forming implicit T-junctions.
-fn build_node_map(data: &VectorizeGpuData) -> (BTreeMap<u64, (f64, f64)>, BTreeMap<u64, bool>) {
+fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTreeMap<u64, bool>) {
     let corners_w = data.img_w + 1;
     let num_cps = corners_w * (data.img_h + 1) * 2;
     let w4 = (data.img_w * 4) as i32;
@@ -354,7 +354,7 @@ fn detect_bg(pixels: &[u32], w: usize, h: usize) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Render vectorize-gpu pipeline output as a filled-region SVG document.
-pub fn render_svg(data: &VectorizeGpuData, pixels: &[u32]) -> String {
+pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
     let (w, h) = (data.img_w, data.img_h);
     let bg = detect_bg(pixels, w, h);
 

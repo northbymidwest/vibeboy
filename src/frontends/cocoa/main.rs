@@ -591,8 +591,8 @@ impl AppState {
         let src_w = self.src_w;
         let src_h = self.src_h;
 
-        // VectorizeGpu: full 6-stage Metal compute pipeline
-        if self.scale_filter == scaling::ScaleFilter::VectorizeGpu {
+        // Vectorize: full 6-stage Metal compute pipeline
+        if self.scale_filter == scaling::ScaleFilter::Vectorize {
             if self.renderer.vectorize_pipeline.is_none() {
                 self.renderer.vectorize_pipeline = MetalVectorizePipeline::new(&self.renderer.device);
             }
@@ -621,8 +621,8 @@ impl AppState {
             }
         }
 
-        // GPU compute scaling filters (VectorizeGpu handled above)
-        if self.scale_filter != scaling::ScaleFilter::VectorizeGpu {
+        // GPU compute scaling filters (Vectorize handled above)
+        if self.scale_filter != scaling::ScaleFilter::Vectorize {
             if let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
                 self.scale_filter, raw_src, src_w as u32, src_h as u32,
                 disp_w as u32, disp_h as u32,

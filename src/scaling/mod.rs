@@ -16,7 +16,7 @@ pub mod omniscale_legacy;
 pub mod sai;
 pub mod scale3x;
 pub mod super_xbr;
-pub mod vectorize_gpu;
+pub mod vectorize;
 pub mod xbr;
 pub mod xbrz;
 pub mod scalefx;
@@ -162,7 +162,7 @@ pub enum ScaleFilter {
     NearestAa,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     /// CPU implementation of the full GPU vectorize pipeline.
-    VectorizeGpu,
+    Vectorize,
     /// ScaleFX 3x edge interpolation (Sp00kyFox).
     ScaleFx,
     /// ScaleFX 9x (two ScaleFX passes chained: 3x → 3x).
@@ -206,7 +206,7 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Super2xSai,       cli_name: "super-2xsai",  display_name: "Super 2xSaI",             factor: 2 },
     FilterInfo { filter: ScaleFilter::SuperEagle,       cli_name: "super-eagle",  display_name: "Super Eagle",              factor: 2 },
     FilterInfo { filter: ScaleFilter::SuperXbr,         cli_name: "super-xbr",    display_name: "Super xBR",                factor: 2 },
-    FilterInfo { filter: ScaleFilter::VectorizeGpu,     cli_name: "vectorize-gpu", display_name: "Vectorize GPU",           factor: 0 },
+    FilterInfo { filter: ScaleFilter::Vectorize,     cli_name: "vectorize", display_name: "Vectorize",               factor: 0 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr2x), cli_name: "xbr2x",  display_name: "xBR 2x",                  factor: 2 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr3x), cli_name: "xbr3x",  display_name: "xBR 3x",                  factor: 3 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr4x), cli_name: "xbr4x",  display_name: "xBR 4x",                  factor: 4 },
@@ -222,30 +222,15 @@ impl ScaleFilter {
         REGISTRY.iter().find(|e| e.filter == self).expect("filter not in registry")
     }
 
-    /// All valid CLI name strings (includes "none" and legacy vectorize aliases).
-    /// Legacy vectorize CLI names that map to VectorizeGpu for backward compatibility.
-    const LEGACY_VECTORIZE_ALIASES: &'static [&'static str] = &[
-        "vectorize", "vectorize-adaptive",
-        "vectorize-diffusion",
-        "vectorize-legacy", "vectorize-legacy-adaptive",
-        "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
-    ];
-
     pub fn all_names() -> Vec<&'static str> {
         let mut names: Vec<&str> = REGISTRY.iter().map(|e| e.cli_name).collect();
         names.push("none"); // alias
-        for &alias in Self::LEGACY_VECTORIZE_ALIASES {
-            names.push(alias);
-        }
         names
     }
 
     /// Parse a CLI name into a ScaleFilter. Returns None for unrecognized names.
     pub fn from_name(s: &str) -> Option<ScaleFilter> {
         if s == "none" { return Some(ScaleFilter::Nearest); }
-        if Self::LEGACY_VECTORIZE_ALIASES.contains(&s) {
-            return Some(ScaleFilter::VectorizeGpu);
-        }
         REGISTRY.iter().find(|e| e.cli_name == s).map(|e| e.filter)
     }
 
@@ -440,11 +425,11 @@ pub fn cpu_scale(
             let s = nearest_aa::scale(src, sw, sh, disp_w, disp_h);
             (s, disp_w as u32, disp_h as u32)
         }
-        ScaleFilter::VectorizeGpu => {
+        ScaleFilter::Vectorize => {
             let scale_f = (disp_w as f32 / sw as f32).min(disp_h as f32 / sh as f32);
             let ow = (sw as f32 * scale_f).ceil() as usize;
             let oh = (sh as f32 * scale_f).ceil() as usize;
-            let s = vectorize_gpu::scale(src, sw, sh, scale_f);
+            let s = vectorize::scale(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
         }
         ScaleFilter::ScaleFx => {

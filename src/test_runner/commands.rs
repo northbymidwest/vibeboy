@@ -6,8 +6,8 @@ use vibeboy::scaling;
 use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
 use crate::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
 
-fn vectorize_gpu_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
-    let data = vibeboy::scaling::vectorize_gpu::vectorize(pixels, width, height);
+fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
+    let data = vibeboy::scaling::vectorize::vectorize(pixels, width, height);
     crate::gpu_svg::render_svg(&data, pixels)
 }
 
@@ -24,7 +24,7 @@ fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
 
 fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
     if format == "svg" || out.ends_with(".svg") {
-        let svg = vectorize_gpu_to_svg(pixels, w, h);
+        let svg = vectorize_to_svg(pixels, w, h);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
     } else {
@@ -74,7 +74,7 @@ fn vectorize_and_save(
     out: &str, format: &str, scale: usize, use_gpu: bool,
 ) {
     if out.ends_with(".svg") {
-        let svg = vectorize_gpu_to_svg(pixels, width, height);
+        let svg = vectorize_to_svg(pixels, width, height);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!(
             "Vectorized {}x{} image -> {} ({} bytes)",
@@ -104,16 +104,16 @@ fn vectorize_and_save(
                     let scale_f = scale as f32;
                     let ow = (width as f32 * scale_f).round() as usize;
                     let oh = (height as f32 * scale_f).round() as usize;
-                    let r = vibeboy::scaling::vectorize_gpu::scale(pixels, width, height, scale_f);
+                    let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
                     (r, ow, oh)
                 },
             )
         }
-        "vectorize-gpu" | _ => {
+        "vectorize" | _ => {
             let scale_f = scale as f32;
             let out_w = (width as f32 * scale_f).round() as usize;
             let out_h = (height as f32 * scale_f).round() as usize;
-            let r = vibeboy::scaling::vectorize_gpu::scale(pixels, width, height, scale_f);
+            let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
             (r, out_w, out_h)
         }
     };
@@ -134,7 +134,7 @@ fn try_gpu_filter(
 ) -> Option<(Vec<u32>, usize, usize)> {
     #[cfg(feature = "sdl3-gpu-shaders")]
     {
-        if filter_name == "vectorize-gpu" {
+        if filter_name == "vectorize" {
             if let Some((pix, w, h)) = scaling::sdl::gpu_full_pipeline_screenshot(
                 raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, scale,
             ) {
@@ -196,7 +196,7 @@ pub fn cmd_screenshot(
 
     // SVG export from raw framebuffer (bypass scaling)
     if out.ends_with(".svg") {
-        let svg = vectorize_gpu_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT);
+        let svg = vectorize_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
         return;
@@ -231,7 +231,7 @@ pub fn cmd_screenshot(
         (raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
     };
 
-    if matches!(format, "raster" | "gpu-full" | "vectorize-gpu") {
+    if matches!(format, "raster" | "gpu-full" | "vectorize") {
         vectorize_and_save(fb, GB_FB_WIDTH, GB_FB_HEIGHT, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
@@ -256,21 +256,10 @@ pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: b
         })
         .collect();
 
-    // Map --filter names to internal format names for vectorize_and_save
-    // All legacy vectorize variants now map to vectorize-gpu
     let format = match filter {
-        "vectorize-gpu" => "vectorize-gpu",
+        "vectorize" => "vectorize",
         "gpu-full" => "gpu-full",
-        other => {
-            // Any legacy vectorize name maps to vectorize-gpu
-            if other.starts_with("vectorize") || other == "raster" || other == "diffusion"
-                || other == "spline-diffusion" || other == "edge"
-            {
-                "vectorize-gpu"
-            } else {
-                other
-            }
-        }
+        other => other,
     };
 
     vectorize_and_save(&pixels, width, height, out, format, scale, gpu);

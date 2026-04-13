@@ -191,7 +191,7 @@ impl GpuPipelines {
         }
 
         match filter {
-            ScaleFilter::VectorizeGpu => {
+            ScaleFilter::Vectorize => {
                 if self.full_vectorize.is_none() {
                     self.full_vectorize = super::init_full_gpu_pipeline(&self.device);
                 }

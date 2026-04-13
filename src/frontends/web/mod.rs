@@ -99,7 +99,7 @@ impl WasmEmulator {
             last_print_w: 0,
             last_print_h: 0,
             save_key,
-            scale_filter: scaling::ScaleFilter::VectorizeGpu,
+            scale_filter: scaling::ScaleFilter::Vectorize,
             skip_boot: false,
             gpu: None,
         })
@@ -451,7 +451,7 @@ impl WasmEmulator {
 
         let out_tex: &wgpu::Texture = match self.scale_filter {
             // Full 6-stage GPU vectorize pipeline
-            ScaleFilter::VectorizeGpu => {
+            ScaleFilter::Vectorize => {
                 gpu.vectorize.encode(
                     &gpu.device, &gpu.queue, &mut encoder,
                     &fb, src_w, src_h, render_w, render_h, scale,

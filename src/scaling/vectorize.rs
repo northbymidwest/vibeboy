@@ -28,7 +28,7 @@ const DIR_N: u32 = 128;
 
 /// Intermediate output from the vectorize-gpu pipeline (stages 1-5).
 /// Contains optimized B-spline control points with connectivity and flags.
-pub struct VectorizeGpuData {
+pub struct VectorizeData {
     pub positions: Vec<f32>,
     pub orig_positions: Vec<f32>,
     pub neighbors: Vec<i32>,
@@ -40,7 +40,7 @@ pub struct VectorizeGpuData {
 
 /// Run stages 1-5 of the vectorize-gpu pipeline without rasterizing.
 /// Returns intermediate CP data for SVG export or other consumers.
-pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeGpuData {
+pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     let graph = build_similarity_graph(src, src_w, src_h);
     let graph = resolve_crossings(&graph, src_w, src_h);
     let (positions, neighbors, flags) = build_cell_graph(&graph, src_w, src_h);
@@ -54,7 +54,7 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeGpuData {
     let mut positions = positions;
     update_tjunctions(&mut positions, &neighbors, &flags, num_cps);
 
-    VectorizeGpuData {
+    VectorizeData {
         positions,
         orig_positions,
         neighbors,
