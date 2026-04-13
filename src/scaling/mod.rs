@@ -160,23 +160,6 @@ pub enum ScaleFilter {
     OmniScaleLegacy,
     /// Anti-aliased nearest neighbor (scales to display size).
     NearestAa,
-    /// Kopf-Lischinski vectorization with full B-spline optimization (legacy scanline rasterizer).
-    VectorizeLegacy,
-    /// Legacy Kopf-Lischinski vectorization — adaptive fast path (skips B-spline
-    /// optimization, uses straight line segments at boundary junctions).
-    VectorizeLegacyAdaptive,
-    /// Kopf-Lischinski vectorization with Gaussian diffusion rendering
-    /// (Paper Section 3.5). Uses truncated Gaussians at cell centroids
-    /// instead of scanline-filled vector paths.
-    VectorizeDiffusion,
-    /// Paper's full rendering: B-spline contour boundaries + Gaussian diffusion.
-    VectorizeSplineDiffusion,
-    /// Adaptive spline-diffusion: skips B-spline optimization on complex frames.
-    VectorizeSplineDiffusionAdaptive,
-    /// Shared-chain vectorization: gap-free rendering using shared boundary spans.
-    Vectorize,
-    /// Adaptive shared-chain: skips optimization on complex frames.
-    VectorizeAdaptive,
     /// Full GPU vectorize: all pipeline stages run on GPU compute shaders.
     /// CPU implementation of the full GPU vectorize pipeline.
     VectorizeGpu,
@@ -223,14 +206,7 @@ const REGISTRY: &[FilterInfo] = &[
     FilterInfo { filter: ScaleFilter::Super2xSai,       cli_name: "super-2xsai",  display_name: "Super 2xSaI",             factor: 2 },
     FilterInfo { filter: ScaleFilter::SuperEagle,       cli_name: "super-eagle",  display_name: "Super Eagle",              factor: 2 },
     FilterInfo { filter: ScaleFilter::SuperXbr,         cli_name: "super-xbr",    display_name: "Super xBR",                factor: 2 },
-    FilterInfo { filter: ScaleFilter::Vectorize,        cli_name: "vectorize",    display_name: "Vectorize",                factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeAdaptive, cli_name: "vectorize-adaptive", display_name: "Vectorize Adaptive", factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeDiffusion, cli_name: "vectorize-diffusion", display_name: "Vectorize Diffusion", factor: 0 },
     FilterInfo { filter: ScaleFilter::VectorizeGpu,     cli_name: "vectorize-gpu", display_name: "Vectorize GPU",           factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeLegacy,  cli_name: "vectorize-legacy", display_name: "Vectorize Legacy",     factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeLegacyAdaptive, cli_name: "vectorize-legacy-adaptive", display_name: "Vectorize Legacy Adaptive", factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeSplineDiffusion, cli_name: "vectorize-spline-diffusion", display_name: "Vectorize Spline Diffusion", factor: 0 },
-    FilterInfo { filter: ScaleFilter::VectorizeSplineDiffusionAdaptive, cli_name: "vectorize-spline-diffusion-adaptive", display_name: "Vectorize Spline Diff Adaptive", factor: 0 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr2x), cli_name: "xbr2x",  display_name: "xBR 2x",                  factor: 2 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr3x), cli_name: "xbr3x",  display_name: "xBR 3x",                  factor: 3 },
     FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr4x), cli_name: "xbr4x",  display_name: "xBR 4x",                  factor: 4 },
@@ -246,31 +222,30 @@ impl ScaleFilter {
         REGISTRY.iter().find(|e| e.filter == self).expect("filter not in registry")
     }
 
-    /// Create a new VectorizeCache appropriate for this filter, or None if not needed.
-    pub fn new_vectorize_cache(self) -> Option<crate::vectorize::VectorizeCache> {
-        match self {
-            Self::Vectorize | Self::VectorizeSplineDiffusion
-                => Some(crate::vectorize::VectorizeCache::new(false)),
-            Self::VectorizeAdaptive | Self::VectorizeSplineDiffusionAdaptive
-                => Some(crate::vectorize::VectorizeCache::new(true)),
-            Self::VectorizeLegacy | Self::VectorizeDiffusion
-                => Some(crate::vectorize::VectorizeCache::new_legacy(false)),
-            Self::VectorizeLegacyAdaptive
-                => Some(crate::vectorize::VectorizeCache::new_legacy(true)),
-            _ => None,
-        }
-    }
+    /// All valid CLI name strings (includes "none" and legacy vectorize aliases).
+    /// Legacy vectorize CLI names that map to VectorizeGpu for backward compatibility.
+    const LEGACY_VECTORIZE_ALIASES: &'static [&'static str] = &[
+        "vectorize", "vectorize-adaptive",
+        "vectorize-diffusion",
+        "vectorize-legacy", "vectorize-legacy-adaptive",
+        "vectorize-spline-diffusion", "vectorize-spline-diffusion-adaptive",
+    ];
 
-    /// All valid CLI name strings (includes "none" as alias for "nearest").
     pub fn all_names() -> Vec<&'static str> {
         let mut names: Vec<&str> = REGISTRY.iter().map(|e| e.cli_name).collect();
         names.push("none"); // alias
+        for &alias in Self::LEGACY_VECTORIZE_ALIASES {
+            names.push(alias);
+        }
         names
     }
 
     /// Parse a CLI name into a ScaleFilter. Returns None for unrecognized names.
     pub fn from_name(s: &str) -> Option<ScaleFilter> {
         if s == "none" { return Some(ScaleFilter::Nearest); }
+        if Self::LEGACY_VECTORIZE_ALIASES.contains(&s) {
+            return Some(ScaleFilter::VectorizeGpu);
+        }
         REGISTRY.iter().find(|e| e.cli_name == s).map(|e| e.filter)
     }
 
@@ -471,29 +446,6 @@ pub fn cpu_scale(
             let oh = (sh as f32 * scale_f).ceil() as usize;
             let s = vectorize_gpu::scale(src, sw, sh, scale_f);
             (s, ow as u32, oh as u32)
-        }
-        ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
-            let scale = (disp_w / sw).max(disp_h / sh).max(1);
-            let (s, w, h) = crate::vectorize::vectorize_to_raster_shared(src, sw, sh, scale);
-            (s, w as u32, h as u32)
-        }
-        ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
-            let scale = (disp_w / sw).max(disp_h / sh).max(1);
-            let (s, w, h) = crate::vectorize::vectorize_to_raster(src, sw, sh, scale);
-            (s, w as u32, h as u32)
-        }
-        ScaleFilter::VectorizeDiffusion => {
-            let scale = (disp_w / sw).max(disp_h / sh).max(1);
-            let (s, w, h) = crate::vectorize::rasterize::rasterize_diffusion(src, sw, sh, scale);
-            (s, w as u32, h as u32)
-        }
-        ScaleFilter::VectorizeSplineDiffusion | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
-            let scale = (disp_w / sw).max(disp_h / sh).max(1);
-            let (paths, bg_color) = crate::vectorize::vectorize_core(src, sw, sh);
-            let (s, w, h) = crate::vectorize::rasterize::rasterize_spline_diffusion(
-                &paths, src, sw, sh, bg_color, scale,
-            );
-            (s, w as u32, h as u32)
         }
         ScaleFilter::ScaleFx => {
             let s = scalefx::scale(src, sw, sh);

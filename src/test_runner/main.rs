@@ -4,7 +4,6 @@ mod harness;
 mod harnesses;
 #[path = "model.rs"]
 mod test_model;
-mod svg;
 mod gpu_svg;
 mod util;
 

@@ -6,8 +6,6 @@
 
 use sdl3::gpu;
 use crate::scaling::ScaleFilter;
-use crate::vectorize::rasterize::{GpuEdgeV2, GpuRowRange};
-
 /// Index into `scale_pipelines` array for each compute-based scaling filter.
 const SP_OMNISCALE: usize = 0;
 const SP_EPX: usize = 1;
@@ -48,10 +46,7 @@ pub struct GpuPipelines {
     // Lazily-initialized compute pipelines (scaling filters)
     scale_pipelines: [Option<gpu::ComputePipeline>; 22],
 
-    // Vectorize compute pipelines
-    vectorize_compute: Option<gpu::ComputePipeline>,
-    diffusion_compute: Option<gpu::ComputePipeline>,
-    spline_diff: Option<(gpu::ComputePipeline, gpu::ComputePipeline)>,
+    // Full GPU vectorize pipeline (6-stage)
     full_vectorize: Option<super::GpuVectorizePipelines>,
 }
 
@@ -97,9 +92,6 @@ impl GpuPipelines {
             transfer_buf_size: max_xfer,
             sampler,
             scale_pipelines: Default::default(),
-            vectorize_compute: None,
-            diffusion_compute: None,
-            spline_diff: None,
             full_vectorize: None,
         }
     }
@@ -199,51 +191,6 @@ impl GpuPipelines {
         }
 
         match filter {
-            ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
-                if self.vectorize_compute.is_none() {
-                    self.vectorize_compute =
-                        super::init_vectorize_compute_pipeline(&self.device);
-                }
-                if self.vectorize_compute.is_some() {
-                    GpuRenderMode::Vectorize
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::VectorizeDiffusion => {
-                if self.diffusion_compute.is_none() {
-                    self.diffusion_compute =
-                        super::init_diffusion_compute_pipeline(&self.device);
-                }
-                if self.diffusion_compute.is_some() {
-                    GpuRenderMode::Diffusion
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::VectorizeSplineDiffusion
-            | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
-                if self.spline_diff.is_none() {
-                    self.spline_diff =
-                        super::init_spline_diffusion_pipelines(&self.device);
-                }
-                if self.spline_diff.is_some() {
-                    GpuRenderMode::SplineDiffusion
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
-            ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive => {
-                if self.vectorize_compute.is_none() {
-                    self.vectorize_compute =
-                        super::init_vectorize_compute_pipeline(&self.device);
-                }
-                if self.vectorize_compute.is_some() {
-                    GpuRenderMode::VectorizeSharedChain
-                } else {
-                    GpuRenderMode::Cpu
-                }
-            }
             ScaleFilter::VectorizeGpu => {
                 if self.full_vectorize.is_none() {
                     self.full_vectorize = super::init_full_gpu_pipeline(&self.device);
@@ -374,33 +321,7 @@ impl GpuPipelines {
         );
     }
 
-    /// Full vectorize render path: prepare edges, upload to GPU, blit to window.
-    pub fn render_vectorize_to_window(
-        &mut self,
-        window: &sdl3::video::Window,
-        gpu_edges: &[GpuEdgeV2],
-        row_ranges: &[GpuRowRange],
-        edge_indices: &[u32],
-        out_w: u32,
-        out_h: u32,
-        bg_color: u32,
-    ) {
-        self.resize_texture(out_w, out_h);
-        super::vectorize_and_blit(
-            &self.device,
-            window,
-            &self.tex,
-            self.vectorize_compute.as_ref().unwrap(),
-            gpu_edges,
-            row_ranges,
-            edge_indices,
-            out_w,
-            out_h,
-            bg_color,
-        );
-    }
-
-    /// Run the full GPU vectorize pipeline (all 5 stages on GPU, no CPU readback).
+    /// Run the full GPU vectorize pipeline (all 6 stages on GPU, no CPU readback).
     pub fn render_full_vectorize_to_window(
         &mut self,
         window: &sdl3::video::Window,
@@ -418,72 +339,6 @@ impl GpuPipelines {
         super::gpu_vectorize_full_pipeline(
             &self.device, window, &self.tex, pipelines,
             pixels, img_w, img_h, out_w, out_h, scale,
-        );
-    }
-
-    /// Full diffusion render path.
-    pub fn render_diffusion_to_window(
-        &mut self,
-        window: &sdl3::video::Window,
-        src_pixels: &[u32],
-        src_regions: &[u32],
-        diag_states: &[u32],
-        sw: u32,
-        sh: u32,
-        out_w: u32,
-        out_h: u32,
-        scale: f32,
-    ) {
-        self.resize_texture(out_w, out_h);
-        super::diffusion_and_blit(
-            &self.device,
-            window,
-            &self.tex,
-            self.diffusion_compute.as_ref().unwrap(),
-            src_pixels,
-            src_regions,
-            diag_states,
-            sw,
-            sh,
-            out_w,
-            out_h,
-            scale,
-        );
-    }
-
-    /// Full spline-diffusion render path.
-    pub fn render_spline_diffusion_to_window(
-        &mut self,
-        window: &sdl3::video::Window,
-        gpu_edges: &[GpuEdgeV2],
-        row_ranges: &[GpuRowRange],
-        edge_indices: &[u32],
-        src_pixels: &[u32],
-        out_w: u32,
-        out_h: u32,
-        sw: u32,
-        sh: u32,
-        bg_color: u32,
-        scale: u32,
-    ) {
-        self.resize_texture(out_w, out_h);
-        let (p1, p2) = self.spline_diff.as_ref().unwrap();
-        super::spline_diffusion_and_blit(
-            &self.device,
-            window,
-            &self.tex,
-            p1,
-            p2,
-            gpu_edges,
-            row_ranges,
-            edge_indices,
-            src_pixels,
-            out_w,
-            out_h,
-            sw,
-            sh,
-            bg_color,
-            scale,
         );
     }
 
@@ -518,14 +373,6 @@ pub enum GpuRenderMode {
     Native,
     /// Use GPU compute scaling filter pipeline.
     ScaleCompute,
-    /// Use GPU compute vectorize pipeline.
-    Vectorize,
-    /// Use GPU compute diffusion pipeline.
-    Diffusion,
-    /// Use GPU compute spline-diffusion pipeline.
-    SplineDiffusion,
-    /// Use GPU compute shared-chain vectorize pipeline.
-    VectorizeSharedChain,
     /// Full GPU vectorize pipeline (all stages on GPU).
     FullGpuVectorize,
     /// No GPU pipeline available; use CPU scaling + upload_and_blit.

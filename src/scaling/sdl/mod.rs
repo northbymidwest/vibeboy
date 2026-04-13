@@ -11,11 +11,8 @@ mod screenshot;
 
 pub use common::{create_texture, upload_and_blit};
 pub use compute::{
-    init_vectorize_compute_pipeline, vectorize_and_blit,
     GpuVectorizePipelines, init_full_gpu_pipeline, gpu_vectorize_full_pipeline,
     gpu_full_pipeline_screenshot,
-    init_diffusion_compute_pipeline, prepare_diffusion_data, diffusion_and_blit,
-    init_spline_diffusion_pipelines, spline_diffusion_and_blit,
     init_omniscale_compute_pipeline, scale_compute_and_blit, super_xbr_compute_and_blit,
     init_epx_compute_pipeline, init_eagle_compute_pipeline,
     init_scale3x_compute_pipeline, init_bicubic_compute_pipeline,
@@ -32,9 +29,4 @@ pub use compute::{
     init_super_eagle_compute_pipeline,
     init_scalefx_compute_pipeline, scalefx_compute_and_blit,
 };
-pub use screenshot::{
-    gpu_screenshot,
-    gpu_vectorize_screenshot,
-    gpu_vectorize_shared_screenshot,
-    gpu_spline_diffusion_screenshot,
-};
+pub use screenshot::gpu_screenshot;

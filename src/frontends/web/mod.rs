@@ -7,12 +7,9 @@ use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
 use crate::scaling;
-use crate::scaling::wgpu_vectorize::{
-    WgpuVectorizePipeline, WgpuDiffusionRasterizer, WgpuSplineDiffusionPipeline,
-};
+use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
 use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 use crate::ui_util;
-use crate::vectorize;
 
 const BLIT_SHADER: &str = r#"
 struct VsOutput {
@@ -49,7 +46,6 @@ pub struct WasmEmulator {
     last_print_h: u32,
     save_key: String,
     scale_filter: scaling::ScaleFilter,
-    vec_cache: Option<vectorize::VectorizeCache>,
     skip_boot: bool,
     // GPU state (initialized async after construction)
     gpu: Option<GpuState>,
@@ -64,9 +60,6 @@ struct GpuState {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vectorize: WgpuVectorizePipeline,
-    shared_chain: scaling::wgpu_vectorize::WgpuSharedChainRasterizer,
-    diffusion: WgpuDiffusionRasterizer,
-    spline_diff: WgpuSplineDiffusionPipeline,
     scale: WgpuScalePipeline,
 }
 
@@ -107,7 +100,6 @@ impl WasmEmulator {
             last_print_h: 0,
             save_key,
             scale_filter: scaling::ScaleFilter::VectorizeGpu,
-            vec_cache: None,
             skip_boot: false,
             gpu: None,
         })
@@ -232,9 +224,6 @@ impl WasmEmulator {
         });
 
         let vectorize = WgpuVectorizePipeline::new(&device);
-        let shared_chain = scaling::wgpu_vectorize::WgpuSharedChainRasterizer::new(&device);
-        let diffusion = WgpuDiffusionRasterizer::new(&device);
-        let spline_diff = WgpuSplineDiffusionPipeline::new(&device);
         let scale = WgpuScalePipeline::new(&device);
 
         self.gpu = Some(GpuState {
@@ -246,9 +235,6 @@ impl WasmEmulator {
             blit_bind_group_layout,
             sampler,
             vectorize,
-            shared_chain,
-            diffusion,
-            spline_diff,
             scale,
         });
 
@@ -390,7 +376,6 @@ impl WasmEmulator {
     pub fn set_filter(&mut self, name: &str) -> bool {
         if let Some(f) = scaling::ScaleFilter::from_name(name) {
             self.scale_filter = f;
-            self.vec_cache = f.new_vectorize_cache();
             true
         } else {
             false
@@ -425,7 +410,6 @@ impl WasmEmulator {
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];
-        self.vec_cache = None;
         true
     }
 
@@ -465,7 +449,6 @@ impl WasmEmulator {
             label: Some("filter+blit"),
         });
 
-        let owned_tex;
         let out_tex: &wgpu::Texture = match self.scale_filter {
             // Full 6-stage GPU vectorize pipeline
             ScaleFilter::VectorizeGpu => {
@@ -473,59 +456,6 @@ impl WasmEmulator {
                     &gpu.device, &gpu.queue, &mut encoder,
                     &fb, src_w, src_h, render_w, render_h, scale,
                 )
-            }
-            // Vectorize variants using GPU edge rasterizer
-            ScaleFilter::Vectorize | ScaleFilter::VectorizeAdaptive
-            | ScaleFilter::VectorizeLegacy | ScaleFilter::VectorizeLegacyAdaptive => {
-                let cache = self.vec_cache.get_or_insert_with(|| {
-                    vectorize::VectorizeCache::new_legacy(false)
-                });
-                let (paths, bg) = cache.get_paths(&fb, src_w as usize, src_h as usize);
-                let (edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(
-                        paths, bg, scale as f64, src_w as usize, src_h as usize,
-                    );
-                if ow == 0 || oh == 0 || edges.is_empty() {
-                    return false;
-                }
-                owned_tex = gpu.shared_chain.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    &edges, &row_ranges, &edge_indices, ow, oh, bg,
-                );
-                &owned_tex
-            }
-            // Diffusion rasterizer (single-pass Gaussian blending)
-            ScaleFilter::VectorizeDiffusion => {
-                let sc = scale.round().max(1.0) as u32;
-                let ow = src_w * sc;
-                let oh = src_h * sc;
-                owned_tex = gpu.diffusion.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    &fb, src_w, src_h, ow, oh, sc,
-                );
-                &owned_tex
-            }
-            // Spline-diffusion (2-pass: vectorize_to_buf + spline_diffusion)
-            ScaleFilter::VectorizeSplineDiffusion | ScaleFilter::VectorizeSplineDiffusionAdaptive => {
-                let sc = scale.round().max(1.0) as u32;
-                let adaptive = matches!(self.scale_filter, ScaleFilter::VectorizeSplineDiffusionAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| {
-                    vectorize::VectorizeCache::new(adaptive)
-                });
-                let (paths, bg) = cache.get_paths(&fb, src_w as usize, src_h as usize);
-                let (edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(
-                        paths, bg, scale as f64, src_w as usize, src_h as usize,
-                    );
-                if ow == 0 || oh == 0 || edges.is_empty() {
-                    return false;
-                }
-                owned_tex = gpu.spline_diff.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    &edges, &row_ranges, &edge_indices, &fb,
-                    src_w, src_h, ow, oh, bg, sc,
-                );
-                &owned_tex
             }
             // All other filters: map to WgpuScaleFilter compute pipeline
             other => {
@@ -636,21 +566,7 @@ impl WasmEmulator {
         let fit_h = (src_h as f64 * scale_fit).round() as usize;
 
         // Try CPU scaling
-        let (pixels, pw, ph) = if matches!(self.scale_filter,
-            scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
-            | scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
-        {
-            let cache = self.vec_cache.get_or_insert_with(|| {
-                match self.scale_filter {
-                    scaling::ScaleFilter::Vectorize => vectorize::VectorizeCache::new(false),
-                    scaling::ScaleFilter::VectorizeAdaptive => vectorize::VectorizeCache::new(true),
-                    scaling::ScaleFilter::VectorizeLegacyAdaptive => vectorize::VectorizeCache::new_legacy(true),
-                    _ => vectorize::VectorizeCache::new_legacy(false),
-                }
-            });
-            let (raster, vw, vh) = cache.rasterize(&fb, src_w, src_h, scale_fit);
-            (raster.to_vec(), vw, vh)
-        } else if let Some((scaled, w, h)) = scaling::cpu_scale(
+        let (pixels, pw, ph) = if let Some((scaled, w, h)) = scaling::cpu_scale(
             self.scale_filter,
             &fb, src_w, src_h,
             fit_w, fit_h,

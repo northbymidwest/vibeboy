@@ -19,8 +19,6 @@ pub mod printer;
 
 pub mod scaling;
 
-pub mod vectorize;
-
 pub mod util;
 pub mod ui_util;
 

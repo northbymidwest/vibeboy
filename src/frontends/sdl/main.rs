@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use input::handle_input;
 use camera::CameraThread;
 use accel::{init_accel, enable_gamepad_sensors};
-use render::{display_size, compute_integer_scale, cpu_scale_frame};
+use render::{display_size, cpu_scale_frame};
 
 use ui_util::frame_duration;
 use ui_util::parse_model;
@@ -86,12 +86,6 @@ struct Cli {
     /// Force CPU-only scaling (disable GPU shader pipeline even if available)
     #[arg(long)]
     cpu_filter: bool,
-
-    /// Use YUV similarity threshold for visible edges in vectorize filters
-    /// (Paper Section 3.2). Merges near-similar colors into the same region.
-    /// Off by default; can produce artifacts in games with dithering/gradients.
-    #[arg(long)]
-    yuv_edges: bool,
 
     /// Run-ahead frames to reduce input latency. Speculatively runs N frames
     /// ahead and displays the result, so input is reflected sooner.
@@ -172,10 +166,6 @@ fn main() {
         std::process::exit(0);
     }
 
-    if cli.yuv_edges || cli.filter.starts_with("vectorize-spline-diffusion") {
-        vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
     // Resolve ROM path: use CLI argument or show a file dialog
     let rom_path: PathBuf = if let Some(ref p) = cli.rom {
         p.clone()
@@ -246,7 +236,6 @@ fn main() {
     let is_sgb = emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
-    let mut vec_cache = scale_filter.new_vectorize_cache();
     let filter_factor = scale_filter.factor().max(1); // 0 = adaptive, treat as 1× for initial sizing
     let tex_w = src_w * filter_factor;
     let tex_h = src_h * filter_factor;
@@ -697,59 +686,6 @@ fn main() {
                 let mode = gpu.ensure_pipeline(scale_filter, &window, cli.cpu_filter);
 
                 match mode {
-                    GpuRenderMode::SplineDiffusion => {
-                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
-                        let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
-                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
-                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale as f64, sw, sh);
-                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
-                            gpu.render_spline_diffusion_to_window(
-                                &window, &gpu_edges, &row_ranges, &edge_indices,
-                                raw_src, out_w, out_h, sw as u32, sh as u32,
-                                bg_color, scale as u32,
-                            );
-                        }
-                    }
-                    GpuRenderMode::Diffusion => {
-                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
-                        let scale = compute_integer_scale(disp_w, disp_h, sw, sh);
-                        let (src_pixels, src_regions, diag_states, out_w, out_h) =
-                            scaling::sdl::prepare_diffusion_data(raw_src, sw, sh, scale);
-                        if out_w > 0 && out_h > 0 {
-                            gpu.render_diffusion_to_window(
-                                &window, &src_pixels, &src_regions, &diag_states,
-                                sw as u32, sh as u32, out_w, out_h, scale as f32,
-                            );
-                        }
-                    }
-                    GpuRenderMode::Vectorize => {
-                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
-                        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                        let (paths, bg_color) = vec_cache.as_mut().unwrap().get_paths(raw_src, sw, sh);
-                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
-                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
-                            gpu.render_vectorize_to_window(
-                                &window, &gpu_edges, &row_ranges, &edge_indices,
-                                out_w, out_h, bg_color,
-                            );
-                        }
-                    }
-                    GpuRenderMode::VectorizeSharedChain => {
-                        let (disp_w, disp_h) = display_size(&window, src_w, src_h);
-                        let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
-                        let cache = vec_cache.as_mut().unwrap();
-                        let (paths, bg_color) = cache.get_paths(raw_src, sw, sh);
-                        let (gpu_edges, row_ranges, edge_indices, out_w, out_h) =
-                            vectorize::rasterize::prepare_gpu_edges_v2(paths, bg_color, scale, sw, sh);
-                        if out_w > 0 && out_h > 0 && !gpu_edges.is_empty() {
-                            gpu.render_vectorize_to_window(
-                                &window, &gpu_edges, &row_ranges, &edge_indices,
-                                out_w, out_h, bg_color,
-                            );
-                        }
-                    }
                     GpuRenderMode::FullGpuVectorize => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let scale = (disp_w as f64 / sw as f64).min(disp_h as f64 / sh as f64);
@@ -773,7 +709,7 @@ fn main() {
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         let (scaled, fw, fh) = cpu_scale_frame(
-                            &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                            &scale_filter, raw_src, sw, sh, disp_w, disp_h,
                         );
                         gpu.upload_and_blit(&scaled, fw, fh, &window);
                     }
@@ -795,7 +731,7 @@ fn main() {
                 } else { (0, 0) };
 
                 let (scaled, fw, fh) = cpu_scale_frame(
-                    &scale_filter, raw_src, sw, sh, disp_w, disp_h, &mut vec_cache,
+                    &scale_filter, raw_src, sw, sh, disp_w, disp_h,
                 );
                 let (fw, fh) = (fw as usize, fh as usize);
                 let final_src = if fw == sw && fh == sh { raw_src } else { &scaled };

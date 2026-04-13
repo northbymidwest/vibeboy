@@ -190,7 +190,6 @@ struct AppState {
     forced_model: Option<GbModel>,
     renderer: MetalRenderer,
     scale_filter: scaling::ScaleFilter,
-    vec_cache: Option<vectorize::VectorizeCache>,
     key_map: std::collections::HashMap<u16, u8>,
     keys_down: HashSet<u16>,
     gamepad: GamepadState,
@@ -336,7 +335,6 @@ impl AppState {
         if let Some(tag) = actions.select_filter {
             if let Some(new_filter) = filter_tag_to_filter(tag) {
                 self.scale_filter = new_filter;
-                self.vec_cache = self.scale_filter.new_vectorize_cache();
                 update_filter_checkmarks(app, tag);
                 eprintln!("Filter: {:?}", self.scale_filter);
             }
@@ -623,14 +621,8 @@ impl AppState {
             }
         }
 
-        // GPU compute scaling filters (not vectorize variants which have their own paths)
-        if !matches!(self.scale_filter,
-            scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
-            | scaling::ScaleFilter::VectorizeDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusion
-            | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
-            | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive
-            | scaling::ScaleFilter::VectorizeGpu)
-        {
+        // GPU compute scaling filters (VectorizeGpu handled above)
+        if self.scale_filter != scaling::ScaleFilter::VectorizeGpu {
             if let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
                 self.scale_filter, raw_src, src_w as u32, src_h as u32,
                 disp_w as u32, disp_h as u32,
@@ -656,69 +648,6 @@ impl AppState {
         let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
             if self.scale_filter == scaling::ScaleFilter::Nearest {
                 (raw_src, src_w, src_h)
-            } else if matches!(self.scale_filter,
-                scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive)
-            {
-                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeLegacyAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
-                if ow > 0 && oh > 0 {
-                    self.renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
-                    self.renderer.render();
-                    gpu_rendered = true;
-                }
-                vec_scaled = Vec::new();
-                (&[] as &[u32], 0, 0)
-            } else if self.scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
-                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                let scale = s.round().max(1.0) as u32;
-                let ow = src_w as u32 * scale;
-                let oh = src_h as u32 * scale;
-                self.renderer.run_diffusion_rasterize(raw_src, src_w as u32, src_h as u32, ow, oh, scale);
-                self.renderer.render();
-                gpu_rendered = true;
-                vec_scaled = Vec::new();
-                (&[] as &[u32], 0, 0)
-            } else if matches!(self.scale_filter,
-                scaling::ScaleFilter::VectorizeSplineDiffusion
-                | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive)
-            {
-                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                let scale = s.round().max(1.0) as u32;
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new_legacy(adaptive));
-                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale as f64, src_w, src_h);
-                if ow > 0 && oh > 0 {
-                    self.renderer.run_spline_diffusion(
-                        &gpu_edges, &row_ranges, &edge_indices, raw_src,
-                        ow, oh, src_w as u32, src_h as u32, bg, scale,
-                    );
-                    self.renderer.render();
-                    gpu_rendered = true;
-                }
-                vec_scaled = Vec::new();
-                (&[] as &[u32], 0, 0)
-            } else if matches!(self.scale_filter,
-                scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
-            {
-                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
-                let (paths, bg) = cache.get_paths(raw_src, src_w, src_h);
-                let (gpu_edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, src_w, src_h);
-                if ow > 0 && oh > 0 {
-                    self.renderer.run_scanline_rasterize(&gpu_edges, &row_ranges, &edge_indices, ow, oh, bg);
-                    self.renderer.render();
-                    gpu_rendered = true;
-                }
-                vec_scaled = Vec::new();
-                (&[] as &[u32], 0, 0)
             } else {
                 // Compute aspect-correct dimensions for adaptive filters
                 let scale = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
@@ -870,7 +799,6 @@ fn main() {
 
         // Scaling filter
         let scale_filter = string_to_filter(&cli.filter);
-        let vec_cache = scale_filter.new_vectorize_cache();
         if scale_filter != scaling::ScaleFilter::Nearest {
             eprintln!("  Filter: {:?}", scale_filter);
         }
@@ -983,7 +911,6 @@ fn main() {
             forced_model,
             renderer,
             scale_filter,
-            vec_cache,
             key_map,
             keys_down: HashSet::new(),
             gamepad: GamepadState::new(),

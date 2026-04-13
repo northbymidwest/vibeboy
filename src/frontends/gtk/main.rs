@@ -68,7 +68,6 @@ struct EmuState {
     rom_data: std::sync::Arc<[u8]>,
     audio_ring: std::sync::Arc<std::sync::Mutex<audio::AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
-    vec_cache: Option<vectorize::VectorizeCache>,
     frame_timer: Option<glib::SourceId>,
     fps: ui_util::FpsCounter,
     gamepad: Option<ui_util::GamepadPoller>,
@@ -162,7 +161,6 @@ fn create_emu_state(
         rom_data: rom,
         audio_ring,
         _audio_stream,
-        vec_cache: None,
         frame_timer: None,
         fps: ui_util::FpsCounter::new(),
         gamepad: ui_util::GamepadPoller::new(),
@@ -685,160 +683,6 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     } else {
                                         (fb, base_w, base_h, None)
                                     }
-                                } else if matches!(
-                                    st.scale_filter,
-                                    scaling::ScaleFilter::VectorizeLegacy
-                                        | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                                        | scaling::ScaleFilter::Vectorize
-                                        | scaling::ScaleFilter::VectorizeAdaptive
-                                ) {
-                                    // All vectorize variants: GPU rasterizer on Linux, CPU fallback on macOS
-                                    let adaptive = matches!(
-                                        st.scale_filter,
-                                        scaling::ScaleFilter::VectorizeAdaptive
-                                            | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                                    );
-                                    let is_legacy = matches!(
-                                        st.scale_filter,
-                                        scaling::ScaleFilter::VectorizeLegacy
-                                            | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                                    );
-                                    let cache = st.vec_cache.get_or_insert_with(|| {
-                                        if is_legacy { vectorize::VectorizeCache::new_legacy(adaptive) }
-                                        else { vectorize::VectorizeCache::new(adaptive) }
-                                    });
-                                    #[cfg(target_os = "linux")]
-                                    if !st.force_cpu {
-                                        let (paths, bg) = cache.get_paths(fb, base_w, base_h);
-                                        let (edges, row_ranges, edge_indices, ow, oh) =
-                                            vectorize::rasterize::prepare_gpu_edges_v2(
-                                                paths, bg, scale_fit, base_w, base_h,
-                                            );
-                                        let mut gc = gpu_compute.borrow_mut();
-                                        if ow > 0 && oh > 0 && !edges.is_empty() {
-                                            if let Some(ref mut compute) = *gc {
-                                                if let Some((gl_tex, gw, gh)) =
-                                                    compute.rasterize_shared_chain(
-                                                        &edges, &row_ranges, &edge_indices,
-                                                        ow, oh, bg,
-                                                    )
-                                                {
-                                                    let mut pf = pending_frame.borrow_mut();
-                                                    pf.pixels.clear(); // signal: use gl_tex instead
-                                                    pf.frame_w = gw;
-                                                    pf.frame_h = gh;
-                                                    pf.src_w = base_w as u32;
-                                                    pf.src_h = base_h as u32;
-                                                    pf.gpu_filter = None;
-                                                    pf.gl_texture = Some(gl_tex);
-                                                    pf.fit_w = fit_w as u32;
-                                                    pf.fit_h = fit_h as u32;
-                                                    drop(gc);
-                                                    drop(pf);
-                                                    gl_area.queue_render();
-                                                    return glib::ControlFlow::Continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // CPU fallback (macOS or GPU unavailable): use legacy rasterizer
-                                    let cache = st.vec_cache.get_or_insert_with(|| {
-                                        vectorize::VectorizeCache::new_legacy(adaptive)
-                                    });
-                                    let (raster, vw, vh) =
-                                        cache.rasterize(fb, base_w, base_h, scale_fit);
-                                    (raster, vw, vh, None)
-                                } else if st.scale_filter == scaling::ScaleFilter::VectorizeDiffusion {
-                                    let sc = scale_fit.round().max(1.0) as u32;
-                                    let ow = base_w as u32 * sc;
-                                    let oh = base_h as u32 * sc;
-                                    #[cfg(target_os = "linux")]
-                                    if !st.force_cpu {
-                                        let mut gc = gpu_compute.borrow_mut();
-                                        if let Some(ref mut compute) = *gc {
-                                            if let Some((gl_tex, gw, gh)) =
-                                                compute.diffusion_rasterize(
-                                                    fb, base_w as u32, base_h as u32, ow, oh, sc,
-                                                )
-                                            {
-                                                let mut pf = pending_frame.borrow_mut();
-                                                pf.pixels.clear();
-                                                pf.frame_w = gw;
-                                                pf.frame_h = gh;
-                                                pf.src_w = base_w as u32;
-                                                pf.src_h = base_h as u32;
-                                                pf.gpu_filter = None;
-                                                pf.gl_texture = Some(gl_tex);
-                                                pf.fit_w = fit_w as u32;
-                                                pf.fit_h = fit_h as u32;
-                                                drop(gc);
-                                                drop(pf);
-                                                gl_area.queue_render();
-                                                return glib::ControlFlow::Continue;
-                                            }
-                                        }
-                                    }
-                                    // CPU fallback
-                                    let (buf, dw, dh) = vectorize::rasterize::rasterize_diffusion(
-                                        fb, base_w, base_h, sc as usize,
-                                    );
-                                    st.scaled_buf = buf;
-                                    (&st.scaled_buf, dw, dh, None)
-                                } else if matches!(
-                                    st.scale_filter,
-                                    scaling::ScaleFilter::VectorizeSplineDiffusion
-                                        | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive
-                                ) {
-                                    let sc = scale_fit.round().max(1.0) as u32;
-                                    let adaptive = st.scale_filter == scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive;
-                                    let cache = st.vec_cache.get_or_insert_with(|| {
-                                        vectorize::VectorizeCache::new(adaptive)
-                                    });
-                                    let (paths, bg) = cache.get_paths(fb, base_w, base_h);
-                                    let (edges, row_ranges, edge_indices, ow, oh) =
-                                        vectorize::rasterize::prepare_gpu_edges_v2(
-                                            paths, bg, scale_fit, base_w, base_h,
-                                        );
-                                    #[cfg(target_os = "linux")]
-                                    if !st.force_cpu {
-                                        if ow > 0 && oh > 0 && !edges.is_empty() {
-                                            let mut gc = gpu_compute.borrow_mut();
-                                            if let Some(ref mut compute) = *gc {
-                                                if let Some((gl_tex, gw, gh)) =
-                                                    compute.spline_diffusion(
-                                                        &edges, &row_ranges, &edge_indices,
-                                                        fb, base_w as u32, base_h as u32,
-                                                        ow, oh, bg, sc,
-                                                    )
-                                                {
-                                                    let mut pf = pending_frame.borrow_mut();
-                                                    pf.pixels.clear();
-                                                    pf.frame_w = gw;
-                                                    pf.frame_h = gh;
-                                                    pf.src_w = base_w as u32;
-                                                    pf.src_h = base_h as u32;
-                                                    pf.gpu_filter = None;
-                                                    pf.gl_texture = Some(gl_tex);
-                                                    pf.fit_w = fit_w as u32;
-                                                    pf.fit_h = fit_h as u32;
-                                                    drop(gc);
-                                                    drop(pf);
-                                                    gl_area.queue_render();
-                                                    return glib::ControlFlow::Continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // CPU fallback
-                                    let cache = st.vec_cache.get_or_insert_with(|| {
-                                        vectorize::VectorizeCache::new(adaptive)
-                                    });
-                                    let (paths, bg) = cache.get_paths(fb, base_w, base_h);
-                                    let (buf, dw, dh) = vectorize::rasterize::rasterize_spline_diffusion(
-                                        paths, fb, base_w, base_h, bg, sc as usize,
-                                    );
-                                    st.scaled_buf = buf;
-                                    (&st.scaled_buf, dw, dh, None)
                                 } else if let Some((scaled, w, h)) = scaling::cpu_scale(
                                     st.scale_filter,
                                     fb,
@@ -1213,7 +1057,6 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     let mut st = state_filter.borrow_mut();
                     if let Some(s) = st.as_mut() {
                         s.scale_filter = filter;
-                        s.vec_cache = filter.new_vectorize_cache();
                         action.set_state(&name.to_variant());
                         eprintln!("Filter: {:?}", filter);
                     }

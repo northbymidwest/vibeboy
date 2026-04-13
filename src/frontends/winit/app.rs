@@ -15,7 +15,6 @@ use super::clock;
 use super::emulator::Emulator;
 use super::model::GbModel;
 use super::scaling;
-use super::vectorize;
 use super::ui_util::{self, frame_duration};
 use super::printer;
 use super::serial;
@@ -48,11 +47,7 @@ pub(super) struct App {
     camera_thread: Option<CameraThread>,
     camera_buf: [u8; 128 * 112],
     scale_filter: scaling::ScaleFilter,
-    vec_cache: Option<vectorize::VectorizeCache>,
     wgpu_vectorize: Option<scaling::wgpu_vectorize::WgpuVectorizePipeline>,
-    wgpu_shared_chain: Option<scaling::wgpu_vectorize::WgpuSharedChainRasterizer>,
-    wgpu_diffusion: Option<scaling::wgpu_vectorize::WgpuDiffusionRasterizer>,
-    wgpu_spline_diff: Option<scaling::wgpu_vectorize::WgpuSplineDiffusionPipeline>,
     wgpu_scale: Option<scaling::wgpu_scale::WgpuScalePipeline>,
     frame_start: Instant,
     frame_dur: Duration,
@@ -104,11 +99,7 @@ impl App {
             camera_thread: None,
             camera_buf: [0u8; 128 * 112],
             scale_filter: scaling::ScaleFilter::Nearest,
-            vec_cache: None,
             wgpu_vectorize: None,
-            wgpu_shared_chain: None,
-            wgpu_diffusion: None,
-            wgpu_spline_diff: None,
             wgpu_scale: None,
             frame_start: Instant::now(),
             frame_dur: frame_duration(model),
@@ -255,7 +246,6 @@ impl App {
                 if let Some(filter) = filter_id_to_filter(other) {
                     self.scale_filter = filter;
                     self.update_filter_checkmarks();
-                    self.vec_cache = filter.new_vectorize_cache();
                     eprintln!("Filter: {:?}", filter);
                     return;
                 }
@@ -413,117 +403,6 @@ impl App {
                     (fb, sw, sh)
                 }
             } else if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
-                (fb, sw, sh)
-            } else if matches!(self.scale_filter,
-                scaling::ScaleFilter::VectorizeLegacy | scaling::ScaleFilter::VectorizeLegacyAdaptive
-                | scaling::ScaleFilter::Vectorize | scaling::ScaleFilter::VectorizeAdaptive)
-            {
-                // All vectorize variants: extract paths on CPU, rasterize on GPU
-                let scale_factor = window.scale_factor();
-                let logical_w = disp_w as f64 / scale_factor;
-                let logical_h = disp_h as f64 / scale_factor;
-                let scale = (logical_w / sw as f64).min(logical_h / sh as f64);
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
-                let (paths, bg) = cache.get_paths(fb, sw, sh);
-                let (edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, scale, sw, sh);
-                if ow > 0 && oh > 0 && !edges.is_empty() {
-                    if self.wgpu_shared_chain.is_none() {
-                        self.wgpu_shared_chain = Some(
-                            scaling::wgpu_vectorize::WgpuSharedChainRasterizer::new(&gpu.device)
-                        );
-                    }
-                    let rasterizer = self.wgpu_shared_chain.as_ref().unwrap();
-                    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("vectorize_shared_chain"),
-                    });
-                    let out_tex = rasterizer.encode(
-                        &gpu.device, &gpu.queue, &mut encoder,
-                        &edges, &row_ranges, &edge_indices, ow, oh, bg,
-                    );
-                    let frame = match gpu.surface.get_current_texture() {
-                        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                        _ => return,
-                    };
-                    let surface_view = frame.texture.create_view(&Default::default());
-                    gpu.encode_blit(&mut encoder, &out_tex, &surface_view, sw as u32, sh as u32);
-                    gpu.queue.submit(std::iter::once(encoder.finish()));
-                    frame.present();
-                    self.frame_start = Instant::now();
-                    return;
-                }
-                // Fallback if edge prep failed
-                (fb, sw, sh)
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeDiffusion) {
-                let scale_factor = window.scale_factor();
-                let logical_w = disp_w as f64 / scale_factor;
-                let logical_h = disp_h as f64 / scale_factor;
-                let s = (logical_w / sw as f64).min(logical_h / sh as f64);
-                let sc = s.round().max(1.0) as u32;
-                let ow = sw as u32 * sc;
-                let oh = sh as u32 * sc;
-                if self.wgpu_diffusion.is_none() {
-                    self.wgpu_diffusion = Some(
-                        scaling::wgpu_vectorize::WgpuDiffusionRasterizer::new(&gpu.device)
-                    );
-                }
-                let rasterizer = self.wgpu_diffusion.as_ref().unwrap();
-                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("diffusion_raster"),
-                });
-                let out_tex = rasterizer.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    fb, sw as u32, sh as u32, ow, oh, sc,
-                );
-                let frame = match gpu.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    _ => return,
-                };
-                let surface_view = frame.texture.create_view(&Default::default());
-                gpu.encode_blit(&mut encoder, &out_tex, &surface_view, sw as u32, sh as u32);
-                gpu.queue.submit(std::iter::once(encoder.finish()));
-                frame.present();
-                self.frame_start = Instant::now();
-                return;
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusion | scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive) {
-                let scale_factor = window.scale_factor();
-                let logical_w = disp_w as f64 / scale_factor;
-                let logical_h = disp_h as f64 / scale_factor;
-                let s = (logical_w / sw as f64).min(logical_h / sh as f64);
-                let sc = s.round().max(1.0) as u32;
-                let adaptive = matches!(self.scale_filter, scaling::ScaleFilter::VectorizeSplineDiffusionAdaptive);
-                let cache = self.vec_cache.get_or_insert_with(|| vectorize::VectorizeCache::new(adaptive));
-                let (paths, bg) = cache.get_paths(fb, sw, sh);
-                let (edges, row_ranges, edge_indices, ow, oh) =
-                    vectorize::rasterize::prepare_gpu_edges_v2(paths, bg, s, sw, sh);
-                if ow > 0 && oh > 0 && !edges.is_empty() {
-                    if self.wgpu_spline_diff.is_none() {
-                        self.wgpu_spline_diff = Some(
-                            scaling::wgpu_vectorize::WgpuSplineDiffusionPipeline::new(&gpu.device)
-                        );
-                    }
-                    let pipeline = self.wgpu_spline_diff.as_ref().unwrap();
-                    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("spline_diffusion"),
-                    });
-                    let out_tex = pipeline.encode(
-                        &gpu.device, &gpu.queue, &mut encoder,
-                        &edges, &row_ranges, &edge_indices, fb,
-                        sw as u32, sh as u32, ow, oh, bg, sc,
-                    );
-                    let frame = match gpu.surface.get_current_texture() {
-                        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                        _ => return,
-                    };
-                    let surface_view = frame.texture.create_view(&Default::default());
-                    gpu.encode_blit(&mut encoder, &out_tex, &surface_view, sw as u32, sh as u32);
-                    gpu.queue.submit(std::iter::once(encoder.finish()));
-                    frame.present();
-                    self.frame_start = Instant::now();
-                    return;
-                }
-                // Fallback if edge prep failed
                 (fb, sw, sh)
             } else if matches!(self.scale_filter, scaling::ScaleFilter::VectorizeGpu) {
                 // Use logical pixels for vectorize output, not Retina physical pixels.

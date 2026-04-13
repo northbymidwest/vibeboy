@@ -3,14 +3,8 @@ use std::path::Path;
 
 use vibeboy::model::GbModel;
 use vibeboy::scaling;
-use vibeboy::vectorize;
 use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
 use crate::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
-
-fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
-    let (paths, w, h, bg_color) = vectorize::vectorize_paths(pixels, width, height);
-    crate::svg::render_svg(&paths, w, h, bg_color)
-}
 
 fn vectorize_gpu_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
     let data = vibeboy::scaling::vectorize_gpu::vectorize(pixels, width, height);
@@ -30,11 +24,7 @@ fn save_pixels_png(pixels: &[u32], w: usize, h: usize, out: &str) {
 
 fn save_pixels(pixels: &[u32], w: usize, h: usize, out: &str, format: &str, frames: u32) {
     if format == "svg" || out.ends_with(".svg") {
-        let svg = if format == "vectorize-gpu" {
-            vectorize_gpu_to_svg(pixels, w, h)
-        } else {
-            vectorize_to_svg(pixels, w, h)
-        };
+        let svg = vectorize_gpu_to_svg(pixels, w, h);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
     } else {
@@ -79,17 +69,12 @@ fn gpu_with_cpu_fallback(
 }
 
 /// Rasterize pixels using the specified vectorize format and save to a file.
-/// Handles raster, diffusion, and spline-diffusion formats with optional GPU.
 fn vectorize_and_save(
     pixels: &[u32], width: usize, height: usize,
     out: &str, format: &str, scale: usize, use_gpu: bool,
 ) {
     if out.ends_with(".svg") {
-        let svg = if format == "vectorize-gpu" {
-            vectorize_gpu_to_svg(pixels, width, height)
-        } else {
-            vectorize_to_svg(pixels, width, height)
-        };
+        let svg = vectorize_gpu_to_svg(pixels, width, height);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!(
             "Vectorized {}x{} image -> {} ({} bytes)",
@@ -99,37 +84,6 @@ fn vectorize_and_save(
     }
 
     let (raster_pixels, out_w, out_h) = match format {
-        "spline-diffusion" => {
-            let r = spline_diffusion_with_fallback(pixels, width, height, scale, use_gpu);
-            (r, width * scale, height * scale)
-        }
-        "diffusion" => {
-            vectorize::rasterize::rasterize_diffusion(pixels, width, height, scale)
-        }
-        "edge" => {
-            gpu_with_cpu_fallback(
-                "edge",
-                use_gpu,
-                || {
-                    #[cfg(feature = "sdl3-gpu-shaders")]
-                    {
-                        vibeboy::scaling::sdl::gpu_vectorize_shared_screenshot(
-                            pixels, width, height, scale,
-                        )
-                    }
-                    #[cfg(not(feature = "sdl3-gpu-shaders"))]
-                    {
-                        None
-                    }
-                },
-                || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
-            )
-        }
-        "cpu-dump" => {
-            // Dump CPU control points for visualization
-            vectorize::contour::dump_cpu_control_points(pixels, width, height);
-            return;
-        }
         "gpu-full" => {
             gpu_with_cpu_fallback(
                 "gpu-full",
@@ -146,19 +100,21 @@ fn vectorize_and_save(
                         None
                     }
                 },
-                || vectorize::vectorize_to_raster_shared(pixels, width, height, scale),
+                || {
+                    let scale_f = scale as f32;
+                    let ow = (width as f32 * scale_f).round() as usize;
+                    let oh = (height as f32 * scale_f).round() as usize;
+                    let r = vibeboy::scaling::vectorize_gpu::scale(pixels, width, height, scale_f);
+                    (r, ow, oh)
+                },
             )
         }
-        "vectorize-gpu" => {
+        "vectorize-gpu" | _ => {
             let scale_f = scale as f32;
             let out_w = (width as f32 * scale_f).round() as usize;
             let out_h = (height as f32 * scale_f).round() as usize;
             let r = vibeboy::scaling::vectorize_gpu::scale(pixels, width, height, scale_f);
             (r, out_w, out_h)
-        }
-        _ => {
-            // "raster" or default
-            vectorize::vectorize_to_raster(pixels, width, height, scale)
         }
     };
     save_pixels_png(&raster_pixels, out_w, out_h, out);
@@ -168,30 +124,6 @@ fn vectorize_and_save(
     );
 }
 
-/// Spline-diffusion rasterization with optional GPU acceleration and CPU fallback.
-fn spline_diffusion_with_fallback(
-    pixels: &[u32], width: usize, height: usize, scale: usize, use_gpu: bool,
-) -> Vec<u32> {
-    #[cfg(feature = "sdl3-gpu-shaders")]
-    if use_gpu {
-        if let Some((px, _, _)) = scaling::sdl::gpu_spline_diffusion_screenshot(pixels, width, height, scale) {
-            return px;
-        }
-        eprintln!("GPU 'spline-diffusion' failed, falling back to CPU rasterization");
-    }
-    #[cfg(not(feature = "sdl3-gpu-shaders"))]
-    if use_gpu {
-        eprintln!("GPU shaders not enabled for 'spline-diffusion', using CPU rasterization");
-    }
-    vectorize::contour::YUV_VISIBLE_EDGES.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (paths, bg_color) = vectorize::vectorize_core(pixels, width, height);
-    vectorize::contour::YUV_VISIBLE_EDGES.store(false, std::sync::atomic::Ordering::Relaxed);
-    let (r, _, _) = vectorize::rasterize::rasterize_spline_diffusion(
-        &paths, pixels, width, height, bg_color, scale,
-    );
-    r
-}
-
 /// Apply a scaling filter via GPU, returning the scaled pixels on success.
 /// Returns `None` if GPU is not available or the operation fails.
 fn try_gpu_filter(
@@ -199,8 +131,6 @@ fn try_gpu_filter(
     filter_name: &str,
     sf: scaling::ScaleFilter,
     scale: usize,
-    is_vectorize: bool,
-    is_adaptive: bool,
 ) -> Option<(Vec<u32>, usize, usize)> {
     #[cfg(feature = "sdl3-gpu-shaders")]
     {
@@ -212,17 +142,6 @@ fn try_gpu_filter(
             }
             eprintln!(
                 "GPU full pipeline screenshot failed for filter '{}', falling back to CPU",
-                filter_name
-            );
-        } else if is_vectorize {
-            let s = scale as f64;
-            if let Some((pix, w, h)) = scaling::sdl::gpu_vectorize_screenshot(
-                raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s, is_adaptive,
-            ) {
-                return Some((pix, w as usize, h as usize));
-            }
-            eprintln!(
-                "GPU vectorize screenshot failed for filter '{}', falling back to CPU",
                 filter_name
             );
         } else if let Some((s, w, h)) = scaling::sdl::gpu_screenshot(
@@ -238,7 +157,7 @@ fn try_gpu_filter(
     }
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
     {
-        let _ = (sf, scale, is_vectorize, is_adaptive);
+        let _ = (sf, scale);
         eprintln!(
             "GPU support not compiled in for filter '{}' (enable sdl3-gpu-shaders feature)",
             filter_name
@@ -277,11 +196,7 @@ pub fn cmd_screenshot(
 
     // SVG export from raw framebuffer (bypass scaling)
     if out.ends_with(".svg") {
-        let svg = if filter == Some("vectorize-gpu") {
-            vectorize_gpu_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
-        } else {
-            vectorize_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
-        };
+        let svg = vectorize_gpu_to_svg(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!("Wrote {} (frame {}, {} bytes SVG)", out, frames, svg.len());
         return;
@@ -294,13 +209,11 @@ pub fn cmd_screenshot(
             eprintln!("Unknown filter '{}', using nearest", f);
             scaling::ScaleFilter::Nearest
         });
-        let is_vectorize = f == "vectorize-legacy" || f == "vectorize-legacy-adaptive";
-        let is_adaptive = f == "vectorize-legacy-adaptive";
 
         // Try GPU path if requested
         if use_gpu {
             if let Some((pixels, w, h)) =
-                try_gpu_filter(raw_fb, f, sf, scale, is_vectorize, is_adaptive)
+                try_gpu_filter(raw_fb, f, sf, scale)
             {
                 scaled_buf = pixels;
                 return save_pixels(&scaled_buf, w, h, out, format, frames);
@@ -308,25 +221,17 @@ pub fn cmd_screenshot(
         }
 
         // CPU path
-        if is_vectorize {
-            let s = scale as f64;
-            let mut cache = vibeboy::vectorize::VectorizeCache::new_legacy(is_adaptive);
-            let (raster, rw, rh) = cache.rasterize(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, s);
-            scaled_buf = raster.to_vec();
-            (scaled_buf.as_slice(), rw, rh)
-        } else {
-            let disp_w = GB_FB_WIDTH * scale;
-            let disp_h = GB_FB_HEIGHT * scale;
-            let (s, w, h) = scaling::cpu_scale(sf, raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, disp_w, disp_h)
-                .unwrap_or_else(|| (raw_fb.to_vec(), GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32));
-            scaled_buf = s;
-            (scaled_buf.as_slice(), w as usize, h as usize)
-        }
+        let disp_w = GB_FB_WIDTH * scale;
+        let disp_h = GB_FB_HEIGHT * scale;
+        let (s, w, h) = scaling::cpu_scale(sf, raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, disp_w, disp_h)
+            .unwrap_or_else(|| (raw_fb.to_vec(), GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32));
+        scaled_buf = s;
+        (scaled_buf.as_slice(), w as usize, h as usize)
     } else {
         (raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
     };
 
-    if matches!(format, "raster" | "diffusion" | "spline-diffusion" | "edge" | "gpu-full" | "cpu-dump") {
+    if matches!(format, "raster" | "gpu-full" | "vectorize-gpu") {
         vectorize_and_save(fb, GB_FB_WIDTH, GB_FB_HEIGHT, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
@@ -352,15 +257,20 @@ pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: b
         .collect();
 
     // Map --filter names to internal format names for vectorize_and_save
+    // All legacy vectorize variants now map to vectorize-gpu
     let format = match filter {
-        "vectorize" | "vectorize-adaptive" => "raster",
-        "vectorize-diffusion" => "diffusion",
-        "vectorize-spline-diffusion" | "vectorize-spline-diffusion-adaptive" => "spline-diffusion",
-        "vectorize-legacy" | "vectorize-legacy-adaptive" => "edge",
         "vectorize-gpu" => "vectorize-gpu",
         "gpu-full" => "gpu-full",
-        "edge" => "edge",
-        other => other, // pass through for any direct format names
+        other => {
+            // Any legacy vectorize name maps to vectorize-gpu
+            if other.starts_with("vectorize") || other == "raster" || other == "diffusion"
+                || other == "spline-diffusion" || other == "edge"
+            {
+                "vectorize-gpu"
+            } else {
+                other
+            }
+        }
     };
 
     vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
@@ -377,70 +287,44 @@ pub fn cmd_audio_dump(
         eprintln!("Failed to read ROM: {e}");
         std::process::exit(1);
     });
-
-    let model = model.unwrap_or_else(|| vibeboy::ui_util::auto_detect_model(&rom));
-    let boot_rom = vibeboy::bootrom::builtin(model).map(|b| b.to_vec());
-
-    let mut emu = vibeboy::emulator::Emulator::new(
-        rom, boot_rom, model, None,
-        vibeboy::clock::default_clock(),
-        sample_rate,
-    );
-    // Audio enabled (not headless) so samples accumulate
-    emu.set_headless(false);
+    let resolved_model = model.unwrap_or_else(|| detect_model_with_rom(rom_path, Some(&rom)));
+    let br = resolve_boot_rom(false, None, resolved_model);
+    let mut emu = make_emu(rom, br, resolved_model);
 
     let mut all_samples: Vec<f32> = Vec::new();
-
     for _ in 0..frames {
         emu.step_frame();
-        let samples = emu.drain_audio_samples();
-        all_samples.extend_from_slice(&samples);
+        all_samples.extend_from_slice(&emu.drain_audio_samples());
     }
 
-    // Write WAV file (PCM 32-bit float, stereo)
-    let num_samples = all_samples.len() / 2; // stereo pairs
-    let byte_rate = sample_rate * 2 * 4; // channels * bytes_per_sample
-    let data_size = (all_samples.len() * 4) as u32;
-
-    let mut wav = Vec::with_capacity(44 + data_size as usize);
-    // RIFF header
+    // Write WAV: 32-bit float, 2ch, given sample rate
+    let data_len = all_samples.len() * 4;
+    let file_len = 36 + data_len;
+    let mut wav: Vec<u8> = Vec::with_capacity(file_len + 8);
     wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+    wav.extend_from_slice(&(file_len as u32).to_le_bytes());
     wav.extend_from_slice(b"WAVE");
-    // fmt chunk
     wav.extend_from_slice(b"fmt ");
     wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
     wav.extend_from_slice(&3u16.to_le_bytes()); // format = IEEE float
     wav.extend_from_slice(&2u16.to_le_bytes()); // channels
-    wav.extend_from_slice(&sample_rate.to_le_bytes()); // sample rate
-    wav.extend_from_slice(&byte_rate.to_le_bytes()); // byte rate
-    wav.extend_from_slice(&8u16.to_le_bytes()); // block align (2 channels * 4 bytes)
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    let byte_rate = sample_rate * 2 * 4;
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&8u16.to_le_bytes()); // block align
     wav.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
-    // data chunk
     wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
+    wav.extend_from_slice(&(data_len as u32).to_le_bytes());
     for &s in &all_samples {
         wav.extend_from_slice(&s.to_le_bytes());
     }
-
-    fs::write(out, &wav).unwrap_or_else(|e| {
-        eprintln!("Failed to write WAV: {e}");
-        std::process::exit(1);
-    });
-
-    let duration = num_samples as f64 / sample_rate as f64;
-    let peak = all_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-
-    // Count clipped samples (at exactly ±1.0 after clamp)
-    let clipped = all_samples.iter().filter(|&&s| s == 1.0 || s == -1.0).count();
-
-    // Max sample-to-sample delta
-    let max_delta = all_samples.windows(2)
-        .enumerate()
-        .filter(|(i, _)| i % 2 == 0) // only check within same channel
-        .map(|(_, w)| (w[1] - w[0]).abs())
-        .fold(0.0f32, f32::max);
-
-    eprintln!("Wrote {out}: {num_samples} stereo samples, {duration:.2}s at {sample_rate}Hz");
-    eprintln!("  peak={peak:.4}, clipped={clipped}, max_delta={max_delta:.4}");
+    fs::write(out, &wav).expect("Failed to write WAV");
+    eprintln!(
+        "Wrote {} ({} frames, {} samples, {:.1}s at {}Hz)",
+        out,
+        frames,
+        all_samples.len() / 2,
+        all_samples.len() as f64 / (2.0 * sample_rate as f64),
+        sample_rate,
+    );
 }
