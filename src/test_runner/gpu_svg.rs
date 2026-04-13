@@ -121,6 +121,9 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
     let (w, h) = (data.img_w, data.img_h);
 
     // For each canonical edge (min→max), track (left_color, right_color).
+    // Sentinel for "no color assigned yet" — must not collide with any real
+    // pixel color. Real pixels always have 0xFF alpha, so 0x00000000 is safe.
+    const NO_COLOR: u32 = 0;
     let mut edge_map: BTreeMap<(u64, u64), (u32, u32)> = BTreeMap::new();
 
     for y in 0..h {
@@ -133,7 +136,7 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
                 let a = cell[i];
                 let b = cell[(i + 1) % n];
                 let (key, is_forward) = if a <= b { ((a, b), true) } else { ((b, a), false) };
-                let entry = edge_map.entry(key).or_insert((u32::MAX, u32::MAX));
+                let entry = edge_map.entry(key).or_insert((NO_COLOR, NO_COLOR));
                 if is_forward { entry.1 = color; } else { entry.0 = color; }
             }
         }
@@ -141,8 +144,8 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
 
     let mut edges = Vec::with_capacity(edge_map.len());
     for (&(a, b), &(left, right)) in &edge_map {
-        let l = if left == u32::MAX { VOID_COLOR } else { left };
-        let r = if right == u32::MAX { VOID_COLOR } else { right };
+        let l = if left == NO_COLOR { VOID_COLOR } else { left };
+        let r = if right == NO_COLOR { VOID_COLOR } else { right };
         if l == r { continue; }
         edges.push(DirEdge { from: a, to: b, color: r });
         edges.push(DirEdge { from: b, to: a, color: l });
