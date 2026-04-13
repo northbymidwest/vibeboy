@@ -57,18 +57,9 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 # Vectorize and rasterize at 4x scale
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format raster --scale 4
 
-# Spline-diffusion rasterizer (paper's full rendering: B-spline boundaries + Gaussian blending)
-cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format spline-diffusion --scale 4
-
-# Voronoi diffusion rasterizer
-cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --format diffusion --scale 4
-
 # Apply any scaling filter (same names as SDL --filter)
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter hq4x --scale 4
-cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter vectorize-gpu --scale 4
-
-# Use GPU shader for the filter
-cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter vectorize-legacy --scale 4 --gpu
+cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out frame.png --filter vectorize --scale 4
 
 # Simulate button presses (frame:button pairs)
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 --keys "100:start,200:a"
@@ -76,25 +67,16 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 
 
 ### Vectorize Command
 
-Vectorize a standalone PNG image. Uses `--filter` to select the vectorize pipeline variant and `--cpu-filter` to force CPU-only rendering.
+Vectorize a standalone PNG image. Uses `--filter` to select the pipeline variant and `--cpu-filter` to force CPU-only rendering.
 
-Supported filters: `vectorize` (default), `vectorize-diffusion`, `vectorize-spline-diffusion`, `vectorize-gpu`, `vectorize-legacy`, `edge`, `gpu-full`.
+Supported filters: `vectorize` (default), `gpu-full`, `raster`.
 
 ```bash
-# Vectorize to SVG (filter doesn't matter for SVG output)
+# Vectorize to SVG
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
 
-# Shared-chain vectorize at 8x scale (default filter: vectorize)
+# Vectorize at 8x scale (GPU pipeline with CPU fallback)
 cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8
-
-# GPU vectorize pipeline (CPU fallback)
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-gpu --scale 8
-
-# Spline-diffusion rasterizer
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-spline-diffusion --scale 8
-
-# Legacy vectorize with GPU rasterizer
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize-legacy --scale 8 --gpu
 
 # Force CPU-only (no GPU shaders)
 cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 4 --cpu-filter
@@ -174,6 +156,6 @@ src/test_runner/
 ├── commands.rs          screenshot, vectorize, audio-dump
 ├── debug_commands.rs    analyze, trace-timer, calibrate
 ├── model.rs             Model detection + boot ROM resolution
-├── svg.rs               SVG export for vectorized frames
+├── gpu_svg.rs           SVG export for vectorized frames (GPU pipeline)
 └── util.rs              Shared helpers (make_emu, collect_roms, parse_keys)
 ```

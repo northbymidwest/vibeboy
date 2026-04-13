@@ -8,7 +8,7 @@ Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GB
 
 ## Building
 
-Requires Rust 2024 edition and SDL3. For GPU shaders: `glslc` (shaderc) and `spirv-cross`.
+Requires Rust 2024 edition and SDL3. For GPU shaders: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH).
 
 ```bash
 cargo build --release
@@ -62,7 +62,7 @@ Gamepad: D-pad/left stick, South=B, East=A, Start, Back=Select, L1=Rewind, R1=Fa
 
 ### Scaling Filters
 
-39 scaling filter options across 19 algorithm modules, each available as both CPU and GPU compute shader:
+35 scaling filter options across 20 algorithm modules, each available as both CPU and GPU compute shader:
 
 ```bash
 cargo run --release -- path/to/rom.gb --filter hq4x
@@ -74,18 +74,17 @@ cargo run --release -- path/to/rom.gb --filter hq4x
 #   hq2x, hq3x, hq4x
 #   xbr2x-4x, super-xbr, xbrz2x-6x
 #   nedi, dcci, edi, mmpx
-#   omniscale, lcd-grid
+#   omniscale, omniscale-legacy, lcd-grid
+#   scalefx, scalefx-9x
 
-# Kopf-Lischinski pixel-art vectorization
+# Kopf-Lischinski pixel-art vectorization (full GPU pipeline)
 cargo run --release -- path/to/rom.gb --filter vectorize
-cargo run --release -- path/to/rom.gb --filter vectorize-gpu
-cargo run --release -- path/to/rom.gb --filter vectorize-spline-diffusion
 
 # Force CPU-only rendering for any filter
 cargo run --release -- path/to/rom.gb --filter omniscale --cpu-filter
 ```
 
-The vectorize filters convert each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/), then rasterize at the target scale with multiple rendering modes (scanline, diffusion, spline-diffusion). The `vectorize-gpu` filter runs the entire pipeline on the GPU. All run in real-time.
+The vectorize filter converts each frame to smooth vector paths using the [Kopf-Lischinski algorithm](https://johanneskopf.de/publications/pixelart/) via a 6-stage GPU pipeline (similarity graph, crossing resolution, cell graph, T-junction update, energy optimization, B-spline rasterization). Falls back to a pixel-identical CPU implementation when no GPU is available. Runs in real-time.
 
 ## Features
 
@@ -101,8 +100,8 @@ The vectorize filters convert each frame to smooth vector paths using the [Kopf-
 - **Printer**: Game Boy Printer emulation (PNG output on native, browser download on web)
 - **Save states**: 10 slots (0-9), serde + bincode serialization, rewind (~10 minutes, reverse-delta compressed)
 - **Runahead**: `--runahead N` for reduced input latency (SDL frontend)
-- **Scaling**: 39 scaling filter options across 19 algorithm modules, all with GPU compute shader acceleration
-- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with scanline, diffusion, and spline-diffusion rasterizers; full GPU pipeline; SVG export
+- **Scaling**: 35 scaling filter options across 20 algorithm modules, all with GPU compute shader acceleration
+- **Vectorization**: Kopf-Lischinski pixel-art vectorizer with 6-stage GPU pipeline (CPU fallback); SVG export
 - **6 frontends**: SDL3, native macOS Cocoa/Metal, winit/wgpu, GTK4, WebAssembly/WebGPU, libretro
 - **Browser**: WebGPU rendering, on-screen touch controls, gamepad, AudioWorklet at 96 kHz, webcam, accelerometer (DeviceMotion for MBC7), localStorage persistence, mobile-responsive
 - **libretro**: RetroArch-compatible core with save RAM persistence (including RTC)
@@ -149,9 +148,8 @@ src/
 ├── snes/            65C816 CPU, LoROM, DMA, ICD2 bridge
 ├── serial.rs        Link cable / serial port
 ├── printer.rs       Game Boy Printer (memory-queued output)
-├── scaling/         18 CPU scaling filters + GPU compute pipelines
+├── scaling/         20 CPU scaling filters + GPU compute pipelines + vectorize
 ├── shaders/         Slang compute shaders (cross-compiled to SPIR-V/MSL/DXIL/WGSL)
-├── vectorize/       Kopf-Lischinski pixel-art vectorizer
 ├── util.rs          Pure utility functions (no I/O)
 ├── ui_util.rs       Frontend utilities (filesystem, gamepad, FPS counter)
 └── test_runner/     Automated test ROM harnesses + SVG export

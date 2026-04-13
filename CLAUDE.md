@@ -34,21 +34,8 @@ PATH="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin:$PATH" \
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --bootrom bootroms/dmg_boot.bin
 
-# With vectorized scaling filter (shared-chain gap-free rendering)
+# Kopf-Lischinski pixel-art vectorization (6-stage GPU pipeline with CPU fallback)
 cargo run --release -- path/to/rom.gbc --filter vectorize
-
-# Vectorize variants
-cargo run --release -- path/to/rom.gbc --filter vectorize-adaptive
-cargo run --release -- path/to/rom.gbc --filter vectorize-diffusion
-cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion
-cargo run --release -- path/to/rom.gbc --filter vectorize-spline-diffusion-adaptive
-
-# Legacy vectorize (original scanline rasterizer)
-cargo run --release -- path/to/rom.gbc --filter vectorize-legacy
-cargo run --release -- path/to/rom.gbc --filter vectorize-legacy-adaptive
-
-# With YUV visible edge threshold (paper's approach, can cause artifacts)
-cargo run --release -- path/to/rom.gbc --filter vectorize-legacy --yuv-edges
 ```
 
 ## Testing
@@ -80,15 +67,10 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 # Vectorize and rasterize at 4x scale
 cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png --format raster --scale 4
 
-# Spline-diffusion rasterizer (paper's rendering)
-cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 --out screenshot.png --format spline-diffusion --scale 4
-
 # Vectorize a standalone PNG image
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter raster --scale 8
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8 --gpu
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter spline-diffusion --scale 8 --cpu-filter
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8 --cpu-filter
 
 # Force a specific model
 cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
@@ -132,32 +114,16 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - `snes/`: Optional LLE mode with full 65C816 CPU (`cpu.rs`), SNES memory map (`bus.rs`), DMA (`dma.rs`), PPU registers (`ppu_regs.rs`), ICD2 bridge (`icd2.rs`)
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
 
-### Vectorization subsystem (`src/vectorize/`)
-Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)). Converts frame buffers into smooth vector paths, then rasterizes at any scale with anti-aliased edges. Implementation aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs).
+### Vectorization (`src/scaling/vectorize.rs`)
+Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)). CPU implementation that is a line-for-line faithful translation of the 6-stage GPU compute shaders — output is pixel-identical. Implementation aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs).
 
-Pipeline: `pixels -> graph::build -> contour::extract_cells_smooth -> rasterize`
+Pipeline stages: `build_similarity_graph() -> resolve_crossings() -> build_cell_graph() -> update_tjunctions() -> optimize_energy() -> rasterize()`
 
-- `mod.rs`: Public API (`vectorize_to_svg`, `vectorize_to_raster`), `VectorizeCache` (shared-chain) and `VectorizeLegacyCache` (original scanline) for frame caching, upscale detection/collapse, background color detection. No color quantization (removed -- the paper doesn't use it).
-- `graph.rs`: Similarity graph -- YUV per-channel thresholds (48/7/6 per 255), diagonal crossing resolution with curves/islands/sparse heuristics. Ties keep both diagonals (matches reference, not paper).
-- `voronoi.rs`: Voronoi cell corner reshaping at diagonal crossings (+/-0.25 pixel offsets)
-- `contour/`: Core pipeline stages (split into submodules):
-  - `cells.rs`: 81-entry compile-time Voronoi cell template table (3^4 corner states), per-pixel cell vertex precomputation
-  - `edges.rs`: Boundary edge deduplication (FxHashMap), chain construction with inline cpair valence, T-junction merging (shading/contour classification via YUV Euclidean distance <= 100/255), T-junction position correction (`0.125*p0 + 0.75*p1 + 0.125*p2`)
-  - `loops.rs`: Planar face algorithm for boundary loop tracing (flat sorted adjacency with cross-product angle ordering)
-  - `optimize.rs`: Gradient descent optimizer with kappa^2 smoothness energy, (2.5x distance)^4 positional energy, x4 grid corner detection (angle >= 60 degrees), corners excluded from curvature energy
-  - `mod.rs`: Orchestration, `VectorizeState` for split-phase optimization (CPU or GPU), VOID_COLOR sentinel (0x01000000) for image border edges
-- SVG export: moved to `test_runner/svg.rs` (only used by test runner screenshot/vectorize commands)
-- `rasterize/`: Three rasterizers (split into submodules):
-  - `scanline.rs`: 2x2 supersampling, nonzero winding, recursive Bezier flattening (tolerance 0.25). Default for `--filter vectorize`.
-  - `diffusion.rs`: Gaussian blending (sigma ~= 0.63, gauss_k=2.5, radius=2.0) with graph-based region connectivity via 8-connected flood fill. For `--filter vectorize-diffusion`.
-  - `spline_diffusion.rs`: B-spline contour boundaries + Gaussian blending with flood-fill connected-component regions. For `--filter vectorize-spline-diffusion`.
-  - `gpu.rs`: GPU rasterization wrappers (edge data upload, buffer management)
-- `gpu_rasterize.rs`: GPU rasterization dispatch wrappers
-- `rasterize.wgsl`: WebGPU compute shader for wgpu-based rasterization
+- SVG export: `test_runner/gpu_svg.rs` (only used by test runner screenshot/vectorize commands)
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. `new_vectorize_cache()` for cache initialization. 41 filter entries across 20 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `scalefx`, `super_xbr`, `vectorize_gpu`, `xbr`, `xbrz`. Available on all platforms.
-- `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `Vectorize`, `Diffusion`, `SplineDiffusion`, `VectorizeSharedChain`, `FullGpuVectorize`, `Cpu`).
+- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 35 filter entries across 20 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `scalefx`, `super_xbr`, `vectorize`, `xbr`, `xbrz`. Available on all platforms.
+- `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `FullGpuVectorize`, `Cpu`).
 - `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
 - `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from Slang via `slangc` at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
 
@@ -183,7 +149,7 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 
 **Cocoa frontend** (`src/frontends/cocoa/`):
 - `main.rs`: Native macOS Cocoa event loop, Metal rendering. Uses logical points for Metal drawable size (not Retina backing pixels). CoreHaptics rumble support for MBC5+Rumble.
-- `metal_renderer.rs`: Metal GPU compute pipeline for all filters including the 6-stage vectorize pipeline, GPU scanline rasterizer, diffusion rasterizer, and spline-diffusion 2-pass pipeline
+- `metal_renderer.rs`: Metal GPU compute pipeline for all filters including the 6-stage vectorize pipeline
 - `vectorize_metal.rs`: `MetalVectorizePipeline` -- Metal-native full GPU vectorize (similarity graph through rasterization)
 - `menu.rs`: Native macOS menu bar (File, Emulation, Filter, Help)
 - `audio.rs`: CoreAudio output
@@ -225,7 +191,7 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 All shaders are compute shaders authored in [Slang](https://github.com/shader-slang/slang). All scaling filters use compute pipelines.
 
 **Compute shaders (scaling filters):**
-- `nearest.slang`, `nearest_aa.slang`, `bilinear.slang`, `bicubic.slang`, `dcci.slang`, `eagle.slang`, `edi.slang`, `epx.slang`, `hqx.slang`, `lcd_grid.slang`, `mmpx.slang`, `nedi.slang`, `omniscale.slang`, `omniscale_legacy.slang`, `sai2x.slang`, `super_sai2x.slang`, `super_eagle.slang`, `scale3x.slang`, `super_xbr.slang`, `xbr.slang`, `xbrz.slang`: GPU compute versions of the pixel scaling filters
+- `nearest.slang`, `nearest_aa.slang`, `bilinear.slang`, `bicubic.slang`, `dcci.slang`, `eagle.slang`, `edi.slang`, `epx.slang`, `hqx.slang`, `lcd_grid.slang`, `mmpx.slang`, `nedi.slang`, `omniscale.slang`, `omniscale_legacy.slang`, `sai2x.slang`, `super_sai2x.slang`, `super_eagle.slang`, `scale3x.slang`, `scalefx.slang`, `super_xbr.slang`, `xbr.slang`, `xbrz.slang`: GPU compute versions of the pixel scaling filters
 
 **Compute shaders (rasterization):**
 - `vectorize_raster.slang`: Scanline rasterizer with 2x2 supersampling, nonzero winding (for `--filter vectorize` GPU path)
