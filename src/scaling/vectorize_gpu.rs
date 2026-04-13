@@ -556,7 +556,13 @@ fn build_cell_graph(
             let t_bnd_s = g(2 * cx, 2 * cy + 1) == 0;
             let t_bnd_w = g(2 * cx - 1, 2 * cy) == 0;
             let t_count = t_bnd_n as u32 + t_bnd_e as u32 + t_bnd_s as u32 + t_bnd_w as u32;
-            if t_count >= 3 {
+            if t_count == 4 {
+                // Valence-4 crossing: slot 0 = N-S, slot 1 = E-W
+                let target_side = from_dir ^ 2;
+                if target_side != 0 && target_side != 2 {
+                    return base + 1;
+                }
+            } else if t_count == 3 {
                 // Collect the 3 boundary directions and select through-pair
                 // using paper's shading/contour + angle heuristic.
                 let mut dirs = [0i32; 3];
@@ -566,7 +572,6 @@ fn build_cell_graph(
                 if t_bnd_s { dirs[di] = 2; di += 1; }
                 if t_bnd_w { dirs[di] = 3; }
                 let (pair0, pair1) = select_tjunction_pair(cx, cy, dirs[0], dirs[1], dirs[2]);
-                // Map from_dir to the boundary direction at the target corner
                 let target_side = from_dir ^ 2;
                 if target_side != pair0 && target_side != pair1 {
                     return base + 1;
