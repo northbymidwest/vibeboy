@@ -199,7 +199,13 @@ fn rasterize_scanline_data(
 
             let rd_start = row_offsets[opy] as usize;
             let rd_end = row_offsets[opy + 1] as usize;
-            if rd_start == rd_end { continue; }
+            if rd_start == rd_end {
+                // No edges on this row — fill with fallback pixel color
+                let fb_y = ((row_center * inv_scale).floor() as usize).min(img_h - 1);
+                let fb_color = pack_color(pixels[fb_y * img_w]);
+                for px in row_slice.iter_mut() { *px = fb_color; }
+                continue;
+            }
 
             // Collect and sort edges by x
             row_edges_buf.clear();
@@ -230,7 +236,12 @@ fn rasterize_scanline_data(
             // At each edge crossing within a pixel, blend between screen_left
             // and screen_right based on the sub-pixel crossing position.
             let mut edge_cursor = 0;
-            let mut current_color = pack_color(bg);
+            // Seed row color from the actual pixel at the left edge, not
+            // the global background. Border CPs produce no edges (clamped
+            // pixels are same-color), so the sweep needs the correct
+            // starting color for each row.
+            let fb_y = ((row_center * inv_scale).floor() as usize).min(img_h - 1);
+            let mut current_color = pack_color(pixels[fb_y * img_w]);
 
             for opx in 0..out_w {
                 let px_left = opx as f32;
