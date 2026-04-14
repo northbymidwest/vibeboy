@@ -72,6 +72,23 @@ pub fn scale_scanline(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32
 
     let data = vectorize(src, src_w, src_h);
 
+    if let Ok(v) = std::env::var("DUMP_CORNER") {
+        let p: Vec<usize> = v.split(',').filter_map(|s| s.parse().ok()).collect();
+        if p.len() == 2 { let cw=src_w+1;
+            for &ci in &[(p[1]*cw+p[0])*2,(p[1]*cw+p[0])*2+1] {
+                if ci>=data.flags.len()||data.flags[ci]==0{continue;}
+                let pos=(data.positions[ci*2],data.positions[ci*2+1]);
+                let pc=data.neighbors[ci*4];let nc=data.neighbors[ci*4+1];
+                let pd=data.neighbors[ci*4+2];let nd=data.neighbors[ci*4+3];
+                let pp=if pc>=0{(data.positions[pc as usize*2],data.positions[pc as usize*2+1])}else{pos};
+                let np=if nc>=0{(data.positions[nc as usize*2],data.positions[nc as usize*2+1])}else{pos};
+                // beval endpoints
+                let b0=(0.5*pp.0+0.5*pos.0, 0.5*pp.1+0.5*pos.1);
+                let b1=(0.5*pos.0+0.5*np.0, 0.5*pos.1+0.5*np.1);
+                eprintln!("CP ci={ci} f={:#x} pos=({:.2},{:.2}) pp=({:.2},{:.2}) np=({:.2},{:.2}) span_y=[{:.1}..{:.1}] pd={pd} nd={nd} pc={pc} nc={nc}",
+                    data.flags[ci],pos.0,pos.1,pp.0,pp.1,np.0,np.1,b0.1*32.0,b1.1*32.0);
+        }}
+    }
     rasterize_scanline_data(src, &data, out_w, out_h, scale_factor)
 }
 

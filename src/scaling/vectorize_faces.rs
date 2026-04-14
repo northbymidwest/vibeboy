@@ -364,26 +364,31 @@ pub fn build_scan_edges(
             (data.orig_positions[next_ci as usize * 2], data.orig_positions[next_ci as usize * 2 + 1])
         } else { orig_pos };
 
-        // Adaptive subdivision
+        // Adaptive subdivision. For junction CPs, force t=0.5 as a
+        // mandatory sample point so all segments meeting at the junction
+        // terminate at exactly the same point (beval at t=0.5).
         let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
         let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
         let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
-        let mut subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
-        // When prev and next colors differ, force subdiv >= 2 so each half
-        // gets the correct color source via the t=0.5 split.
-        if prev_colors.is_some() && next_colors.is_some()
-            && prev_colors != next_colors
-            && subdiv < 2
-        {
-            subdiv = 2;
+        let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+        let is_junction = flag & SHARP_MASK != 0;
+
+        // Build t-value list with mandatory t=0.5 for junctions
+        let mut t_values: Vec<f32> = Vec::with_capacity(subdiv + 2);
+        for s in 1..=subdiv {
+            t_values.push(s as f32 / subdiv as f32);
+        }
+        if is_junction && !t_values.contains(&0.5) {
+            t_values.push(0.5);
+            t_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
         }
 
         let mut prev_pt = beval(pp, pos, np, 0.0, scale_factor);
+        let mut t_prev_val = 0.0f32;
 
-        for s in 1..=subdiv {
-            let t = s as f32 / subdiv as f32;
-            let t_prev = (s - 1) as f32 / subdiv as f32;
+        for &t in &t_values {
             let cur_pt = beval(pp, pos, np, t, scale_factor);
+            let t_prev = t_prev_val;
 
             let dy = cur_pt.1 - prev_pt.1;
             let mid_t = (t_prev + t) * 0.5;
@@ -474,6 +479,7 @@ pub fn build_scan_edges(
             }
 
             prev_pt = cur_pt;
+            t_prev_val = t;
         }
     }
 
