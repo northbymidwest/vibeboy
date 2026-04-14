@@ -393,10 +393,13 @@ pub fn build_scan_edges(
             let dy = cur_pt.1 - prev_pt.1;
             let mid_t = (t_prev + t) * 0.5;
 
-            // For T-junction/crossing CPs, clip segments that overshoot
+            // For chain endpoints at junctions, clip segments that overshoot
             // past the junction point — matching the GPU's dot-product
-            // clipping in resolve_color for chain endpoints.
-            if dy.abs() > 1e-6 && flag & SHARP_MASK != 0 {
+            // clipping in resolve_color. Only applies to endpoints (prev_ci<0
+            // or next_ci<0), NOT through-chain CPs which legitimately pass
+            // through junctions.
+            if dy.abs() > 1e-6 && flag & SHARP_MASK != 0
+                && (prev_ci < 0 || next_ci < 0) {
                 let u = 1.0 - mid_t;
                 let curve_x = 0.5 * u * u * pp.0 + (u * mid_t + 0.5) * pos.0 + 0.5 * mid_t * mid_t * np.0;
                 let curve_y = 0.5 * u * u * pp.1 + (u * mid_t + 0.5) * pos.1 + 0.5 * mid_t * mid_t * np.1;
@@ -440,7 +443,14 @@ pub fn build_scan_edges(
                     // > 0 means segment is on the prev side.
                     let seg_mid = ((prev_pt.0 + cur_pt.0) * 0.5,
                                    (prev_pt.1 + cur_pt.1) * 0.5);
-                    let junc = (pos.0 * scale_factor, pos.1 * scale_factor);
+                    // For crossings (inverse B-spline), the curve passes
+                    // through beval@0.5 (= grid_pos), NOT pos. Use the
+                    // actual curve junction point for the spatial test.
+                    let junc_src = if flag & IS_CROSSING != 0 {
+                        (0.125 * pp.0 + 0.75 * pos.0 + 0.125 * np.0,
+                         0.125 * pp.1 + 0.75 * pos.1 + 0.125 * np.1)
+                    } else { pos };
+                    let junc = (junc_src.0 * scale_factor, junc_src.1 * scale_factor);
                     let toward_prev = (pp.0 - pos.0, pp.1 - pos.1);
                     let offset = (seg_mid.0 - junc.0, seg_mid.1 - junc.1);
                     let on_prev_side = toward_prev.0 * offset.0
