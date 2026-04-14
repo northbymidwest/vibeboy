@@ -554,7 +554,7 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.dxil")),
-        2, 1, 0, (256, 1, 1), "update_tjunction")?;
+        3, 1, 0, (256, 1, 1), "update_tjunction")?;
 
     let rast = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
@@ -667,13 +667,26 @@ fn dispatch_stages_1_4b(
     }
     let optimized_pos = cur_in;
 
-    // Stage 4b: T-junction position correction + stem CP alignment
+    // Stage 4b: T-junction position correction + stem CP alignment.
+    // Save optimized positions as orig_positions for the center weight
+    // (the shader must use the pre-correction center, not the corrected one).
+    // Dispatch 3 times for convergence when junction CPs are neighbors.
+    let tjunc_orig = opt_out_buf.clone(); // reuse the other ping-pong buffer
     {
+        let cp = device.begin_copy_pass(cmd).expect("tjunc orig copy");
+        unsafe {
+            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: optimized_pos.raw(), offset: 0 };
+            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: tjunc_orig.raw(), offset: 0 };
+            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size, false);
+        }
+        device.end_copy_pass(cp);
+    }
+    for _ in 0..3 {
         let cp = device.begin_compute_pass(cmd, &[],
             &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&optimized_pos).with_cycle(false)],
         ).expect("tjunc pass");
         cp.bind_compute_pipeline(&pipelines.tjunction);
-        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone(), tjunc_orig.clone()]);
         #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
         cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
         cp.dispatch((num_cps + 255) / 256, 1, 1);

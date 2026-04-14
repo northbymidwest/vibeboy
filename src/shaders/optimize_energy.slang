@@ -88,10 +88,14 @@ void main(uint3 tid: SV_DispatchThreadID) {
     int next_idx = neighbor_data[i * 4u + 1u];
     if (prev_idx < 0 || next_idx < 0) return;
 
-    // Skip nodes adjacent to crossings (crossing position depends on all 4 neighbors;
-    // optimizing one side without the other would break symmetry).
-    if ((node_flags[uint(prev_idx)] & IS_CROSSING) != 0u) return;
-    if ((node_flags[uint(next_idx)] & IS_CROSSING) != 0u) return;
+    // Skip non-crossing nodes adjacent to crossings (crossing position
+    // depends on all 4 neighbors; optimizing one side without the other
+    // would break symmetry). Crossing nodes themselves must not be
+    // skipped — they handle their own combined-curvature optimization.
+    if ((flags & IS_CROSSING) == 0u) {
+        if ((node_flags[uint(prev_idx)] & IS_CROSSING) != 0u) return;
+        if ((node_flags[uint(next_idx)] & IS_CROSSING) != 0u) return;
+    }
 
     float2 n0 = read_neighbor_pos(uint(prev_idx));
     float2 n1 = read_neighbor_pos(uint(next_idx));
