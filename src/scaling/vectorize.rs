@@ -134,7 +134,7 @@ fn rasterize_scanline_data(
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    use super::vectorize_faces::build_scan_edges;
+    use super::vectorize_scanline::build_scan_edges;
 
     let (img_w, img_h) = (data.img_w, data.img_h);
 
@@ -210,7 +210,7 @@ fn rasterize_scanline_data(
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
             if trace_row == Some(opy) {
-                let is_tj = |f: u32| if f & super::vectorize_faces::SHARP_MASK != 0 { " [TJ]" } else { "" };
+                let is_tj = |f: u32| if f & (32 | 64) != 0 { " [TJ]" } else { "" };
                 let src_name = |s: u8| if s == 0 { "prev" } else { "next" };
                 eprintln!("=== ROW {} ({} edge crossings) ===", opy, row_edges_buf.len());
                 for (x, ei) in &row_edges_buf {
