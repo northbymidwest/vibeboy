@@ -264,21 +264,37 @@ void main(uint3 tid: SV_DispatchThreadID) {
     bool is_interior = cx > 0u && cy > 0u && cx < u.img_w && cy < u.img_h;
 
     if (!is_interior) {
+        // Border CPs: pinned CP that connects back to whichever interior
+        // CP references us. Read both slots at adjacent interior corners
+        // to find the one whose prev or next == our base index.
         bool has_boundary = false;
-        if (cy == 0u && cx > 0u && cx < u.img_w) {
+        if (cy == 0u && cx > 0u && cx < u.img_w)
             has_boundary = !similar(int(cx) - 1, 0, int(cx), 0);
-        }
-        if (cy == u.img_h && cx > 0u && cx < u.img_w) {
+        if (cy == u.img_h && cx > 0u && cx < u.img_w)
             has_boundary = has_boundary || !similar(int(cx) - 1, int(u.img_h) - 1, int(cx), int(u.img_h) - 1);
-        }
-        if (cx == 0u && cy > 0u && cy < u.img_h) {
+        if (cx == 0u && cy > 0u && cy < u.img_h)
             has_boundary = has_boundary || !similar(0, int(cy) - 1, 0, int(cy));
-        }
-        if (cx == u.img_w && cy > 0u && cy < u.img_h) {
+        if (cx == u.img_w && cy > 0u && cy < u.img_h)
             has_boundary = has_boundary || !similar(int(u.img_w) - 1, int(cy) - 1, int(u.img_w) - 1, int(cy));
-        }
+
         if (has_boundary) {
-            write_cp(base, float2(float(cx), float(cy)), -1, -1, 1u);
+            // Find the interior CP that references us using nbr_cp_idx
+            // (reads from graph only — no race condition). The interior
+            // CP's south boundary uses nbr_cp_idx(cx, cy+1, 2) to find
+            // us, so we use nbr_cp_idx(cx, cy-1, 2) to find them back.
+            int nbr = -1;
+            int our_dir = -1;
+            // from_dir = direction at OUR (border) corner.
+            if (cy == u.img_h)      { nbr = nbr_cp_idx(int(cx), int(cy)-1, 0); our_dir = 0; }
+            else if (cy == 0u)      { nbr = nbr_cp_idx(int(cx), int(cy)+1, 2); our_dir = 2; }
+            else if (cx == u.img_w) { nbr = nbr_cp_idx(int(cx)-1, int(cy), 3); our_dir = 3; }
+            else if (cx == 0u)      { nbr = nbr_cp_idx(int(cx)+1, int(cy), 1); our_dir = 1; }
+
+            if (nbr >= 0) {
+                write_cp_full(base, float2(float(cx), float(cy)), -1, nbr, 1u, -1, our_dir, int(cx), int(cy));
+            } else {
+                write_cp(base, float2(float(cx), float(cy)), -1, -1, 1u);
+            }
         }
         return;
     }

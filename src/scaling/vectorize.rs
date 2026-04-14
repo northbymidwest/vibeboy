@@ -733,45 +733,47 @@ fn build_cell_graph(
             let is_interior = cx > 0 && cy > 0 && cx < img_w && cy < img_h;
 
             if !is_interior {
-                // Border corners
+                // Border CPs: pinned CP that connects back to whichever
+                // interior CP references us. Read both slots at the
+                // interior neighbor corner and find the one whose prev
+                // or next points to our base index.
                 let mut has_boundary = false;
                 if cy == 0 && cx > 0 && cx < img_w {
                     has_boundary = !similar(cx as i32 - 1, 0, cx as i32, 0);
                 }
                 if cy == img_h && cx > 0 && cx < img_w {
-                    has_boundary = has_boundary
-                        || !similar(
-                            cx as i32 - 1,
-                            img_h as i32 - 1,
-                            cx as i32,
-                            img_h as i32 - 1,
-                        );
+                    has_boundary = has_boundary || !similar(cx as i32 - 1, img_h as i32 - 1, cx as i32, img_h as i32 - 1);
                 }
                 if cx == 0 && cy > 0 && cy < img_h {
-                    has_boundary =
-                        has_boundary || !similar(0, cy as i32 - 1, 0, cy as i32);
+                    has_boundary = has_boundary || !similar(0, cy as i32 - 1, 0, cy as i32);
                 }
                 if cx == img_w && cy > 0 && cy < img_h {
-                    has_boundary = has_boundary
-                        || !similar(
-                            img_w as i32 - 1,
-                            cy as i32 - 1,
-                            img_w as i32 - 1,
-                            cy as i32,
-                        );
+                    has_boundary = has_boundary || !similar(img_w as i32 - 1, cy as i32 - 1, img_w as i32 - 1, cy as i32);
                 }
                 if has_boundary {
-                    write_cp(
-                        &mut positions,
-                        &mut neighbors,
-                        &mut flags,
-        
-                        base,
-                        (cx as f32, cy as f32),
-                        -1,
-                        -1,
-                        1,
-                    );
+                    // Find interior CP via nbr_cp_idx (graph-only, no
+                    // race condition, mirrors cell_graph.slang).
+                    let mut nbr = -1i32;
+                    let mut our_dir = -1i32;
+                    // from_dir = direction at OUR (border) corner.
+                    // nbr_cp_idx maps it to the opposite side at the neighbor.
+                    if cy == img_h {
+                        nbr = nbr_cp_idx(cx as i32, cy as i32 - 1, 0); our_dir = 0;
+                    } else if cy == 0 {
+                        nbr = nbr_cp_idx(cx as i32, cy as i32 + 1, 2); our_dir = 2;
+                    } else if cx == img_w {
+                        nbr = nbr_cp_idx(cx as i32 - 1, cy as i32, 3); our_dir = 3;
+                    } else if cx == 0 {
+                        nbr = nbr_cp_idx(cx as i32 + 1, cy as i32, 1); our_dir = 1;
+                    }
+                    if nbr >= 0 {
+                        write_cp_full(&mut positions, &mut neighbors, &mut flags,
+                            base, (cx as f32, cy as f32), -1, nbr, 1, -1, our_dir,
+                            cx as i32, cy as i32);
+                    } else {
+                        write_cp(&mut positions, &mut neighbors, &mut flags,
+                            base, (cx as f32, cy as f32), -1, -1, 1);
+                    }
                 }
                 continue;
             }
@@ -1218,6 +1220,32 @@ fn build_cell_graph(
                     icx,
                     icy,
                 );
+            }
+        }
+    }
+
+    // Fix border CP connectivity: interior CPs already reference border
+    // CPs as neighbors, but border CPs don't link back. Make the connection
+    // reciprocal so border CPs produce proper chain-endpoint B-spline edges
+    // that extend to the image border.
+    for i in 0..num_cps {
+        if flags[i] == 0 { continue; }
+        let prev = neighbors[i * 4];
+        let next = neighbors[i * 4 + 1];
+        if prev >= 0 {
+            let pi = prev as usize;
+            if flags[pi] == 1 && neighbors[pi * 4] < 0 && neighbors[pi * 4 + 1] < 0 {
+                neighbors[pi * 4 + 1] = i as i32;
+                let d = neighbors[i * 4 + 2];
+                if d >= 0 { neighbors[pi * 4 + 3] = (d + 2) % 4; }
+            }
+        }
+        if next >= 0 {
+            let ni = next as usize;
+            if flags[ni] == 1 && neighbors[ni * 4] < 0 && neighbors[ni * 4 + 1] < 0 {
+                neighbors[ni * 4] = i as i32;
+                let d = neighbors[i * 4 + 3];
+                if d >= 0 { neighbors[ni * 4 + 2] = (d + 2) % 4; }
             }
         }
     }
