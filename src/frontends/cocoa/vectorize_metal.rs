@@ -34,6 +34,7 @@ pub(super) struct MetalVecBufs {
     flag_buf: Buffer,
     opt_out_buf: Buffer,
     orig_pos_buf: Buffer,
+    tjunc_orig_buf: Buffer,
 }
 
 fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
@@ -92,6 +93,7 @@ impl MetalVectorizePipeline {
                 flag_buf: mk_buf(device, (num_cps * 4) as usize),
                 opt_out_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 orig_pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
+                tjunc_orig_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
             });
         }
         let b = self.bufs.as_ref().unwrap();
@@ -236,8 +238,19 @@ impl MetalVectorizePipeline {
             enc.endEncoding();
         }
 
-        // Stage 4b: T-junction correction
+        // Copy optimized positions → tjunc_orig_pos (snapshot before t-junction)
         {
+            let enc = cmd.blitCommandEncoder().unwrap();
+            unsafe {
+                enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &b.pos_buf, 0, &b.tjunc_orig_buf, 0, (num_cps * 2 * 4) as usize,
+                );
+            }
+            enc.endEncoding();
+        }
+
+        // Stage 4b: T-junction correction (3 iterations for convergence)
+        for _ in 0..3 {
             let uni = mk_uni(&[num_cps, 0, 0, 0]);
             let enc = cmd.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(&self.tjunction);
@@ -245,7 +258,8 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 1);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 2);
-                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.tjunc_orig_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 4);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
                     MTLSize { width: 256, height: 1, depth: 1 },

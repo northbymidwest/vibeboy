@@ -31,6 +31,7 @@ struct VecBufs {
     flag_buf: wgpu::Buffer,
     opt_out_buf: wgpu::Buffer,
     orig_pos_buf: wgpu::Buffer,
+    tjunc_orig_buf: wgpu::Buffer,
     // One uniform buffer per stage to avoid write conflicts
     uni_sim: wgpu::Buffer,
     uni_resolve: wgpu::Buffer,
@@ -147,6 +148,7 @@ impl WgpuVectorizePipeline {
         let flag_buf = mk("flags", flag_size, storage_rw);
         let opt_out_buf = mk("opt_out", pos_size, storage_rw);
         let orig_pos_buf = mk("orig_pos", pos_size, storage_rw);
+        let tjunc_orig_buf = mk("tjunc_orig_pos", pos_size, storage_ro);
         let uni_sim = mk("uni_sim", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_resolve = mk("uni_resolve", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_cell = mk("uni_cell", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
@@ -214,6 +216,7 @@ impl WgpuVectorizePipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: tjunc_orig_buf.as_entire_binding() },
             ]),
             bg(&self.tjunction, 1, &[wgpu::BindGroupEntry { binding: 0, resource: uni_tjunc.as_entire_binding() }]),
         ];
@@ -235,7 +238,7 @@ impl WgpuVectorizePipeline {
         self.bufs = Some(VecBufs {
             img_w, img_h,
             px_buf, graph_buf, graph_snapshot, pos_buf, nbr_buf, flag_buf,
-            opt_out_buf, orig_pos_buf,
+            opt_out_buf, orig_pos_buf, tjunc_orig_buf,
             uni_sim, uni_resolve, uni_cell, uni_opt, uni_tjunc, uni_rast,
             output_tex, output_tex_w: out_w, output_tex_h: out_h,
             bg_sim, bg_resolve, bg_cell, bg_opt_p1, bg_opt_p2, bg_tjunc, bg_rast,
@@ -331,10 +334,10 @@ impl WgpuVectorizePipeline {
         let pos_size = (num_cps * 2 * 4) as u64;
         encoder.copy_buffer_to_buffer(&b.pos_buf, 0, &b.orig_pos_buf, 0, pos_size);
 
-        // Compute pass 3: optimizer + t-junction + rasterizer
+        // Compute pass 3: optimizer
         {
             let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("opt+tjunc+rast"),
+                label: Some("optimizer"),
                 timestamp_writes: None,
             });
             cp.set_pipeline(&self.optimizer);
@@ -346,10 +349,23 @@ impl WgpuVectorizePipeline {
             cp.set_bind_group(1, &b.bg_opt_p2[1], &[]);
             cp.set_bind_group(2, &b.bg_opt_p2[2], &[]);
             cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+        }
+
+        // Buffer copy: optimized positions → tjunc_orig_pos (snapshot before t-junction)
+        encoder.copy_buffer_to_buffer(&b.pos_buf, 0, &b.tjunc_orig_buf, 0, pos_size);
+
+        // Compute pass 4: t-junction (3 iterations for convergence) + rasterizer
+        {
+            let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("tjunc+rast"),
+                timestamp_writes: None,
+            });
             cp.set_pipeline(&self.tjunction);
-            cp.set_bind_group(0, &b.bg_tjunc[0], &[]);
-            cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
-            cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+            for _ in 0..3 {
+                cp.set_bind_group(0, &b.bg_tjunc[0], &[]);
+                cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
+                cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+            }
             cp.set_pipeline(&self.rasterizer);
             cp.set_bind_group(0, &b.bg_rast[0], &[]);
             cp.set_bind_group(1, &b.bg_rast[1], &[]);

@@ -1456,17 +1456,28 @@ fn optimize_energy(
                 continue;
             }
 
-            // Skip nodes adjacent to crossings
-            if (flags[prev_idx as usize] & IS_CROSSING) != 0 {
-                continue;
-            }
-            if (flags[next_idx as usize] & IS_CROSSING) != 0 {
-                continue;
+            // Skip non-crossing nodes adjacent to crossings (crossing
+            // position depends on all 4 neighbors; optimizing one side
+            // without the other would break symmetry). Crossing nodes
+            // themselves must NOT be skipped — they handle their own
+            // combined-curvature optimization.
+            if (f & IS_CROSSING) == 0 {
+                if (flags[prev_idx as usize] & IS_CROSSING) != 0 {
+                    continue;
+                }
+                if (flags[next_idx as usize] & IS_CROSSING) != 0 {
+                    continue;
+                }
             }
 
-            // Crossings: only process from slot 0 (even index) to avoid double-processing
+            // Crossings: only process from slot 0 (even index) to avoid double-processing.
+            // The even slot writes the result to both slots AFTER optimization.
+            // Revert the initial copy that clobbered the even slot's write.
             let is_crossing = (f & IS_CROSSING) != 0;
             if is_crossing && (i & 1) != 0 {
+                let even = i - 1;
+                pos_out[i * 2] = pos_out[even * 2];
+                pos_out[i * 2 + 1] = pos_out[even * 2 + 1];
                 continue;
             }
 
@@ -1546,88 +1557,49 @@ fn optimize_energy(
 // ============================================================================
 
 fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], num_cps: usize) {
-    // Collect updates first (reads from positions, writes back after)
-    let mut updates: Vec<(usize, f32, f32)> = Vec::new();
-    let mut stem_updates: Vec<(usize, f32, f32)> = Vec::new();
+    // Unified iterative solver matching the GPU shader (update_tjunction.slang).
+    // Save original positions, then iterate 3 passes. Each pass processes ALL
+    // junction CPs in one loop:
+    //   - Crossings: inverse B-spline correction (each slot independently —
+    //     different pp/np require different corrected positions for both curves
+    //     to pass through the same grid_pos at t=0.5)
+    //   - T-junctions: forward B-spline correction + stem snapping
+    // Both use orig for the center weight and latest neighbor positions.
+    // 3 passes converge to sub-pixel accuracy (contraction ≈ 0.17/pass).
+    let orig = positions.to_vec();
+    for _ in 0..3 {
+        for i in 0..num_cps {
+            let f = flags[i];
+            let prev_idx = neighbors[i * 4];
+            let next_idx = neighbors[i * 4 + 1];
+            if prev_idx < 0 || next_idx < 0 { continue; }
 
-    // Valence-4 crossings: inverse B-spline correction
-    let mut crossing_updates: Vec<(usize, f32, f32)> = Vec::new();
-    for i in 0..num_cps {
-        if (flags[i] & IS_CROSSING) == 0 {
-            continue;
+            let prev_pos = (positions[prev_idx as usize * 2], positions[prev_idx as usize * 2 + 1]);
+            let next_pos = (positions[next_idx as usize * 2], positions[next_idx as usize * 2 + 1]);
+            let grid_pos = (orig[i * 2], orig[i * 2 + 1]);
+
+            if (f & IS_CROSSING) != 0 {
+                let corrected = (
+                    (grid_pos.0 - 0.125 * prev_pos.0 - 0.125 * next_pos.0) / 0.75,
+                    (grid_pos.1 - 0.125 * prev_pos.1 - 0.125 * next_pos.1) / 0.75,
+                );
+                positions[i * 2] = corrected.0;
+                positions[i * 2 + 1] = corrected.1;
+            } else if (f & IS_TJUNCTION) != 0 {
+                let corrected = (
+                    0.125 * prev_pos.0 + 0.75 * grid_pos.0 + 0.125 * next_pos.0,
+                    0.125 * prev_pos.1 + 0.75 * grid_pos.1 + 0.125 * next_pos.1,
+                );
+                positions[i * 2] = corrected.0;
+                positions[i * 2 + 1] = corrected.1;
+
+                let stem = i ^ 1;
+                if stem < num_cps && flags[stem] == 1 {
+                    positions[stem * 2] = 0.125 * prev_pos.0 + 0.75 * corrected.0 + 0.125 * next_pos.0;
+                    positions[stem * 2 + 1] = 0.125 * prev_pos.1 + 0.75 * corrected.1 + 0.125 * next_pos.1;
+                }
+            }
         }
-        let prev_idx = neighbors[i * 4];
-        let next_idx = neighbors[i * 4 + 1];
-        if prev_idx < 0 || next_idx < 0 {
-            continue;
-        }
-        let prev_pos = (
-            positions[prev_idx as usize * 2],
-            positions[prev_idx as usize * 2 + 1],
-        );
-        let grid_pos = (positions[i * 2], positions[i * 2 + 1]);
-        let next_pos = (
-            positions[next_idx as usize * 2],
-            positions[next_idx as usize * 2 + 1],
-        );
-        let corrected = (
-            (grid_pos.0 - 0.125 * prev_pos.0 - 0.125 * next_pos.0) / 0.75,
-            (grid_pos.1 - 0.125 * prev_pos.1 - 0.125 * next_pos.1) / 0.75,
-        );
-        crossing_updates.push((i, corrected.0, corrected.1));
-    }
-    for (i, x, y) in crossing_updates {
-        positions[i * 2] = x;
-        positions[i * 2 + 1] = y;
-    }
-
-    // T-junctions
-    for i in 0..num_cps {
-        if (flags[i] & IS_TJUNCTION) == 0 {
-            continue;
-        }
-
-        let prev_idx = neighbors[i * 4];
-        let next_idx = neighbors[i * 4 + 1];
-        if prev_idx < 0 || next_idx < 0 {
-            continue;
-        }
-
-        let prev_pos = (
-            positions[prev_idx as usize * 2],
-            positions[prev_idx as usize * 2 + 1],
-        );
-        let curr_pos = (positions[i * 2], positions[i * 2 + 1]);
-        let next_pos = (
-            positions[next_idx as usize * 2],
-            positions[next_idx as usize * 2 + 1],
-        );
-
-        let corrected = (
-            0.125 * prev_pos.0 + 0.75 * curr_pos.0 + 0.125 * next_pos.0,
-            0.125 * prev_pos.1 + 0.75 * curr_pos.1 + 0.125 * next_pos.1,
-        );
-        updates.push((i, corrected.0, corrected.1));
-
-        // Update stem CP at the other slot (i ^ 1)
-        let stem = i ^ 1;
-        if stem < num_cps && flags[stem] == 1 {
-            let on_curve = (
-                0.125 * prev_pos.0 + 0.75 * corrected.0 + 0.125 * next_pos.0,
-                0.125 * prev_pos.1 + 0.75 * corrected.1 + 0.125 * next_pos.1,
-            );
-            stem_updates.push((stem, on_curve.0, on_curve.1));
-        }
-    }
-
-    // Apply updates
-    for (i, x, y) in updates {
-        positions[i * 2] = x;
-        positions[i * 2 + 1] = y;
-    }
-    for (i, x, y) in stem_updates {
-        positions[i * 2] = x;
-        positions[i * 2 + 1] = y;
     }
 }
 
@@ -1653,79 +1625,103 @@ fn beval_deriv(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, 
 }
 
 /// Find closest parameter t on a quadratic B-spline span to point pt.
-/// Uses precomputed polynomial coefficients: B(t) = a*t² + b*t + c
-/// B'(t) = 2*a*t + b (exact derivative).
-/// 5 coarse samples, early reject if d2 > 1.0, then 4 Newton iterations.
+/// Uses precomputed polynomial coefficients: B(t) = a*t² + b*t + c.
+///
+/// Exact cubic solver: D(t) = |B(t)-pt|² is degree 4, D'(t) is cubic.
+/// Solves D'(t)=0 analytically, evaluates D at roots + endpoints, picks min.
+/// No iterative Newton, no coarse sweep, no degenerate endpoint traps.
 #[inline(always)]
 fn closest_on_span_poly(
     ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32,
     ptx: f32, pty: f32,
 ) -> (f32, f32) {
-    // Evaluate B(t) = (a*t + b)*t + c using Horner's method
-    // 2 muls + 2 adds per component vs ~5 muls in the expanded form
-    macro_rules! eval_d2 {
-        ($t:expr) => {{
-            let t: f32 = $t;
-            let ex = (ax * t + bx) * t + cx;
-            let ey = (ay * t + by) * t + cy;
-            let dx = ptx - ex;
-            let dy = pty - ey;
-            dx * dx + dy * dy
-        }};
-    }
+    // Shift: let dx(t) = ax*t² + bx*t + (cx-ptx), dy(t) similarly
+    let ex = cx - ptx;
+    let ey = cy - pty;
 
-    // Coarse sweep: 5 samples
-    let mut best_d2 = eval_d2!(0.0);
-    let mut best_t = 0.0f32;
+    // D'(t)/2 = (ax*t²+bx*t+ex)(2ax*t+bx) + (ay*t²+by*t+ey)(2ay*t+by)
+    // Expand to c3*t³ + c2*t² + c1*t + c0:
+    //   c3 = 2(ax²+ay²)
+    //   c2 = 3(ax*bx+ay*by)
+    //   c1 = 2(ax*ex+ay*ey) + bx²+by²
+    //   c0 = bx*ex+by*ey
+    let c3 = 2.0 * (ax * ax + ay * ay);
+    let c2 = 3.0 * (ax * bx + ay * by);
+    let c1 = 2.0 * (ax * ex + ay * ey) + bx * bx + by * by;
+    let c0 = bx * ex + by * ey;
 
-    let d1 = eval_d2!(0.25);
-    if d1 < best_d2 { best_d2 = d1; best_t = 0.25; }
-    let d2 = eval_d2!(0.5);
-    if d2 < best_d2 { best_d2 = d2; best_t = 0.5; }
-    let d3 = eval_d2!(0.75);
-    if d3 < best_d2 { best_d2 = d3; best_t = 0.75; }
-    let d4 = eval_d2!(1.0);
-    if d4 < best_d2 { best_d2 = d4; best_t = 1.0; }
+    // Evaluate D(t) = |B(t)-pt|² via Horner
+    let eval_d2 = |t: f32| -> f32 {
+        let dx = (ax * t + bx) * t + ex;
+        let dy = (ay * t + by) * t + ey;
+        dx * dx + dy * dy
+    };
 
-    // Early reject: if coarse sweep couldn't get within 1.0, Newton won't help
-    if best_d2 > 1.0 {
-        return (best_t, best_d2);
-    }
+    // Start with endpoints
+    let d0 = eval_d2(0.0);
+    let d1 = eval_d2(1.0);
+    let (mut best_t, mut best_d2) = if d0 <= d1 { (0.0f32, d0) } else { (1.0f32, d1) };
 
-    // Precompute 2*a for derivative: B'(t) = 2*a*t + b
-    let a2x = 2.0 * ax;
-    let a2y = 2.0 * ay;
+    if c3.abs() < 1e-12 {
+        // Degenerate: quadratic or linear D'
+        if c2.abs() > 1e-12 {
+            // Quadratic: c2*t² + c1*t + c0 = 0
+            let disc = c1 * c1 - 4.0 * c2 * c0;
+            if disc >= 0.0 {
+                let sq = disc.sqrt();
+                let inv = 0.5 / c2;
+                for t in [(-c1 + sq) * inv, (-c1 - sq) * inv] {
+                    if t > 0.0 && t < 1.0 {
+                        let d = eval_d2(t);
+                        if d < best_d2 { best_d2 = d; best_t = t; }
+                    }
+                }
+            }
+        } else if c1.abs() > 1e-12 {
+            // Linear: c1*t + c0 = 0
+            let t = -c0 / c1;
+            if t > 0.0 && t < 1.0 {
+                let d = eval_d2(t);
+                if d < best_d2 { best_d2 = d; best_t = t; }
+            }
+        }
+    } else {
+        // Full cubic: c3*t³ + c2*t² + c1*t + c0 = 0
+        // Depressed cubic via substitution t = u - c2/(3*c3)
+        let inv3a = 1.0 / (3.0 * c3);
+        let shift = -c2 * inv3a;
+        let p = (3.0 * c3 * c1 - c2 * c2) / (3.0 * c3 * c3);
+        let q = (2.0 * c2 * c2 * c2 - 9.0 * c3 * c2 * c1 + 27.0 * c3 * c3 * c0)
+            / (27.0 * c3 * c3 * c3);
 
-    // Newton-Raphson: minimize D(t) = |B(t) - pt|²
-    // D'(t) = 2 * B'(t) · (B(t) - pt), D''(t) = 2 * (B''· diff + |B'|²)
-    // Step: t -= D'/(2*D'') = f/g where f = B'·diff, g = a2·diff + |B'|²
-    for _ in 0..4 {
-        let t = best_t;
-        // B(t) via Horner
-        let ex = (ax * t + bx) * t + cx;
-        let ey = (ay * t + by) * t + cy;
-        // B'(t)
-        let b1x = a2x * t + bx;
-        let b1y = a2y * t + by;
-        // diff = B(t) - pt
-        let dx = ex - ptx;
-        let dy = ey - pty;
-        let f = b1x * dx + b1y * dy;
-        let g = a2x * dx + a2y * dy + b1x * b1x + b1y * b1y;
-        if g.abs() > 1e-10 {
-            let step = f / g;
-            best_t = (t - step).clamp(0.0, 1.0);
-            // Early termination if converged
-            if step.abs() < 1e-6 { break; }
+        let disc = q * q / 4.0 + p * p * p / 27.0;
+
+        if disc > 1e-12 {
+            // One real root
+            let sq = disc.sqrt();
+            let u = (-q / 2.0 + sq).cbrt() + (-q / 2.0 - sq).cbrt();
+            let t = u + shift;
+            if t > 0.0 && t < 1.0 {
+                let d = eval_d2(t);
+                if d < best_d2 { best_d2 = d; best_t = t; }
+            }
+        } else {
+            // Three real roots (trigonometric method)
+            let r = (-p * p * p / 27.0).sqrt();
+            let phi = if r.abs() < 1e-15 { 0.0 } else { (-q / (2.0 * r)).clamp(-1.0, 1.0).acos() };
+            let cube_r = r.cbrt() * 2.0;
+            for k in 0..3 {
+                let angle = (phi + std::f32::consts::TAU * k as f32) / 3.0;
+                let t = cube_r * angle.cos() + shift;
+                if t > 0.0 && t < 1.0 {
+                    let d = eval_d2(t);
+                    if d < best_d2 { best_d2 = d; best_t = t; }
+                }
+            }
         }
     }
 
-    // Final distance via Horner
-    let ex = (ax * best_t + bx) * best_t + cx;
-    let ey = (ay * best_t + by) * best_t + cy;
-    let dx = ptx - ex;
-    let dy = pty - ey;
-    (best_t, dx * dx + dy * dy)
+    (best_t, best_d2)
 }
 
 /// CP data for rasterization (replaces SharedCP in the shader).
@@ -2031,6 +2027,18 @@ fn rasterize(
                 let cp_i = grid_data[ci];
                 let sc = &all_cps[cp_i as usize];
 
+                // Quick screen: 3-sample reject (matches GPU bspline_quick_screen)
+                let b0 = (sc.poly_cx, sc.poly_cy); // beval at t=0
+                let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
+                           0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
+                let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
+                let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
+                let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
+                let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
+                let quick_d2 = qd0.min(qdm).min(qd1);
+                if quick_d2 > 2.0 { continue; }
+
+                // Exact cubic closest-point solve
                 let result = closest_on_span_poly(
                     sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
                     sc.poly_cx, sc.poly_cy, center.0, center.1,
