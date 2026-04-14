@@ -326,7 +326,7 @@ pub fn build_scan_edges(
         };
         if resolve_left == resolve_right { continue; }
 
-        // B-spline triplet — same as existing rasterizer (vectorize.rs line 1819)
+        // B-spline triplets — optimized AND original positions.
         let pos = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
         let pp = if prev_ci >= 0 {
             (data.positions[prev_ci as usize * 2], data.positions[prev_ci as usize * 2 + 1])
@@ -334,6 +334,14 @@ pub fn build_scan_edges(
         let np = if next_ci >= 0 {
             (data.positions[next_ci as usize * 2], data.positions[next_ci as usize * 2 + 1])
         } else { pos };
+
+        let orig_pos = (data.orig_positions[ci * 2], data.orig_positions[ci * 2 + 1]);
+        let orig_pp = if prev_ci >= 0 {
+            (data.orig_positions[prev_ci as usize * 2], data.orig_positions[prev_ci as usize * 2 + 1])
+        } else { orig_pos };
+        let orig_np = if next_ci >= 0 {
+            (data.orig_positions[next_ci as usize * 2], data.orig_positions[next_ci as usize * 2 + 1])
+        } else { orig_pos };
 
         // Adaptive subdivision
         let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
@@ -356,14 +364,23 @@ pub fn build_scan_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // resolve_left/resolve_right are from the cell rasterizer's
-                // tangent-normal convention: for a downward edge, resolve_left
-                // is screen-left. For upward, it's screen-right. Normalize
-                // so ScanEdge.left_color is always screen-left.
+                // Check if optimization flipped the tangent direction.
+                // cell_rasterizer.slang: normals_agree = dot(opt_normal, orig_normal) > 0
+                // When they disagree, swap colors.
+                let mid_t = (s as f32 - 0.5) / subdiv as f32;
+                let opt_tan = beval_deriv(pp, pos, np, mid_t);
+                let orig_tan = beval_deriv(orig_pp, orig_pos, orig_np, mid_t);
+                // Normal = (-tan.y, tan.x). dot(opt_n, orig_n) = opt_tan.x*orig_tan.x + opt_tan.y*orig_tan.y
+                let normals_agree = opt_tan.0 * orig_tan.0 + opt_tan.1 * orig_tan.1 > 0.0;
+
+                // For downward edge: resolve_left is screen-left (from tangent normal).
+                // If normals disagree, the tangent flipped → swap colors.
                 let (lc, rc) = if dy > 0.0 {
-                    (resolve_left, resolve_right)
+                    if normals_agree { (resolve_left, resolve_right) }
+                    else { (resolve_right, resolve_left) }
                 } else {
-                    (resolve_right, resolve_left) // upward: flip screen sides
+                    if normals_agree { (resolve_right, resolve_left) }
+                    else { (resolve_left, resolve_right) }
                 };
 
                 edges.push(ScanEdge {
@@ -380,6 +397,12 @@ pub fn build_scan_edges(
     // and interior edges provide all color transitions.
 
     edges
+}
+
+#[inline]
+fn beval_deriv(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, f32) {
+    ((t - 1.0) * p0.0 + (1.0 - 2.0 * t) * p1.0 + t * p2.0,
+     (t - 1.0) * p0.1 + (1.0 - 2.0 * t) * p1.1 + t * p2.1)
 }
 
 #[inline]
