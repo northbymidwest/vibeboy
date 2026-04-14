@@ -239,97 +239,8 @@ pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTree
 }
 
 // ---------------------------------------------------------------------------
-// Scanline rasterizer support: node→CP mapping and face flattening
+// Scanline rasterizer: per-CP winding edge construction
 // ---------------------------------------------------------------------------
-
-/// Map from x4 node → list of CP indices at that node.
-/// At regular corners there's one CP. At T-junctions/crossings, two.
-pub fn build_node_cp_map(data: &VectorizeData) -> BTreeMap<u64, Vec<usize>> {
-    let corners_w = data.img_w + 1;
-    let num_cps = corners_w * (data.img_h + 1) * 2;
-
-    let mut map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for ci in 0..num_cps {
-        if data.flags[ci] == 0 { continue; }
-        let x4 = (data.orig_positions[ci * 2] * 4.0).round() as i32;
-        let y4 = (data.orig_positions[ci * 2 + 1] * 4.0).round() as i32;
-        map.entry(pack_node(x4, y4)).or_default().push(ci);
-    }
-    map
-}
-
-/// Convert an x4 vector (from one face node to an adjacent face node)
-/// into the edge direction code (0-3) at the destination grid corner.
-///
-/// The face arrives from the direction of the vector. The edge direction
-/// code represents which edge of the grid corner was crossed:
-///   0=north, 1=east, 2=south, 3=west
-///
-/// Vector pointing east (+x) means the face came from the west → crossed west edge → dir 3.
-/// Returns None if the vector is zero or doesn't map cleanly to a direction.
-fn x4_vector_to_entry_dir(dx4: i32, dy4: i32) -> Option<i32> {
-    if dx4 == 0 && dy4 == 0 { return None; }
-    // The entry direction is the OPPOSITE of the vector direction.
-    // Vector pointing east → came from west → entry edge = west = 3
-    if dx4.abs() >= dy4.abs() {
-        if dx4 > 0 { Some(3) } else { Some(1) } // came from west / east
-    } else {
-        if dy4 > 0 { Some(0) } else { Some(2) } // came from north / south
-    }
-}
-
-/// Same but for exit direction (vector FROM current TO next node).
-/// Vector pointing east → exits via east edge → dir 1.
-fn x4_vector_to_exit_dir(dx4: i32, dy4: i32) -> Option<i32> {
-    if dx4 == 0 && dy4 == 0 { return None; }
-    if dx4.abs() >= dy4.abs() {
-        if dx4 > 0 { Some(1) } else { Some(3) } // exits east / west
-    } else {
-        if dy4 > 0 { Some(2) } else { Some(0) } // exits south / north
-    }
-}
-
-/// Resolve which CP at a T-junction/crossing node matches the face traversal.
-/// Uses exact direction code matching from the face's entry/exit x4 vectors.
-fn resolve_cp_at_node(
-    nid: u64,
-    prev_nid: u64,
-    next_nid: u64,
-    node_cp_map: &BTreeMap<u64, Vec<usize>>,
-    data: &VectorizeData,
-) -> Option<usize> {
-    let cps = node_cp_map.get(&nid)?;
-    if cps.len() == 1 { return Some(cps[0]); }
-
-    // Compute entry/exit edge directions from face node x4 vectors
-    let (cx4, cy4) = unpack_node(nid);
-    let (px4, py4) = unpack_node(prev_nid);
-    let (nx4, ny4) = unpack_node(next_nid);
-
-    let entry_dir = x4_vector_to_entry_dir(cx4 - px4, cy4 - py4);
-    let exit_dir = x4_vector_to_exit_dir(nx4 - cx4, ny4 - cy4);
-
-    // Find CP whose chain directions match. Check both forward and reverse traversal.
-    for &ci in cps {
-        let cp_prev_dir = data.neighbors[ci * 4 + 2]; // prev_dir
-        let cp_next_dir = data.neighbors[ci * 4 + 3]; // next_dir
-
-        // Forward: face enters via prev_dir, exits via next_dir
-        if let (Some(ed), Some(xd)) = (entry_dir, exit_dir) {
-            if cp_prev_dir == ed && cp_next_dir == xd { return Some(ci); }
-        }
-        // Partial match: just entry or just exit
-        if let Some(ed) = entry_dir {
-            if cp_prev_dir == ed { return Some(ci); }
-        }
-        if let Some(xd) = exit_dir {
-            if cp_next_dir == xd { return Some(ci); }
-        }
-    }
-
-    // Fallback: first CP
-    Some(cps[0])
-}
 
 /// A directed line segment for winding-rule scanline fill.
 pub struct WindingEdge {
@@ -341,130 +252,143 @@ pub struct WindingEdge {
     pub winding: i8,
 }
 
-/// Flatten a Voronoi-traced face into directed line segments for scanline fill.
+/// Build winding edges directly from the CP chain data.
 ///
-/// For each node in the face, resolves the corresponding CP using exact
-/// direction matching at T-junctions. Evaluates beval(prev, self, next)
-/// using the chain's actual neighbors for smooth curves everywhere.
-/// Nodes without CPs (diagonal intermediate points) use grid positions.
-pub fn flatten_face_cp(
-    face: &Face,
-    node_cp_map: &BTreeMap<u64, Vec<usize>>,
+/// Each active CP defines a B-spline span using the same (pp, pos, np) triplet
+/// as the existing nearest-curve rasterizer, with the same degenerate fallback
+/// for chain endpoints (missing neighbor → use self).
+///
+/// Each CP's span separates two colors (from get_edge_colors). color_right is
+/// always the CW (right) side of the chain exit direction. The span is flattened
+/// into line segments and two winding edges are emitted per segment: one for
+/// color_right (+1 if downward, -1 if upward) and one for color_left (opposite).
+///
+/// Border edges are added for pixels on the image boundary to close regions
+/// that touch the image edge.
+pub fn build_winding_edges(
     data: &VectorizeData,
+    pixels: &[u32],
     scale_factor: f32,
-    edges_out: &mut Vec<WindingEdge>,
-) {
-    let n = face.nodes.len();
-    if n < 3 { return; }
+    out_h: usize,
+) -> Vec<WindingEdge> {
+    let corners_w = data.img_w + 1;
+    let num_cps = corners_w * (data.img_h + 1) * 2;
+    let img_w = data.img_w;
+    let img_h = data.img_h;
 
-    let cp_pos = |ci: usize| -> (f32, f32) {
-        (data.positions[ci * 2], data.positions[ci * 2 + 1])
+    let get_px_color = |px: i32, py: i32| -> u32 {
+        let px = px.clamp(0, img_w as i32 - 1) as usize;
+        let py = py.clamp(0, img_h as i32 - 1) as usize;
+        pixels[py * img_w + px]
+    };
+    let get_edge_colors = |icx: i32, icy: i32, dir: i32| -> (u32, u32) {
+        match dir {
+            0 => (get_px_color(icx - 1, icy - 1), get_px_color(icx, icy - 1)),
+            1 => (get_px_color(icx, icy - 1), get_px_color(icx, icy)),
+            2 => (get_px_color(icx, icy), get_px_color(icx - 1, icy)),
+            3 => (get_px_color(icx - 1, icy), get_px_color(icx - 1, icy - 1)),
+            _ => (0, 0),
+        }
     };
 
-    // For each face node, resolve CP and compute span start/end points.
-    // A CP's B-spline span goes from midpoint(chain_prev, self) to midpoint(self, chain_next).
-    // With degenerate fallback: missing neighbor → use self, so span starts/ends at self.
-    struct NodeSpan {
-        ci: Option<usize>,
-        /// B-spline control points (pp, pos, np) — only valid if ci.is_some()
-        pp: (f32, f32),
-        pos: (f32, f32),
-        np: (f32, f32),
-        /// Span start: midpoint(pp, pos). Span end: midpoint(pos, np).
-        span_start: (f32, f32),
-        span_end: (f32, f32),
-    }
+    let mut edges = Vec::new();
 
-    let mut spans: Vec<NodeSpan> = Vec::with_capacity(n);
+    // For each active CP, flatten its B-spline span into winding edge pairs.
+    for ci in 0..num_cps {
+        let flag = data.flags[ci];
+        if flag == 0 { continue; }
 
-    for i in 0..n {
-        let nid = face.nodes[i];
-        let prev_nid = face.nodes[(i + n - 1) % n];
-        let next_nid = face.nodes[(i + 1) % n];
+        let prev_ci = data.neighbors[ci * 4];
+        let next_ci = data.neighbors[ci * 4 + 1];
+        if prev_ci < 0 && next_ci < 0 { continue; }
 
-        let ci = resolve_cp_at_node(nid, prev_nid, next_nid, node_cp_map, data);
+        let next_dir = data.neighbors[ci * 4 + 3];
+        if next_dir < 0 { continue; }
 
-        if let Some(ci) = ci {
-            let pos = cp_pos(ci);
-            let prev_ci = data.neighbors[ci * 4];
-            let next_ci = data.neighbors[ci * 4 + 1];
-            let pp = if prev_ci >= 0 { cp_pos(prev_ci as usize) } else { pos };
-            let np = if next_ci >= 0 { cp_pos(next_ci as usize) } else { pos };
+        let icx = (ci / 2 % corners_w) as i32;
+        let icy = (ci / 2 / corners_w) as i32;
 
-            let span_start = ((pp.0 + pos.0) * 0.5, (pp.1 + pos.1) * 0.5);
-            let span_end = ((pos.0 + np.0) * 0.5, (pos.1 + np.1) * 0.5);
+        let (color_left, color_right) = get_edge_colors(icx, icy, next_dir);
+        if color_left == color_right { continue; }
 
-            spans.push(NodeSpan { ci: Some(ci), pp, pos, np, span_start, span_end });
-        } else {
-            let (x4, y4) = unpack_node(nid);
-            let gp = (x4 as f32 / 4.0, y4 as f32 / 4.0);
-            spans.push(NodeSpan {
-                ci: None, pp: gp, pos: gp, np: gp,
-                span_start: gp, span_end: gp,
-            });
-        }
-    }
+        // B-spline triplet — same as existing rasterizer (vectorize.rs line 1819)
+        let pos = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
+        let pp = if prev_ci >= 0 {
+            (data.positions[prev_ci as usize * 2], data.positions[prev_ci as usize * 2 + 1])
+        } else { pos };
+        let np = if next_ci >= 0 {
+            (data.positions[next_ci as usize * 2], data.positions[next_ci as usize * 2 + 1])
+        } else { pos };
 
-    // Build the face boundary by emitting spans with connecting segments.
-    // For each node: connect from previous endpoint → this span_start (if gap),
-    // then emit the B-spline span from span_start to span_end.
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n * 6);
+        // Adaptive subdivision
+        let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
+        let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
+        let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
+        let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
 
-    let beval_scaled = |pp: (f32, f32), pos: (f32, f32), np: (f32, f32), t: f32| -> (f32, f32) {
-        let u = 1.0 - t;
-        (
-            (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale_factor,
-            (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale_factor,
-        )
-    };
+        let mut prev_pt = beval(pp, pos, np, 0.0, scale_factor);
 
-    for i in 0..n {
-        let span = &spans[i];
-        let prev_span = &spans[(i + n - 1) % n];
+        for s in 1..=subdiv {
+            let t = s as f32 / subdiv as f32;
+            let cur_pt = beval(pp, pos, np, t, scale_factor);
 
-        // Connect from previous span's endpoint to this span's start.
-        // If they match (chain-consecutive CPs), this is a zero-length segment (harmless).
-        // If they don't match (T-junction, grid node transition), this adds a straight line.
-        let prev_end = (prev_span.span_end.0 * scale_factor, prev_span.span_end.1 * scale_factor);
-        let this_start = (span.span_start.0 * scale_factor, span.span_start.1 * scale_factor);
-        let gap = (prev_end.0 - this_start.0).abs() + (prev_end.1 - this_start.1).abs();
-        if gap > 1e-4 {
-            // Straight line connecting the gap (T-junction corner or grid node)
-            pts.push(this_start);
-        }
+            let dy = cur_pt.1 - prev_pt.1;
+            if dy.abs() > 1e-6 {
+                let (ymin, ymax, x_at_ymin) = if prev_pt.1 < cur_pt.1 {
+                    (prev_pt.1, cur_pt.1, prev_pt.0)
+                } else {
+                    (cur_pt.1, prev_pt.1, cur_pt.0)
+                };
+                let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-        // Emit the B-spline span
-        if span.ci.is_some() {
-            let chord_mid_x = (span.pp.0 + span.np.0) * 0.25 + span.pos.0 * 0.5;
-            let chord_mid_y = (span.pp.1 + span.np.1) * 0.25 + span.pos.1 * 0.5;
-            let dev = ((span.pos.0 - chord_mid_x).powi(2) + (span.pos.1 - chord_mid_y).powi(2)).sqrt();
-            let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+                // Winding: for a left-to-right sweep, a downward edge means we
+                // cross from left to right. color_right (CW of chain exit) is on
+                // the screen-right — it EXITS (-1) as we sweep past it.
+                let wr: i8 = if dy > 0.0 { -1 } else { 1 };
 
-            for s in 0..=subdiv {
-                let t = s as f32 / subdiv as f32;
-                pts.push(beval_scaled(span.pp, span.pos, span.np, t));
+                edges.push(WindingEdge {
+                    x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
+                    color: color_right, winding: wr,
+                });
+                edges.push(WindingEdge {
+                    x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
+                    color: color_left, winding: -wr,
+                });
             }
-        } else {
-            pts.push((span.pos.0 * scale_factor, span.pos.1 * scale_factor));
+
+            prev_pt = cur_pt;
         }
     }
 
-    // Convert points to winding edges
-    let color = face.color;
-    let np = pts.len();
-    for i in 0..np {
-        let (x0, y0) = pts[i];
-        let (x1, y1) = pts[(i + 1) % np];
-        let dy = y1 - y0;
-        if dy.abs() < 1e-6 { continue; }
+    // Border edges: close regions touching image boundaries.
+    let out_w_f = img_w as f32 * scale_factor;
+    for py in 0..img_h {
+        let y0 = py as f32 * scale_factor;
+        let y1 = (py + 1) as f32 * scale_factor;
 
-        let winding: i8 = if dy > 0.0 { 1 } else { -1 };
-        let (ymin, ymax, x_at_ymin) = if y0 < y1 { (y0, y1, x0) } else { (y1, y0, x1) };
-        let dx_per_dy = (x1 - x0) / dy;
-
-        edges_out.push(WindingEdge {
-            x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-            color, winding,
+        // Left border (x=0): downward edge at left boundary.
+        // This is a vertical boundary at x=0. The pixel at column 0 is to the
+        // RIGHT of this edge (CW side for a downward edge) → enters that color.
+        let lc = get_px_color(0, py as i32);
+        edges.push(WindingEdge {
+            x_at_ymin: 0.0, y_min: y0, y_max: y1, dx_per_dy: 0.0,
+            color: lc, winding: -1, // downward border: left-column color exits (flipped convention)
+        });
+        let rc = get_px_color(img_w as i32 - 1, py as i32);
+        edges.push(WindingEdge {
+            x_at_ymin: out_w_f, y_min: y0, y_max: y1, dx_per_dy: 0.0,
+            color: rc, winding: 1, // downward border: right-column color enters
         });
     }
+
+    edges
+}
+
+#[inline]
+fn beval(pp: (f32, f32), pos: (f32, f32), np: (f32, f32), t: f32, scale: f32) -> (f32, f32) {
+    let u = 1.0 - t;
+    (
+        (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale,
+        (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale,
+    )
 }

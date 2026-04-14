@@ -118,34 +118,13 @@ fn rasterize_scanline_data(
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    use super::vectorize_faces::{
-        WindingEdge, VOID_COLOR,
-        build_cell_edges, trace_faces, build_node_cp_map, flatten_face_cp,
-    };
+    use super::vectorize_faces::{WindingEdge, build_winding_edges};
 
     let (img_w, img_h) = (data.img_w, data.img_h);
 
-    // Phase 1: Trace faces using Voronoi cell graph (correct topology)
-    let dir_edges = build_cell_edges(data, pixels);
-    let faces = trace_faces(&dir_edges);
-    let node_cp_map = build_node_cp_map(data);
-
-    // Phase 2: Flatten face boundaries using exact CP chain data
-    let mut edges: Vec<WindingEdge> = Vec::new();
-    let mut cp_hits = 0usize;
-    let mut cp_misses = 0usize;
-    let mut total_nodes = 0usize;
-    for face in &faces {
-        if face.color == VOID_COLOR { continue; }
-        for i in 0..face.nodes.len() {
-            total_nodes += 1;
-            let nid = face.nodes[i];
-            if node_cp_map.contains_key(&nid) { cp_hits += 1; } else { cp_misses += 1; }
-        }
-        flatten_face_cp(face, &node_cp_map, data, scale_factor, &mut edges);
-    }
-    eprintln!("[scanline] {} faces, {} nodes ({} CP hits, {} misses), {} winding edges",
-        faces.iter().filter(|f| f.color != VOID_COLOR).count(), total_nodes, cp_hits, cp_misses, edges.len());
+    // Build winding edges directly from CP chains — no face tracing needed.
+    let edges = build_winding_edges(data, pixels, scale_factor, out_h);
+    eprintln!("[scanline] {}x{}: {} winding edges", img_w, img_h, edges.len());
 
     // Phase 3: Build row index
     let mut row_count = vec![0u32; out_h];
