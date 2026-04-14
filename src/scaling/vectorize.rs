@@ -124,7 +124,10 @@ fn rasterize_scanline_data(
 
     // Build winding edges directly from CP chains — no face tracing needed.
     let edges = build_winding_edges(data, pixels, scale_factor, out_h);
-    eprintln!("[scanline] {}x{}: {} winding edges", img_w, img_h, edges.len());
+    let extreme = edges.iter().filter(|e| e.dx_per_dy.abs() > 100.0).count();
+    let tiny_dy = edges.iter().filter(|e| (e.y_max - e.y_min) < 0.5).count();
+    eprintln!("[scanline] {}x{}: {} winding edges, {} extreme slope, {} tiny dy",
+        img_w, img_h, edges.len(), extreme, tiny_dy);
 
     // Phase 3: Build row index
     let mut row_count = vec![0u32; out_h];
@@ -211,11 +214,11 @@ fn rasterize_scanline_data(
                     edge_cursor += 1;
                 }
 
-                // Find color with nonzero winding (last one wins)
+                // Find color with nonzero winding
                 let mut found = false;
                 let mut color = 0u32;
-                for (i, &w) in winding.iter().enumerate() {
-                    if w != 0 { color = color_set[i]; found = true; }
+                for (i, w) in winding.iter().enumerate() {
+                    if *w != 0 { color = color_set[i]; found = true; }
                 }
                 if found {
                     row_slice[opx] = pack_color(color);

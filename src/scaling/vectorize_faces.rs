@@ -346,7 +346,10 @@ pub fn build_winding_edges(
             let cur_pt = beval(pp, pos, np, t, scale_factor);
 
             let dy = cur_pt.1 - prev_pt.1;
-            if dy.abs() > 1e-6 {
+            let dx = cur_pt.0 - prev_pt.0;
+            // Skip near-horizontal segments: they barely cross scanlines
+            // and their extreme dx_per_dy produces wrong x-positions.
+            if dy.abs() > 1e-6 && dy.abs() > dx.abs() * 0.01 {
                 let (ymin, ymax, x_at_ymin) = if prev_pt.1 < cur_pt.1 {
                     (prev_pt.1, cur_pt.1, prev_pt.0)
                 } else {
@@ -354,7 +357,9 @@ pub fn build_winding_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                let wr: i8 = if dy > 0.0 { -1 } else { 1 };
+                // For downward edge: sweep crosses left→right, exiting
+                // resolve_left's region and entering resolve_right's.
+                let wr: i8 = if dy > 0.0 { 1 } else { -1 };
 
                 edges.push(WindingEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
@@ -379,15 +384,19 @@ pub fn build_winding_edges(
         // Left border (x=0): downward edge at left boundary.
         // This is a vertical boundary at x=0. The pixel at column 0 is to the
         // RIGHT of this edge (CW side for a downward edge) → enters that color.
+        // Left border (x=0): downward edge. Left-column pixel is to the
+        // screen-right of this edge → it enters (+1).
         let lc = get_px_color(0, py as i32);
         edges.push(WindingEdge {
             x_at_ymin: 0.0, y_min: y0, y_max: y1, dx_per_dy: 0.0,
-            color: lc, winding: -1, // downward border: left-column color exits (flipped convention)
+            color: lc, winding: 1,
         });
+        // Right border (x=out_w): right-column pixel is to the screen-left
+        // of this edge → it exits (-1).
         let rc = get_px_color(img_w as i32 - 1, py as i32);
         edges.push(WindingEdge {
             x_at_ymin: out_w_f, y_min: y0, y_max: y1, dx_per_dy: 0.0,
-            color: rc, winding: 1, // downward border: right-column color enters
+            color: rc, winding: -1,
         });
     }
 
