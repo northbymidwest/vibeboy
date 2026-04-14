@@ -209,9 +209,9 @@ fn rasterize_scanline_data(
             row_edges_buf.clear();
             for &ei in &row_data[rd_start..rd_end] {
                 let edge = &edges[ei as usize];
-                // Evaluate x at the row center. Don't clamp to edge y-range —
-                // edges that barely clip the row should still contribute at
-                // their geometrically correct x position (line extension).
+                // Only include edges that actually span the row center.
+                // The row index (floor/ceil) is coarse; this is the precise check.
+                if row_center < edge.y_min || row_center >= edge.y_max { continue; }
                 let x = edge.x_at_ymin + (row_center - edge.y_min) * edge.dx_per_dy;
                 row_edges_buf.push((x, ei));
             }
