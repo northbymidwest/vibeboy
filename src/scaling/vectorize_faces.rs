@@ -416,23 +416,37 @@ pub fn build_scan_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // Color resolution matching GPU resolve_color() exactly:
+                // Color resolution matching GPU resolve_color():
                 // - Chain start (prev_ci < 0): next_dir colors, ref_t=1.0
                 // - Chain end (next_ci < 0): prev_dir colors, ref_t=0.0
-                // - Both present, t < 0.5: prefer prev_dir, fallback next_dir
-                // - Both present, t >= 0.5: prefer next_dir, fallback prev_dir
+                // - Both present: use SPATIAL position relative to junction
+                //   point (pos) to determine prev vs next. The GPU uses
+                //   projected t per-pixel; we approximate by checking which
+                //   side of pos the segment midpoint falls on.
                 let (resolve_left, resolve_right, ref_t, color_src) = if prev_ci < 0 {
                     let c = next_colors.unwrap_or_else(|| prev_colors.unwrap());
                     (c.0, c.1, 1.0f32, 1u8)
                 } else if next_ci < 0 {
                     let c = prev_colors.unwrap_or_else(|| next_colors.unwrap());
                     (c.0, c.1, 0.0f32, 0u8)
-                } else if mid_t < 0.5 {
-                    if let Some(c) = prev_colors { (c.0, c.1, 0.0f32, 0u8) }
-                    else { let c = next_colors.unwrap(); (c.0, c.1, 1.0, 1) }
                 } else {
-                    if let Some(c) = next_colors { (c.0, c.1, 1.0f32, 1u8) }
-                    else { let c = prev_colors.unwrap(); (c.0, c.1, 0.0, 0) }
+                    // Spatial test: is this segment on the prev or next side
+                    // of the junction? dot(segment_mid - junction, pp - pos)
+                    // > 0 means segment is on the prev side.
+                    let seg_mid = ((prev_pt.0 + cur_pt.0) * 0.5,
+                                   (prev_pt.1 + cur_pt.1) * 0.5);
+                    let junc = (pos.0 * scale_factor, pos.1 * scale_factor);
+                    let toward_prev = (pp.0 - pos.0, pp.1 - pos.1);
+                    let offset = (seg_mid.0 - junc.0, seg_mid.1 - junc.1);
+                    let on_prev_side = toward_prev.0 * offset.0
+                        + toward_prev.1 * offset.1 > 0.0;
+                    if on_prev_side {
+                        if let Some(c) = prev_colors { (c.0, c.1, 0.0f32, 0u8) }
+                        else { let c = next_colors.unwrap(); (c.0, c.1, 1.0, 1) }
+                    } else {
+                        if let Some(c) = next_colors { (c.0, c.1, 1.0f32, 1u8) }
+                        else { let c = prev_colors.unwrap(); (c.0, c.1, 0.0, 0) }
+                    }
                 };
 
                 // Screen-side determination matching GPU resolve_color():
