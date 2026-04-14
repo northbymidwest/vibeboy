@@ -209,8 +209,10 @@ fn rasterize_scanline_data(
             row_edges_buf.clear();
             for &ei in &row_data[rd_start..rd_end] {
                 let edge = &edges[ei as usize];
-                let y_clamp = row_center.clamp(edge.y_min, edge.y_max);
-                let x = edge.x_at_ymin + (y_clamp - edge.y_min) * edge.dx_per_dy;
+                // Evaluate x at the row center. Don't clamp to edge y-range —
+                // edges that barely clip the row should still contribute at
+                // their geometrically correct x position (line extension).
+                let x = edge.x_at_ymin + (row_center - edge.y_min) * edge.dx_per_dy;
                 row_edges_buf.push((x, ei));
             }
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
