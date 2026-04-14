@@ -361,7 +361,7 @@ pub fn flatten_face_cp(
         (data.positions[ci * 2], data.positions[ci * 2 + 1])
     };
 
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n * 4);
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
 
     for i in 0..n {
         let nid = face.nodes[i];
@@ -371,27 +371,11 @@ pub fn flatten_face_cp(
         let ci = resolve_cp_at_node(nid, prev_nid, next_nid, node_cp_map, data);
 
         if let Some(ci) = ci {
+            // Use optimized CP position directly
             let pos = cp_pos(ci);
-            let prev_ci = data.neighbors[ci * 4];
-            let next_ci = data.neighbors[ci * 4 + 1];
-            let pp = if prev_ci >= 0 { cp_pos(prev_ci as usize) } else { pos };
-            let np = if next_ci >= 0 { cp_pos(next_ci as usize) } else { pos };
-
-            // Adaptive subdivision
-            let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
-            let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
-            let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
-            let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
-
-            for s in 0..=subdiv {
-                let t = s as f32 / subdiv as f32;
-                let u = 1.0 - t;
-                let x = (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale_factor;
-                let y = (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale_factor;
-                pts.push((x, y));
-            }
+            pts.push((pos.0 * scale_factor, pos.1 * scale_factor));
         } else {
-            // No CP (diagonal intermediate point) — straight line
+            // No CP (diagonal intermediate point) — use grid position
             let (x4, y4) = unpack_node(nid);
             pts.push((x4 as f32 / 4.0 * scale_factor, y4 as f32 / 4.0 * scale_factor));
         }

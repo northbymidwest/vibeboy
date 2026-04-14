@@ -132,10 +132,20 @@ fn rasterize_scanline_data(
 
     // Phase 2: Flatten face boundaries using exact CP chain data
     let mut edges: Vec<WindingEdge> = Vec::new();
+    let mut cp_hits = 0usize;
+    let mut cp_misses = 0usize;
+    let mut total_nodes = 0usize;
     for face in &faces {
         if face.color == VOID_COLOR { continue; }
+        for i in 0..face.nodes.len() {
+            total_nodes += 1;
+            let nid = face.nodes[i];
+            if node_cp_map.contains_key(&nid) { cp_hits += 1; } else { cp_misses += 1; }
+        }
         flatten_face_cp(face, &node_cp_map, data, scale_factor, &mut edges);
     }
+    eprintln!("[scanline] {} faces, {} nodes ({} CP hits, {} misses), {} winding edges",
+        faces.iter().filter(|f| f.color != VOID_COLOR).count(), total_nodes, cp_hits, cp_misses, edges.len());
 
     // Phase 3: Build row index
     let mut row_count = vec![0u32; out_h];
