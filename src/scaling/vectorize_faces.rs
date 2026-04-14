@@ -348,10 +348,7 @@ pub fn build_scan_edges(
             let cur_pt = beval(pp, pos, np, t, scale_factor);
 
             let dy = cur_pt.1 - prev_pt.1;
-            let dx = cur_pt.0 - prev_pt.0;
-            // Skip near-horizontal segments: they barely cross scanlines
-            // and their extreme dx_per_dy produces wrong x-positions.
-            if dy.abs() > 1e-6 && dy.abs() > dx.abs() * 0.01 {
+            if dy.abs() > 1e-6 {
                 let (ymin, ymax, x_at_ymin) = if prev_pt.1 < cur_pt.1 {
                     (prev_pt.1, cur_pt.1, prev_pt.0)
                 } else {
