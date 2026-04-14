@@ -186,6 +186,8 @@ fn rasterize_scanline_data(
         .ok()
         .and_then(|s| s.parse().ok());
 
+    let inv_scale = 1.0 / scale_factor;
+
     let process_rows = |chunk: &mut [u32], start_row: usize| {
         let chunk_rows = chunk.len() / out_w;
         let mut row_edges_buf: Vec<(f32, u32)> = Vec::new();
@@ -224,20 +226,63 @@ fn rasterize_scanline_data(
                 }
             }
 
-            // Sweep left-to-right: at each edge crossing, adopt screen_right.
+            // Sweep left-to-right with analytical AA.
+            // At each edge crossing within a pixel, blend between screen_left
+            // and screen_right based on the sub-pixel crossing position.
             let mut edge_cursor = 0;
             let mut current_color = pack_color(bg);
 
             for opx in 0..out_w {
-                let px_center = opx as f32 + 0.5;
+                let px_left = opx as f32;
+                let px_center = px_left + 0.5;
+                let px_right = px_left + 1.0;
 
-                while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_center {
+                // Advance past edges fully to the left of this pixel
+                while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_left {
                     let ei = row_edges_buf[edge_cursor].1 as usize;
                     current_color = pack_color(edges[ei].screen_right);
                     edge_cursor += 1;
                 }
 
-                row_slice[opx] = current_color;
+                // Check if any edge crosses within this pixel [px_left, px_right)
+                let mut aa_color = current_color;
+                let mut look = edge_cursor;
+                while look < row_edges_buf.len() && row_edges_buf[look].0 < px_right {
+                    let edge_x = row_edges_buf[look].0;
+                    let ei = row_edges_buf[look].1 as usize;
+                    let edge = &edges[ei];
+
+                    // Perpendicular distance from pixel center to edge line.
+                    // Edge tangent direction is (dx_per_dy, 1), normal is
+                    // (-1, dx_per_dy) / sqrt(1 + dx_per_dy²).
+                    let slope = edge.dx_per_dy;
+                    let inv_len = 1.0 / (1.0 + slope * slope).sqrt();
+                    let d = -(px_center - edge_x) * inv_len;
+
+                    // Projected pixel width along the normal (matching reference)
+                    let proj_w = inv_scale * (1.0f32).max(slope.abs()) * inv_len;
+                    let frac = (0.5 + d / proj_w).clamp(0.0, 1.0);
+
+                    let left_c = pack_color(edge.screen_left);
+                    let right_c = pack_color(edge.screen_right);
+
+                    // sRGB blend: frac=1 → fully left (positive normal side),
+                    // frac=0 → fully right (negative normal side)
+                    let decode = |c: u32, shift: u32| -> f32 {
+                        (((c >> shift) & 0xFF) as f32 / 255.0).powf(2.2)
+                    };
+                    let r = (frac * decode(left_c, 16) + (1.0 - frac) * decode(right_c, 16)).powf(1.0 / 2.2);
+                    let g = (frac * decode(left_c, 8) + (1.0 - frac) * decode(right_c, 8)).powf(1.0 / 2.2);
+                    let b = (frac * decode(left_c, 0) + (1.0 - frac) * decode(right_c, 0)).powf(1.0 / 2.2);
+                    aa_color = 0xFF000000
+                        | (((r * 255.0).round().clamp(0.0, 255.0) as u32) << 16)
+                        | (((g * 255.0).round().clamp(0.0, 255.0) as u32) << 8)
+                        | ((b * 255.0).round().clamp(0.0, 255.0) as u32);
+
+                    look += 1;
+                }
+
+                row_slice[opx] = aa_color;
             }
         }
     };
