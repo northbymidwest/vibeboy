@@ -72,18 +72,7 @@ pub fn scale_scanline(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32
 
     let data = vectorize(src, src_w, src_h);
 
-    rasterize_scanline(
-        src,
-        &data.positions,
-        &data.orig_positions,
-        &data.flags,
-        &data.neighbors,
-        data.img_w,
-        data.img_h,
-        out_w,
-        out_h,
-        scale_factor,
-    )
+    rasterize_scanline_data(src, &data, out_w, out_h, scale_factor)
 }
 
 // TODO: Face-tracing scanline rasterizer.
@@ -122,23 +111,146 @@ fn blend_linear_srgb(c0: u32, c1: u32, t: f32) -> u32 {
     0xFF000000 | (ri << 16) | (gi << 8) | bi
 }
 
-fn rasterize_scanline(
+fn rasterize_scanline_data(
     pixels: &[u32],
-    positions: &[f32],
-    orig_positions: &[f32],
-    flags: &[u32],
-    cp_neighbors: &[i32],
-    img_w: usize,
-    img_h: usize,
+    data: &VectorizeData,
     out_w: usize,
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    // Stub: delegate to nearest-curve rasterizer until face-tracing is implemented.
-    rasterize(
-        pixels, positions, orig_positions, flags, cp_neighbors,
-        img_w, img_h, out_w, out_h, scale_factor,
-    )
+    use super::vectorize_faces::{
+        WindingEdge, VOID_COLOR,
+        build_cell_edges, trace_faces, build_node_cp_map, flatten_face_cp,
+    };
+
+    let (img_w, img_h) = (data.img_w, data.img_h);
+
+    // Phase 1: Trace faces using Voronoi cell graph (correct topology)
+    let dir_edges = build_cell_edges(data, pixels);
+    let faces = trace_faces(&dir_edges);
+    let node_cp_map = build_node_cp_map(data);
+
+    // Phase 2: Flatten face boundaries using exact CP chain data
+    let mut edges: Vec<WindingEdge> = Vec::new();
+    for face in &faces {
+        if face.color == VOID_COLOR { continue; }
+        flatten_face_cp(face, &node_cp_map, data, scale_factor, &mut edges);
+    }
+
+    // Phase 3: Build row index
+    let mut row_count = vec![0u32; out_h];
+    for edge in &edges {
+        let r_start = (edge.y_min.floor() as usize).min(out_h.saturating_sub(1));
+        let r_end = (edge.y_max.ceil() as usize).min(out_h);
+        for r in r_start..r_end { row_count[r] += 1; }
+    }
+    let mut row_offsets = vec![0u32; out_h + 1];
+    for r in 0..out_h { row_offsets[r + 1] = row_offsets[r] + row_count[r]; }
+    let total = row_offsets[out_h] as usize;
+    let mut row_data = vec![0u32; total];
+    let mut fill_pos = row_offsets[..out_h].to_vec();
+    for (ei, edge) in edges.iter().enumerate() {
+        let r_start = (edge.y_min.floor() as usize).min(out_h.saturating_sub(1));
+        let r_end = (edge.y_max.ceil() as usize).min(out_h);
+        for r in r_start..r_end {
+            row_data[fill_pos[r] as usize] = ei as u32;
+            fill_pos[r] += 1;
+        }
+    }
+
+    // Detect background color
+    let bg = {
+        let mut counts = std::collections::HashMap::new();
+        for x in 0..img_w {
+            *counts.entry(pixels[x]).or_insert(0usize) += 1;
+            *counts.entry(pixels[(img_h - 1) * img_w + x]).or_insert(0) += 1;
+        }
+        for y in 1..img_h - 1 {
+            *counts.entry(pixels[y * img_w]).or_insert(0) += 1;
+            *counts.entry(pixels[y * img_w + img_w - 1]).or_insert(0) += 1;
+        }
+        counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0)
+    };
+
+    // Collect unique colors for winding map
+    let mut color_set: Vec<u32> = Vec::new();
+    for e in &edges {
+        if !color_set.contains(&e.color) { color_set.push(e.color); }
+    }
+    let num_colors = color_set.len();
+
+    // Phase 4: Winding-rule scanline fill
+    let mut output = vec![pack_color(bg); out_w * out_h];
+
+    let process_rows = |chunk: &mut [u32], start_row: usize| {
+        let chunk_rows = chunk.len() / out_w;
+        let mut winding = vec![0i16; num_colors];
+        let mut row_edges_buf: Vec<(f32, u32)> = Vec::new();
+
+        for local_y in 0..chunk_rows {
+            let opy = start_row + local_y;
+            let row_center = opy as f32 + 0.5;
+            let row_slice = &mut chunk[local_y * out_w..(local_y + 1) * out_w];
+
+            let rd_start = row_offsets[opy] as usize;
+            let rd_end = row_offsets[opy + 1] as usize;
+            if rd_start == rd_end { continue; }
+
+            row_edges_buf.clear();
+            for &ei in &row_data[rd_start..rd_end] {
+                let edge = &edges[ei as usize];
+                let y_clamp = row_center.clamp(edge.y_min, edge.y_max);
+                let x = edge.x_at_ymin + (y_clamp - edge.y_min) * edge.dx_per_dy;
+                row_edges_buf.push((x, ei));
+            }
+            row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for w in winding.iter_mut() { *w = 0; }
+            let mut edge_cursor = 0;
+
+            for opx in 0..out_w {
+                let px_center = opx as f32 + 0.5;
+
+                while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_center {
+                    let ei = row_edges_buf[edge_cursor].1 as usize;
+                    let edge = &edges[ei];
+                    if let Some(ci) = color_set.iter().position(|&c| c == edge.color) {
+                        winding[ci] += edge.winding as i16;
+                    }
+                    edge_cursor += 1;
+                }
+
+                // Find color with nonzero winding (last one wins)
+                let mut color = 0u32;
+                for (i, &w) in winding.iter().enumerate() {
+                    if w != 0 { color = color_set[i]; }
+                }
+                if color != 0 {
+                    row_slice[opx] = pack_color(color);
+                }
+            }
+        }
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let rows_per_thread = (out_h + num_threads - 1) / num_threads;
+        std::thread::scope(|scope| {
+            let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
+            let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
+                let start = ci * rows_per_thread;
+                scope.spawn(move || { process_rows(chunk, start); })
+            }).collect();
+            for h in handles { h.join().unwrap(); }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        process_rows(&mut output, 0);
+    }
+
+    output
 }
 
 /// Public entry point: runs all 6 GPU pipeline stages on CPU.

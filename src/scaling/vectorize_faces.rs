@@ -209,9 +209,8 @@ pub fn trace_faces(edges: &[DirEdge]) -> Vec<Face> {
 }
 
 /// Build maps from x4 node -> optimized position and -> sharp flag.
+/// Used by the SVG exporter (which still uses the sharp mask approach).
 /// Multiple CP slots may map to the same node; we take the first one found.
-/// Nodes on the image perimeter are always marked sharp -- boundary chains
-/// terminate against the hard image edge, forming implicit T-junctions.
 pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTreeMap<u64, bool>) {
     let corners_w = data.img_w + 1;
     let num_cps = corners_w * (data.img_h + 1) * 2;
@@ -237,4 +236,183 @@ pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTree
     }
 
     (pos_map, sharp_map)
+}
+
+// ---------------------------------------------------------------------------
+// Scanline rasterizer support: node→CP mapping and face flattening
+// ---------------------------------------------------------------------------
+
+/// Map from x4 node → list of CP indices at that node.
+/// At regular corners there's one CP. At T-junctions/crossings, two.
+pub fn build_node_cp_map(data: &VectorizeData) -> BTreeMap<u64, Vec<usize>> {
+    let corners_w = data.img_w + 1;
+    let num_cps = corners_w * (data.img_h + 1) * 2;
+
+    let mut map: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for ci in 0..num_cps {
+        if data.flags[ci] == 0 { continue; }
+        let x4 = (data.orig_positions[ci * 2] * 4.0).round() as i32;
+        let y4 = (data.orig_positions[ci * 2 + 1] * 4.0).round() as i32;
+        map.entry(pack_node(x4, y4)).or_default().push(ci);
+    }
+    map
+}
+
+/// Convert an x4 vector (from one face node to an adjacent face node)
+/// into the edge direction code (0-3) at the destination grid corner.
+///
+/// The face arrives from the direction of the vector. The edge direction
+/// code represents which edge of the grid corner was crossed:
+///   0=north, 1=east, 2=south, 3=west
+///
+/// Vector pointing east (+x) means the face came from the west → crossed west edge → dir 3.
+/// Returns None if the vector is zero or doesn't map cleanly to a direction.
+fn x4_vector_to_entry_dir(dx4: i32, dy4: i32) -> Option<i32> {
+    if dx4 == 0 && dy4 == 0 { return None; }
+    // The entry direction is the OPPOSITE of the vector direction.
+    // Vector pointing east → came from west → entry edge = west = 3
+    if dx4.abs() >= dy4.abs() {
+        if dx4 > 0 { Some(3) } else { Some(1) } // came from west / east
+    } else {
+        if dy4 > 0 { Some(0) } else { Some(2) } // came from north / south
+    }
+}
+
+/// Same but for exit direction (vector FROM current TO next node).
+/// Vector pointing east → exits via east edge → dir 1.
+fn x4_vector_to_exit_dir(dx4: i32, dy4: i32) -> Option<i32> {
+    if dx4 == 0 && dy4 == 0 { return None; }
+    if dx4.abs() >= dy4.abs() {
+        if dx4 > 0 { Some(1) } else { Some(3) } // exits east / west
+    } else {
+        if dy4 > 0 { Some(2) } else { Some(0) } // exits south / north
+    }
+}
+
+/// Resolve which CP at a T-junction/crossing node matches the face traversal.
+/// Uses exact direction code matching from the face's entry/exit x4 vectors.
+fn resolve_cp_at_node(
+    nid: u64,
+    prev_nid: u64,
+    next_nid: u64,
+    node_cp_map: &BTreeMap<u64, Vec<usize>>,
+    data: &VectorizeData,
+) -> Option<usize> {
+    let cps = node_cp_map.get(&nid)?;
+    if cps.len() == 1 { return Some(cps[0]); }
+
+    // Compute entry/exit edge directions from face node x4 vectors
+    let (cx4, cy4) = unpack_node(nid);
+    let (px4, py4) = unpack_node(prev_nid);
+    let (nx4, ny4) = unpack_node(next_nid);
+
+    let entry_dir = x4_vector_to_entry_dir(cx4 - px4, cy4 - py4);
+    let exit_dir = x4_vector_to_exit_dir(nx4 - cx4, ny4 - cy4);
+
+    // Find CP whose chain directions match. Check both forward and reverse traversal.
+    for &ci in cps {
+        let cp_prev_dir = data.neighbors[ci * 4 + 2]; // prev_dir
+        let cp_next_dir = data.neighbors[ci * 4 + 3]; // next_dir
+
+        // Forward: face enters via prev_dir, exits via next_dir
+        if let (Some(ed), Some(xd)) = (entry_dir, exit_dir) {
+            if cp_prev_dir == ed && cp_next_dir == xd { return Some(ci); }
+        }
+        // Partial match: just entry or just exit
+        if let Some(ed) = entry_dir {
+            if cp_prev_dir == ed { return Some(ci); }
+        }
+        if let Some(xd) = exit_dir {
+            if cp_next_dir == xd { return Some(ci); }
+        }
+    }
+
+    // Fallback: first CP
+    Some(cps[0])
+}
+
+/// A directed line segment for winding-rule scanline fill.
+pub struct WindingEdge {
+    pub x_at_ymin: f32,
+    pub y_min: f32,
+    pub y_max: f32,
+    pub dx_per_dy: f32,
+    pub color: u32,
+    pub winding: i8,
+}
+
+/// Flatten a Voronoi-traced face into directed line segments for scanline fill.
+///
+/// For each node in the face, resolves the corresponding CP using exact
+/// direction matching at T-junctions. Evaluates beval(prev, self, next)
+/// using the chain's actual neighbors for smooth curves everywhere.
+/// Nodes without CPs (diagonal intermediate points) use grid positions.
+pub fn flatten_face_cp(
+    face: &Face,
+    node_cp_map: &BTreeMap<u64, Vec<usize>>,
+    data: &VectorizeData,
+    scale_factor: f32,
+    edges_out: &mut Vec<WindingEdge>,
+) {
+    let n = face.nodes.len();
+    if n < 3 { return; }
+
+    let cp_pos = |ci: usize| -> (f32, f32) {
+        (data.positions[ci * 2], data.positions[ci * 2 + 1])
+    };
+
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n * 4);
+
+    for i in 0..n {
+        let nid = face.nodes[i];
+        let prev_nid = face.nodes[(i + n - 1) % n];
+        let next_nid = face.nodes[(i + 1) % n];
+
+        let ci = resolve_cp_at_node(nid, prev_nid, next_nid, node_cp_map, data);
+
+        if let Some(ci) = ci {
+            let pos = cp_pos(ci);
+            let prev_ci = data.neighbors[ci * 4];
+            let next_ci = data.neighbors[ci * 4 + 1];
+            let pp = if prev_ci >= 0 { cp_pos(prev_ci as usize) } else { pos };
+            let np = if next_ci >= 0 { cp_pos(next_ci as usize) } else { pos };
+
+            // Adaptive subdivision
+            let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
+            let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
+            let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
+            let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+
+            for s in 0..=subdiv {
+                let t = s as f32 / subdiv as f32;
+                let u = 1.0 - t;
+                let x = (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale_factor;
+                let y = (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale_factor;
+                pts.push((x, y));
+            }
+        } else {
+            // No CP (diagonal intermediate point) — straight line
+            let (x4, y4) = unpack_node(nid);
+            pts.push((x4 as f32 / 4.0 * scale_factor, y4 as f32 / 4.0 * scale_factor));
+        }
+    }
+
+    // Convert points to winding edges
+    let color = face.color;
+    let np = pts.len();
+    for i in 0..np {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % np];
+        let dy = y1 - y0;
+        if dy.abs() < 1e-6 { continue; }
+
+        let winding: i8 = if dy > 0.0 { 1 } else { -1 };
+        let (ymin, ymax, x_at_ymin) = if y0 < y1 { (y0, y1, x0) } else { (y1, y0, x1) };
+        let dx_per_dy = (x1 - x0) / dy;
+
+        edges_out.push(WindingEdge {
+            x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
+            color, winding,
+        });
+    }
 }
