@@ -117,7 +117,7 @@ fn rasterize_scanline_data(
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    use super::vectorize_faces::{ScanEdge, build_scan_edges};
+    use super::vectorize_faces::build_scan_edges;
 
     let (img_w, img_h) = (data.img_w, data.img_h);
 
@@ -159,22 +159,18 @@ fn rasterize_scanline_data(
         counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0)
     };
 
-    // Collect unique colors for per-color winding.
-    let mut color_set: Vec<u32> = Vec::new();
-    for e in &edges {
-        if !color_set.contains(&e.color) { color_set.push(e.color); }
-    }
-    let num_colors = color_set.len();
-
-    // Per-color winding fill: process each color independently.
-    // For each pixel, accumulate winding from edges to the left.
-    // Nonzero winding = pixel is inside that color's region.
-    // Last color with nonzero winding wins (painter's algorithm).
+    // Color-sweep fill: sweep left-to-right across each row. At each edge
+    // crossing, transition to the edge's screen-right color. Since vectorized
+    // pixel art tiles the plane (no overlapping regions), this produces the
+    // correct color at every pixel without winding counts.
     let mut output = vec![pack_color(bg); out_w * out_h];
+
+    let trace_row: Option<usize> = std::env::var("SCANLINE_TRACE")
+        .ok()
+        .and_then(|s| s.parse().ok());
 
     let process_rows = |chunk: &mut [u32], start_row: usize| {
         let chunk_rows = chunk.len() / out_w;
-        let mut winding = vec![0i16; num_colors];
         let mut row_edges_buf: Vec<(f32, u32)> = Vec::new();
 
         for local_y in 0..chunk_rows {
@@ -196,32 +192,35 @@ fn rasterize_scanline_data(
             }
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Sweep: accumulate per-color winding independently.
-            for w in winding.iter_mut() { *w = 0; }
+            if trace_row == Some(opy) {
+                let is_tj = |f: u32| if f & super::vectorize_faces::SHARP_MASK != 0 { " [TJ]" } else { "" };
+                let src_name = |s: u8| if s == 0 { "prev" } else { "next" };
+                eprintln!("=== ROW {} ({} edge crossings) ===", opy, row_edges_buf.len());
+                for (x, ei) in &row_edges_buf {
+                    let e = &edges[*ei as usize];
+                    eprintln!("  x={:.1} ci={} ({},{}) flag={:#x}{} pdir={} ndir={} pci={} nci={} src={} L={:#010x} R={:#010x} y=[{:.1}..{:.1}]",
+                        x, e.ci, e.diag_icx, e.diag_icy, e.cp_flag, is_tj(e.cp_flag),
+                        e.diag_prev_dir, e.diag_next_dir,
+                        e.diag_prev_ci, e.diag_next_ci,
+                        src_name(e.diag_color_src),
+                        e.screen_left, e.screen_right, e.y_min, e.y_max);
+                }
+            }
+
+            // Sweep left-to-right: at each edge crossing, adopt screen_right.
             let mut edge_cursor = 0;
+            let mut current_color = pack_color(bg);
 
             for opx in 0..out_w {
                 let px_center = opx as f32 + 0.5;
 
-                // Advance past all edges to the left of this pixel
                 while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_center {
                     let ei = row_edges_buf[edge_cursor].1 as usize;
-                    let edge = &edges[ei];
-                    if let Some(ci) = color_set.iter().position(|&c| c == edge.color) {
-                        winding[ci] += edge.winding as i16;
-                    }
+                    current_color = pack_color(edges[ei].screen_right);
                     edge_cursor += 1;
                 }
 
-                // Find color with nonzero winding (last one wins)
-                let mut found = false;
-                let mut color = 0u32;
-                for (i, w) in winding.iter().enumerate() {
-                    if *w != 0 { color = color_set[i]; found = true; }
-                }
-                if found {
-                    row_slice[opx] = pack_color(color);
-                }
+                row_slice[opx] = current_color;
             }
         }
     };

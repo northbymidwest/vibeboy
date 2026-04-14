@@ -242,17 +242,32 @@ pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTree
 // Scanline rasterizer: per-CP winding edge construction
 // ---------------------------------------------------------------------------
 
-/// A directed line segment for winding-rule scanline fill.
-/// Each edge belongs to ONE color region and has a winding direction.
+/// A boundary edge for scanline color-sweep fill.
+/// Each edge separates two color regions. When a scanline crosses this edge
+/// from left to right, the active color transitions from `screen_left` to
+/// `screen_right`.
 pub struct ScanEdge {
     pub x_at_ymin: f32,
     pub y_min: f32,
     pub y_max: f32,
     pub dx_per_dy: f32,
-    /// The color region this edge bounds.
-    pub color: u32,
-    /// Winding direction: +1 or -1.
-    pub winding: i8,
+    /// Color on the screen-right side of this edge.
+    pub screen_right: u32,
+    /// Color on the screen-left side of this edge.
+    pub screen_left: u32,
+    /// Source CP index (for diagnostics).
+    pub ci: usize,
+    /// CP flag bits (for identifying T-junctions).
+    pub cp_flag: u32,
+    /// Grid corner + direction info (diagnostics).
+    pub diag_icx: i32,
+    pub diag_icy: i32,
+    pub diag_prev_dir: i32,
+    pub diag_next_dir: i32,
+    pub diag_prev_ci: i32,
+    pub diag_next_ci: i32,
+    /// Which color source was used: 0=prev, 1=next
+    pub diag_color_src: u8,
 }
 
 /// Build scan edges directly from the CP chain data.
@@ -313,19 +328,26 @@ pub fn build_scan_edges(
         let icy = (ci / 2 / corners_w) as i32;
 
         // Color resolution matching cell_rasterizer.slang resolve_color():
-        // - next_dir: colors are SWAPPED (color_left = nr, color_right = nl)
-        // - prev_dir: colors are NOT swapped (color_left = pl, color_right = pr)
-        let (resolve_left, resolve_right) = if next_dir >= 0 {
-            let (l, r) = get_edge_colors(icx, icy, next_dir);
-            (r, l) // swap for next_dir
-        } else if prev_dir >= 0 {
-            get_edge_colors(icx, icy, prev_dir) // no swap for prev_dir
-        } else {
-            continue;
-        };
-        if resolve_left == resolve_right { continue; }
+        // The GPU rasterizer picks colors based on t along the span:
+        //   t < 0.5 → prev_dir colors (left=pl, right=pr), ref_t=0.0
+        //   t >= 0.5 → next_dir colors (left=nr, right=nl SWAPPED), ref_t=1.0
+        // With fallback to the other direction if the preferred one is invalid.
+        //
+        // Chain endpoints (prev_ci < 0 or next_ci < 0) use only the valid side.
+        let prev_colors = if prev_dir >= 0 {
+            let (pl, pr) = get_edge_colors(icx, icy, prev_dir);
+            if pl != pr { Some((pl, pr)) } else { None }
+        } else { None };
+        let next_colors = if next_dir >= 0 {
+            let (nl, nr) = get_edge_colors(icx, icy, next_dir);
+            if nl != nr { Some((nr, nl)) } else { None } // swap for next_dir
+        } else { None };
 
-        // B-spline triplets — optimized AND original positions.
+        if prev_colors.is_none() && next_colors.is_none() { continue; }
+
+        // B-spline triplets — matching GPU cell_rasterizer.slang exactly:
+        //   pp = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
+        //   np = (next_ci >= 0) ? read_pos(next_ci) : cp;
         let pos = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
         let pp = if prev_ci >= 0 {
             (data.positions[prev_ci as usize * 2], data.positions[prev_ci as usize * 2 + 1])
@@ -346,15 +368,46 @@ pub fn build_scan_edges(
         let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
         let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
         let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
-        let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+        let mut subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
+        // When prev and next colors differ, force subdiv >= 2 so each half
+        // gets the correct color source via the t=0.5 split.
+        if prev_colors.is_some() && next_colors.is_some()
+            && prev_colors != next_colors
+            && subdiv < 2
+        {
+            subdiv = 2;
+        }
 
         let mut prev_pt = beval(pp, pos, np, 0.0, scale_factor);
 
         for s in 1..=subdiv {
             let t = s as f32 / subdiv as f32;
+            let t_prev = (s - 1) as f32 / subdiv as f32;
             let cur_pt = beval(pp, pos, np, t, scale_factor);
 
             let dy = cur_pt.1 - prev_pt.1;
+            let mid_t = (t_prev + t) * 0.5;
+
+            // For T-junction/crossing CPs, clip segments that overshoot
+            // past the junction point — matching the GPU's dot-product
+            // clipping in resolve_color for chain endpoints.
+            if dy.abs() > 1e-6 && flag & SHARP_MASK != 0 {
+                let u = 1.0 - mid_t;
+                let curve_x = 0.5 * u * u * pp.0 + (u * mid_t + 0.5) * pos.0 + 0.5 * mid_t * mid_t * np.0;
+                let curve_y = 0.5 * u * u * pp.1 + (u * mid_t + 0.5) * pos.1 + 0.5 * mid_t * mid_t * np.1;
+                let (toward_x, toward_y) = if mid_t < 0.5 {
+                    (pp.0 - pos.0, pp.1 - pos.1)
+                } else {
+                    (np.0 - pos.0, np.1 - pos.1)
+                };
+                let offset_x = curve_x - pos.0;
+                let offset_y = curve_y - pos.1;
+                if toward_x * offset_x + toward_y * offset_y < 0.0 {
+                    prev_pt = cur_pt;
+                    continue;
+                }
+            }
+
             if dy.abs() > 1e-6 {
                 let (ymin, ymax, x_at_ymin) = if prev_pt.1 < cur_pt.1 {
                     (prev_pt.1, cur_pt.1, prev_pt.0)
@@ -363,25 +416,46 @@ pub fn build_scan_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // Emit two winding edges: one per color.
-                // Winding direction based on dy and normals_agree check.
-                let mid_t = (s as f32 - 0.5) / subdiv as f32;
+                // Color resolution matching GPU resolve_color() exactly:
+                // - Chain start (prev_ci < 0): next_dir colors, ref_t=1.0
+                // - Chain end (next_ci < 0): prev_dir colors, ref_t=0.0
+                // - Both present, t < 0.5: prefer prev_dir, fallback next_dir
+                // - Both present, t >= 0.5: prefer next_dir, fallback prev_dir
+                let (resolve_left, resolve_right, ref_t, color_src) = if prev_ci < 0 {
+                    let c = next_colors.unwrap_or_else(|| prev_colors.unwrap());
+                    (c.0, c.1, 1.0f32, 1u8)
+                } else if next_ci < 0 {
+                    let c = prev_colors.unwrap_or_else(|| next_colors.unwrap());
+                    (c.0, c.1, 0.0f32, 0u8)
+                } else if mid_t < 0.5 {
+                    if let Some(c) = prev_colors { (c.0, c.1, 0.0f32, 0u8) }
+                    else { let c = next_colors.unwrap(); (c.0, c.1, 1.0, 1) }
+                } else {
+                    if let Some(c) = next_colors { (c.0, c.1, 1.0f32, 1u8) }
+                    else { let c = prev_colors.unwrap(); (c.0, c.1, 0.0, 0) }
+                };
+
+                // Screen-side determination matching GPU resolve_color():
+                // orig tangent at ref_t, opt tangent at actual t.
                 let opt_tan = beval_deriv(pp, pos, np, mid_t);
-                let orig_tan = beval_deriv(orig_pp, orig_pos, orig_np, mid_t);
+                let orig_tan = beval_deriv(orig_pp, orig_pos, orig_np, ref_t);
                 let normals_agree = opt_tan.0 * orig_tan.0 + opt_tan.1 * orig_tan.1 > 0.0;
 
-                // Base winding for resolve_right: +1 for downward, -1 for upward.
-                // Flip if normals disagree (optimization reversed the tangent).
-                let mut wr: i8 = if dy > 0.0 { 1 } else { -1 };
-                if !normals_agree { wr = -wr; }
+                let (screen_right, screen_left) =
+                    if (dy > 0.0) == normals_agree {
+                        (resolve_right, resolve_left)
+                    } else {
+                        (resolve_left, resolve_right)
+                    };
 
                 edges.push(ScanEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: resolve_right, winding: wr,
-                });
-                edges.push(ScanEdge {
-                    x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: resolve_left, winding: -wr,
+                    screen_right, screen_left,
+                    ci, cp_flag: flag,
+                    diag_icx: icx, diag_icy: icy,
+                    diag_prev_dir: prev_dir, diag_next_dir: next_dir,
+                    diag_prev_ci: prev_ci, diag_next_ci: next_ci,
+                    diag_color_src: color_src,
                 });
             }
 
