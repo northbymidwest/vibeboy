@@ -90,7 +90,6 @@ pub fn scale_scanline(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32
 // polygon with guaranteed-consistent winding.
 
 /// Blend two sRGB-packed colors in linear light. `t` is the weight of `c0`.
-#[allow(dead_code)]
 #[inline(always)]
 fn blend_linear_srgb(c0: u32, c1: u32, t: f32) -> u32 {
     let r0 = (((c0 >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
@@ -199,15 +198,32 @@ fn rasterize_scanline_data(
             for &(edge_x, ei) in &row_edges_buf {
                 let edge = &edges[ei as usize];
 
-                // Fill from fill_x to this edge with current_color
-                let edge_px = ((edge_x as i32).max(0) as usize).min(out_w);
+                // Fill solid current_color up to 1 pixel before the edge
+                let aa_start = ((edge_x - 0.5).floor() as i32).max(0) as usize;
+                let aa_start = aa_start.min(out_w);
                 let cc = pack_color(current_color);
-                for opx in fill_x..edge_px {
+                for opx in fill_x..aa_start {
                     row_slice[opx] = cc;
                 }
-                fill_x = edge_px;
 
-                // Transition to right_color
+                // AA blend over ~1 pixel at the edge crossing
+                let aa_end = ((edge_x + 0.5).ceil() as i32).max(0) as usize;
+                let aa_end = aa_end.min(out_w);
+                for opx in aa_start..aa_end {
+                    let px_center = opx as f32 + 0.5;
+                    let frac = (0.5 + (px_center - edge_x)).clamp(0.0, 1.0);
+                    if frac < 0.001 {
+                        row_slice[opx] = pack_color(current_color);
+                    } else if frac > 0.999 {
+                        row_slice[opx] = pack_color(edge.right_color);
+                    } else {
+                        row_slice[opx] = blend_linear_srgb(
+                            edge.right_color, current_color, frac,
+                        );
+                    }
+                }
+                fill_x = aa_end;
+
                 current_color = edge.right_color;
             }
 
