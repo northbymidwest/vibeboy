@@ -242,35 +242,37 @@ pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTree
 // Scanline rasterizer: per-CP winding edge construction
 // ---------------------------------------------------------------------------
 
-/// A directed line segment for winding-rule scanline fill.
-pub struct WindingEdge {
+/// A directed line segment for scanline fill.
+/// Each edge is a color transition: pixels to the left have `left_color`,
+/// pixels to the right have `right_color`.
+pub struct ScanEdge {
     pub x_at_ymin: f32,
     pub y_min: f32,
     pub y_max: f32,
     pub dx_per_dy: f32,
-    pub color: u32,
-    pub winding: i8,
+    /// Color on the left (screen-left) side of this edge.
+    pub left_color: u32,
+    /// Color on the right (screen-right) side of this edge.
+    pub right_color: u32,
 }
 
-/// Build winding edges directly from the CP chain data.
+/// Build scan edges directly from the CP chain data.
 ///
 /// Each active CP defines a B-spline span using the same (pp, pos, np) triplet
 /// as the existing nearest-curve rasterizer, with the same degenerate fallback
 /// for chain endpoints (missing neighbor → use self).
 ///
-/// Each CP's span separates two colors (from get_edge_colors). color_right is
-/// always the CW (right) side of the chain exit direction. The span is flattened
-/// into line segments and two winding edges are emitted per segment: one for
-/// color_right (+1 if downward, -1 if upward) and one for color_left (opposite).
+/// Color resolution matches cell_rasterizer.slang resolve_color():
+/// - For next_dir: colors are SWAPPED (left=nr, right=nl from get_edge_colors)
+/// - For prev_dir: colors are NOT swapped (left=pl, right=pr)
 ///
-/// Border edges are added for pixels on the image boundary to close regions
-/// that touch the image edge.
-pub fn build_winding_edges(
+/// For downward segments, left=screen-left, right=screen-right (from tangent
+/// normal analysis). For upward segments, the screen relationship flips.
+pub fn build_scan_edges(
     data: &VectorizeData,
     pixels: &[u32],
     scale_factor: f32,
-    out_h: usize,
-) -> Vec<WindingEdge> {
+) -> Vec<ScanEdge> {
     let corners_w = data.img_w + 1;
     let num_cps = corners_w * (data.img_h + 1) * 2;
     let img_w = data.img_w;
@@ -357,17 +359,19 @@ pub fn build_winding_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // For downward edge: sweep crosses left→right, exiting
-                // resolve_left's region and entering resolve_right's.
-                let wr: i8 = if dy > 0.0 { 1 } else { -1 };
+                // resolve_left/resolve_right are from the cell rasterizer's
+                // tangent-normal convention: for a downward edge, resolve_left
+                // is screen-left. For upward, it's screen-right. Normalize
+                // so ScanEdge.left_color is always screen-left.
+                let (lc, rc) = if dy > 0.0 {
+                    (resolve_left, resolve_right)
+                } else {
+                    (resolve_right, resolve_left) // upward: flip screen sides
+                };
 
-                edges.push(WindingEdge {
+                edges.push(ScanEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: resolve_right, winding: wr,
-                });
-                edges.push(WindingEdge {
-                    x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: resolve_left, winding: -wr,
+                    left_color: lc, right_color: rc,
                 });
             }
 
@@ -375,30 +379,8 @@ pub fn build_winding_edges(
         }
     }
 
-    // Border edges: close regions touching image boundaries.
-    let out_w_f = img_w as f32 * scale_factor;
-    for py in 0..img_h {
-        let y0 = py as f32 * scale_factor;
-        let y1 = (py + 1) as f32 * scale_factor;
-
-        // Left border (x=0): downward edge at left boundary.
-        // This is a vertical boundary at x=0. The pixel at column 0 is to the
-        // RIGHT of this edge (CW side for a downward edge) → enters that color.
-        // Left border (x=0): downward edge. Left-column pixel is to the
-        // screen-right of this edge → it enters (+1).
-        let lc = get_px_color(0, py as i32);
-        edges.push(WindingEdge {
-            x_at_ymin: 0.0, y_min: y0, y_max: y1, dx_per_dy: 0.0,
-            color: lc, winding: 1,
-        });
-        // Right border (x=out_w): right-column pixel is to the screen-left
-        // of this edge → it exits (-1).
-        let rc = get_px_color(img_w as i32 - 1, py as i32);
-        edges.push(WindingEdge {
-            x_at_ymin: out_w_f, y_min: y0, y_max: y1, dx_per_dy: 0.0,
-            color: rc, winding: -1,
-        });
-    }
+    // No border edges needed — the sweep starts with background color
+    // and interior edges provide all color transitions.
 
     edges
 }

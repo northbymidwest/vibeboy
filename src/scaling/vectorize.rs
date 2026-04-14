@@ -118,18 +118,14 @@ fn rasterize_scanline_data(
     out_h: usize,
     scale_factor: f32,
 ) -> Vec<u32> {
-    use super::vectorize_faces::{WindingEdge, build_winding_edges};
+    use super::vectorize_faces::{ScanEdge, build_scan_edges};
 
     let (img_w, img_h) = (data.img_w, data.img_h);
 
-    // Build winding edges directly from CP chains — no face tracing needed.
-    let edges = build_winding_edges(data, pixels, scale_factor, out_h);
-    let extreme = edges.iter().filter(|e| e.dx_per_dy.abs() > 100.0).count();
-    let tiny_dy = edges.iter().filter(|e| (e.y_max - e.y_min) < 0.5).count();
-    eprintln!("[scanline] {}x{}: {} winding edges, {} extreme slope, {} tiny dy",
-        img_w, img_h, edges.len(), extreme, tiny_dy);
+    // Build scan edges from CP chains.
+    let edges = build_scan_edges(data, pixels, scale_factor);
 
-    // Phase 3: Build row index
+    // Build row index
     let mut row_count = vec![0u32; out_h];
     for edge in &edges {
         let r_start = (edge.y_min.floor() as usize).min(out_h.saturating_sub(1));
@@ -150,7 +146,7 @@ fn rasterize_scanline_data(
         }
     }
 
-    // Detect background color
+    // Detect background color from border pixels
     let bg = {
         let mut counts = std::collections::HashMap::new();
         for x in 0..img_w {
@@ -164,19 +160,12 @@ fn rasterize_scanline_data(
         counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0)
     };
 
-    // Collect unique colors for winding map
-    let mut color_set: Vec<u32> = Vec::new();
-    for e in &edges {
-        if !color_set.contains(&e.color) { color_set.push(e.color); }
-    }
-    let num_colors = color_set.len();
-
-    // Phase 4: Winding-rule scanline fill
+    // Sweep fill: each edge is a color transition (left→right).
+    // Track current_color as we sweep left to right.
     let mut output = vec![pack_color(bg); out_w * out_h];
 
     let process_rows = |chunk: &mut [u32], start_row: usize| {
         let chunk_rows = chunk.len() / out_w;
-        let mut winding = vec![0i16; num_colors];
         let mut row_edges_buf: Vec<(f32, u32)> = Vec::new();
 
         for local_y in 0..chunk_rows {
@@ -191,38 +180,41 @@ fn rasterize_scanline_data(
             row_edges_buf.clear();
             for &ei in &row_data[rd_start..rd_end] {
                 let edge = &edges[ei as usize];
-                // Only include edges that actually span the row center.
-                // The row index (floor/ceil) is coarse; this is the precise check.
                 if row_center < edge.y_min || row_center >= edge.y_max { continue; }
                 let x = edge.x_at_ymin + (row_center - edge.y_min) * edge.dx_per_dy;
                 row_edges_buf.push((x, ei));
             }
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-            for w in winding.iter_mut() { *w = 0; }
+            // Sweep: track current_color, update at each edge crossing.
+            // Start with the left_color of the first edge (or background).
+            let mut current_color = if !row_edges_buf.is_empty() {
+                edges[row_edges_buf[0].1 as usize].left_color
+            } else {
+                continue;
+            };
             let mut edge_cursor = 0;
+            let mut fill_x = 0usize;
 
-            for opx in 0..out_w {
-                let px_center = opx as f32 + 0.5;
+            for &(edge_x, ei) in &row_edges_buf {
+                let edge = &edges[ei as usize];
 
-                while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_center {
-                    let ei = row_edges_buf[edge_cursor].1 as usize;
-                    let edge = &edges[ei];
-                    if let Some(ci) = color_set.iter().position(|&c| c == edge.color) {
-                        winding[ci] += edge.winding as i16;
-                    }
-                    edge_cursor += 1;
+                // Fill from fill_x to this edge with current_color
+                let edge_px = ((edge_x as i32).max(0) as usize).min(out_w);
+                let cc = pack_color(current_color);
+                for opx in fill_x..edge_px {
+                    row_slice[opx] = cc;
                 }
+                fill_x = edge_px;
 
-                // Find color with nonzero winding
-                let mut found = false;
-                let mut color = 0u32;
-                for (i, w) in winding.iter().enumerate() {
-                    if *w != 0 { color = color_set[i]; found = true; }
-                }
-                if found {
-                    row_slice[opx] = pack_color(color);
-                }
+                // Transition to right_color
+                current_color = edge.right_color;
+            }
+
+            // Fill remaining pixels after last edge
+            let cc = pack_color(current_color);
+            for opx in fill_x..out_w {
+                row_slice[opx] = cc;
             }
         }
     };
