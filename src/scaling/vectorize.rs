@@ -185,10 +185,16 @@ fn rasterize_scanline_data(
             }
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
+            let trace_row = opy == 60; // debug: trace row 60 for Mario 8x
+
             // Sweep: track current_color, update at each edge crossing.
             // Start with the left_color of the first edge (or background).
             let mut current_color = if !row_edges_buf.is_empty() {
-                edges[row_edges_buf[0].1 as usize].left_color
+                let first_lc = edges[row_edges_buf[0].1 as usize].left_color;
+                if trace_row {
+                    eprintln!("[trace row {}] {} edges, start color=0x{:08X}", opy, row_edges_buf.len(), first_lc);
+                }
+                first_lc
             } else {
                 continue;
             };
@@ -197,6 +203,21 @@ fn rasterize_scanline_data(
 
             for &(edge_x, ei) in &row_edges_buf {
                 let edge = &edges[ei as usize];
+
+                // If current_color doesn't match this edge's left_color,
+                // a near-horizontal boundary was missed. Transition now.
+                if current_color != edge.left_color {
+                    // Find the midpoint between the last edge and this one
+                    // for the implicit transition.
+                    let mid_x = (fill_x as f32 + edge_x) * 0.5;
+                    let mid_px = ((mid_x as i32).max(0) as usize).min(out_w);
+                    let cc = pack_color(current_color);
+                    for opx in fill_x..mid_px {
+                        row_slice[opx] = cc;
+                    }
+                    fill_x = mid_px;
+                    current_color = edge.left_color;
+                }
 
                 // Fill solid current_color up to 1 pixel before the edge
                 let aa_start = ((edge_x - 0.5).floor() as i32).max(0) as usize;
@@ -224,6 +245,10 @@ fn rasterize_scanline_data(
                 }
                 fill_x = aa_end;
 
+                if trace_row {
+                    eprintln!("  edge x={:.2}: 0x{:08X} → 0x{:08X}",
+                        edge_x, edge.left_color, edge.right_color);
+                }
                 current_color = edge.right_color;
             }
 
