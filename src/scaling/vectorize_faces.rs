@@ -361,7 +361,21 @@ pub fn flatten_face_cp(
         (data.positions[ci * 2], data.positions[ci * 2 + 1])
     };
 
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n * 4);
+    // For each face node, resolve CP and compute span start/end points.
+    // A CP's B-spline span goes from midpoint(chain_prev, self) to midpoint(self, chain_next).
+    // With degenerate fallback: missing neighbor → use self, so span starts/ends at self.
+    struct NodeSpan {
+        ci: Option<usize>,
+        /// B-spline control points (pp, pos, np) — only valid if ci.is_some()
+        pp: (f32, f32),
+        pos: (f32, f32),
+        np: (f32, f32),
+        /// Span start: midpoint(pp, pos). Span end: midpoint(pos, np).
+        span_start: (f32, f32),
+        span_end: (f32, f32),
+    }
+
+    let mut spans: Vec<NodeSpan> = Vec::with_capacity(n);
 
     for i in 0..n {
         let nid = face.nodes[i];
@@ -371,31 +385,67 @@ pub fn flatten_face_cp(
         let ci = resolve_cp_at_node(nid, prev_nid, next_nid, node_cp_map, data);
 
         if let Some(ci) = ci {
-            // Evaluate beval(pp, pos, np) with degenerate fallback — same as
-            // the existing nearest-curve rasterizer (vectorize.rs line 1819).
             let pos = cp_pos(ci);
             let prev_ci = data.neighbors[ci * 4];
             let next_ci = data.neighbors[ci * 4 + 1];
             let pp = if prev_ci >= 0 { cp_pos(prev_ci as usize) } else { pos };
             let np = if next_ci >= 0 { cp_pos(next_ci as usize) } else { pos };
 
-            // Adaptive subdivision
-            let chord_mid_x = (pp.0 + np.0) * 0.25 + pos.0 * 0.5;
-            let chord_mid_y = (pp.1 + np.1) * 0.25 + pos.1 * 0.5;
-            let dev = ((pos.0 - chord_mid_x).powi(2) + (pos.1 - chord_mid_y).powi(2)).sqrt();
+            let span_start = ((pp.0 + pos.0) * 0.5, (pp.1 + pos.1) * 0.5);
+            let span_end = ((pos.0 + np.0) * 0.5, (pos.1 + np.1) * 0.5);
+
+            spans.push(NodeSpan { ci: Some(ci), pp, pos, np, span_start, span_end });
+        } else {
+            let (x4, y4) = unpack_node(nid);
+            let gp = (x4 as f32 / 4.0, y4 as f32 / 4.0);
+            spans.push(NodeSpan {
+                ci: None, pp: gp, pos: gp, np: gp,
+                span_start: gp, span_end: gp,
+            });
+        }
+    }
+
+    // Build the face boundary by emitting spans with connecting segments.
+    // For each node: connect from previous endpoint → this span_start (if gap),
+    // then emit the B-spline span from span_start to span_end.
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n * 6);
+
+    let beval_scaled = |pp: (f32, f32), pos: (f32, f32), np: (f32, f32), t: f32| -> (f32, f32) {
+        let u = 1.0 - t;
+        (
+            (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale_factor,
+            (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale_factor,
+        )
+    };
+
+    for i in 0..n {
+        let span = &spans[i];
+        let prev_span = &spans[(i + n - 1) % n];
+
+        // Connect from previous span's endpoint to this span's start.
+        // If they match (chain-consecutive CPs), this is a zero-length segment (harmless).
+        // If they don't match (T-junction, grid node transition), this adds a straight line.
+        let prev_end = (prev_span.span_end.0 * scale_factor, prev_span.span_end.1 * scale_factor);
+        let this_start = (span.span_start.0 * scale_factor, span.span_start.1 * scale_factor);
+        let gap = (prev_end.0 - this_start.0).abs() + (prev_end.1 - this_start.1).abs();
+        if gap > 1e-4 {
+            // Straight line connecting the gap (T-junction corner or grid node)
+            pts.push(this_start);
+        }
+
+        // Emit the B-spline span
+        if span.ci.is_some() {
+            let chord_mid_x = (span.pp.0 + span.np.0) * 0.25 + span.pos.0 * 0.5;
+            let chord_mid_y = (span.pp.1 + span.np.1) * 0.25 + span.pos.1 * 0.5;
+            let dev = ((span.pos.0 - chord_mid_x).powi(2) + (span.pos.1 - chord_mid_y).powi(2)).sqrt();
             let subdiv = (dev * scale_factor * 2.0).ceil().clamp(1.0, 16.0) as usize;
 
             for s in 0..=subdiv {
                 let t = s as f32 / subdiv as f32;
-                let u = 1.0 - t;
-                let x = (0.5 * u * u * pp.0 + (u * t + 0.5) * pos.0 + 0.5 * t * t * np.0) * scale_factor;
-                let y = (0.5 * u * u * pp.1 + (u * t + 0.5) * pos.1 + 0.5 * t * t * np.1) * scale_factor;
-                pts.push((x, y));
+                pts.push(beval_scaled(span.pp, span.pos, span.np, t));
             }
         } else {
-            // No CP at this node (diagonal intermediate) — grid position
-            let (x4, y4) = unpack_node(nid);
-            pts.push((x4 as f32 / 4.0 * scale_factor, y4 as f32 / 4.0 * scale_factor));
+            pts.push((span.pos.0 * scale_factor, span.pos.1 * scale_factor));
         }
     }
 
