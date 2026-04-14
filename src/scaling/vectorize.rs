@@ -159,12 +159,22 @@ fn rasterize_scanline_data(
         counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0)
     };
 
-    // Sweep fill: each edge is a color transition (left→right).
-    // Track current_color as we sweep left to right.
+    // Collect unique colors for per-color winding.
+    let mut color_set: Vec<u32> = Vec::new();
+    for e in &edges {
+        if !color_set.contains(&e.color) { color_set.push(e.color); }
+    }
+    let num_colors = color_set.len();
+
+    // Per-color winding fill: process each color independently.
+    // For each pixel, accumulate winding from edges to the left.
+    // Nonzero winding = pixel is inside that color's region.
+    // Last color with nonzero winding wins (painter's algorithm).
     let mut output = vec![pack_color(bg); out_w * out_h];
 
     let process_rows = |chunk: &mut [u32], start_row: usize| {
         let chunk_rows = chunk.len() / out_w;
+        let mut winding = vec![0i16; num_colors];
         let mut row_edges_buf: Vec<(f32, u32)> = Vec::new();
 
         for local_y in 0..chunk_rows {
@@ -176,6 +186,7 @@ fn rasterize_scanline_data(
             let rd_end = row_offsets[opy + 1] as usize;
             if rd_start == rd_end { continue; }
 
+            // Collect and sort edges by x
             row_edges_buf.clear();
             for &ei in &row_data[rd_start..rd_end] {
                 let edge = &edges[ei as usize];
@@ -185,77 +196,32 @@ fn rasterize_scanline_data(
             }
             row_edges_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-            let trace_row = opy == 60; // debug: trace row 60 for Mario 8x
-
-            // Sweep: track current_color, update at each edge crossing.
-            // Start with the left_color of the first edge (or background).
-            let mut current_color = if !row_edges_buf.is_empty() {
-                let first_lc = edges[row_edges_buf[0].1 as usize].left_color;
-                if trace_row {
-                    eprintln!("[trace row {}] {} edges, start color=0x{:08X}", opy, row_edges_buf.len(), first_lc);
-                }
-                first_lc
-            } else {
-                continue;
-            };
+            // Sweep: accumulate per-color winding independently.
+            for w in winding.iter_mut() { *w = 0; }
             let mut edge_cursor = 0;
-            let mut fill_x = 0usize;
 
-            for &(edge_x, ei) in &row_edges_buf {
-                let edge = &edges[ei as usize];
+            for opx in 0..out_w {
+                let px_center = opx as f32 + 0.5;
 
-                // If current_color doesn't match this edge's left_color,
-                // a near-horizontal boundary was missed. Transition now.
-                if current_color != edge.left_color {
-                    // Find the midpoint between the last edge and this one
-                    // for the implicit transition.
-                    let mid_x = (fill_x as f32 + edge_x) * 0.5;
-                    let mid_px = ((mid_x as i32).max(0) as usize).min(out_w);
-                    let cc = pack_color(current_color);
-                    for opx in fill_x..mid_px {
-                        row_slice[opx] = cc;
+                // Advance past all edges to the left of this pixel
+                while edge_cursor < row_edges_buf.len() && row_edges_buf[edge_cursor].0 < px_center {
+                    let ei = row_edges_buf[edge_cursor].1 as usize;
+                    let edge = &edges[ei];
+                    if let Some(ci) = color_set.iter().position(|&c| c == edge.color) {
+                        winding[ci] += edge.winding as i16;
                     }
-                    fill_x = mid_px;
-                    current_color = edge.left_color;
+                    edge_cursor += 1;
                 }
 
-                // Fill solid current_color up to 1 pixel before the edge
-                let aa_start = ((edge_x - 0.5).floor() as i32).max(0) as usize;
-                let aa_start = aa_start.min(out_w);
-                let cc = pack_color(current_color);
-                for opx in fill_x..aa_start {
-                    row_slice[opx] = cc;
+                // Find color with nonzero winding (last one wins)
+                let mut found = false;
+                let mut color = 0u32;
+                for (i, w) in winding.iter().enumerate() {
+                    if *w != 0 { color = color_set[i]; found = true; }
                 }
-
-                // AA blend over ~1 pixel at the edge crossing
-                let aa_end = ((edge_x + 0.5).ceil() as i32).max(0) as usize;
-                let aa_end = aa_end.min(out_w);
-                for opx in aa_start..aa_end {
-                    let px_center = opx as f32 + 0.5;
-                    let frac = (0.5 + (px_center - edge_x)).clamp(0.0, 1.0);
-                    if frac < 0.001 {
-                        row_slice[opx] = pack_color(current_color);
-                    } else if frac > 0.999 {
-                        row_slice[opx] = pack_color(edge.right_color);
-                    } else {
-                        row_slice[opx] = blend_linear_srgb(
-                            edge.right_color, current_color, frac,
-                        );
-                    }
+                if found {
+                    row_slice[opx] = pack_color(color);
                 }
-                fill_x = aa_end;
-
-                if trace_row {
-                    eprintln!("  edge x={:.2}: 0x{:08X} → 0x{:08X}",
-                        edge_x, edge.left_color, edge.right_color);
-                }
-                current_color = edge.right_color;
-            }
-
-            // Fill remaining pixels after last edge
-            let cc = pack_color(current_color);
-            for opx in fill_x..out_w {
-                row_slice[opx] = cc;
             }
         }
     };

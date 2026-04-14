@@ -242,18 +242,17 @@ pub fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTree
 // Scanline rasterizer: per-CP winding edge construction
 // ---------------------------------------------------------------------------
 
-/// A directed line segment for scanline fill.
-/// Each edge is a color transition: pixels to the left have `left_color`,
-/// pixels to the right have `right_color`.
+/// A directed line segment for winding-rule scanline fill.
+/// Each edge belongs to ONE color region and has a winding direction.
 pub struct ScanEdge {
     pub x_at_ymin: f32,
     pub y_min: f32,
     pub y_max: f32,
     pub dx_per_dy: f32,
-    /// Color on the left (screen-left) side of this edge.
-    pub left_color: u32,
-    /// Color on the right (screen-right) side of this edge.
-    pub right_color: u32,
+    /// The color region this edge bounds.
+    pub color: u32,
+    /// Winding direction: +1 or -1.
+    pub winding: i8,
 }
 
 /// Build scan edges directly from the CP chain data.
@@ -364,28 +363,25 @@ pub fn build_scan_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // Check if optimization flipped the tangent direction.
-                // cell_rasterizer.slang: normals_agree = dot(opt_normal, orig_normal) > 0
-                // When they disagree, swap colors.
+                // Emit two winding edges: one per color.
+                // Winding direction based on dy and normals_agree check.
                 let mid_t = (s as f32 - 0.5) / subdiv as f32;
                 let opt_tan = beval_deriv(pp, pos, np, mid_t);
                 let orig_tan = beval_deriv(orig_pp, orig_pos, orig_np, mid_t);
-                // Normal = (-tan.y, tan.x). dot(opt_n, orig_n) = opt_tan.x*orig_tan.x + opt_tan.y*orig_tan.y
                 let normals_agree = opt_tan.0 * orig_tan.0 + opt_tan.1 * orig_tan.1 > 0.0;
 
-                // For downward edge: resolve_left is screen-left (from tangent normal).
-                // If normals disagree, the tangent flipped → swap colors.
-                let (lc, rc) = if dy > 0.0 {
-                    if normals_agree { (resolve_left, resolve_right) }
-                    else { (resolve_right, resolve_left) }
-                } else {
-                    if normals_agree { (resolve_right, resolve_left) }
-                    else { (resolve_left, resolve_right) }
-                };
+                // Base winding for resolve_right: +1 for downward, -1 for upward.
+                // Flip if normals disagree (optimization reversed the tangent).
+                let mut wr: i8 = if dy > 0.0 { 1 } else { -1 };
+                if !normals_agree { wr = -wr; }
 
                 edges.push(ScanEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    left_color: lc, right_color: rc,
+                    color: resolve_right, winding: wr,
+                });
+                edges.push(ScanEdge {
+                    x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
+                    color: resolve_left, winding: -wr,
                 });
             }
 
