@@ -393,9 +393,6 @@ pub fn build_scan_edges(
         }
     }
 
-    // No border edges needed — the sweep starts with background color
-    // and interior edges provide all color transitions.
-
     edges
 }
 
