@@ -212,11 +212,12 @@ fn rasterize_scanline_data(
                 }
 
                 // Find color with nonzero winding (last one wins)
+                let mut found = false;
                 let mut color = 0u32;
                 for (i, &w) in winding.iter().enumerate() {
-                    if w != 0 { color = color_set[i]; }
+                    if w != 0 { color = color_set[i]; found = true; }
                 }
-                if color != 0 {
+                if found {
                     row_slice[opx] = pack_color(color);
                 }
             }

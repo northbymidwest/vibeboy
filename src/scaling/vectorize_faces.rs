@@ -294,6 +294,9 @@ pub fn build_winding_edges(
     let mut edges = Vec::new();
 
     // For each active CP, flatten its B-spline span into winding edge pairs.
+    // Include CPs with only prev_dir OR only next_dir (T-junction stems,
+    // chain endpoints) — they have degenerate B-spline spans that are still
+    // part of color boundaries.
     for ci in 0..num_cps {
         let flag = data.flags[ci];
         if flag == 0 { continue; }
@@ -302,14 +305,24 @@ pub fn build_winding_edges(
         let next_ci = data.neighbors[ci * 4 + 1];
         if prev_ci < 0 && next_ci < 0 { continue; }
 
+        let prev_dir = data.neighbors[ci * 4 + 2];
         let next_dir = data.neighbors[ci * 4 + 3];
-        if next_dir < 0 { continue; }
 
         let icx = (ci / 2 % corners_w) as i32;
         let icy = (ci / 2 / corners_w) as i32;
 
-        let (color_left, color_right) = get_edge_colors(icx, icy, next_dir);
-        if color_left == color_right { continue; }
+        // Color resolution matching cell_rasterizer.slang resolve_color():
+        // - next_dir: colors are SWAPPED (color_left = nr, color_right = nl)
+        // - prev_dir: colors are NOT swapped (color_left = pl, color_right = pr)
+        let (resolve_left, resolve_right) = if next_dir >= 0 {
+            let (l, r) = get_edge_colors(icx, icy, next_dir);
+            (r, l) // swap for next_dir
+        } else if prev_dir >= 0 {
+            get_edge_colors(icx, icy, prev_dir) // no swap for prev_dir
+        } else {
+            continue;
+        };
+        if resolve_left == resolve_right { continue; }
 
         // B-spline triplet — same as existing rasterizer (vectorize.rs line 1819)
         let pos = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
@@ -341,18 +354,15 @@ pub fn build_winding_edges(
                 };
                 let dx_per_dy = (cur_pt.0 - prev_pt.0) / dy;
 
-                // Winding: for a left-to-right sweep, a downward edge means we
-                // cross from left to right. color_right (CW of chain exit) is on
-                // the screen-right — it EXITS (-1) as we sweep past it.
                 let wr: i8 = if dy > 0.0 { -1 } else { 1 };
 
                 edges.push(WindingEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: color_right, winding: wr,
+                    color: resolve_right, winding: wr,
                 });
                 edges.push(WindingEdge {
                     x_at_ymin, y_min: ymin, y_max: ymax, dx_per_dy,
-                    color: color_left, winding: -wr,
+                    color: resolve_left, winding: -wr,
                 });
             }
 
