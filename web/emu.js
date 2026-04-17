@@ -167,7 +167,7 @@ function populateFilterDropdown() {
     const opt = document.createElement('option');
     opt.value = f.cli_name;
     opt.textContent = f.display_name;
-    if (f.cli_name === 'vectorize-gpu') opt.selected = true;
+    if (f.cli_name === 'vectorize') opt.selected = true;
     if (f.group === 'main') {
       filterSelect.appendChild(opt);
     } else {
