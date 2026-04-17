@@ -1759,11 +1759,6 @@ fn rasterize(
             let (color_left, color_right, ref_t);
 
             if sc.prev_ci < 0 {
-                let toward = (sc.next_pos.0 - sc.pos.0, sc.next_pos.1 - sc.pos.1);
-                let dp = (pt.0 - sc.pos.0) * toward.0 + (pt.1 - sc.pos.1) * toward.1;
-                if dp < 0.0 {
-                    return None;
-                }
                 if next_valid {
                     color_left = nr;
                     color_right = nl;
@@ -1772,11 +1767,6 @@ fn rasterize(
                     return None;
                 }
             } else if sc.next_ci < 0 {
-                let toward = (sc.prev_pos.0 - sc.pos.0, sc.prev_pos.1 - sc.pos.1);
-                let dp = (pt.0 - sc.pos.0) * toward.0 + (pt.1 - sc.pos.1) * toward.1;
-                if dp < 0.0 {
-                    return None;
-                }
                 if prev_valid {
                     color_left = pl;
                     color_right = pr;

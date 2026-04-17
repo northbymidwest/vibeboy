@@ -140,13 +140,9 @@ bool resolve_color(float2 pt, SlimCP sc, ResolveData rd, float t, out uint out_c
     bool next_valid = (nl != nr);
 
     if (rd.prev_ci < 0) {
-        float2 toward = sc.next_pos - sc.pos;
-        if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
         else return false;
     } else if (rd.next_ci < 0) {
-        float2 toward = sc.prev_pos - sc.pos;
-        if (dot(pt - sc.pos, toward) < 0.0) return false;
         if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
         else return false;
     } else if (t < 0.5) {
