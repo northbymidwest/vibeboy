@@ -75,8 +75,7 @@ enum Command {
         /// Output file path (.svg for vector, .png for raster)
         #[arg(long, default_value = "output.svg")]
         out: String,
-        /// Vectorize filter: vectorize (default), vectorize-diffusion, vectorize-spline-diffusion,
-        /// vectorize-gpu (uses CPU fallback), vectorize-legacy, edge, gpu-full
+        /// Vectorize filter: vectorize (default), gpu-full
         #[arg(long, default_value = "vectorize")]
         filter: String,
         /// Scale factor for raster output (default 4)

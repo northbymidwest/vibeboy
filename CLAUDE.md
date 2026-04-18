@@ -295,7 +295,7 @@ python3 scripts/generate_icon.py
 
 #### `scripts/vectorize_comparison.sh` -- Vectorize Comparison Test Suite
 
-Downloads all 54 input sprites and the paper's 8x results from the Kopf-Lischinski supplementary page, then runs our scanline and spline-diffusion rasterizers (CPU and GPU) on each for side-by-side comparison. Generates an HTML page.
+Downloads all 54 input sprites and the paper's 8x results from the Kopf-Lischinski supplementary page, then runs our CPU and GPU vectorizers on each for side-by-side comparison. Generates an HTML page.
 
 ```bash
 ./scripts/vectorize_comparison.sh          # skip existing outputs
