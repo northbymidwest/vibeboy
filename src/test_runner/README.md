@@ -67,19 +67,17 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 600 
 
 ### Vectorize Command
 
-Vectorize a standalone PNG image. Uses `--filter` to select the pipeline variant and `--cpu-filter` to force CPU-only rendering.
-
-Supported filters: `vectorize` (default), `gpu-full`, `raster`.
+Vectorize a standalone PNG image. Uses `--gpu` to run the full GPU pipeline (falls back to CPU if unavailable) and `--cpu-filter` to force CPU-only rendering.
 
 ```bash
 # Vectorize to SVG
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
 
 # Vectorize at 8x scale (GPU pipeline with CPU fallback)
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8 --gpu
 
 # Force CPU-only (no GPU shaders)
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 4 --cpu-filter
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8 --cpu-filter
 ```
 
 ### Audio Dump

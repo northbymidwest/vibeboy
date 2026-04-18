@@ -69,8 +69,8 @@ cargo run --release --bin test_runner -- screenshot path/to/rom.gb --frames 300 
 
 # Vectorize a standalone PNG image
 cargo run --release --bin test_runner -- vectorize input.png --out output.svg
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8
-cargo run --release --bin test_runner -- vectorize input.png --out output.png --filter vectorize --scale 8 --cpu-filter
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8 --gpu
+cargo run --release --bin test_runner -- vectorize input.png --out output.png --scale 8 --cpu-filter
 
 # Force a specific model
 cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye-test-suite/acceptance/ --model dmg
