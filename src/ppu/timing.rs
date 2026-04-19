@@ -75,7 +75,7 @@ impl Ppu {
                 // DMG scan starts at dot 4 (after line-start offset); CGB at dot 4.
                 // Each entry takes 2T, so entry N is checked at dot (4 + N*2).
                 let scan_start = 4u32;
-                if self.dot >= scan_start && self.dot % 2 == 0 {
+                if self.dot >= scan_start && self.dot.is_multiple_of(2) {
                     self.oam_scan_step();
                 }
 
@@ -202,7 +202,7 @@ impl Ppu {
                 if self.lcd_first_line {
                     // Per-entry OAM scan (same cadence as normal mode 2)
                     let scan_start = 4u32;
-                    if self.dot >= scan_start && self.dot % 2 == 0 {
+                    if self.dot >= scan_start && self.dot.is_multiple_of(2) {
                         self.oam_scan_step();
                     }
                     let first_line_mode3 = if self.cgb_mode { 78 } else { 79 };

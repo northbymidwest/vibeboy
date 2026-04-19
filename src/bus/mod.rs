@@ -263,7 +263,7 @@ impl Bus {
         // Compute timer before rom is moved into cartridge
         let timer = if boot_rom_active { Timer::reset(model) } else { Timer::post_boot(model, is_cgb_game, &rom) };
 
-        let mut cart = make_cartridge(rom, clock);
+        let cart = make_cartridge(rom, clock);
 
         Bus {
             cart,

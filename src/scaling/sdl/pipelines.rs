@@ -124,7 +124,7 @@ impl GpuPipelines {
     pub fn ensure_pipeline(
         &mut self,
         filter: ScaleFilter,
-        window: &sdl3::video::Window,
+        _window: &sdl3::video::Window,
         force_cpu: bool,
     ) -> GpuRenderMode {
         if force_cpu {

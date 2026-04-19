@@ -401,12 +401,12 @@ fn trace_edges(junctions: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
             let dd2 = decode_flags(sample(junctions, w, h, ix, iy + 2));
             let dd3 = decode_flags(sample(junctions, w, h, ix, iy + 3));
 
-            // Level 1: corner exists with adjacent support (or SFX_SCN allows unsupported)
+            // Level 1: corner exists (SFX_SCN=1, so adjacent support always satisfied)
             let l1 = [
-                e.corner[0] && (dl.corner[2] || du.corner[2] || true), // SCN=1
-                e.corner[1] && (dr.corner[3] || du.corner[3] || true),
-                e.corner[2] && (dr.corner[0] || dd.corner[0] || true),
-                e.corner[3] && (dl.corner[1] || dd.corner[1] || true),
+                e.corner[0],
+                e.corner[1],
+                e.corner[2],
+                e.corner[3],
             ];
 
             // Level 2: mid-edge between two corners (horizontal or vertical)

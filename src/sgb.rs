@@ -260,7 +260,7 @@ impl Sgb {
 
                         self.bit_count += 1;
 
-                        if self.bit_count % 8 == 0 {
+                        if self.bit_count.is_multiple_of(8) {
                             self.packet_buf.push(self.current_byte);
                             self.current_byte = 0;
                         }

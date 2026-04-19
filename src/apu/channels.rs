@@ -231,7 +231,7 @@ impl Sweep {
     }
 
     /// Initialize sweep on CH1 trigger. May disable the channel via `ch`.
-    pub fn trigger(&mut self, ch: &mut SquareCh, was_active: bool, lf_div: u32) {
+    pub fn trigger(&mut self, ch: &mut SquareCh, _was_active: bool, _lf_div: u32) {
         let ch1_freq = ch.freq;
         self.shadow = ch1_freq;
         self.completed_addend = 0;

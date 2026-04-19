@@ -2007,7 +2007,7 @@ fn rasterize(
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        let rows_per_thread = (out_h + num_threads - 1) / num_threads;
+        let rows_per_thread = out_h.div_ceil(num_threads);
         std::thread::scope(|scope| {
             let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
             let all_cps = &all_cps;

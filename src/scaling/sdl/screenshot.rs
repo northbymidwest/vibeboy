@@ -104,8 +104,8 @@ pub fn gpu_screenshot(
         device.end_copy_pass(cp);
     }
 
-    let dispatch_x = (out_w + 15) / 16;
-    let dispatch_y = (out_h + 15) / 16;
+    let dispatch_x = out_w.div_ceil(16);
+    let dispatch_y = out_h.div_ceil(16);
 
     if matches!(filter, ScaleFilter::SuperXbr) {
         // Super xBR: 3-pass pipeline with intermediate buffer

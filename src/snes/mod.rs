@@ -171,7 +171,7 @@ impl SnesSys {
         self.frame_count += 1;
 
         // Periodic diagnostics (every 300 frames)
-        if self.frame_count % 300 == 0 {
+        if self.frame_count.is_multiple_of(300) {
             log::debug!(
                 "SNES frame {}: PC={:02X}:{:04X} NMITIMEN=${:02X} apu_state={}",
                 self.frame_count, self.cpu.pbr, self.cpu.pc,

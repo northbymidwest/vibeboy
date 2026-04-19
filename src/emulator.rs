@@ -607,7 +607,7 @@ impl Emulator {
             }
 
             // Check periodically for serial output or timeout
-            if total_cycles % 4096 == 0 {
+            if total_cycles.is_multiple_of(4096) {
                 let output = String::from_utf8_lossy(&self.bus.serial.serial_output);
                 if output.contains("Passed") || output.contains("Failed") {
                     return output.into_owned();

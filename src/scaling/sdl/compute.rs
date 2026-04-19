@@ -227,10 +227,10 @@ pub fn scalefx_compute_and_blit(
     // Helper: dispatch 5 ScaleFX passes
     let dispatch_5_passes = |cmd: &gpu::CommandBuffer, px_src: &gpu::Buffer, px_dst: &gpu::Buffer,
                               sw: u32, sh: u32, ow: u32, oh: u32, first: bool| {
-        let sd_x = (sw + 15) / 16;
-        let sd_y = (sh + 15) / 16;
-        let od_x = (ow + 15) / 16;
-        let od_y = (oh + 15) / 16;
+        let sd_x = sw.div_ceil(16);
+        let sd_y = sh.div_ceil(16);
+        let od_x = ow.div_ceil(16);
+        let od_y = oh.div_ceil(16);
 
         for pass_idx in 0u32..5 {
             let cp = device.begin_compute_pass(
@@ -342,7 +342,7 @@ pub fn scale_compute_and_blit(
         #[repr(C)]
         struct RawUniforms([u32; 8]);
         cmd.push_compute_uniform_data(0, &RawUniforms(*uniforms));
-        compute_pass.dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
+        compute_pass.dispatch(out_w.div_ceil(16), out_h.div_ceil(16), 1);
         device.end_compute_pass(compute_pass);
     }
 
@@ -403,8 +403,8 @@ pub fn super_xbr_compute_and_blit(
     #[repr(C)]
     struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
 
-    let dispatch_x = (out_w + 15) / 16;
-    let dispatch_y = (out_h + 15) / 16;
+    let dispatch_x = out_w.div_ceil(16);
+    let dispatch_y = out_h.div_ceil(16);
 
     // Upload pixels
     {
@@ -598,7 +598,7 @@ fn dispatch_stages_1_4b(
         cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
         cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
-        cp.dispatch((img_w + 15) / 16, (img_h + 15) / 16, 1);
+        cp.dispatch(img_w.div_ceil(16), img_h.div_ceil(16), 1);
         device.end_compute_pass(cp);
     }
 
@@ -619,7 +619,7 @@ fn dispatch_stages_1_4b(
         cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
         cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
-        cp.dispatch((img_w.saturating_sub(1) + 15) / 16, (img_h.saturating_sub(1) + 15) / 16, 1);
+        cp.dispatch(img_w.saturating_sub(1).div_ceil(16), img_h.saturating_sub(1).div_ceil(16), 1);
         device.end_compute_pass(cp);
     }
 
@@ -634,7 +634,7 @@ fn dispatch_stages_1_4b(
         cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, corners_w: u32 }
         cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, corners_w });
-        cp.dispatch((corners_w + 15) / 16, (corners_h + 15) / 16, 1);
+        cp.dispatch(corners_w.div_ceil(16), corners_h.div_ceil(16), 1);
         device.end_compute_pass(cp);
     }
 
@@ -661,7 +661,7 @@ fn dispatch_stages_1_4b(
         #[repr(C)] struct U { num_nodes: u32, gradient_step: f32, max_move: f32, positional_scale: f32 }
         cmd.push_compute_uniform_data(0, &U {
             num_nodes: num_cps, gradient_step: 0.01, max_move: 0.25, positional_scale: 2.5 });
-        cp.dispatch((num_cps + 255) / 256, 1, 1);
+        cp.dispatch(num_cps.div_ceil(256), 1, 1);
         device.end_compute_pass(cp);
         std::mem::swap(&mut cur_in, &mut cur_out);
     }
@@ -689,7 +689,7 @@ fn dispatch_stages_1_4b(
         cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone(), tjunc_orig.clone()]);
         #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
         cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
-        cp.dispatch((num_cps + 255) / 256, 1, 1);
+        cp.dispatch(num_cps.div_ceil(256), 1, 1);
         device.end_compute_pass(cp);
     }
 
@@ -770,8 +770,8 @@ pub fn gpu_vectorize_full_pipeline(
 
     // Stage 5: Tile-based cell rasterizer (one workgroup per 2×2 source tile)
     {
-        let tiles_w = (img_w + 1) / 2;
-        let tiles_h = (img_h + 1) / 2;
+        let tiles_w = img_w.div_ceil(2);
+        let tiles_h = img_h.div_ceil(2);
         let total_tiles = tiles_w * tiles_h;
         let cp = device.begin_compute_pass(&cmd,
             &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
@@ -1368,8 +1368,8 @@ pub fn gpu_full_pipeline_screenshot(
     let cmd = device.acquire_command_buffer().ok()?;
 
     // Tile-based rasterizer: one workgroup per 2×2 source tile
-    { let tiles_w = (img_w + 1) / 2;
-      let tiles_h = (img_h + 1) / 2;
+    { let tiles_w = img_w.div_ceil(2);
+      let tiles_h = img_h.div_ceil(2);
       let total_tiles = tiles_w * tiles_h;
       let cp = device.begin_compute_pass(&cmd,
           &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
