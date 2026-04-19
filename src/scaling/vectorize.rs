@@ -1554,7 +1554,7 @@ fn closest_on_span_poly(
             }
         } else {
             // Three real roots (trigonometric method)
-            let r = (-p * p * p / 27.0).sqrt();
+            let r = (-p * p * p / 27.0).max(0.0).sqrt();
             let phi = if r.abs() < 1e-15 { 0.0 } else { (-q / (2.0 * r)).clamp(-1.0, 1.0).acos() };
             let cube_r = r.cbrt() * 2.0;
             for k in 0..3 {
