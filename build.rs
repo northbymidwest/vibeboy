@@ -119,26 +119,32 @@ fn main() {
         }
     }
 
-    // Run all slangc invocations in parallel
-    let results: Vec<_> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs.iter().map(|job| {
-            scope.spawn(|| {
-                let mut cmd = Command::new("slangc");
-                cmd.arg(job.src.to_str().unwrap())
-                    .arg("-I").arg("src/shaders")
-                    .arg("-target").arg(job.target);
-                if let Some(profile) = job.profile {
-                    cmd.arg("-profile").arg(profile);
-                }
-                if let Some(define) = job.define {
-                    cmd.arg(format!("-D{define}"));
-                }
-                cmd.arg("-o").arg(job.out.to_str().unwrap());
-                cmd.output()
-            })
-        }).collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    // Run slangc invocations in parallel, limited to available CPUs to avoid
+    // hitting the open file descriptor limit (~112 simultaneous processes).
+    let max_parallel = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let results: Vec<_> = jobs.chunks(max_parallel).flat_map(|chunk| {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk.iter().map(|job| {
+                scope.spawn(|| {
+                    let mut cmd = Command::new("slangc");
+                    cmd.arg(job.src.to_str().unwrap())
+                        .arg("-I").arg("src/shaders")
+                        .arg("-target").arg(job.target);
+                    if let Some(profile) = job.profile {
+                        cmd.arg("-profile").arg(profile);
+                    }
+                    if let Some(define) = job.define {
+                        cmd.arg(format!("-D{define}"));
+                    }
+                    cmd.arg("-o").arg(job.out.to_str().unwrap());
+                    cmd.output()
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        })
+    }).collect();
 
     for (job, output) in jobs.iter().zip(results) {
         match output {
