@@ -541,15 +541,17 @@ impl AppState {
     unsafe fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
         let occluded = !window.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible);
 
-        // Update drawable size on resize
+        // Update drawable size on resize (use backing pixels for Retina)
         let (disp_w, disp_h);
         {
             let bounds = content_view.bounds();
-            disp_w = bounds.size.width as usize;
-            disp_h = bounds.size.height as usize;
+            let scale = window.backingScaleFactor();
+            disp_w = (bounds.size.width * scale) as usize;
+            disp_h = (bounds.size.height * scale) as usize;
             if !occluded {
+                self.renderer.layer.setContentsScale(scale);
                 self.renderer.layer.setDrawableSize(NSSize::new(
-                    bounds.size.width, bounds.size.height,
+                    bounds.size.width * scale, bounds.size.height * scale,
                 ));
             }
         }
@@ -616,6 +618,7 @@ impl AppState {
                 self.renderer.tex_w = gw;
                 self.renderer.tex_h = gh;
                 self.renderer.texture = out_tex.clone();
+                self.renderer.use_linear_blit = true;
                 self.renderer.render();
                 return true;
             }
@@ -630,6 +633,7 @@ impl AppState {
                 self.renderer.tex_w = gw;
                 self.renderer.tex_h = gh;
                 self.renderer.texture = self.renderer.compute_out_tex.as_ref().unwrap().clone();
+                self.renderer.use_linear_blit = false;
                 self.renderer.render();
                 return true;
             }
@@ -698,6 +702,7 @@ impl AppState {
         }
 
         self.renderer.update_texture(&self.bgra_buf);
+        self.renderer.use_linear_blit = false;
         self.renderer.render();
     }
 }
@@ -874,10 +879,12 @@ fn main() {
         let layer_ref: &CALayer = &renderer.layer;
         content_view.setLayer(Some(layer_ref));
 
-        // Set drawable size to logical points
+        // Set layer scale and drawable size to backing pixels (Retina)
+        let backing_scale = window.backingScaleFactor();
+        renderer.layer.setContentsScale(backing_scale);
         renderer.layer.setDrawableSize(NSSize::new(
-            win_w as f64,
-            win_h as f64,
+            win_w as f64 * backing_scale,
+            win_h as f64 * backing_scale,
         ));
 
         window.makeKeyAndOrderFront(None);

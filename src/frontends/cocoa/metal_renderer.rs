@@ -46,6 +46,12 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     constexpr sampler s(mag_filter::nearest, min_filter::nearest);
     return tex.sample(s, in.texcoord);
 }
+
+fragment float4 fragment_linear(VertexOut in [[stage_in]],
+                                texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    return tex.sample(s, in.texcoord);
+}
 ";
 
 type Device = Retained<ProtocolObject<dyn MTLDevice>>;
@@ -60,6 +66,8 @@ pub(super) struct MetalRenderer {
     pub layer: Retained<CAMetalLayer>,
     pub command_queue: CmdQueue,
     pipeline_state: RenderPipeline,
+    pipeline_state_linear: RenderPipeline,
+    pub use_linear_blit: bool,
     pub texture: Texture,
     pub tex_w: u32,
     pub tex_h: u32,
@@ -159,6 +167,12 @@ impl MetalRenderer {
             .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
             .expect("Failed to create render pipeline state");
 
+        let frag_linear_fn = library.newFunctionWithName(ns_string!("fragment_linear")).unwrap();
+        pipeline_desc.setFragmentFunction(Some(&frag_linear_fn));
+        let pipeline_state_linear = device
+            .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
+            .expect("Failed to create linear render pipeline state");
+
         let texture = make_texture(&device, tex_w, tex_h, MTLTextureUsage::ShaderRead);
 
         MetalRenderer {
@@ -166,6 +180,8 @@ impl MetalRenderer {
             layer,
             command_queue,
             pipeline_state,
+            pipeline_state_linear,
+            use_linear_blit: false,
             texture,
             tex_w,
             tex_h,
@@ -520,7 +536,8 @@ impl MetalRenderer {
             let cmd_buf = match self.command_queue.commandBuffer() { Some(c) => c, None => { log::error!("Metal: failed to create command buffer"); return; } };
             let Some(encoder) = cmd_buf.renderCommandEncoderWithDescriptor(&rpd) else { return; };
 
-            encoder.setRenderPipelineState(&self.pipeline_state);
+            let ps = if self.use_linear_blit { &self.pipeline_state_linear } else { &self.pipeline_state };
+            encoder.setRenderPipelineState(ps);
             unsafe {
                 encoder.setVertexBytes_length_atIndex(
                     NonNull::new_unchecked(viewport.as_ptr() as *mut _),
