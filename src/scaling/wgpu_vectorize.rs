@@ -4,7 +4,7 @@
 //! 1. similarity_graph → 2. resolve_crossings → 3. cell_graph →
 //! 4. optimize_energy → 5. update_tjunction → 6. cell_rasterizer
 //!
-//! All shaders are loaded from WGSL (cross-compiled from GLSL via naga).
+//! All shaders are loaded from WGSL (cross-compiled from Slang via slangc).
 
 use wgpu;
 

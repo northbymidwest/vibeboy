@@ -12,5 +12,11 @@ public static const uint IS_TJUNCTION = 32u;
 /// passes through grid corner).
 public static const uint IS_CROSSING  = 64u;
 
+/// Control-point flag: node is a chain endpoint (prev or next neighbor is -1).
+/// The rasterizer treats endpoint neighbors with clamped (knot-multiplicity-3)
+/// boundary conditions instead of degenerate self-fallback, so the final span
+/// of a chain is a real curved Bezier ending exactly at the endpoint position.
+public static const uint IS_ENDPOINT  = 128u;
+
 /// Sentinel color marking void/boundary edges in the scanline rasterizer.
 public static const uint VOID_COLOR   = 0x01000000u;

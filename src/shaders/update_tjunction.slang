@@ -8,7 +8,7 @@
 // T-junctions: forward B-spline correction + stem snapping.
 //
 // Uses orig_positions for the center weight (pre-correction optimizer
-// output). Dispatch 3 times for convergence when junction CPs are
+// output). Dispatch a few times for convergence when junction CPs are
 // neighbors of other junction CPs.
 
 import modules.vectorize;
@@ -59,10 +59,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
     uint flags = node_flags[i];
 
-    // Valence-4 crossing: inverse B-spline correction.
-    // BOTH slots are processed independently — each has its own pp/np,
-    // so each needs its own corrected position for its curve to pass
-    // through grid_pos at t=0.5.
+    // Valence-4 crossing: inverse B-spline correction. BOTH slots are
+    // processed independently — each has its own pp/np, so each needs its
+    // own corrected position for its curve to pass through grid_pos at t=0.5.
     if ((flags & IS_CROSSING) != 0u) {
         int prev_idx = neighbor_data[i * 4u];
         int next_idx = neighbor_data[i * 4u + 1u];
@@ -93,9 +92,11 @@ void main(uint3 tid: SV_DispatchThreadID) {
     positions[i * 2u] = corrected.x;
     positions[i * 2u + 1u] = corrected.y;
 
-    // Snap stem CP at the other slot onto the through curve.
+    // Snap stem CP at the other slot onto the through curve. Stem CPs carry
+    // flags = IS_USED | IS_ENDPOINT (= 129), so mask out IS_ENDPOINT before
+    // testing that this slot is a plain stem (flag bits == 1).
     uint stem = i ^ 1u;
-    if (stem < u.num_nodes && node_flags[stem] == 1u) {
+    if (stem < u.num_nodes && (node_flags[stem] & ~IS_ENDPOINT) == 1u) {
         float2 on_curve = 0.125 * prev_pos + 0.75 * corrected + 0.125 * next_pos;
         positions[stem * 2u] = on_curve.x;
         positions[stem * 2u + 1u] = on_curve.y;

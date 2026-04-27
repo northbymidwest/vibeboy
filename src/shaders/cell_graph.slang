@@ -221,6 +221,10 @@ void write_cp_full(int idx, float2 pos, int prev, int next, uint flag,
     neighbors[idx * 4 + 1] = next;
     neighbors[idx * 4 + 2] = prev_dir;
     neighbors[idx * 4 + 3] = next_dir;
+    // Only mark genuinely-active CPs as endpoints. Default-init slots have
+    // flag=0 and prev=next=-1; without this guard they'd be flagged
+    // IS_ENDPOINT, overloading the bit's meaning.
+    if (flag != 0u && (prev < 0 || next < 0)) flag |= IS_ENDPOINT;
     flags[idx] = flag;
 }
 
@@ -231,6 +235,10 @@ void write_cp(int idx, float2 pos, int prev, int next, uint flag) {
     neighbors[idx * 4 + 1] = next;
     neighbors[idx * 4 + 2] = -1;
     neighbors[idx * 4 + 3] = -1;
+    // Only mark genuinely-active CPs as endpoints. Default-init slots have
+    // flag=0 and prev=next=-1; without this guard they'd be flagged
+    // IS_ENDPOINT, overloading the bit's meaning.
+    if (flag != 0u && (prev < 0 || next < 0)) flag |= IS_ENDPOINT;
     flags[idx] = flag;
 }
 

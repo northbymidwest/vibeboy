@@ -6,6 +6,7 @@
 
 import modules.color;
 import modules.bspline;
+import modules.vectorize;
 
 struct Uniforms {
     uint img_w;
@@ -71,7 +72,13 @@ struct SlimCP {
     float2 bbox_min;
     float2 bbox_max;
     int ci;
-    int _pad;
+    // Branch threshold for prev_dir vs next_dir in resolve_color. For
+    // non-clamped (interior) spans this is 0.5; for clamped Bezier spans
+    // (Q0=prev_endpoint or Q2=next_endpoint), the parameterization is
+    // shifted, so t_branch is the t value at which the clamped curve reaches
+    // the same physical "before/after sc" boundary that the interior
+    // B-spline reaches at t=0.5.
+    float t_branch;
 };
 
 groupshared SlimCP sh_cps[MAX_TILE_CPS];
@@ -130,6 +137,17 @@ void get_edge_colors(uint icx, uint icy, int dir, out uint color_left, out uint 
 
 bool resolve_color(float2 pt, SlimCP sc, ResolveData rd, float t, out uint out_color) {
     out_color = 0u;
+    // Endpoint defer: when this CP's curve has its closest point exactly at
+    // an endpoint that's structurally co-located with another CP's curve
+    // (degenerate stem at t=1, clamped Bezier extension at t=0), the local
+    // edges describe a different region. Defer to the next-closest candidate.
+    bool prev_extends =
+        (rd.prev_ci < 0) || ((cp_flags[rd.prev_ci] & IS_ENDPOINT) != 0u);
+    bool next_extends =
+        (rd.next_ci < 0) || ((cp_flags[rd.next_ci] & IS_ENDPOINT) != 0u);
+    if ((prev_extends && t == 0.0) || (next_extends && t == 1.0)) {
+        return false;
+    }
     uint pl = 0u, pr = 0u, nl = 0u, nr = 0u;
     if (rd.prev_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.prev_dir, pl, pr);
     if (rd.next_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.next_dir, nl, nr);
@@ -145,7 +163,7 @@ bool resolve_color(float2 pt, SlimCP sc, ResolveData rd, float t, out uint out_c
     } else if (rd.next_ci < 0) {
         if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
         else return false;
-    } else if (t < 0.5) {
+    } else if (t < sc.t_branch) {
         if (prev_valid) { color_left = pl; color_right = pr; ref_t = 0.0; }
         else if (next_valid) { color_left = nr; color_right = nl; ref_t = 1.0; }
         else return false;
@@ -216,6 +234,7 @@ uint sample_from_shared(float2 pt, uint fallback_color,
         }
     }
 
+    // Default outs to the closest hit (used by AA only if no hit resolves).
     out_idx = (num_hits > 0) ? hits[0].idx : -1;
     out_t = (num_hits > 0) ? hits[0].t : 0.0;
     out_d2 = (num_hits > 0) ? hits[0].d2 : 1e10;
@@ -225,6 +244,12 @@ uint sample_from_shared(float2 pt, uint fallback_color,
         ResolveData rd = read_resolve_data(sc.ci);
         uint c;
         if (resolve_color(pt, sc, rd, hits[h].t, c)) {
+            // Promote the resolved hit's data to the out-params so the AA
+            // path uses the same CP that produced the center color, not a
+            // closer one that was endpoint-deferred.
+            out_idx = hits[h].idx;
+            out_t = hits[h].t;
+            out_d2 = hits[h].d2;
             return c;
         }
     }
@@ -267,20 +292,64 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
 
             int prev_ci = cp_neighbors[ci * 4];
             int next_ci = cp_neighbors[ci * 4 + 1];
+            // Clamped model: endpoint CPs don't own a span; their interior
+            // neighbor's span extends to reach them via knot multiplicity 3.
+            // Exception: 2-CP chains have no interior neighbor to do the
+            // clamping, so we render here with the degenerate fallback.
             if (prev_ci < 0 && next_ci < 0) continue;
+            bool i_am_endpoint = (prev_ci < 0 || next_ci < 0);
+            if (i_am_endpoint) {
+                int other = (prev_ci < 0) ? next_ci : prev_ci;
+                bool other_is_end = (cp_flags[other] & IS_ENDPOINT) != 0u;
+                if (!other_is_end) continue;
+            }
 
             uint idx;
             idx = sh_num_cps.add(1u);
             if (idx < MAX_TILE_CPS) {
                 float2 cp = read_pos(ci);
-                float2 pp = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
-                float2 np = (next_ci >= 0) ? read_pos(next_ci) : cp;
+                // 2-CP-chain fallback: if either neighbor is missing, use the
+                // CP itself for that side (degenerate, straight-line span).
+                float2 prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp;
+                float2 next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp;
+
+                // If a neighbor is an endpoint, replace its position with a
+                // virtual ghost = 2*real - cp so that bspline_eval(...,t=0|1)
+                // lands exactly on the real endpoint position. For interior
+                // neighbors, ghost == real; nothing changes.
+                bool prev_is_end = (prev_ci >= 0) && ((cp_flags[prev_ci] & IS_ENDPOINT) != 0u);
+                bool next_is_end = (next_ci >= 0) && ((cp_flags[next_ci] & IS_ENDPOINT) != 0u);
+                float2 pp = prev_is_end ? (2.0 * prev_pos - cp) : prev_pos;
+                float2 np = next_is_end ? (2.0 * next_pos - cp) : next_pos;
+
+                // Bbox: include the real prev/next positions (not ghosts) so
+                // that pixels in the cell-radius around endpoint neighbors
+                // still find this span as a candidate. Ghosts can be far
+                // outside the curve's actual extent.
                 sh_cps[idx].pos = cp;
                 sh_cps[idx].prev_pos = pp;
                 sh_cps[idx].next_pos = np;
-                sh_cps[idx].bbox_min = min(min(pp, cp), np);
-                sh_cps[idx].bbox_max = max(max(pp, cp), np);
+                sh_cps[idx].bbox_min = min(min(prev_pos, cp), next_pos);
+                sh_cps[idx].bbox_max = max(max(prev_pos, cp), next_pos);
                 sh_cps[idx].ci = ci;
+
+                // t_branch: branch threshold for prev_dir vs next_dir in
+                // resolve_color. For non-clamped spans the interior B-spline
+                // passes through cp at t=0.5, so the threshold is 0.5
+                // trivially. For clamped spans the curve is reshaped (Q0 or
+                // Q2 = endpoint instead of midpoint), and t=0.5 of the
+                // clamped curve is no longer at the same physical point as
+                // t=0.5 of the equivalent interior curve. Compute t_branch as
+                // the clamped curve's t at the *interior B-spline*'s t=0.5
+                // physical position — the natural before/after sc pivot —
+                // so pixels classify consistently regardless of which curve
+                // shape is in effect.
+                if (prev_is_end || next_is_end) {
+                    float2 interior_mid = 0.125 * prev_pos + 0.75 * cp + 0.125 * next_pos;
+                    sh_cps[idx].t_branch = bspline_refine(pp, cp, np, interior_mid, 0.5, 1e10).x;
+                } else {
+                    sh_cps[idx].t_branch = 0.5;
+                }
             }
         }
     }
@@ -343,9 +412,9 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 bool have_edge = false;
                 float ref_t;
 
-                if (best_t < 0.5 && aa_pl != aa_pr) {
+                if (best_t < sc.t_branch && aa_pl != aa_pr) {
                     color_left = aa_pl; color_right = aa_pr; ref_t = 0.0; have_edge = true;
-                } else if (best_t >= 0.5 && aa_nl != aa_nr) {
+                } else if (best_t >= sc.t_branch && aa_nl != aa_nr) {
                     color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;
                 } else if (aa_nl != aa_nr) {
                     color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;

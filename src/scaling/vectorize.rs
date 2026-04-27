@@ -13,6 +13,11 @@
 const IS_CORNER: u32 = 16;
 const IS_TJUNCTION: u32 = 32;
 const IS_CROSSING: u32 = 64;
+/// Chain endpoint (prev or next neighbor is -1). Set by write_cp/write_cp_full.
+/// The rasterizer uses clamped Bezier boundaries when an adjacent CP carries
+/// this bit, so the final span ends exactly at the endpoint position with a
+/// real quadratic curve instead of a degenerate straight tail.
+const IS_ENDPOINT: u32 = 128;
 
 const NEWTON_ITER: i32 = 3;
 
@@ -677,6 +682,10 @@ fn build_cell_graph(
         neighbors_buf[i * 4 + 1] = next;
         neighbors_buf[i * 4 + 2] = prev_dir;
         neighbors_buf[i * 4 + 3] = next_dir;
+        // Only mark genuinely-active CPs as endpoints. Default-init slots
+        // have flag=0 and prev=next=-1; without the flag!=0 guard they'd
+        // get IS_ENDPOINT, overloading the bit's meaning.
+        let flag = if flag != 0 && (prev < 0 || next < 0) { flag | IS_ENDPOINT } else { flag };
         flags_buf[i] = flag;
     };
 
@@ -690,6 +699,10 @@ fn build_cell_graph(
                     next: i32,
                     flag: u32| {
         let i = idx as usize;
+        // Only mark genuinely-active CPs as endpoints. Default-init slots
+        // have flag=0 and prev=next=-1; without the flag!=0 guard they'd
+        // get IS_ENDPOINT, overloading the bit's meaning.
+        let flag = if flag != 0 && (prev < 0 || next < 0) { flag | IS_ENDPOINT } else { flag };
         positions[i * 2] = pos.0;
         positions[i * 2 + 1] = pos.1;
         neighbors_buf[i * 4] = prev;
@@ -1227,14 +1240,22 @@ fn build_cell_graph(
     // Fix border CP connectivity: interior CPs already reference border
     // CPs as neighbors, but border CPs don't link back. Make the connection
     // reciprocal so border CPs produce proper chain-endpoint B-spline edges
-    // that extend to the image border.
+    // that extend to the image border. Each linked border CP still has its
+    // other neighbor at -1, so it remains a chain endpoint and IS_ENDPOINT
+    // stays correct after the link.
+    // Mask IS_ENDPOINT before testing for "plain" CPs: every isolated border
+    // CP carries that bit, so a bare `flags[pi] == 1` check would skip the
+    // candidates this fixup is supposed to rescue.
     for i in 0..num_cps {
         if flags[i] == 0 { continue; }
         let prev = neighbors[i * 4];
         let next = neighbors[i * 4 + 1];
         if prev >= 0 {
             let pi = prev as usize;
-            if flags[pi] == 1 && neighbors[pi * 4] < 0 && neighbors[pi * 4 + 1] < 0 {
+            if (flags[pi] & !IS_ENDPOINT) == 1
+                && neighbors[pi * 4] < 0
+                && neighbors[pi * 4 + 1] < 0
+            {
                 neighbors[pi * 4 + 1] = i as i32;
                 let d = neighbors[i * 4 + 2];
                 if d >= 0 { neighbors[pi * 4 + 3] = (d + 2) % 4; }
@@ -1242,7 +1263,10 @@ fn build_cell_graph(
         }
         if next >= 0 {
             let ni = next as usize;
-            if flags[ni] == 1 && neighbors[ni * 4] < 0 && neighbors[ni * 4 + 1] < 0 {
+            if (flags[ni] & !IS_ENDPOINT) == 1
+                && neighbors[ni * 4] < 0
+                && neighbors[ni * 4 + 1] < 0
+            {
                 neighbors[ni * 4] = i as i32;
                 let d = neighbors[i * 4 + 3];
                 if d >= 0 { neighbors[ni * 4 + 2] = (d + 2) % 4; }
@@ -1441,7 +1465,10 @@ fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], nu
                 positions[i * 2 + 1] = corrected.1;
 
                 let stem = i ^ 1;
-                if stem < num_cps && flags[stem] == 1 {
+                // Stem CPs carry flags = 1 | IS_ENDPOINT in the clamped model;
+                // mask out IS_ENDPOINT before checking that the slot is a stem
+                // (otherwise the snap-onto-through-curve step is skipped).
+                if stem < num_cps && (flags[stem] & !IS_ENDPOINT) == 1 {
                     positions[stem * 2] = 0.125 * prev_pos.0 + 0.75 * corrected.0 + 0.125 * next_pos.0;
                     positions[stem * 2 + 1] = 0.125 * prev_pos.1 + 0.75 * corrected.1 + 0.125 * next_pos.1;
                 }
@@ -1449,6 +1476,7 @@ fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], nu
         }
     }
 }
+
 
 // ============================================================================
 // Stage 6: Rasterize
@@ -1586,6 +1614,14 @@ struct CpData {
     poly_ax: f32, poly_ay: f32,
     poly_bx: f32, poly_by: f32,
     poly_cx: f32, poly_cy: f32,
+    /// Branch threshold for prev_dir vs next_dir in resolve_from_cp. For
+    /// non-clamped (interior) spans this is 0.5; for clamped Bezier spans
+    /// (Q0=prev_endpoint or Q2=next_endpoint), the parameterization is
+    /// shifted, so t_branch is the t value at which the clamped curve
+    /// reaches the same physical "before/after sc" boundary that the
+    /// equivalent interior B-spline reaches at t=0.5. Pixels with closest-
+    /// point t < t_branch classify as prev side; t ≥ t_branch as next side.
+    t_branch: f32,
     prev_dir: i32,
     next_dir: i32,
     icx: i32,
@@ -1635,17 +1671,56 @@ fn rasterize(
 
         let prev_ci = cp_neighbors[ci * 4];
         let next_ci = cp_neighbors[ci * 4 + 1];
+        // Clamped model: endpoint CPs don't own a span; their interior
+        // neighbor's span extends to reach them via knot multiplicity 3.
+        // Exception: 2-CP chains have no interior neighbor, render here.
         if prev_ci < 0 && next_ci < 0 {
             continue;
         }
+        let i_am_endpoint = prev_ci < 0 || next_ci < 0;
+        if i_am_endpoint {
+            let other = if prev_ci < 0 { next_ci } else { prev_ci };
+            let other_is_end = (flags[other as usize] & IS_ENDPOINT) != 0;
+            if !other_is_end {
+                continue;
+            }
+        }
 
         let cp = read_pos_f(ci as i32);
-        let pp = if prev_ci >= 0 { read_pos_f(prev_ci) } else { cp };
-        let np = if next_ci >= 0 { read_pos_f(next_ci) } else { cp };
+        // 2-CP-chain fallback: if either neighbor is missing, use the CP
+        // itself for that side (degenerate, straight-line span).
+        let prev_pos = if prev_ci >= 0 { read_pos_f(prev_ci) } else { cp };
+        let next_pos = if next_ci >= 0 { read_pos_f(next_ci) } else { cp };
 
-        let bbox_min = (pp.0.min(cp.0).min(np.0), pp.1.min(cp.1).min(np.1));
-        let bbox_max = (pp.0.max(cp.0).max(np.0), pp.1.max(cp.1).max(np.1));
-        // Polynomial form: B(t) = a*t² + b*t + c
+        // If a neighbor is an endpoint, replace its position with a virtual
+        // ghost = 2*real - cp so that bspline_eval(...,t=0|1) lands exactly
+        // on the real endpoint position. For interior neighbors, ghost = real.
+        let prev_is_end = prev_ci >= 0 && (flags[prev_ci as usize] & IS_ENDPOINT) != 0;
+        let next_is_end = next_ci >= 0 && (flags[next_ci as usize] & IS_ENDPOINT) != 0;
+        let pp = if prev_is_end {
+            (2.0 * prev_pos.0 - cp.0, 2.0 * prev_pos.1 - cp.1)
+        } else {
+            prev_pos
+        };
+        let np = if next_is_end {
+            (2.0 * next_pos.0 - cp.0, 2.0 * next_pos.1 - cp.1)
+        } else {
+            next_pos
+        };
+
+        // Bbox: include the real prev/next positions (not ghosts) so that
+        // pixels in the cell-radius around endpoint neighbors still find this
+        // span as a candidate. Ghosts can be far outside the curve's extent.
+        let bbox_min = (
+            prev_pos.0.min(cp.0).min(next_pos.0),
+            prev_pos.1.min(cp.1).min(next_pos.1),
+        );
+        let bbox_max = (
+            prev_pos.0.max(cp.0).max(next_pos.0),
+            prev_pos.1.max(cp.1).max(next_pos.1),
+        );
+        // Polynomial form: B(t) = a*t² + b*t + c (uniform B-spline, virtual
+        // ghosts make the eval equivalent to the clamped Bezier).
         // a = 0.5*(p0 - 2*p1 + p2), b = p1 - p0, c = 0.5*(p0 + p1)
         let poly_ax = 0.5 * (pp.0 - 2.0 * cp.0 + np.0);
         let poly_ay = 0.5 * (pp.1 - 2.0 * cp.1 + np.1);
@@ -1653,6 +1728,24 @@ fn rasterize(
         let poly_by = cp.1 - pp.1;
         let poly_cx = 0.5 * (pp.0 + cp.0);
         let poly_cy = 0.5 * (pp.1 + cp.1);
+
+        // Compute t_branch: see CpData::t_branch doc comment. For non-clamped
+        // spans this is 0.5; for clamped spans we find the clamped curve's t
+        // at the position the equivalent interior B-spline would reach at
+        // t=0.5 (the natural before/after-sc pivot in physical space).
+        let t_branch = if prev_is_end || next_is_end {
+            // Interior B-spline at t=0.5 uses real (non-ghost) prev and next.
+            let interior_mid_x = 0.125 * prev_pos.0 + 0.75 * cp.0 + 0.125 * next_pos.0;
+            let interior_mid_y = 0.125 * prev_pos.1 + 0.75 * cp.1 + 0.125 * next_pos.1;
+            // Find the clamped curve's closest-t to that physical point.
+            closest_on_span_poly(
+                poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
+                interior_mid_x, interior_mid_y,
+            )
+            .0
+        } else {
+            0.5
+        };
 
         all_cps.push(CpData {
             pos: cp,
@@ -1678,6 +1771,7 @@ fn rasterize(
             icy: (ci / 2 / corners_w) as i32,
             prev_ci,
             next_ci,
+            t_branch,
         });
     }
 
@@ -1748,6 +1842,21 @@ fn rasterize(
 
     let resolve_from_cp =
         |pt: (f32, f32), sc: &CpData, t: f32| -> Option<u32> {
+            // Endpoint defer: when this CP's curve has its closest point
+            // exactly at an endpoint that's structurally co-located with
+            // another CP's curve (degenerate stem at t=1, clamped Bezier
+            // extension at t=0), the local edges describe a different region.
+            // Defer to the next-closest candidate so the local CP wins. The
+            // returned None falls through to the fallback color (the source
+            // pixel underneath), which is correct for genuine
+            // outside-the-curve-extent pixels.
+            let prev_extends =
+                sc.prev_ci < 0 || (flags[sc.prev_ci as usize] & IS_ENDPOINT) != 0;
+            let next_extends =
+                sc.next_ci < 0 || (flags[sc.next_ci as usize] & IS_ENDPOINT) != 0;
+            if (prev_extends && t == 0.0) || (next_extends && t == 1.0) {
+                return None;
+            }
             let (mut pl, mut pr) = (0u32, 0u32);
             let (mut nl, mut nr) = (0u32, 0u32);
             if sc.prev_dir >= 0 { let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.prev_dir); pl = l; pr = r; }
@@ -1774,7 +1883,7 @@ fn rasterize(
                 } else {
                     return None;
                 }
-            } else if t < 0.5 {
+            } else if t < sc.t_branch {
                 if prev_valid {
                     color_left = pl;
                     color_right = pr;
@@ -1907,23 +2016,39 @@ fn rasterize(
             let best_t = if num_hits > 0 { hit_t[0] } else { 0.0 };
             let best_d2 = if num_hits > 0 { hit_d2[0] } else { 1e10 };
 
-            // Resolve color from hits
+            // Resolve color from hits. Track which hit actually resolved to
+            // a valid color so the AA path uses the SAME CP that produced
+            // center_color, not just the closest one (which may have
+            // returned None via endpoint-defer in resolve_from_cp).
             let mut center_color = fallback;
+            let mut resolved_h: i32 = -1;
             for h in 0..num_hits {
                 if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[h] as usize], hit_t[h]) {
                     center_color = c;
+                    resolved_h = h as i32;
                     break;
                 }
             }
 
-            let need_aa = best_idx >= 0 && best_d2 < aa_threshold;
+            // For AA, use the hit that actually resolved to a valid color
+            // (so endpoint-deferred hits don't drive the AA blend).
+            let (aa_idx, aa_t, aa_d2) = if resolved_h >= 0 {
+                (
+                    hit_idx[resolved_h as usize] as i32,
+                    hit_t[resolved_h as usize],
+                    hit_d2[resolved_h as usize],
+                )
+            } else {
+                (best_idx, best_t, best_d2)
+            };
+            let need_aa = aa_idx >= 0 && aa_d2 < aa_threshold;
 
             if !need_aa {
                 chunk[local_y * out_w + opx] = pack_color(center_color);
             } else {
-                let sc = &all_cps[best_idx as usize];
-                let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
-                let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
+                let sc = &all_cps[aa_idx as usize];
+                let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
+                let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
                 let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
 
                 if tl < 1e-4 {
@@ -1942,12 +2067,12 @@ fn rasterize(
                     let mut have_edge = false;
                     let mut ref_t = 0.0f32;
 
-                    if best_t < 0.5 && aa_pl != aa_pr {
+                    if aa_t < sc.t_branch && aa_pl != aa_pr {
                         color_left = aa_pl;
                         color_right = aa_pr;
                         ref_t = 0.0;
                         have_edge = true;
-                    } else if best_t >= 0.5 && aa_nl != aa_nr {
+                    } else if aa_t >= sc.t_branch && aa_nl != aa_nr {
                         color_left = aa_nr;
                         color_right = aa_nl;
                         ref_t = 1.0;
