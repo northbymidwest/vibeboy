@@ -28,6 +28,7 @@
 //! B-spline blend `(prev + 6·this + next) / 8` at t=0.5.
 
 use std::collections::{btree_map, BTreeMap};
+use svg::node::element::path::{Command, Data, Position};
 use vibeboy::scaling::vectorize::VectorizeData;
 
 /// Sentinel color for the void outside the image boundary.
@@ -42,17 +43,18 @@ const IS_ENDPOINT: u32 = 128;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn fmt(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-9 {
-        format!("{}", v.round() as i64)
-    } else {
-        let s = format!("{:.4}", v);
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
 fn hex(c: u32) -> String {
     format!("#{:02X}{:02X}{:02X}", (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
+}
+
+fn cmd_move(p: (f64, f64)) -> Command {
+    Command::Move(Position::Absolute, p.into())
+}
+fn cmd_line(p: (f64, f64)) -> Command {
+    Command::Line(Position::Absolute, p.into())
+}
+fn cmd_quad(c: (f64, f64), p: (f64, f64)) -> Command {
+    Command::QuadraticCurve(Position::Absolute, (c.0, c.1, p.0, p.1).into())
 }
 
 /// Pack x4/y4 coordinates into a u64 node identifier.
@@ -400,7 +402,8 @@ fn match_chain<'a>(
 // Face → SVG path
 // ---------------------------------------------------------------------------
 
-/// Convert a traced face (closed loop of node IDs) to an SVG path `d` attribute.
+/// Append a traced face (closed loop of node IDs) to `data` as a closed
+/// sub-path (`M ... Z`). Skips faces with fewer than 3 vertices.
 ///
 /// Per-node behaviors:
 /// - **Grid-only** (no optimized position): line segment through the grid
@@ -422,9 +425,9 @@ fn match_chain<'a>(
 ///   unless the next iteration is also a plain kink, in which case we move
 ///   the pen with an L.
 #[allow(unused_assignments)] // `pen`'s last write inside the loop is intentional.
-fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
+fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
     let n = nodes.len();
-    if n < 3 { return String::new(); }
+    if n < 3 { return; }
 
     let is_optimized = |nid: u64| map.chains.contains_key(&nid);
     let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
@@ -544,8 +547,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
 
     let m_pos = pen_after(n - 1);
     let mut pen = m_pos;
-    let mut d = String::with_capacity(n * 32);
-    d.push_str(&format!("M{} {}", fmt(m_pos.0), fmt(m_pos.1)));
+    data.append(cmd_move(m_pos));
 
     for i in 0..n {
         let next_idx = (i + 1) % n;
@@ -555,10 +557,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
         if let Some(ch) = &chain_match[i] {
             // Smooth iteration: Q with the chain's CP as control.
             let end = smooth_end(ch, nid, next_nid);
-            d.push_str(&format!(
-                "Q{} {} {} {}",
-                fmt(ch.pos.0), fmt(ch.pos.1), fmt(end.0), fmt(end.1)
-            ));
+            data.append(cmd_quad(ch.pos, end));
             pen = end;
         } else if is_kink(i) {
             let prev_loop = nodes[(i + n - 1) % n];
@@ -577,10 +576,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
                 let partner_interior = chain_partner(nid, prev_loop)
                     .is_some_and(|p| p.prev.is_some() && p.next.is_some());
                 let control = if partner_interior { mid(pen, part.pos) } else { part.pos };
-                d.push_str(&format!(
-                    "Q{} {} {} {}",
-                    fmt(control.0), fmt(control.1), fmt(kp.0), fmt(kp.1)
-                ));
+                data.append(cmd_quad(control, kp));
                 pen = kp;
             }
 
@@ -596,14 +592,11 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
                     let partner_interior = partner.prev.is_some() && partner.next.is_some();
                     if partner_interior {
                         if (pen.0 - kp.0).abs() > 1e-9 || (pen.1 - kp.1).abs() > 1e-9 {
-                            d.push_str(&format!("L{} {}", fmt(kp.0), fmt(kp.1)));
+                            data.append(cmd_line(kp));
                         }
                         let end = mid(part.pos, partner.pos);
                         let control = mid(part.pos, end);
-                        d.push_str(&format!(
-                            "Q{} {} {} {}",
-                            fmt(control.0), fmt(control.1), fmt(end.0), fmt(end.1)
-                        ));
+                        data.append(cmd_quad(control, end));
                         pen = end;
                     } else {
                         // Pen sits where the previous chain (on which the
@@ -613,10 +606,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
                         // this_pos (= part.pos) to partner.pos via ghost
                         // expansion. We approximate by starting from pen so
                         // the SVG remains continuous.
-                        d.push_str(&format!(
-                            "Q{} {} {} {}",
-                            fmt(part.pos.0), fmt(part.pos.1), fmt(partner.pos.0), fmt(partner.pos.1)
-                        ));
+                        data.append(cmd_quad(part.pos, partner.pos));
                         pen = partner.pos;
                     }
                 }
@@ -630,7 +620,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
                     .copied()
                     .unwrap_or_else(|| grid_pos(next_nid));
                 if (pen.0 - next_kp.0).abs() > 1e-9 || (pen.1 - next_kp.1).abs() > 1e-9 {
-                    d.push_str(&format!("L{} {}", fmt(next_kp.0), fmt(next_kp.1)));
+                    data.append(cmd_line(next_kp));
                     pen = next_kp;
                 }
             }
@@ -638,7 +628,7 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
             // Grid: L through the grid corner; if the next is a smooth chain,
             // also L to the midpoint so the next Q starts there.
             let p = grid_pos(nid);
-            d.push_str(&format!("L{} {}", fmt(p.0), fmt(p.1)));
+            data.append(cmd_line(p));
             pen = p;
             if is_optimized(next_nid) {
                 let target = if is_kink(next_idx) {
@@ -651,13 +641,12 @@ fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
                 } else {
                     p
                 };
-                d.push_str(&format!("L{} {}", fmt(target.0), fmt(target.1)));
+                data.append(cmd_line(target));
                 pen = target;
             }
         }
     }
-    d.push('Z');
-    d
+    data.append(Command::Close);
 }
 
 // ---------------------------------------------------------------------------
@@ -703,28 +692,22 @@ pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
             .set("fill", hex(bg)),
     );
 
-    // Group face paths by color for compact SVG output.
-    let mut by_color: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    // Group face paths by color into one `Data` builder per color, so each
+    // fill becomes a single `<path>` element in the document.
+    let mut by_color: BTreeMap<u32, Data> = BTreeMap::new();
     for (nodes, color) in &faces {
         if *color == bg || *color == VOID_COLOR { continue; }
-        let d = face_to_svg_d(nodes, &map);
-        if !d.is_empty() {
-            by_color.entry(*color).or_default().push(d);
-        }
+        let entry = by_color.entry(*color).or_default();
+        append_face_path(nodes, &map, entry);
     }
 
-    for (color, ds) in &by_color {
-        let mut combined = String::new();
-        for d in ds {
-            if !combined.is_empty() { combined.push(' '); }
-            combined.push_str(d);
-        }
+    for (color, data) in by_color {
         doc = doc.add(
             svg::node::element::Path::new()
-                .set("fill", hex(*color))
+                .set("fill", hex(color))
                 .set("fill-rule", "nonzero")
                 .set("stroke", "none")
-                .set("d", combined),
+                .set("d", data),
         );
     }
 
