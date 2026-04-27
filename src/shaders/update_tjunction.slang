@@ -1,15 +1,16 @@
 // Post-optimization junction position correction.
 //
-// Crossings: inverse B-spline correction so the curve passes through
-// the grid corner at t=0.5. Each crossing slot is corrected independently
-// (different pp/np → different corrected positions, but both curves pass
-// through the same grid_pos).
+// Crossings: ghost-aware inverse B-spline correction so the *rendered*
+// curve passes through the grid corner at t=0.5. Coefficients depend on
+// whether prev/next is a chain endpoint (which causes the rasterizer
+// to ghost-adjust that side of the clamped Bezier).
 //
-// T-junctions: forward B-spline correction + stem snapping.
+// T-junctions: through-CP is left at the optimizer's value (not
+// overwritten). The stem CP is snapped onto the rendered through-curve
+// via the ghost-aware algebraic B(0.5) formula.
 //
-// Uses orig_positions for the center weight (pre-correction optimizer
-// output). Dispatch a few times for convergence when junction CPs are
-// neighbors of other junction CPs.
+// Dispatch a few times for convergence when junction CPs are neighbors
+// of other junction CPs.
 
 import modules.vectorize;
 
@@ -59,18 +60,25 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
     uint flags = node_flags[i];
 
-    // Valence-4 crossing: inverse B-spline correction. BOTH slots are
-    // processed independently — each has its own pp/np, so each needs its
-    // own corrected position for its curve to pass through grid_pos at t=0.5.
-    if ((flags & IS_CROSSING) != 0u) {
-        int prev_idx = neighbor_data[i * 4u];
-        int next_idx = neighbor_data[i * 4u + 1u];
-        if (prev_idx < 0 || next_idx < 0) return;
+    int prev_idx = neighbor_data[i * 4u];
+    int next_idx = neighbor_data[i * 4u + 1u];
+    if (prev_idx < 0 || next_idx < 0) return;
 
-        float2 prev_pos = float2(positions[uint(prev_idx) * 2u], positions[uint(prev_idx) * 2u + 1u]);
+    bool prev_is_end = (node_flags[uint(prev_idx)] & IS_ENDPOINT) != 0u;
+    bool next_is_end = (node_flags[uint(next_idx)] & IS_ENDPOINT) != 0u;
+    float2 prev_pos = float2(positions[uint(prev_idx) * 2u], positions[uint(prev_idx) * 2u + 1u]);
+    float2 next_pos = float2(positions[uint(next_idx) * 2u], positions[uint(next_idx) * 2u + 1u]);
+
+    if ((flags & IS_CROSSING) != 0u) {
+        // Ghost-aware inverse correction: solve B_rendered(0.5) = grid for cp.
+        float a, bp, bn;
+        if (!prev_is_end && !next_is_end) { a = 0.75; bp = 0.125; bn = 0.125; }
+        else if (prev_is_end && !next_is_end) { a = 0.625; bp = 0.25; bn = 0.125; }
+        else if (!prev_is_end && next_is_end) { a = 0.625; bp = 0.125; bn = 0.25; }
+        else { a = 0.5; bp = 0.25; bn = 0.25; }
+
         float2 grid_pos = float2(orig_positions[i * 2u], orig_positions[i * 2u + 1u]);
-        float2 next_pos = float2(positions[uint(next_idx) * 2u], positions[uint(next_idx) * 2u + 1u]);
-        float2 corrected = (grid_pos - 0.125 * prev_pos - 0.125 * next_pos) / 0.75;
+        float2 corrected = (grid_pos - bp * prev_pos - bn * next_pos) / a;
         positions[i * 2u] = corrected.x;
         positions[i * 2u + 1u] = corrected.y;
         return;
@@ -78,27 +86,20 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
     if ((flags & IS_TJUNCTION) == 0u) return;
 
-    int prev_idx = neighbor_data[i * 4u];
-    int next_idx = neighbor_data[i * 4u + 1u];
-    if (prev_idx < 0 || next_idx < 0) return;
-
-    // Neighbors: latest positions (may be updated by other threads)
-    float2 prev_pos = float2(positions[uint(prev_idx) * 2u], positions[uint(prev_idx) * 2u + 1u]);
-    float2 next_pos = float2(positions[uint(next_idx) * 2u], positions[uint(next_idx) * 2u + 1u]);
-    // Center: ORIGINAL optimizer output (not the corrected value)
-    float2 curr_orig = float2(orig_positions[i * 2u], orig_positions[i * 2u + 1u]);
-
-    float2 corrected = 0.125 * prev_pos + 0.75 * curr_orig + 0.125 * next_pos;
-    positions[i * 2u] = corrected.x;
-    positions[i * 2u + 1u] = corrected.y;
-
-    // Snap stem CP at the other slot onto the through curve. Stem CPs carry
-    // flags = IS_USED | IS_ENDPOINT (= 129), so mask out IS_ENDPOINT before
-    // testing that this slot is a plain stem (flag bits == 1).
+    // Through-CP stays at the optimizer's position. Snap the stem onto
+    // the rendered through-curve via the ghost-aware algebraic B(0.5).
     uint stem = i ^ 1u;
-    if (stem < u.num_nodes && (node_flags[stem] & ~IS_ENDPOINT) == 1u) {
-        float2 on_curve = 0.125 * prev_pos + 0.75 * corrected + 0.125 * next_pos;
-        positions[stem * 2u] = on_curve.x;
-        positions[stem * 2u + 1u] = on_curve.y;
-    }
+    if (stem >= u.num_nodes) return;
+    if ((node_flags[stem] & ~IS_ENDPOINT) != 1u) return;
+
+    float2 through = float2(positions[i * 2u], positions[i * 2u + 1u]);
+    float sp, st, sn;
+    if (!prev_is_end && !next_is_end) { sp = 0.125; st = 0.75;  sn = 0.125; }
+    else if (prev_is_end && !next_is_end) { sp = 0.25;  st = 0.625; sn = 0.125; }
+    else if (!prev_is_end && next_is_end) { sp = 0.125; st = 0.625; sn = 0.25; }
+    else { sp = 0.25;  st = 0.5;   sn = 0.25; }
+
+    float2 on_curve = sp * prev_pos + st * through + sn * next_pos;
+    positions[stem * 2u] = on_curve.x;
+    positions[stem * 2u + 1u] = on_curve.y;
 }

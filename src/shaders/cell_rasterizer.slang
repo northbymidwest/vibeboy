@@ -334,18 +334,15 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 sh_cps[idx].ci = ci;
 
                 // t_branch: branch threshold for prev_dir vs next_dir in
-                // resolve_color. For non-clamped spans the interior B-spline
-                // passes through cp at t=0.5, so the threshold is 0.5
-                // trivially. For clamped spans the curve is reshaped (Q0 or
-                // Q2 = endpoint instead of midpoint), and t=0.5 of the
-                // clamped curve is no longer at the same physical point as
-                // t=0.5 of the equivalent interior curve. Compute t_branch as
-                // the clamped curve's t at the *interior B-spline*'s t=0.5
-                // physical position — the natural before/after sc pivot —
-                // so pixels classify consistently regardless of which curve
-                // shape is in effect.
+                // resolve_color. For non-clamped spans the curve passes
+                // through cp at t=0.5 trivially. For clamped spans, project
+                // the rendered curve's B(0.5) (= 0.125*pp + 0.75*cp +
+                // 0.125*np with ghost adjustment) back onto itself to find
+                // t. This aligns t_branch with the algebraic ghost-aware
+                // stem snap and crossing inverse correction performed by
+                // update_tjunction.
                 if (prev_is_end || next_is_end) {
-                    float2 interior_mid = 0.125 * prev_pos + 0.75 * cp + 0.125 * next_pos;
+                    float2 interior_mid = 0.125 * pp + 0.75 * cp + 0.125 * np;
                     sh_cps[idx].t_branch = bspline_refine(pp, cp, np, interior_mid, 0.5, 1e10).x;
                 } else {
                     sh_cps[idx].t_branch = 0.5;

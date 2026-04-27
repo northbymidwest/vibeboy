@@ -1327,20 +1327,6 @@ fn optimize_energy(
                 continue;
             }
 
-            // Skip non-crossing nodes adjacent to crossings (crossing
-            // position depends on all 4 neighbors; optimizing one side
-            // without the other would break symmetry). Crossing nodes
-            // themselves must NOT be skipped — they handle their own
-            // combined-curvature optimization.
-            if (f & IS_CROSSING) == 0 {
-                if (flags[prev_idx as usize] & IS_CROSSING) != 0 {
-                    continue;
-                }
-                if (flags[next_idx as usize] & IS_CROSSING) != 0 {
-                    continue;
-                }
-            }
-
             // Crossings: only process from slot 0 (even index) to avoid double-processing.
             // The even slot writes the result to both slots AFTER optimization.
             // Revert the initial copy that clobbered the even slot's write.
@@ -1448,29 +1434,40 @@ fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], nu
             let prev_pos = (positions[prev_idx as usize * 2], positions[prev_idx as usize * 2 + 1]);
             let next_pos = (positions[next_idx as usize * 2], positions[next_idx as usize * 2 + 1]);
             let grid_pos = (orig[i * 2], orig[i * 2 + 1]);
+            let prev_is_end = (flags[prev_idx as usize] & IS_ENDPOINT) != 0;
+            let next_is_end = (flags[next_idx as usize] & IS_ENDPOINT) != 0;
 
             if (f & IS_CROSSING) != 0 {
+                // Ghost-aware inverse correction. Solve B_rendered(0.5) = grid
+                // for cp, accounting for ghost extension at endpoint neighbors.
+                let (a, bp, bn) = match (prev_is_end, next_is_end) {
+                    (false, false) => (0.75, 0.125, 0.125),
+                    (true,  false) => (0.625, 0.25,  0.125),
+                    (false, true ) => (0.625, 0.125, 0.25),
+                    (true,  true ) => (0.5,   0.25,  0.25),
+                };
                 let corrected = (
-                    (grid_pos.0 - 0.125 * prev_pos.0 - 0.125 * next_pos.0) / 0.75,
-                    (grid_pos.1 - 0.125 * prev_pos.1 - 0.125 * next_pos.1) / 0.75,
+                    (grid_pos.0 - bp * prev_pos.0 - bn * next_pos.0) / a,
+                    (grid_pos.1 - bp * prev_pos.1 - bn * next_pos.1) / a,
                 );
                 positions[i * 2] = corrected.0;
                 positions[i * 2 + 1] = corrected.1;
             } else if (f & IS_TJUNCTION) != 0 {
-                let corrected = (
-                    0.125 * prev_pos.0 + 0.75 * grid_pos.0 + 0.125 * next_pos.0,
-                    0.125 * prev_pos.1 + 0.75 * grid_pos.1 + 0.125 * next_pos.1,
-                );
-                positions[i * 2] = corrected.0;
-                positions[i * 2 + 1] = corrected.1;
-
+                // Through-CP stays at the optimizer's position. Snap the stem
+                // onto the rendered through-curve via the ghost-aware
+                // algebraic B(0.5) formula.
+                let through = (positions[i * 2], positions[i * 2 + 1]);
                 let stem = i ^ 1;
-                // Stem CPs carry flags = 1 | IS_ENDPOINT in the clamped model;
-                // mask out IS_ENDPOINT before checking that the slot is a stem
-                // (otherwise the snap-onto-through-curve step is skipped).
                 if stem < num_cps && (flags[stem] & !IS_ENDPOINT) == 1 {
-                    positions[stem * 2] = 0.125 * prev_pos.0 + 0.75 * corrected.0 + 0.125 * next_pos.0;
-                    positions[stem * 2 + 1] = 0.125 * prev_pos.1 + 0.75 * corrected.1 + 0.125 * next_pos.1;
+                    // Coefficients depend on which neighbors are endpoints.
+                    let (sp, st, sn) = match (prev_is_end, next_is_end) {
+                        (false, false) => (0.125, 0.75,  0.125),
+                        (true,  false) => (0.25,  0.625, 0.125),
+                        (false, true ) => (0.125, 0.625, 0.25),
+                        (true,  true ) => (0.25,  0.5,   0.25),
+                    };
+                    positions[stem * 2]     = sp * prev_pos.0 + st * through.0 + sn * next_pos.0;
+                    positions[stem * 2 + 1] = sp * prev_pos.1 + st * through.1 + sn * next_pos.1;
                 }
             }
         }
@@ -1734,10 +1731,11 @@ fn rasterize(
         // at the position the equivalent interior B-spline would reach at
         // t=0.5 (the natural before/after-sc pivot in physical space).
         let t_branch = if prev_is_end || next_is_end {
-            // Interior B-spline at t=0.5 uses real (non-ghost) prev and next.
-            let interior_mid_x = 0.125 * prev_pos.0 + 0.75 * cp.0 + 0.125 * next_pos.0;
-            let interior_mid_y = 0.125 * prev_pos.1 + 0.75 * cp.1 + 0.125 * next_pos.1;
-            // Find the clamped curve's closest-t to that physical point.
+            // Use ghost-adjusted positions (= rendered B(0.5)) as interior_mid.
+            // This makes the bifurcation point coincide with the algebraic
+            // ghost-aware stem snap and the ghost-aware crossing correction.
+            let interior_mid_x = 0.125 * pp.0 + 0.75 * cp.0 + 0.125 * np.0;
+            let interior_mid_y = 0.125 * pp.1 + 0.75 * cp.1 + 0.125 * np.1;
             closest_on_span_poly(
                 poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
                 interior_mid_x, interior_mid_y,
