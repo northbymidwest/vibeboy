@@ -2,21 +2,41 @@
 //!
 //! Builds filled vector regions from the GPU pipeline's resolved similarity graph
 //! and optimized B-spline control points. Uses Voronoi cell boundary walking
-//! (same as the CPU contour pipeline) to create a proper planar subdivision,
-//! then traces faces with the planar face algorithm.
+//! to create a planar subdivision, then traces faces with the planar face
+//! algorithm.
 //!
-//! Boundary curves use optimized positions with sharp corners at T-junctions
-//! and crossings.
+//! At each face-loop node we consult the CP graph: if some CP at this grid
+//! corner has chain neighbors whose grid positions match the face's previous
+//! and next loop nodes (in either direction), the face follows that chain
+//! smoothly through the junction and renders as a single quadratic Bézier
+//! using that CP as control. Otherwise the node is a *kink* — a T-junction
+//! stem terminus, a chain endpoint at the image border, a face transition
+//! between two chains at a T-junction, or two chains crossing at the same
+//! corner — and the curve must land on the junction position exactly.
+//!
+//! At a kink with an *interior* partial chain (a chain at this node whose
+//! neighbor matches the face's prev_loop or next_loop), the boundary is
+//! rendered as the de Casteljau split of that chain's full Q at t=0.5 — a
+//! half-Q from `mid(neighbor, this_cp)` to `kink_pos`. This matches the
+//! rasterizer's clamped-stem and crossing-chain rendering exactly. With an
+//! *endpoint* partial chain (a 2-CP chain whose far end is itself a chain
+//! endpoint), the full B-spline segment at this CP is emitted as a single Q.
+//!
+//! The kink position varies by junction type (see [`NodeMap::kink_pos`]):
+//! T-junction stems' snap-corrected position, chain endpoints' own position,
+//! and the crossings' chains-intersection point computed as the standard
+//! B-spline blend `(prev + 6·this + next) / 8` at t=0.5.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
 use vibeboy::scaling::vectorize::VectorizeData;
-
-const IS_TJUNCTION: u32 = 32;
-const IS_CROSSING: u32 = 64;
-const SHARP_MASK: u32 = IS_TJUNCTION | IS_CROSSING;
 
 /// Sentinel color for the void outside the image boundary.
 const VOID_COLOR: u32 = 0x01000000;
+
+// CP flag bits — must match `src/scaling/vectorize.rs`.
+const IS_TJUNCTION: u32 = 32;
+const IS_CROSSING: u32 = 64;
+const IS_ENDPOINT: u32 = 128;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,38 +250,150 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
 }
 
 // ---------------------------------------------------------------------------
-// Node → optimized position mapping
+// Node → optimized position + chain neighbors
 // ---------------------------------------------------------------------------
 
-/// Build maps from x4 node → optimized position and → sharp flag.
-/// Multiple CP slots may map to the same node; we take the first one found.
-/// Nodes on the image perimeter are always marked sharp — boundary chains
-/// terminate against the hard image edge, forming implicit T-junctions.
-fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTreeMap<u64, bool>) {
-    let corners_w = data.img_w + 1;
-    let num_cps = corners_w * (data.img_h + 1) * 2;
-    let w4 = (data.img_w * 4) as i32;
-    let h4 = (data.img_h * 4) as i32;
+/// One CP's chain at a face-loop node. The position is the CP's optimized
+/// position — this is what becomes the Q control when a face follows this
+/// chain through the node.
+#[derive(Clone)]
+struct ChainNeighbors {
+    prev: Option<u64>,
+    next: Option<u64>,
+    pos: (f64, f64),
+}
 
-    let mut pos_map: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
-    let mut sharp_map: BTreeMap<u64, bool> = BTreeMap::new();
+struct NodeMap {
+    /// Multiple CPs may share a corner (T-junction slot 0/1, crossing slot 0/1).
+    /// Each entry's neighbors define one chain through this corner.
+    chains: BTreeMap<u64, Vec<ChainNeighbors>>,
+    /// Position used at *kinks* (boundary lands here exactly, no single chain
+    /// matches the face traversal). Chosen so half-Qs converge on the same
+    /// point the rasterizer's nearest-CP curves intersect at:
+    ///   * T-junction: the stem CP's position (snap-corrected to lie on the
+    ///     through curve at t=0.5).
+    ///   * Crossing: `(prev + 6·this + next)/8` — the chain's t=0.5 midpoint.
+    ///     Both crossing slots' B-splines converge on this point through
+    ///     iterative inverse correction, so the chains intersect there.
+    ///   * Plain chain endpoint (border/isolated): the CP's own position.
+    kink_pos: BTreeMap<u64, (f64, f64)>,
+}
+
+/// Compute the face-loop node ID where the CP at `ci` would appear, based on
+/// the corner's diagonal state. Smooth diagonal CPs land on offset vertices;
+/// everything else (axis-aligned smooth, T-junctions, crossings, even ones
+/// with non-integer corrected orig positions from diagonal through-pairs)
+/// lands on the integer grid corner because pixel cells push the corner
+/// whenever `corner_diag` returns 0 (no single diagonal).
+fn cp_loop_node(data: &VectorizeData, ci: usize, cw: usize) -> u64 {
+    let cx = (ci / 2) % cw;
+    let cy = (ci / 2) / cw;
+    let slot = ci % 2;
+    let diag = corner_diag(&data.graph, data.img_w, data.img_h, cx, cy);
+    let cx4 = 4 * cx as i32;
+    let cy4 = 4 * cy as i32;
+    let junction = data.flags[ci] & (IS_TJUNCTION | IS_CROSSING);
+    let (dx, dy) = match (diag, slot, junction) {
+        // Diagonal corner with a smooth (non-junction) chain CP: pixel cells
+        // push the offset for this slot. T-junctions and crossings sit at
+        // the integer corner regardless of diag (their corrected positions
+        // are handled by `pos`, not by offset selection).
+        (1, 0, 0) => (-1, 1),
+        (1, 1, 0) => (1, -1),
+        (2, 0, 0) => (-1, -1),
+        (2, 1, 0) => (1, 1),
+        _ => (0, 0),
+    };
+    pack_node(cx4 + dx, cy4 + dy)
+}
+
+fn build_node_map(data: &VectorizeData) -> NodeMap {
+    let cw = data.img_w + 1;
+    let num_cps = cw * (data.img_h + 1) * 2;
+    let mut chains: BTreeMap<u64, Vec<ChainNeighbors>> = BTreeMap::new();
+    let mut kink_pos: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
+
+    let neighbor_node = |nci: i32| -> Option<u64> {
+        if nci < 0 { return None; }
+        Some(cp_loop_node(data, nci as usize, cw))
+    };
 
     for ci in 0..num_cps {
         if data.flags[ci] == 0 { continue; }
-        let x4 = (data.orig_positions[ci * 2] * 4.0).round() as i32;
-        let y4 = (data.orig_positions[ci * 2 + 1] * 4.0).round() as i32;
-        let nid = pack_node(x4, y4);
-        pos_map.entry(nid).or_insert((
+        let nid = cp_loop_node(data, ci, cw);
+        let pos = (
             data.positions[ci * 2] as f64,
             data.positions[ci * 2 + 1] as f64,
-        ));
-        let on_border = x4 <= 0 || y4 <= 0 || x4 >= w4 || y4 >= h4;
-        if on_border || data.flags[ci] & SHARP_MASK != 0 {
-            sharp_map.insert(nid, true);
+        );
+        chains.entry(nid).or_default().push(ChainNeighbors {
+            prev: neighbor_node(data.neighbors[ci * 4]),
+            next: neighbor_node(data.neighbors[ci * 4 + 1]),
+            pos,
+        });
+
+        let is_endpoint = data.flags[ci] & IS_ENDPOINT != 0;
+        let is_through = data.flags[ci] & IS_TJUNCTION != 0;
+        let is_crossing = data.flags[ci] & IS_CROSSING != 0;
+        let kp_value = if is_crossing {
+            // Crossing kp = chain's t=0.5 midpoint (where the rasterizer's two
+            // chain B-splines actually intersect). The optimizer can move the
+            // CP away from the inverse-corrected position, so we read the
+            // post-optimization positions from the latest pass and evaluate.
+            let prev_idx = data.neighbors[ci * 4];
+            let next_idx = data.neighbors[ci * 4 + 1];
+            if prev_idx >= 0 && next_idx >= 0 {
+                let prev_pos = (
+                    data.positions[prev_idx as usize * 2] as f64,
+                    data.positions[prev_idx as usize * 2 + 1] as f64,
+                );
+                let next_pos = (
+                    data.positions[next_idx as usize * 2] as f64,
+                    data.positions[next_idx as usize * 2 + 1] as f64,
+                );
+                (
+                    (prev_pos.0 + 6.0 * pos.0 + next_pos.0) / 8.0,
+                    (prev_pos.1 + 6.0 * pos.1 + next_pos.1) / 8.0,
+                )
+            } else {
+                pos
+            }
+        } else {
+            pos
+        };
+        // Override priority: prefer the IS_ENDPOINT (stem at T-junctions, on
+        // the through curve) or IS_CROSSING (chain intersection point) over a
+        // through CP's position that may have been inserted first by slot 0.
+        // Among multiple endpoint/crossing CPs at the same node they all
+        // converge on the same point, so subsequent overrides are no-ops.
+        match kink_pos.entry(nid) {
+            btree_map::Entry::Occupied(mut e) => {
+                if (is_endpoint && !is_through) || is_crossing {
+                    e.insert(kp_value);
+                }
+            }
+            btree_map::Entry::Vacant(e) => {
+                e.insert(kp_value);
+            }
         }
     }
 
-    (pos_map, sharp_map)
+    NodeMap { chains, kink_pos }
+}
+
+/// Returns the matching chain at `nid` (whose neighbors match the face's
+/// `(prev_loop, next_loop)` in either direction) — meaning the face follows
+/// that chain smoothly through this node. `None` means the face kinks here
+/// and the curve must land on the junction position.
+fn match_chain<'a>(
+    nid: u64,
+    prev_loop: u64,
+    next_loop: u64,
+    chains: &'a BTreeMap<u64, Vec<ChainNeighbors>>,
+) -> Option<&'a ChainNeighbors> {
+    chains.get(&nid)?.iter().find(|ch| {
+        (ch.prev == Some(prev_loop) && ch.next == Some(next_loop))
+            || (ch.prev == Some(next_loop) && ch.next == Some(prev_loop))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,65 +402,258 @@ fn build_node_map(data: &VectorizeData) -> (BTreeMap<u64, (f64, f64)>, BTreeMap<
 
 /// Convert a traced face (closed loop of node IDs) to an SVG path `d` attribute.
 ///
-/// Node types:
-/// - **Grid-only** (no optimized position): straight line segment (L)
-/// - **Smooth** (optimized, not sharp): B-spline control point (Q)
-/// - **Sharp** (optimized, T-junction/crossing/border): adjacent curves still
-///   approach smoothly via B-spline midpoints, but the vertex itself is a hard
-///   corner connected by line segments (L through the sharp position)
-fn face_to_svg_d(
-    nodes: &[u64],
-    pos_map: &BTreeMap<u64, (f64, f64)>,
-    sharp_map: &BTreeMap<u64, bool>,
-) -> String {
+/// Per-node behaviors:
+/// - **Grid-only** (no optimized position): line segment through the grid
+///   corner.
+/// - **Smooth** (some chain at this CP has neighbors matching the face's
+///   `prev`/`next`): quadratic Bézier with that chain's CP as control,
+///   running between midpoints with the same chain's adjacent CP positions
+///   on each side. This reproduces the rasterizer's uniform-knot B-spline
+///   blend exactly.
+/// - **Kink** (no chain fully matches but some interior chain partially
+///   matches — face enters or leaves along that chain at this junction):
+///   emit a half-Q (de Casteljau split of that chain's Q at t=0.5) so the
+///   boundary lands on the through curve at `kink_pos`. T-junction stem
+///   sides need this — they follow the through curve up to the corrected
+///   T=0.5 point, then turn onto the stem.
+/// - **Plain kink** (no partial match — chain endpoint at border, stem
+///   terminus from the stem chain side, etc.): clamped end already lands on
+///   `kink_pos` from the prev iteration, so this iteration emits nothing
+///   unless the next iteration is also a plain kink, in which case we move
+///   the pen with an L.
+#[allow(unused_assignments)] // `pen`'s last write inside the loop is intentional.
+fn face_to_svg_d(nodes: &[u64], map: &NodeMap) -> String {
     let n = nodes.len();
     if n < 3 { return String::new(); }
 
-    let get_pos = |nid: u64| -> (f64, f64) {
-        pos_map.get(&nid).copied().unwrap_or_else(|| {
-            let (x4, y4) = unpack_node(nid);
-            (x4 as f64 / 4.0, y4 as f64 / 4.0)
+    let is_optimized = |nid: u64| map.chains.contains_key(&nid);
+    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+    let grid_pos = |nid: u64| -> (f64, f64) {
+        let (x4, y4) = unpack_node(nid);
+        (x4 as f64 / 4.0, y4 as f64 / 4.0)
+    };
+
+    // Find the chain at `next_nid` that's on the same chain as `this` (one of
+    // its neighbors points back to `this_nid`). If found and the partner is an
+    // *interior* CP (both neighbors valid) the chain continues smoothly to a
+    // midpoint with the partner. If the partner is itself an endpoint, the
+    // partner's position IS the clamped chain end. `None` means no chain
+    // continues from `this` toward `next_nid` (the chain ends at this side).
+    let chain_partner = |this_nid: u64, next_nid: u64| -> Option<&ChainNeighbors> {
+        map.chains.get(&next_nid)?.iter().find(|p| {
+            p.prev == Some(this_nid) || p.next == Some(this_nid)
         })
     };
-    let is_optimized = |nid: u64| pos_map.contains_key(&nid);
-    let is_sharp = |nid: u64| sharp_map.get(&nid).copied().unwrap_or(false);
-    let is_grid = |nid: u64| !is_optimized(nid);
-    let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
 
-    let mut d = String::with_capacity(n * 32);
-
-    // Determine start point: grid/sharp nodes start at their position,
-    // smooth nodes start at the midpoint with the previous node.
-    let first = get_pos(nodes[0]);
-    let last = get_pos(nodes[n - 1]);
-    let start = if is_grid(nodes[0]) || is_sharp(nodes[0]) {
-        first
-    } else {
-        mid(last, first)
-    };
-    d.push_str(&format!("M{} {}", fmt(start.0), fmt(start.1)));
-
-    for i in 0..n {
-        let nid = nodes[i];
-        let next_nid = nodes[(i + 1) % n];
-        let p = get_pos(nid);
-        let np = get_pos(next_nid);
-
-        if is_grid(nid) {
-            d.push_str(&format!("L{} {}", fmt(p.0), fmt(p.1)));
-            if !is_grid(next_nid) && !is_sharp(next_nid) {
-                let m = mid(p, np);
-                d.push_str(&format!("L{} {}", fmt(m.0), fmt(m.1)));
-            }
-        } else if is_sharp(nid) {
-            d.push_str(&format!("L{} {}", fmt(p.0), fmt(p.1)));
-            if !is_grid(next_nid) && !is_sharp(next_nid) {
-                let m = mid(p, np);
-                d.push_str(&format!("L{} {}", fmt(m.0), fmt(m.1)));
+    // For a smooth iteration emitting Q ending toward `next_nid`: the natural
+    // endpoint is the midpoint with the chain partner (interior continuation)
+    // or the partner's own position (clamped end at endpoint).
+    let smooth_end = |this: &ChainNeighbors, this_nid: u64, next_nid: u64| -> (f64, f64) {
+        if let Some(p) = chain_partner(this_nid, next_nid) {
+            if p.prev.is_some() && p.next.is_some() {
+                mid(this.pos, p.pos)
+            } else {
+                p.pos
             }
         } else {
-            let end = mid(p, np);
-            d.push_str(&format!("Q{} {} {} {}", fmt(p.0), fmt(p.1), fmt(end.0), fmt(end.1)));
+            map.kink_pos
+                .get(&next_nid)
+                .copied()
+                .unwrap_or_else(|| grid_pos(next_nid))
+        }
+    };
+
+    // At a kink iteration, look for an interior chain at this node whose
+    // neighbor matches `prev_loop` (face arriving along that chain) or
+    // `next_loop` (face leaving along it). When found, the boundary follows
+    // half of that chain's Q from `mid(neighbor.pos, this_chain.pos)` through
+    // the kink point — a clamped Bézier matching the through curve.
+    let partial_chain = |nid: u64, neighbor_loop: u64| -> Option<&ChainNeighbors> {
+        map.chains.get(&nid)?.iter().find(|ch| {
+            ch.prev.is_some()
+                && ch.next.is_some()
+                && (ch.prev == Some(neighbor_loop) || ch.next == Some(neighbor_loop))
+        })
+    };
+
+    // Per iteration: full chain match (smooth) or `None`.
+    let chain_match: Vec<Option<ChainNeighbors>> = (0..n)
+        .map(|i| {
+            let nid = nodes[i];
+            let prev_loop = nodes[(i + n - 1) % n];
+            let next_loop = nodes[(i + 1) % n];
+            match_chain(nid, prev_loop, next_loop, &map.chains).cloned()
+        })
+        .collect();
+
+    let is_kink = |i: usize| is_optimized(nodes[i]) && chain_match[i].is_none();
+
+    // Pen position after iteration i (= start of iteration i+1). This is
+    // also what the path's M command should be (= last iteration's end) so
+    // the closing Z snaps cleanly.
+    let pen_after = |i: usize| -> (f64, f64) {
+        let next_idx = (i + 1) % n;
+        let nid = nodes[i];
+        let next_nid = nodes[next_idx];
+        if let Some(ch) = &chain_match[i] {
+            // Smooth: Q ended at smooth_end(this -> next).
+            smooth_end(ch, nid, next_nid)
+        } else if is_kink(i) {
+            // Kink: pen-end depends on which branch of the kink emission
+            // fires (mirrors the actual loop body below).
+            //  * partial_next interior partner → mid(part, partner) (also
+            //    the ending of a crossing-kink's single smooth Q)
+            //  * partial_next endpoint partner → partner.pos
+            //  * no partial_next, next is kink → next's kink_pos (the L
+            //    kink→kink branch moves the pen there)
+            //  * otherwise → this kink_pos
+            let next_loop = next_nid;
+            if let Some(part) = partial_chain(nid, next_loop) {
+                if let Some(p) = chain_partner(nid, next_loop) {
+                    let partner_interior = p.prev.is_some() && p.next.is_some();
+                    return if partner_interior { mid(part.pos, p.pos) } else { p.pos };
+                }
+            }
+            if is_kink(next_idx) {
+                return map
+                    .kink_pos
+                    .get(&next_nid)
+                    .copied()
+                    .unwrap_or_else(|| grid_pos(next_nid));
+            }
+            map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid))
+        } else {
+            // Grid: L moves to next-side midpoint when next is smooth, to
+            // next's kink_pos when next is a kink, or to the grid corner.
+            if is_optimized(next_nid) {
+                if is_kink(next_idx) {
+                    map.kink_pos
+                        .get(&next_nid)
+                        .copied()
+                        .unwrap_or_else(|| grid_pos(next_nid))
+                } else if let Some(ch_next) = &chain_match[next_idx] {
+                    mid(grid_pos(nid), ch_next.pos)
+                } else {
+                    grid_pos(nid)
+                }
+            } else {
+                grid_pos(nid)
+            }
+        }
+    };
+
+    let m_pos = pen_after(n - 1);
+    let mut pen = m_pos;
+    let mut d = String::with_capacity(n * 32);
+    d.push_str(&format!("M{} {}", fmt(m_pos.0), fmt(m_pos.1)));
+
+    for i in 0..n {
+        let next_idx = (i + 1) % n;
+        let nid = nodes[i];
+        let next_nid = nodes[next_idx];
+
+        if let Some(ch) = &chain_match[i] {
+            // Smooth iteration: Q with the chain's CP as control.
+            let end = smooth_end(ch, nid, next_nid);
+            d.push_str(&format!(
+                "Q{} {} {} {}",
+                fmt(ch.pos.0), fmt(ch.pos.1), fmt(end.0), fmt(end.1)
+            ));
+            pen = end;
+        } else if is_kink(i) {
+            let prev_loop = nodes[(i + n - 1) % n];
+            let kp = map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid));
+
+            // Q on the prev side: face arrived at this kink along an interior
+            // chain. The shape depends on the chain partner at prev_loop.
+            //   * Interior partner — prev iteration emitted a smooth Q ending
+            //     at mid(partner.pos, this_chain.pos); render the second half
+            //     (de Casteljau split at t=0.5) to land on kp.
+            //   * Endpoint partner — pen comes in at partner.pos (the chain's
+            //     clamped end). Render the full B-spline segment AT this CP
+            //     with prev-side ghost expansion as a single Q from pen
+            //     through control = part.pos to kp.
+            if let Some(part) = partial_chain(nid, prev_loop) {
+                let partner_interior = chain_partner(nid, prev_loop)
+                    .is_some_and(|p| p.prev.is_some() && p.next.is_some());
+                let control = if partner_interior { mid(pen, part.pos) } else { part.pos };
+                d.push_str(&format!(
+                    "Q{} {} {} {}",
+                    fmt(control.0), fmt(control.1), fmt(kp.0), fmt(kp.1)
+                ));
+                pen = kp;
+            }
+
+            // Q on the next side: face leaves this kink along an interior
+            // chain. Mirror of the prev side.
+            //   * Interior partner — emit the first-half de Casteljau Q from
+            //     kp to mid(this_chain.pos, partner.pos).
+            //   * Endpoint partner — the chain ends at next_loop with a
+            //     clamped Bézier landing on partner.pos. Emit a single Q with
+            //     control = part.pos and end = partner.pos.
+            if let Some(part) = partial_chain(nid, next_nid) {
+                if let Some(partner) = chain_partner(nid, next_nid) {
+                    let partner_interior = partner.prev.is_some() && partner.next.is_some();
+                    if partner_interior {
+                        if (pen.0 - kp.0).abs() > 1e-9 || (pen.1 - kp.1).abs() > 1e-9 {
+                            d.push_str(&format!("L{} {}", fmt(kp.0), fmt(kp.1)));
+                        }
+                        let end = mid(part.pos, partner.pos);
+                        let control = mid(part.pos, end);
+                        d.push_str(&format!(
+                            "Q{} {} {} {}",
+                            fmt(control.0), fmt(control.1), fmt(end.0), fmt(end.1)
+                        ));
+                        pen = end;
+                    } else {
+                        // Pen sits where the previous chain (on which the
+                        // face arrived) clamped — partner_for_prev.pos. The
+                        // through chain's last segment AT this CP runs from
+                        // mid(prev_through, this_pos) through control =
+                        // this_pos (= part.pos) to partner.pos via ghost
+                        // expansion. We approximate by starting from pen so
+                        // the SVG remains continuous.
+                        d.push_str(&format!(
+                            "Q{} {} {} {}",
+                            fmt(part.pos.0), fmt(part.pos.1), fmt(partner.pos.0), fmt(partner.pos.1)
+                        ));
+                        pen = partner.pos;
+                    }
+                }
+            } else if !is_kink(next_idx) && !is_optimized(next_nid) {
+                // Pen stays at kp; next iter handles its own start.
+            } else if is_kink(next_idx) {
+                // Plain kink chained to another plain kink: line over.
+                let next_kp = map
+                    .kink_pos
+                    .get(&next_nid)
+                    .copied()
+                    .unwrap_or_else(|| grid_pos(next_nid));
+                if (pen.0 - next_kp.0).abs() > 1e-9 || (pen.1 - next_kp.1).abs() > 1e-9 {
+                    d.push_str(&format!("L{} {}", fmt(next_kp.0), fmt(next_kp.1)));
+                    pen = next_kp;
+                }
+            }
+        } else {
+            // Grid: L through the grid corner; if the next is a smooth chain,
+            // also L to the midpoint so the next Q starts there.
+            let p = grid_pos(nid);
+            d.push_str(&format!("L{} {}", fmt(p.0), fmt(p.1)));
+            pen = p;
+            if is_optimized(next_nid) {
+                let target = if is_kink(next_idx) {
+                    map.kink_pos
+                        .get(&next_nid)
+                        .copied()
+                        .unwrap_or_else(|| grid_pos(next_nid))
+                } else if let Some(ch_next) = &chain_match[next_idx] {
+                    mid(p, ch_next.pos)
+                } else {
+                    p
+                };
+                d.push_str(&format!("L{} {}", fmt(target.0), fmt(target.1)));
+                pen = target;
+            }
         }
     }
     d.push('Z');
@@ -363,7 +688,7 @@ pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
 
     let edges = build_cell_edges(data, pixels);
     let faces = trace_faces(&edges);
-    let (pos_map, sharp_map) = build_node_map(data);
+    let map = build_node_map(data);
 
     let mut doc = svg::Document::new()
         .set("viewBox", (0, 0, w, h))
@@ -382,7 +707,7 @@ pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
     let mut by_color: BTreeMap<u32, Vec<String>> = BTreeMap::new();
     for (nodes, color) in &faces {
         if *color == bg || *color == VOID_COLOR { continue; }
-        let d = face_to_svg_d(nodes, &pos_map, &sharp_map);
+        let d = face_to_svg_d(nodes, &map);
         if !d.is_empty() {
             by_color.entry(*color).or_default().push(d);
         }
