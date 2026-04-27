@@ -59,15 +59,25 @@ public float2 bspline_refine(float2 p0, float2 p1, float2 p2, float2 pt,
     float best_d2 = d0; float best_t = 0.0;
     if (d1 < best_d2) { best_d2 = d1; best_t = 1.0; }
 
+    // 1e-12 is essentially "is c3 zero?" — the full-cubic branch divides by
+    // c3 (and c3², c3³), so anything strictly positive but tiny would blow up.
+    // Genuine straight-line spans (2-CP chains) are dispatched to a closed-
+    // form line solver upstream and never reach here, so this only fires for
+    // numerically-degenerate spans where the linear approximation is correct
+    // anyway.
     if (abs(c3) < 1e-12) {
         // Degenerate: quadratic or linear
         if (abs(c2) > 1e-12) {
+            // Numerically stable quadratic root formula (Numerical Recipes 5.6):
+            // q = -0.5*(c1 + sgn(c1)*sqrt(disc)); roots: q/c2, c0/q.
+            // Avoids catastrophic cancellation when c2 is small and the
+            // (-c1 ± sqrt(disc)) form subtracts two near-equal numbers.
             float disc = c1*c1 - 4.0*c2*c0;
             if (disc >= 0.0) {
                 float sq = sqrt(disc);
-                float inv = 0.5 / c2;
-                float t1 = (-c1 + sq) * inv;
-                float t2 = (-c1 - sq) * inv;
+                float qq = -0.5 * (c1 + sign(c1) * sq);
+                float t1 = qq / c2;
+                float t2 = c0 / qq;
                 if (t1 > 0.0 && t1 < 1.0) { float dd = EVAL_D2(t1); if (dd < best_d2) { best_d2 = dd; best_t = t1; } }
                 if (t2 > 0.0 && t2 < 1.0) { float dd = EVAL_D2(t2); if (dd < best_d2) { best_d2 = dd; best_t = t2; } }
             }

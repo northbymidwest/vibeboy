@@ -17,7 +17,7 @@ const IS_CROSSING: u32 = 64;
 /// The rasterizer uses clamped Bezier boundaries when an adjacent CP carries
 /// this bit, so the final span ends exactly at the endpoint position with a
 /// real quadratic curve instead of a degenerate straight tail.
-const IS_ENDPOINT: u32 = 128;
+pub const IS_ENDPOINT: u32 = 128;
 
 const NEWTON_ITER: i32 = 3;
 
@@ -1497,6 +1497,29 @@ fn beval_deriv(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, 
 }
 
 /// Find closest parameter t on a quadratic B-spline span to point pt.
+/// Closed-form closest-point on a line segment from a0 to a1. Returns
+/// `(t, d²)` matching `closest_on_span_poly`'s signature so callers can
+/// dispatch on `CpData::is_line` and merge results into the same hit array.
+#[inline(always)]
+fn closest_on_segment(
+    a0x: f32, a0y: f32, a1x: f32, a1y: f32,
+    ptx: f32, pty: f32,
+) -> (f32, f32) {
+    let vx = a1x - a0x;
+    let vy = a1y - a0y;
+    let vv = vx * vx + vy * vy;
+    let t = if vv > 0.0 {
+        (((ptx - a0x) * vx + (pty - a0y) * vy) / vv).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let cx = a0x + t * vx;
+    let cy = a0y + t * vy;
+    let dx = ptx - cx;
+    let dy = pty - cy;
+    (t, dx * dx + dy * dy)
+}
+
 /// Uses precomputed polynomial coefficients: B(t) = a*t² + b*t + c.
 ///
 /// Exact cubic solver: D(t) = |B(t)-pt|² is degree 4, D'(t) is cubic.
@@ -1537,12 +1560,20 @@ fn closest_on_span_poly(
     if c3.abs() < 1e-12 {
         // Degenerate: quadratic or linear D'
         if c2.abs() > 1e-12 {
-            // Quadratic: c2*t² + c1*t + c0 = 0
+            // Quadratic: c2*t² + c1*t + c0 = 0.
+            // Use the numerically stable formula (Numerical Recipes 5.6):
+            //   q = -0.5 * (c1 + sgn(c1) * sqrt(disc))
+            //   roots: q/c2  and  c0/q
+            // This avoids catastrophic cancellation when c2 is small
+            // (near-linear D') and the standard `(-c1 ± sq)/(2c2)` form
+            // subtracts two nearly-equal numbers.
             let disc = c1 * c1 - 4.0 * c2 * c0;
             if disc >= 0.0 {
                 let sq = disc.sqrt();
-                let inv = 0.5 / c2;
-                for t in [(-c1 + sq) * inv, (-c1 - sq) * inv] {
+                let q = -0.5 * (c1 + c1.signum() * sq);
+                let t1 = q / c2;
+                let t2 = c0 / q;
+                for t in [t1, t2] {
                     if t > 0.0 && t < 1.0 {
                         let d = eval_d2(t);
                         if d < best_d2 { best_d2 = d; best_t = t; }
@@ -1597,6 +1628,16 @@ fn closest_on_span_poly(
 }
 
 /// CP data for rasterization (replaces SharedCP in the shader).
+/// Linear approximation of a curve at the AA hit's closest_t. Used by the
+/// multi-curve wedge AA path to partition a pixel by multiple curves; each
+/// wedge's color is then resampled via classify_at, so we only need the
+/// geometry here, not the curve's own pos/neg side codes.
+struct AaLine {
+    cpt: (f32, f32),
+    /// Unit normal. Side test: `(pt - cpt) · normal`.
+    normal: (f32, f32),
+}
+
 struct CpData {
     pos: (f32, f32),
     orig_pos: (f32, f32),
@@ -1625,6 +1666,11 @@ struct CpData {
     icy: i32,
     prev_ci: i32,
     next_ci: i32,
+    /// True for 2-CP chains (degenerate stem with both ends being endpoint
+    /// markers). The span is geometrically a straight line, so the rasterizer
+    /// uses a closed-form line-segment distance instead of the cubic solver,
+    /// avoiding the float-noise vs degeneracy-threshold trap.
+    is_line: bool,
 }
 
 fn rasterize(
@@ -1675,34 +1721,76 @@ fn rasterize(
             continue;
         }
         let i_am_endpoint = prev_ci < 0 || next_ci < 0;
+        let mut two_cp_chain = false;
         if i_am_endpoint {
             let other = if prev_ci < 0 { next_ci } else { prev_ci };
             let other_is_end = (flags[other as usize] & IS_ENDPOINT) != 0;
             if !other_is_end {
                 continue;
             }
+            // 2-CP chain: both endpoints are markers with no interior CP. The
+            // span has to render here, but only ONCE — the lower-indexed
+            // endpoint owns it. Without this guard both endpoints render the
+            // same physical span with opposite-bowing ghost curvatures and
+            // pollute wedge-AA classifier lines at T-junctions.
+            if (ci as i32) > other {
+                continue;
+            }
+            two_cp_chain = true;
         }
 
-        let cp = read_pos_f(ci as i32);
+        let cp_real = read_pos_f(ci as i32);
         // 2-CP-chain fallback: if either neighbor is missing, use the CP
         // itself for that side (degenerate, straight-line span).
-        let prev_pos = if prev_ci >= 0 { read_pos_f(prev_ci) } else { cp };
-        let next_pos = if next_ci >= 0 { read_pos_f(next_ci) } else { cp };
+        let prev_pos = if prev_ci >= 0 { read_pos_f(prev_ci) } else { cp_real };
+        let next_pos = if next_ci >= 0 { read_pos_f(next_ci) } else { cp_real };
 
         // If a neighbor is an endpoint, replace its position with a virtual
         // ghost = 2*real - cp so that bspline_eval(...,t=0|1) lands exactly
         // on the real endpoint position. For interior neighbors, ghost = real.
         let prev_is_end = prev_ci >= 0 && (flags[prev_ci as usize] & IS_ENDPOINT) != 0;
         let next_is_end = next_ci >= 0 && (flags[next_ci as usize] & IS_ENDPOINT) != 0;
-        let pp = if prev_is_end {
-            (2.0 * prev_pos.0 - cp.0, 2.0 * prev_pos.1 - cp.1)
+
+        // For 2-CP chains, the span runs between two endpoint markers with no
+        // interior CP. Compute its anchors once (in pos and orig space) and
+        // share across the bspline-eval-friendly p0/p1/p2, the polynomial
+        // coefficients, and the orig overrides.
+        let (a0_pos, a1_pos, a0_orig, a1_orig) = if two_cp_chain {
+            let other = if prev_ci < 0 { next_ci } else { prev_ci };
+            let other_pos = read_pos_f(other);
+            let other_orig = read_orig_f(other);
+            let this_orig = read_orig_f(ci as i32);
+            let a0_pos = if prev_ci < 0 { cp_real } else { other_pos };
+            let a1_pos = if next_ci < 0 { cp_real } else { other_pos };
+            let a0_orig = if prev_ci < 0 { this_orig } else { other_orig };
+            let a1_orig = if next_ci < 0 { this_orig } else { other_orig };
+            (a0_pos, a1_pos, a0_orig, a1_orig)
         } else {
-            prev_pos
+            ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0))
         };
-        let np = if next_is_end {
-            (2.0 * next_pos.0 - cp.0, 2.0 * next_pos.1 - cp.1)
+
+        let (cp, pp, np) = if two_cp_chain {
+            // Render the span as a straight line: pick p0=(3·a0-a1)/2,
+            // p1=midpoint, p2=(3·a1-a0)/2 so bspline_eval gives
+            // B(t) = lerp(a0, a1, t) and the polynomial t² coefficient is 0.
+            // a0 = prev side, a1 = next side.
+            let p0 = (1.5 * a0_pos.0 - 0.5 * a1_pos.0, 1.5 * a0_pos.1 - 0.5 * a1_pos.1);
+            let p1 = (0.5 * (a0_pos.0 + a1_pos.0), 0.5 * (a0_pos.1 + a1_pos.1));
+            let p2 = (1.5 * a1_pos.0 - 0.5 * a0_pos.0, 1.5 * a1_pos.1 - 0.5 * a0_pos.1);
+            (p1, p0, p2)
         } else {
-            next_pos
+            let cp = cp_real;
+            let pp = if prev_is_end {
+                (2.0 * prev_pos.0 - cp.0, 2.0 * prev_pos.1 - cp.1)
+            } else {
+                prev_pos
+            };
+            let np = if next_is_end {
+                (2.0 * next_pos.0 - cp.0, 2.0 * next_pos.1 - cp.1)
+            } else {
+                next_pos
+            };
+            (cp, pp, np)
         };
 
         // Bbox: include the real prev/next positions (not ghosts) so that
@@ -1718,19 +1806,37 @@ fn rasterize(
         );
         // Polynomial form: B(t) = a*t² + b*t + c (uniform B-spline, virtual
         // ghosts make the eval equivalent to the clamped Bezier).
-        // a = 0.5*(p0 - 2*p1 + p2), b = p1 - p0, c = 0.5*(p0 + p1)
-        let poly_ax = 0.5 * (pp.0 - 2.0 * cp.0 + np.0);
-        let poly_ay = 0.5 * (pp.1 - 2.0 * cp.1 + np.1);
-        let poly_bx = cp.0 - pp.0;
-        let poly_by = cp.1 - pp.1;
-        let poly_cx = 0.5 * (pp.0 + cp.0);
-        let poly_cy = 0.5 * (pp.1 + cp.1);
+        // a = 0.5*(p0 - 2*p1 + p2), b = p1 - p0, c = 0.5*(p0 + p1).
+        // For 2-CP chains, set coefficients directly so the t² term is
+        // *exactly* zero. Computing it via 0.5*(pp - 2*cp + np) leaves ~1e-6
+        // of float noise, which makes c3 = 2|a|² ≈ 4e-12 — just above
+        // closest_on_span_poly's 1e-12 degenerate-detection threshold —
+        // sending the solver down the full-cubic numerical-disaster path.
+        let (poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy) = if two_cp_chain {
+            (
+                0.0, 0.0,
+                a1_pos.0 - a0_pos.0, a1_pos.1 - a0_pos.1,
+                a0_pos.0, a0_pos.1,
+            )
+        } else {
+            (
+                0.5 * (pp.0 - 2.0 * cp.0 + np.0),
+                0.5 * (pp.1 - 2.0 * cp.1 + np.1),
+                cp.0 - pp.0,
+                cp.1 - pp.1,
+                0.5 * (pp.0 + cp.0),
+                0.5 * (pp.1 + cp.1),
+            )
+        };
 
         // Compute t_branch: see CpData::t_branch doc comment. For non-clamped
         // spans this is 0.5; for clamped spans we find the clamped curve's t
         // at the position the equivalent interior B-spline would reach at
         // t=0.5 (the natural before/after-sc pivot in physical space).
-        let t_branch = if prev_is_end || next_is_end {
+        let t_branch = if two_cp_chain {
+            // Straight line: interior_mid = cp = midpoint, closest t is 0.5.
+            0.5
+        } else if prev_is_end || next_is_end {
             // Use ghost-adjusted positions (= rendered B(0.5)) as interior_mid.
             // This makes the bifurcation point coincide with the algebraic
             // ghost-aware stem snap and the ghost-aware crossing correction.
@@ -1745,21 +1851,30 @@ fn rasterize(
             0.5
         };
 
+        // For 2-CP chains, mirror the straight-line construction in orig
+        // space too so beval(orig_prev, orig_pos, orig_next) gives the same
+        // line in original cell-graph coordinates that the AA flip-detection
+        // in the rasterizer expects.
+        let (orig_pos_out, orig_prev_out, orig_next_out) = if two_cp_chain {
+            let q0 = (1.5 * a0_orig.0 - 0.5 * a1_orig.0, 1.5 * a0_orig.1 - 0.5 * a1_orig.1);
+            let q1 = (0.5 * (a0_orig.0 + a1_orig.0), 0.5 * (a0_orig.1 + a1_orig.1));
+            let q2 = (1.5 * a1_orig.0 - 0.5 * a0_orig.0, 1.5 * a1_orig.1 - 0.5 * a0_orig.1);
+            (q1, q0, q2)
+        } else {
+            (
+                read_orig_f(ci as i32),
+                if prev_ci >= 0 { read_orig_f(prev_ci) } else { read_orig_f(ci as i32) },
+                if next_ci >= 0 { read_orig_f(next_ci) } else { read_orig_f(ci as i32) },
+            )
+        };
+
         all_cps.push(CpData {
             pos: cp,
-            orig_pos: read_orig_f(ci as i32),
+            orig_pos: orig_pos_out,
             prev_pos: pp,
             next_pos: np,
-            orig_prev: if prev_ci >= 0 {
-                read_orig_f(prev_ci)
-            } else {
-                read_orig_f(ci as i32)
-            },
-            orig_next: if next_ci >= 0 {
-                read_orig_f(next_ci)
-            } else {
-                read_orig_f(ci as i32)
-            },
+            orig_prev: orig_prev_out,
+            orig_next: orig_next_out,
             bbox_min,
             bbox_max,
             poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
@@ -1770,6 +1885,7 @@ fn rasterize(
             prev_ci,
             next_ci,
             t_branch,
+            is_line: two_cp_chain,
         });
     }
 
@@ -1938,6 +2054,80 @@ fn rasterize(
     let inv_scale = 1.0 / scale_factor;
     let aa_threshold = 2.0 / (scale_factor * scale_factor);
 
+    // Build a classifier line for an AA hit: tangent line at the curve's
+    // closest_t. Returns None when the CP has no usable edge (no color
+    // discontinuity to either side via prev_dir/next_dir) — such a line
+    // wouldn't separate distinct color regions and shouldn't drive a wedge.
+    let build_aa_line = |sc: &CpData, t: f32,
+                          get_edge_colors: &dyn Fn(i32, i32, i32) -> (u32, u32)|
+                          -> Option<AaLine> {
+        let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+        let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
+        let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
+        if tl < 1e-4 { return None; }
+        let normal = (-tang.1 / tl, tang.0 / tl);
+
+        let prev_split = sc.prev_dir >= 0 && {
+            let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.prev_dir);
+            l != r
+        };
+        let next_split = sc.next_dir >= 0 && {
+            let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.next_dir);
+            l != r
+        };
+        if !prev_split && !next_split { return None; }
+
+        Some(AaLine { cpt, normal })
+    };
+
+    // Sutherland-Hodgman: clip a convex polygon against the half-plane
+    // selected by `keep_pos` of `line`. Returns the clipped polygon.
+    let clip_polygon = |poly: &[(f32, f32)], line: &AaLine, keep_pos: bool| -> Vec<(f32, f32)> {
+        let n = poly.len();
+        if n == 0 { return Vec::new(); }
+        let signed_dist = |p: (f32, f32)| -> f32 {
+            (p.0 - line.cpt.0) * line.normal.0 + (p.1 - line.cpt.1) * line.normal.1
+        };
+        let inside = |s: f32| -> bool { if keep_pos { s > 0.0 } else { s < 0.0 } };
+        let mut out: Vec<(f32, f32)> = Vec::with_capacity(n + 2);
+        let mut prev = poly[n - 1];
+        let mut prev_s = signed_dist(prev);
+        for i in 0..n {
+            let curr = poly[i];
+            let curr_s = signed_dist(curr);
+            if inside(curr_s) {
+                if !inside(prev_s) {
+                    let denom = prev_s - curr_s;
+                    if denom.abs() > 1e-12 {
+                        let t = prev_s / denom;
+                        out.push((prev.0 + t * (curr.0 - prev.0), prev.1 + t * (curr.1 - prev.1)));
+                    }
+                }
+                out.push(curr);
+            } else if inside(prev_s) {
+                let denom = prev_s - curr_s;
+                if denom.abs() > 1e-12 {
+                    let t = prev_s / denom;
+                    out.push((prev.0 + t * (curr.0 - prev.0), prev.1 + t * (curr.1 - prev.1)));
+                }
+            }
+            prev = curr;
+            prev_s = curr_s;
+        }
+        out
+    };
+
+    let polygon_area = |poly: &[(f32, f32)]| -> f32 {
+        let n = poly.len();
+        if n < 3 { return 0.0; }
+        let mut a = 0.0f32;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            a += poly[i].0 * poly[j].1 - poly[j].0 * poly[i].1;
+        }
+        0.5 * a.abs()
+    };
+
     // Rasterize row range into output chunk
     let rasterize_rows = |chunk: &mut [u32], start: usize,
         all_cps: &[CpData], grid_data: &[u16], cell_offset: &[u32]|
@@ -1982,11 +2172,20 @@ fn rasterize(
                 let quick_d2 = qd0.min(qdm).min(qd1);
                 if quick_d2 > 2.0 { continue; }
 
-                // Exact cubic closest-point solve
-                let result = closest_on_span_poly(
-                    sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
-                    sc.poly_cx, sc.poly_cy, center.0, center.1,
-                );
+                // Closest-point: closed-form for 2-CP-chain straight lines,
+                // exact cubic solver for parabolic spans.
+                let result = if sc.is_line {
+                    let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
+                                       0.5 * (sc.prev_pos.1 + sc.pos.1));
+                    let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
+                                       0.5 * (sc.pos.1 + sc.next_pos.1));
+                    closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
+                } else {
+                    closest_on_span_poly(
+                        sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
+                        sc.poly_cx, sc.poly_cy, center.0, center.1,
+                    )
+                };
                 let span_best_t = result.0;
                 let span_best_d2 = result.1;
 
@@ -2040,9 +2239,146 @@ fn rasterize(
                 (best_idx, best_t, best_d2)
             };
             let need_aa = aa_idx >= 0 && aa_d2 < aa_threshold;
+            // Wedge AA only fires at junctions where 2+ curves are within
+            // aa_threshold. For single-curve edges (the common AA case) we
+            // skip aa_lines[] construction entirely and fall through to
+            // the single-curve AA branch.
+            let need_wedge_aa = need_aa && num_hits >= 2 && hit_d2[1] < aa_threshold;
+
+            let mut aa_lines: [Option<AaLine>; 4] = [None, None, None, None];
+            let mut aa_lines_n = 0usize;
+            if need_wedge_aa {
+                for h in 0..num_hits {
+                    if hit_d2[h] >= aa_threshold { break; }
+                    let sc = &all_cps[hit_idx[h] as usize];
+                    // Don't gate on resolve_from_cp here: a stem at its
+                    // endpoint defers center-color resolution to the through-
+                    // curve (correct for the pixel center), but its tangent is
+                    // still a useful wedge partition line. build_aa_line
+                    // already returns None when no edge colors exist.
+                    if let Some(line) = build_aa_line(sc, hit_t[h], &get_edge_colors) {
+                        aa_lines[aa_lines_n] = Some(line);
+                        aa_lines_n += 1;
+                        if aa_lines_n == 4 { break; }
+                    }
+                }
+            }
 
             if !need_aa {
                 chunk[local_y * out_w + opx] = pack_color(center_color);
+            } else if aa_lines_n >= 2 {
+                // Multi-curve wedge AA: partition the pixel square by the
+                // top-2 classifier lines, area-weighted blend.
+                let pix_h = inv_scale * 0.5;
+                let pixel: [(f32, f32); 4] = [
+                    (center.0 - pix_h, center.1 - pix_h),
+                    (center.0 + pix_h, center.1 - pix_h),
+                    (center.0 + pix_h, center.1 + pix_h),
+                    (center.0 - pix_h, center.1 + pix_h),
+                ];
+                let line_a = aa_lines[0].as_ref().unwrap();
+                let line_b = aa_lines[1].as_ref().unwrap();
+
+                let pixel_vec: Vec<(f32, f32)> = pixel.to_vec();
+                let above_a = clip_polygon(&pixel_vec, line_a, true);
+                let below_a = clip_polygon(&pixel_vec, line_a, false);
+                // line_a partitions pixel into above/below; line_b further
+                // partitions each half. Each wedge is sampled at its centroid
+                // by classify_at below — the per-line pos/neg colors aren't
+                // used for the final blend, only the wedge geometry is.
+                let pp = clip_polygon(&above_a, line_b, true);
+                let pn = clip_polygon(&above_a, line_b, false);
+                let np = clip_polygon(&below_a, line_b, true);
+                let nn = clip_polygon(&below_a, line_b, false);
+                let wedges: [&[(f32, f32)]; 4] = [&pp, &pn, &np, &nn];
+
+                let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
+                let mut total_area = 0.0f32;
+                let centroid = |poly: &[(f32, f32)]| -> (f32, f32) {
+                    let n = poly.len() as f32;
+                    let sx: f32 = poly.iter().map(|p| p.0).sum();
+                    let sy: f32 = poly.iter().map(|p| p.1).sum();
+                    (sx / n, sy / n)
+                };
+                // Re-classify a query point near the pixel center. The full
+                // grid scan is expensive at high scale factors, but wedge
+                // centroids are inside the same pixel as the center (≤
+                // inv_scale/2 away), so the relevant CP candidates are the
+                // same top-4 hits[] we already collected for the center.
+                // Just recompute closest_t/d² against those at the new
+                // query point — no fresh spatial-grid iteration.
+                let classify_at = |query: (f32, f32)| -> u32 {
+                    let mut hd2 = [1e10f32; 4];
+                    let mut ht = [0.0f32; 4];
+                    let mut hi = [0u32; 4];
+                    let mut nh = 0usize;
+                    for cached_h in 0..num_hits {
+                        let cp_i = hit_idx[cached_h];
+                        let sc = &all_cps[cp_i as usize];
+                        let r = if sc.is_line {
+                            let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
+                                               0.5 * (sc.prev_pos.1 + sc.pos.1));
+                            let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
+                                               0.5 * (sc.pos.1 + sc.next_pos.1));
+                            closest_on_segment(a0x, a0y, a1x, a1y, query.0, query.1)
+                        } else {
+                            closest_on_span_poly(
+                                sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
+                                sc.poly_cx, sc.poly_cy, query.0, query.1,
+                            )
+                        };
+                        if r.1 < 1.0 {
+                            for h in 0..4 {
+                                if r.1 < hd2[h] {
+                                    for j in (h + 1..4).rev() {
+                                        hd2[j] = hd2[j - 1];
+                                        ht[j] = ht[j - 1];
+                                        hi[j] = hi[j - 1];
+                                    }
+                                    hd2[h] = r.1;
+                                    ht[h] = r.0;
+                                    hi[h] = cp_i;
+                                    if nh < 4 { nh += 1; }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let qfb_x = (query.0.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
+                    let qfb_y = (query.1.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
+                    let qfallback = pixels[qfb_y * img_w + qfb_x];
+                    for h in 0..nh {
+                        if let Some(c) = resolve_from_cp(query, &all_cps[hi[h] as usize], ht[h]) {
+                            return c;
+                        }
+                    }
+                    qfallback
+                };
+                for poly in wedges.iter() {
+                    let area = polygon_area(poly);
+                    if area < 1e-9 { continue; }
+                    // Classify the wedge by sampling at its centroid using
+                    // the full rasterizer classification (independent of
+                    // line_a/line_b's pos/neg side codes).
+                    let c = centroid(poly);
+                    let color = classify_at(c);
+                    let rr = ((color >> 16) & 0xFF) as f32 / 255.0;
+                    let gg = ((color >> 8) & 0xFF) as f32 / 255.0;
+                    let bb = (color & 0xFF) as f32 / 255.0;
+                    sum_r += rr.powf(2.2) * area;
+                    sum_g += gg.powf(2.2) * area;
+                    sum_b += bb.powf(2.2) * area;
+                    total_area += area;
+                }
+
+                if total_area > 0.0 {
+                    let r_out = ((sum_r / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+                    let g_out = ((sum_g / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+                    let b_out = ((sum_b / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+                    chunk[local_y * out_w + opx] = 0xFF000000 | (r_out << 16) | (g_out << 8) | b_out;
+                } else {
+                    chunk[local_y * out_w + opx] = pack_color(center_color);
+                }
             } else {
                 let sc = &all_cps[aa_idx as usize];
                 let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
@@ -2101,9 +2437,40 @@ fn rasterize(
                         if pos_side == neg_side {
                             chunk[local_y * out_w + opx] = pack_color(center_color);
                         } else {
-                            let pw = inv_scale;
-                            let proj_w = pw * normal.0.abs().max(normal.1.abs());
-                            let frac = (0.5 + d / proj_w).clamp(0.0, 1.0);
+                            // Exact pixel coverage by the tangent line.
+                            // Pixel = unit square at center, line at signed
+                            // perpendicular distance d_p from center (in
+                            // pixel-side units), normal absolute components
+                            // (a, b) with a >= b >= 0.
+                            //   - In the linear regime |d_p| <= (a-b)/2:
+                            //     line crosses two parallel edges, coverage
+                            //     is linear → frac = 0.5 + d_p/a (matches the
+                            //     old L∞ formula).
+                            //   - In the corner-cut regime (a-b)/2 < |d_p| <
+                            //     (a+b)/2: line cuts a triangle off one
+                            //     corner, coverage is quadratic.
+                            //   - |d_p| >= (a+b)/2: line outside pixel,
+                            //     coverage saturates.
+                            let nx = normal.0.abs();
+                            let ny = normal.1.abs();
+                            let a = nx.max(ny);
+                            let b = nx.min(ny);
+                            let half_ext = (a + b) * 0.5;
+                            let lin_ext = (a - b) * 0.5;
+                            let d_p = d / inv_scale;
+                            let frac = if d_p >= half_ext {
+                                1.0
+                            } else if d_p <= -half_ext {
+                                0.0
+                            } else if d_p.abs() <= lin_ext {
+                                0.5 + d_p / a
+                            } else if d_p > 0.0 {
+                                let t = half_ext - d_p;
+                                1.0 - 0.5 * t * t / (a * b)
+                            } else {
+                                let t = half_ext + d_p;
+                                0.5 * t * t / (a * b)
+                            };
 
                             // Blend in linear light (sRGB decode → blend → sRGB encode)
                             let r0 = (((pos_side >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
