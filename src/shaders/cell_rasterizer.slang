@@ -333,68 +333,6 @@ AaLine build_junction_aa_line(SlimCP sc, ResolveData rd, float t_eval, float2 j,
     return result;
 }
 
-struct Poly {
-    float2 v[8];
-    int n;
-};
-
-Poly clip_polygon(Poly poly, AaLine line, bool keep_pos) {
-    Poly out_poly;
-    out_poly.n = 0;
-    if (poly.n == 0) return out_poly;
-
-    float2 prev = poly.v[poly.n - 1];
-    float prev_s = dot(prev - line.cpt, line.normal);
-
-    for (int i = 0; i < poly.n; i++) {
-        float2 curr = poly.v[i];
-        float curr_s = dot(curr - line.cpt, line.normal);
-        bool curr_in = keep_pos ? (curr_s > 0.0) : (curr_s < 0.0);
-        bool prev_in = keep_pos ? (prev_s > 0.0) : (prev_s < 0.0);
-        if (curr_in) {
-            if (!prev_in) {
-                float denom = prev_s - curr_s;
-                if (abs(denom) > 1e-12 && out_poly.n < 8) {
-                    float tt = prev_s / denom;
-                    out_poly.v[out_poly.n] = prev + tt * (curr - prev);
-                    out_poly.n++;
-                }
-            }
-            if (out_poly.n < 8) {
-                out_poly.v[out_poly.n] = curr;
-                out_poly.n++;
-            }
-        } else if (prev_in) {
-            float denom = prev_s - curr_s;
-            if (abs(denom) > 1e-12 && out_poly.n < 8) {
-                float tt = prev_s / denom;
-                out_poly.v[out_poly.n] = prev + tt * (curr - prev);
-                out_poly.n++;
-            }
-        }
-        prev = curr;
-        prev_s = curr_s;
-    }
-    return out_poly;
-}
-
-float polygon_area(Poly p) {
-    if (p.n < 3) return 0.0;
-    float a = 0.0;
-    for (int i = 0; i < p.n; i++) {
-        int j = (i + 1) % p.n;
-        a += p.v[i].x * p.v[j].y - p.v[j].x * p.v[i].y;
-    }
-    return abs(a) * 0.5;
-}
-
-float2 polygon_centroid(Poly p) {
-    if (p.n == 0) return float2(0, 0);
-    float2 s = float2(0, 0);
-    for (int i = 0; i < p.n; i++) s += p.v[i];
-    return s / float(p.n);
-}
-
 struct SHit { float d2; float t; int idx; };
 
 uint sample_from_shared(float2 pt, uint fallback_color,
@@ -836,27 +774,13 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
         }
 
         if (need_aa && line_a.valid && line_b.valid) {
-            float pix_h = inv_scale * 0.5;
-            Poly pixel;
-            pixel.v[0] = float2(center.x - pix_h, center.y - pix_h);
-            pixel.v[1] = float2(center.x + pix_h, center.y - pix_h);
-            pixel.v[2] = float2(center.x + pix_h, center.y + pix_h);
-            pixel.v[3] = float2(center.x - pix_h, center.y + pix_h);
-            pixel.n = 4;
-
-            Poly above_a = clip_polygon(pixel, line_a, true);
-            Poly below_a = clip_polygon(pixel, line_a, false);
-            Poly w0 = clip_polygon(above_a, line_b, true);
-            Poly w1 = clip_polygon(above_a, line_b, false);
-            Poly w2 = clip_polygon(below_a, line_b, true);
-            Poly w3 = clip_polygon(below_a, line_b, false);
-
-            // Through-curve color LUT: at a T-junction the through curve
-            // (= sc_a) carries all 3 colors via its prev/next edge segments
-            // split at t_branch. Build each segment's (pos, neg) using the
-            // same edge-selection logic as resolve_color (so a missing edge
-            // falls back to the other one — both segments share colors),
-            // then align to line_a.normal.
+            // Through-curve color LUT (seg0 / seg1 × pos / neg). At a
+            // T-junction the through curve (= sc_a) carries all 3 colors
+            // via its prev/next edge segments split at t_branch. Build
+            // each segment's (pos, neg) using the same edge-selection
+            // logic as resolve_color (so a missing edge falls back to
+            // the other one — both segments share colors), then align
+            // to line_a.normal.
             uint a_pl = 0u, a_pr = 0u, a_nl = 0u, a_nr = 0u;
             if (rd_a.prev_dir >= 0) get_edge_colors(rd_a.icx, rd_a.icy, rd_a.prev_dir, a_pl, a_pr);
             if (rd_a.next_dir >= 0) get_edge_colors(rd_a.icx, rd_a.icy, rd_a.next_dir, a_nl, a_nr);
@@ -890,65 +814,96 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 else          { pos_seg1 = op; neg_seg1 = ng; }
             }
 
-            // Segment selection: line_b's normal is aligned to line_a's
-            // tangent direction (see line construction above), so a wedge
-            // centroid with sb > 0 lies in the tang_a direction from the
-            // junction = post-junction (seg 1), and sb < 0 = pre-junction
-            // (seg 0). Maps (sa-sign, sb-sign) directly to LUT entries.
+            // LUT decoded once. Indexed by (sa>0) | ((sb>0) << 1):
+            //   0 = neg_seg0, 1 = pos_seg0, 2 = neg_seg1, 3 = pos_seg1.
+            float3 lut[4];
+            {
+                uint cs[4] = { neg_seg0, pos_seg0, neg_seg1, pos_seg1 };
+                for (int k = 0; k < 4; k++) {
+                    uint cc = cs[k];
+                    float3 col = float3(float((cc >> 16u) & 0xFFu),
+                                        float((cc >> 8u) & 0xFFu),
+                                        float(cc & 0xFFu)) / 255.0;
+                    lut[k] = pow(col, float3(2.2));
+                }
+            }
+
+            // Boundary-sweep area accumulation. Walk the pixel boundary
+            // CCW; on each edge find up to 2 line crossings (line_a and
+            // line_b), split the edge into ≤3 sub-segments, classify
+            // each sub-segment by (sa, sb)-sign at its midpoint, and
+            // add a signed-triangle area (J as origin) to the matching
+            // wedge bucket. J interior + consistent walk direction →
+            // |cross| gives the wedge area directly.
+            float pix_h = inv_scale * 0.5;
+            float2 corners[4] = {
+                float2(center.x - pix_h, center.y - pix_h),
+                float2(center.x + pix_h, center.y - pix_h),
+                float2(center.x + pix_h, center.y + pix_h),
+                float2(center.x - pix_h, center.y + pix_h),
+            };
+            float2 J = line_a.cpt;
 
             float3 sum_lin = float3(0, 0, 0);
             float total_area = 0.0;
 
-            // Wedges processed inline (array-of-struct quirks in the past).
-            // Per-wedge: 2 dot products + LUT lookup, no closest-point and
-            // no per-wedge resolve_color.
-            float a0 = polygon_area(w0);
-            if (a0 > 1e-9) {
-                float2 cq = polygon_centroid(w0);
-                float sa = dot(cq - line_a.cpt, line_a.normal);
-                float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = sb > 0.0;
-                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
-                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
-                float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                sum_lin += pow(col, float3(2.2)) * a0;
-                total_area += a0;
-            }
-            float a1 = polygon_area(w1);
-            if (a1 > 1e-9) {
-                float2 cq = polygon_centroid(w1);
-                float sa = dot(cq - line_a.cpt, line_a.normal);
-                float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = sb > 0.0;
-                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
-                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
-                float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                sum_lin += pow(col, float3(2.2)) * a1;
-                total_area += a1;
-            }
-            float a2 = polygon_area(w2);
-            if (a2 > 1e-9) {
-                float2 cq = polygon_centroid(w2);
-                float sa = dot(cq - line_a.cpt, line_a.normal);
-                float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = sb > 0.0;
-                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
-                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
-                float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                sum_lin += pow(col, float3(2.2)) * a2;
-                total_area += a2;
-            }
-            float a3 = polygon_area(w3);
-            if (a3 > 1e-9) {
-                float2 cq = polygon_centroid(w3);
-                float sa = dot(cq - line_a.cpt, line_a.normal);
-                float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = sb > 0.0;
-                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
-                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
-                float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                sum_lin += pow(col, float3(2.2)) * a3;
-                total_area += a3;
+            for (int ei = 0; ei < 4; ei++) {
+                float2 p = corners[ei];
+                float2 q = corners[(ei + 1) & 3];
+                float sa_p = dot(p - line_a.cpt, line_a.normal);
+                float sa_q = dot(q - line_a.cpt, line_a.normal);
+                float sb_p = dot(p - line_b.cpt, line_b.normal);
+                float sb_q = dot(q - line_b.cpt, line_b.normal);
+
+                float splits[2] = { 0.0, 0.0 };
+                int nsplit = 0;
+                if (sa_p * sa_q < 0.0) {
+                    splits[nsplit] = sa_p / (sa_p - sa_q);
+                    nsplit++;
+                }
+                if (sb_p * sb_q < 0.0) {
+                    splits[nsplit] = sb_p / (sb_p - sb_q);
+                    nsplit++;
+                }
+                if (nsplit == 2 && splits[0] > splits[1]) {
+                    float tmp = splits[0]; splits[0] = splits[1]; splits[1] = tmp;
+                }
+
+                // Walk sub-segments [0, splits[0]], [splits[0], splits[1]], [splits[1], 1].
+                float t_prev = 0.0;
+                float2 u = p;
+                for (int k = 0; k < nsplit; k++) {
+                    float t_curr = splits[k];
+                    if (t_curr > t_prev + 1e-9) {
+                        float2 v = p + t_curr * (q - p);
+                        float2 m = p + (0.5 * (t_prev + t_curr)) * (q - p);
+                        float sa_m = dot(m - line_a.cpt, line_a.normal);
+                        float sb_m = dot(m - line_b.cpt, line_b.normal);
+                        float2 uj = u - J;
+                        float2 vj = v - J;
+                        float area = abs(uj.x * vj.y - uj.y * vj.x) * 0.5;
+                        if (area >= 1e-9) {
+                            int idx = (sa_m > 0.0 ? 1 : 0) | (sb_m > 0.0 ? 2 : 0);
+                            sum_lin += lut[idx] * area;
+                            total_area += area;
+                        }
+                        u = v;
+                    }
+                    t_prev = t_curr;
+                }
+                if (t_prev < 1.0 - 1e-9) {
+                    float2 m = p + (0.5 * (t_prev + 1.0)) * (q - p);
+                    float sa_m = dot(m - line_a.cpt, line_a.normal);
+                    float sb_m = dot(m - line_b.cpt, line_b.normal);
+                    float2 uj = u - J;
+                    float2 vj = q - J;
+                    float area = abs(uj.x * vj.y - uj.y * vj.x) * 0.5;
+                    if (area >= 1e-9) {
+                        int idx = (sa_m > 0.0 ? 1 : 0) | (sb_m > 0.0 ? 2 : 0);
+                        sum_lin += lut[idx] * area;
+                        total_area += area;
+                    }
+                }
             }
 
             if (total_area > 0.0) {

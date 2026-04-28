@@ -1726,14 +1726,6 @@ fn srgb_encode_argb(r: f32, g: f32, b: f32) -> u32 {
     0xFF000000 | (r_o << 16) | (g_o << 8) | b_o
 }
 
-#[inline(always)]
-fn polygon_centroid(poly: &[(f32, f32)]) -> (f32, f32) {
-    let n = poly.len() as f32;
-    let sx: f32 = poly.iter().map(|p| p.0).sum();
-    let sy: f32 = poly.iter().map(|p| p.1).sum();
-    (sx / n, sy / n)
-}
-
 /// Build line_a/line_b classifier line for the wedge AA path. Returns None
 /// when the CP has no usable edge (no color discontinuity to either side via
 /// prev_dir/next_dir) — such a line wouldn't separate distinct color
@@ -2212,54 +2204,6 @@ fn rasterize(
     // each fires only on pixels the curve(s) actually pass through.
     let aa_threshold = 0.5 / (scale_factor * scale_factor);
 
-    // Sutherland-Hodgman: clip a convex polygon against the half-plane
-    // selected by `keep_pos` of `line`. Returns the clipped polygon.
-    let clip_polygon = |poly: &[(f32, f32)], line: &AaLine, keep_pos: bool| -> Vec<(f32, f32)> {
-        let n = poly.len();
-        if n == 0 { return Vec::new(); }
-        let signed_dist = |p: (f32, f32)| -> f32 {
-            (p.0 - line.cpt.0) * line.normal.0 + (p.1 - line.cpt.1) * line.normal.1
-        };
-        let inside = |s: f32| -> bool { if keep_pos { s > 0.0 } else { s < 0.0 } };
-        let mut out: Vec<(f32, f32)> = Vec::with_capacity(n + 2);
-        let mut prev = poly[n - 1];
-        let mut prev_s = signed_dist(prev);
-        for i in 0..n {
-            let curr = poly[i];
-            let curr_s = signed_dist(curr);
-            if inside(curr_s) {
-                if !inside(prev_s) {
-                    let denom = prev_s - curr_s;
-                    if denom.abs() > 1e-12 {
-                        let t = prev_s / denom;
-                        out.push((prev.0 + t * (curr.0 - prev.0), prev.1 + t * (curr.1 - prev.1)));
-                    }
-                }
-                out.push(curr);
-            } else if inside(prev_s) {
-                let denom = prev_s - curr_s;
-                if denom.abs() > 1e-12 {
-                    let t = prev_s / denom;
-                    out.push((prev.0 + t * (curr.0 - prev.0), prev.1 + t * (curr.1 - prev.1)));
-                }
-            }
-            prev = curr;
-            prev_s = curr_s;
-        }
-        out
-    };
-
-    let polygon_area = |poly: &[(f32, f32)]| -> f32 {
-        let n = poly.len();
-        if n < 3 { return 0.0; }
-        let mut a = 0.0f32;
-        for i in 0..n {
-            let j = (i + 1) % n;
-            a += poly[i].0 * poly[j].1 - poly[j].0 * poly[i].1;
-        }
-        0.5 * a.abs()
-    };
-
     // Rasterize row range into output chunk
     let rasterize_rows = |chunk: &mut [u32], start: usize,
         all_cps: &[CpData], grid_data: &[u32], cell_offset: &[u32]|
@@ -2540,49 +2484,24 @@ fn rasterize(
                 } else if let (Some(line_a), Some(line_b)) = (line_a.as_ref(), line_b.as_ref()) {
                     // Wedge AA model
                     // ==============
-                    // line_a: tangent at the closest curve (sc_a, the through
-                    //   curve at T-junctions). Carries up to 4 colors via
-                    //   t_branch — segment 0 covers t < t_branch (prev edge
-                    //   colors), segment 1 covers t >= t_branch (next edge
-                    //   colors). Each segment has a (pos, neg) pair indexed by
-                    //   the sa-sign at the wedge centroid.
-                    // line_b: tangent at the second-closest curve. Selects which
-                    //   line_a segment a wedge belongs to via sb-sign — but only
-                    //   when line_b actually crosses line_a's render range
-                    //   (b_separates). Outside that range all wedges share the
-                    //   segment containing the pixel center (center_in_seg1).
-                    // Pixel is clipped against line_a then line_b → 4 wedges.
-                    // Each picks one of {pos_seg0, neg_seg0, pos_seg1, neg_seg1}
-                    // via two sign tests on the centroid.
+                    // line_a: through-curve tangent at the junction. Carries up
+                    //   to 4 colors via t_branch — seg 0 (t < t_branch) uses
+                    //   prev edge colors, seg 1 (t >= t_branch) uses next.
+                    //   sa-sign picks pos vs neg side of line_a within the
+                    //   chosen segment.
+                    // line_b: stem-curve tangent at the junction. Aligned so
+                    //   sb > 0 lies in the tang_a direction along line_a =
+                    //   post-junction (seg 1).
                     //
-                    // Multi-curve wedge AA: partition the pixel square by the
-                    // two classifier lines, area-weighted blend.
-                    let pix_h = inv_scale * 0.5;
-                    let pixel: [(f32, f32); 4] = [
-                        (center.0 - pix_h, center.1 - pix_h),
-                        (center.0 + pix_h, center.1 - pix_h),
-                        (center.0 + pix_h, center.1 + pix_h),
-                        (center.0 - pix_h, center.1 + pix_h),
-                    ];
-                    let (a_idx, a_t) = line_a_hit;
+                    // Boundary-sweep area accumulation: walk the pixel
+                    // boundary, find line_a/line_b crossings on each edge,
+                    // accumulate signed-triangle areas (J as origin) into 4
+                    // wedge buckets. The sub-segment midpoint sign-tests give
+                    // the (sa, sb) wedge directly — no centroid pass.
+                    let (a_idx, _a_t) = line_a_hit;
                     let sc_a = &all_cps[a_idx as usize];
 
-                    let above_a = clip_polygon(&pixel, line_a, true);
-                    let below_a = clip_polygon(&pixel, line_a, false);
-                    let pp = clip_polygon(&above_a, line_b, true);
-                    let pn = clip_polygon(&above_a, line_b, false);
-                    let np = clip_polygon(&below_a, line_b, true);
-                    let nn = clip_polygon(&below_a, line_b, false);
-                    let wedges: [&[(f32, f32)]; 4] = [&pp, &pn, &np, &nn];
-
-                    // Through-curve color LUT: at a T-junction the through
-                    // curve (= sc_a) carries all 3 colors via its prev/next
-                    // edge segments split at t_branch. Resolve once per
-                    // segment using the same edge-selection logic as
-                    // resolve_from_cp (so a missing edge falls back to the
-                    // other one — both segments share colors), then align
-                    // to line_a.normal so a single sa-sign test classifies
-                    // both segments.
+                    // Through-curve color LUT (seg0 / seg1 × pos / neg).
                     let uniform_pn = (center_color, center_color);
                     let (pos_seg0, neg_seg0) =
                         resolve_lut_segment(sc_a, line_a.normal, pixels, img_w, img_h, false)
@@ -2590,35 +2509,107 @@ fn rasterize(
                     let (pos_seg1, neg_seg1) =
                         resolve_lut_segment(sc_a, line_a.normal, pixels, img_w, img_h, true)
                             .unwrap_or(uniform_pn);
-                    // Segment selection: line_b's normal is aligned to line_a's
-                    // tangent direction (see line construction above), so a
-                    // wedge centroid with sb > 0 lies in the tang_a direction
-                    // from the junction = post-junction (seg 1), and sb < 0 =
-                    // pre-junction (seg 0). The 4 wedges map (sa-sign, sb-sign)
-                    // to 4 LUT entries directly.
-                    let _ = a_t; // line_a_hit's a_t is no longer used here
-                    let _ = sc_a;
-                    let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
+                    // LUT indexed by (sa>0) | ((sb>0) << 1):
+                    //   0 = sa<0,sb<0 = neg_seg0
+                    //   1 = sa>0,sb<0 = pos_seg0
+                    //   2 = sa<0,sb>0 = neg_seg1
+                    //   3 = sa>0,sb>0 = pos_seg1
+                    let lut: [(f32, f32, f32); 4] = [
+                        srgb_decode(neg_seg0),
+                        srgb_decode(pos_seg0),
+                        srgb_decode(neg_seg1),
+                        srgb_decode(pos_seg1),
+                    ];
+
+                    let pix_h = inv_scale * 0.5;
+                    let corners: [(f32, f32); 4] = [
+                        (center.0 - pix_h, center.1 - pix_h),
+                        (center.0 + pix_h, center.1 - pix_h),
+                        (center.0 + pix_h, center.1 + pix_h),
+                        (center.0 - pix_h, center.1 + pix_h),
+                    ];
+                    let j = line_a.cpt;
+                    let sa_at = |p: (f32, f32)| -> f32 {
+                        (p.0 - line_a.cpt.0) * line_a.normal.0
+                            + (p.1 - line_a.cpt.1) * line_a.normal.1
+                    };
+                    let sb_at = |p: (f32, f32)| -> f32 {
+                        (p.0 - line_b.cpt.0) * line_b.normal.0
+                            + (p.1 - line_b.cpt.1) * line_b.normal.1
+                    };
+
+                    let mut sum_r = 0.0f32;
+                    let mut sum_g = 0.0f32;
+                    let mut sum_b = 0.0f32;
                     let mut total_area = 0.0f32;
-                    for poly in wedges.iter() {
-                        let area = polygon_area(poly);
-                        if area < 1e-9 { continue; }
-                        let cq = polygon_centroid(poly);
-                        let sa = (cq.0 - line_a.cpt.0) * line_a.normal.0
-                               + (cq.1 - line_a.cpt.1) * line_a.normal.1;
-                        let sb = (cq.0 - line_b.cpt.0) * line_b.normal.0
-                               + (cq.1 - line_b.cpt.1) * line_b.normal.1;
-                        let in_seg1 = sb > 0.0;
-                        let color = if in_seg1 {
-                            if sa > 0.0 { pos_seg1 } else { neg_seg1 }
-                        } else {
-                            if sa > 0.0 { pos_seg0 } else { neg_seg0 }
+
+                    let accumulate = |u: (f32, f32), v: (f32, f32),
+                                          sa_m: f32, sb_m: f32,
+                                          sum_r: &mut f32, sum_g: &mut f32,
+                                          sum_b: &mut f32, total: &mut f32| {
+                        let ux = u.0 - j.0;
+                        let uy = u.1 - j.1;
+                        let vx = v.0 - j.0;
+                        let vy = v.1 - j.1;
+                        // J is interior, walk is consistent; abs covers
+                        // either Y-up or Y-down convention.
+                        let area = 0.5 * (ux * vy - uy * vx).abs();
+                        if area < 1e-9 { return; }
+                        let idx = (if sa_m > 0.0 { 1 } else { 0 })
+                            | (if sb_m > 0.0 { 2 } else { 0 });
+                        let (rl, gl, bl) = lut[idx];
+                        *sum_r += rl * area;
+                        *sum_g += gl * area;
+                        *sum_b += bl * area;
+                        *total += area;
+                    };
+
+                    for i in 0..4 {
+                        let p = corners[i];
+                        let q = corners[(i + 1) & 3];
+                        let sa_p = sa_at(p);
+                        let sa_q = sa_at(q);
+                        let sb_p = sb_at(p);
+                        let sb_q = sb_at(q);
+
+                        // Up to 2 crossings per edge (one per line, if signs flip).
+                        let mut splits: [f32; 2] = [0.0; 2];
+                        let mut nsplit = 0usize;
+                        if sa_p * sa_q < 0.0 {
+                            splits[nsplit] = sa_p / (sa_p - sa_q);
+                            nsplit += 1;
+                        }
+                        if sb_p * sb_q < 0.0 {
+                            splits[nsplit] = sb_p / (sb_p - sb_q);
+                            nsplit += 1;
+                        }
+                        if nsplit == 2 && splits[0] > splits[1] {
+                            splits.swap(0, 1);
+                        }
+
+                        let edge_pt = |t: f32| -> (f32, f32) {
+                            (p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1))
                         };
-                        let (rl, gl, bl) = srgb_decode(color);
-                        sum_r += rl * area;
-                        sum_g += gl * area;
-                        sum_b += bl * area;
-                        total_area += area;
+
+                        // Walk sub-segments [0, splits[0]], [splits[0], splits[1]], [splits[1], 1].
+                        let mut t_prev = 0.0f32;
+                        let mut u = p;
+                        for k in 0..nsplit {
+                            let t_curr = splits[k];
+                            if t_curr > t_prev + 1e-9 {
+                                let v = edge_pt(t_curr);
+                                let m = edge_pt(0.5 * (t_prev + t_curr));
+                                accumulate(u, v, sa_at(m), sb_at(m),
+                                    &mut sum_r, &mut sum_g, &mut sum_b, &mut total_area);
+                                u = v;
+                            }
+                            t_prev = t_curr;
+                        }
+                        if t_prev < 1.0 - 1e-9 {
+                            let m = edge_pt(0.5 * (t_prev + 1.0));
+                            accumulate(u, q, sa_at(m), sb_at(m),
+                                &mut sum_r, &mut sum_g, &mut sum_b, &mut total_area);
+                        }
                     }
 
                     chunk[local_y * out_w + opx] = if total_area > 0.0 {
