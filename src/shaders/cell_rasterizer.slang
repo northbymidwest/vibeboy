@@ -294,6 +294,45 @@ AaLine build_aa_line(SlimCP sc, ResolveData rd, float t, float d2) {
     return result;
 }
 
+/// Junction-anchored AA line: cpt = J (junction position), tangent at
+/// `t_eval`. Returns the unit tangent in `out_tang_unit` so caller can
+/// align line_b's normal to line_a's tangent direction. valid=true iff
+/// the curve has at least one edge with a color discontinuity (otherwise
+/// the line wouldn't separate distinct color regions).
+AaLine build_junction_aa_line(SlimCP sc, ResolveData rd, float t_eval, float2 j,
+                              out float2 out_tang_unit) {
+    AaLine result;
+    result.valid = false;
+    result.d2 = 0.0;
+    result.cpt = j;
+    result.normal = float2(0, 0);
+    result.pos_color = 0u;
+    result.neg_color = 0u;
+    out_tang_unit = float2(0, 0);
+
+    float2 tang = bspline_deriv(sc.prev_pos, sc.pos, sc.next_pos, t_eval);
+    float tl = length(tang);
+    if (tl < 1e-4) return result;
+    float2 tu = tang / tl;
+    out_tang_unit = tu;
+
+    uint aa_pl = 0u, aa_pr = 0u, aa_nl = 0u, aa_nr = 0u;
+    bool prev_split = false, next_split = false;
+    if (rd.prev_dir >= 0) {
+        get_edge_colors(rd.icx, rd.icy, rd.prev_dir, aa_pl, aa_pr);
+        prev_split = (aa_pl != aa_pr);
+    }
+    if (rd.next_dir >= 0) {
+        get_edge_colors(rd.icx, rd.icy, rd.next_dir, aa_nl, aa_nr);
+        next_split = (aa_nl != aa_nr);
+    }
+    if (!prev_split && !next_split) return result;
+
+    result.normal = float2(-tu.y, tu.x);
+    result.valid = true;
+    return result;
+}
+
 struct Poly {
     float2 v[8];
     int n;
@@ -670,18 +709,51 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
 
                 int slot1_ci_0 = (ci0 / 2) * 2 + 1;
                 int slot1_ci_1 = (ci1 / 2) * 2 + 1;
-                // 2-CP-chain stem: slot 1 itself renders as the stem (both
-                // stem endpoints are markers, slot 1 isn't filtered). The
-                // "stem render CP" IS slot 1. Otherwise: slot 1 is filtered
-                // and its surviving non-(-1) neighbor IS the stem render CP.
-                bool cp0_through = ((f0 & IS_TJUNCTION) != 0u)
-                    && (ci1 == slot1_ci_0
-                        || cp_neighbors[slot1_ci_0 * 4] == ci1
-                        || cp_neighbors[slot1_ci_0 * 4 + 1] == ci1);
-                bool cp1_through = ((f1 & IS_TJUNCTION) != 0u)
-                    && (ci0 == slot1_ci_1
-                        || cp_neighbors[slot1_ci_1 * 4] == ci0
-                        || cp_neighbors[slot1_ci_1 * 4 + 1] == ci0);
+                // Structural lookup of t_b_eval — the parameter on sc_b's
+                // curve at which it passes through (or terminates at) the
+                // junction. Three cases, all without closest_t:
+                //   (a) sc_b IS slot 1 of sc_a's corner — 2-CP-chain stem.
+                //       Cell graph creates slot 1 with next_ci=-1, so the
+                //       2-CP construction puts a1 = slot1.pos = junction
+                //       side at t=1.
+                //   (b) sc_b is slot 1's neighbor — slot 1 was filtered;
+                //       sc_b ghost-extends through slot 1's pos at whichever
+                //       of sc_b's prev/next is IS_ENDPOINT-flagged (t=0 for
+                //       prev, t=1 for next).
+                //   Crossings: sc_b's curve passes through J at t_branch.
+                int cp0_t_match = -1;  // -1 = no match, 0 = t=0, 1 = t=1, 2 = t=t_branch
+                int cp1_t_match = -1;
+                if ((f0 & IS_TJUNCTION) != 0u) {
+                    if (ci1 == slot1_ci_0) {
+                        cp0_t_match = 1;  // case (a)
+                    } else if (cp_neighbors[slot1_ci_0 * 4] == ci1
+                            || cp_neighbors[slot1_ci_0 * 4 + 1] == ci1) {
+                        // case (b): junction side = sc_b's IS_ENDPOINT neighbor
+                        int sc_b_prev = cp_neighbors[ci1 * 4];
+                        int sc_b_next = cp_neighbors[ci1 * 4 + 1];
+                        bool prev_is_end = sc_b_prev >= 0
+                            && (cp_flags[sc_b_prev] & IS_ENDPOINT) != 0u;
+                        bool next_is_end = sc_b_next >= 0
+                            && (cp_flags[sc_b_next] & IS_ENDPOINT) != 0u;
+                        if (prev_is_end) cp0_t_match = 0;
+                        else if (next_is_end) cp0_t_match = 1;
+                    }
+                }
+                if ((f1 & IS_TJUNCTION) != 0u) {
+                    if (ci0 == slot1_ci_1) {
+                        cp1_t_match = 1;
+                    } else if (cp_neighbors[slot1_ci_1 * 4] == ci0
+                            || cp_neighbors[slot1_ci_1 * 4 + 1] == ci0) {
+                        int sc_b_prev = cp_neighbors[ci0 * 4];
+                        int sc_b_next = cp_neighbors[ci0 * 4 + 1];
+                        bool prev_is_end = sc_b_prev >= 0
+                            && (cp_flags[sc_b_prev] & IS_ENDPOINT) != 0u;
+                        bool next_is_end = sc_b_next >= 0
+                            && (cp_flags[sc_b_next] & IS_ENDPOINT) != 0u;
+                        if (prev_is_end) cp1_t_match = 0;
+                        else if (next_is_end) cp1_t_match = 1;
+                    }
+                }
                 bool both_x_same =
                     ((f0 & IS_CROSSING) != 0u)
                     && ((f1 & IS_CROSSING) != 0u)
@@ -689,20 +761,19 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
 
                 int through_idx = -1;
                 int stem_idx = -1;
-                float through_t = 0.0;
-                float stem_t = 0.0;
-                if (cp0_through) {
+                float t_b_eval = 0.0;
+                if (cp0_t_match >= 0) {
                     through_idx = best_idx;
                     stem_idx = second_idx;
-                    through_t = best_t;
-                } else if (cp1_through) {
+                    t_b_eval = (cp0_t_match == 0) ? 0.0 : 1.0;
+                } else if (cp1_t_match >= 0) {
                     through_idx = second_idx;
                     stem_idx = best_idx;
-                    through_t = 0.0;  // recompute below
+                    t_b_eval = (cp1_t_match == 0) ? 0.0 : 1.0;
                 } else if (both_x_same) {
                     through_idx = best_idx;
                     stem_idx = second_idx;
-                    through_t = best_t;
+                    t_b_eval = sh_cps[uint(second_idx)].t_branch;
                 }
 
                 // The wedge AA model assumes the 3-color region (the wedge
@@ -715,9 +786,19 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 // single-curve AA avoids mixing in a spurious third color.
                 if (through_idx >= 0) {
                     SlimCP sc_through_test = sh_cps[uint(through_idx)];
+                    // J = beval(through, t_branch): the actual point on the
+                    // rendered curve at the junction parameter. NOT sc.pos
+                    // (= polynomial control point), since for non-ghost-
+                    // extended through CPs (e.g. an arch with all interior
+                    // neighbors) the curve at t_branch differs from pos by
+                    // the 0.125*p0 + 0.75*p1 + 0.125*p2 vs p1 offset.
+                    float2 J_test = bspline_eval(sc_through_test.prev_pos,
+                                                  sc_through_test.pos,
+                                                  sc_through_test.next_pos,
+                                                  sc_through_test.t_branch);
                     float pix_half_test = inv_scale * 0.5;
-                    if (abs(sc_through_test.pos.x - center.x) > pix_half_test
-                        || abs(sc_through_test.pos.y - center.y) > pix_half_test) {
+                    if (abs(J_test.x - center.x) > pix_half_test
+                        || abs(J_test.y - center.y) > pix_half_test) {
                         through_idx = -1;
                         stem_idx = -1;
                     }
@@ -726,23 +807,30 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 if (through_idx >= 0) {
                     sc_a = sh_cps[uint(through_idx)];
                     rd_a = read_resolve_data(sc_a.ci);
-                    // For the cp1_through case, recompute through_t at center.
-                    if (through_idx != best_idx) {
-                        float2 r = sc_a.is_line
-                            ? closest_on_chain_segment(sc_a, center)
-                            : bspline_refine(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, center, 0.5, 1e10);
-                        through_t = r.x;
-                    }
-                    line_a_t = through_t;
-                    line_a = build_aa_line(sc_a, rd_a, through_t, 0.0);
+                    // J = beval(sc_a, t_branch) — point on the rendered through
+                    // curve at the junction parameter (not sc_a.pos).
+                    float2 J = bspline_eval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos,
+                                             sc_a.t_branch);
+                    line_a_t = sc_a.t_branch;
 
-                    // Build line_b from stem_idx (recompute t at center).
+                    // line_a: through tangent at t_branch (where the curve
+                    // passes through its own pos by construction).
+                    float2 tang_a_unit;
+                    line_a = build_junction_aa_line(sc_a, rd_a, sc_a.t_branch, J, tang_a_unit);
+
+                    // line_b: stem tangent at the junction. t_b_eval was
+                    // determined structurally by the gate above.
                     SlimCP sc_b = sh_cps[uint(stem_idx)];
                     ResolveData rd_b = read_resolve_data(sc_b.ci);
-                    float2 rb = sc_b.is_line
-                        ? closest_on_chain_segment(sc_b, center)
-                        : bspline_refine(sc_b.prev_pos, sc_b.pos, sc_b.next_pos, center, 0.5, 1e10);
-                    line_b = build_aa_line(sc_b, rd_b, rb.x, rb.y);
+                    float2 tang_b_unit;
+                    line_b = build_junction_aa_line(sc_b, rd_b, t_b_eval, J, tang_b_unit);
+
+                    // Align line_b.normal so sb > 0 = "in tang_a direction"
+                    // along line_a = post-junction (seg 1). If line_b's normal
+                    // opposes tang_a, flip it.
+                    if (line_b.valid && dot(line_b.normal, tang_a_unit) < 0.0) {
+                        line_b.normal = -line_b.normal;
+                    }
                 }
             }
         }
@@ -802,27 +890,11 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 else          { pos_seg1 = op; neg_seg1 = ng; }
             }
 
-            // Segment selection: line_b only separates seg 0 from seg 1
-            // when it crosses line_a's curve in [0, 1] — i.e., the mid-
-            // seg-0 and mid-seg-1 points lie on opposite sides of line_b.
-            // When line_b is geometrically outside line_a's curve range
-            // (e.g., a stem at an adjacent corner), both segments fall
-            // on the same side and sb-sidedness is meaningless. In that
-            // case all wedges of the pixel share one segment, picked from
-            // the curve's t at the pixel center.
-            float seg1_side = 1.0;
-            bool b_separates = false;
-            if (!sc_a.is_line) {
-                float t_pre = sc_a.t_branch * 0.5;
-                float t_post = (sc_a.t_branch + 1.0) * 0.5;
-                float2 p_pre = bspline_eval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, t_pre);
-                float2 p_post = bspline_eval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, t_post);
-                float s0 = dot(p_pre - line_b.cpt, line_b.normal);
-                float s1 = dot(p_post - line_b.cpt, line_b.normal);
-                seg1_side = s1;
-                b_separates = (s0 * s1) < 0.0;
-            }
-            bool center_in_seg1 = line_a_t >= sc_a.t_branch;
+            // Segment selection: line_b's normal is aligned to line_a's
+            // tangent direction (see line construction above), so a wedge
+            // centroid with sb > 0 lies in the tang_a direction from the
+            // junction = post-junction (seg 1), and sb < 0 = pre-junction
+            // (seg 0). Maps (sa-sign, sb-sign) directly to LUT entries.
 
             float3 sum_lin = float3(0, 0, 0);
             float total_area = 0.0;
@@ -835,7 +907,7 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 float2 cq = polygon_centroid(w0);
                 float sa = dot(cq - line_a.cpt, line_a.normal);
                 float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                bool seg1 = sb > 0.0;
                 uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
                                : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
@@ -847,7 +919,7 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 float2 cq = polygon_centroid(w1);
                 float sa = dot(cq - line_a.cpt, line_a.normal);
                 float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                bool seg1 = sb > 0.0;
                 uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
                                : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
@@ -859,7 +931,7 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 float2 cq = polygon_centroid(w2);
                 float sa = dot(cq - line_a.cpt, line_a.normal);
                 float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                bool seg1 = sb > 0.0;
                 uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
                                : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
@@ -871,7 +943,7 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 float2 cq = polygon_centroid(w3);
                 float sa = dot(cq - line_a.cpt, line_a.normal);
                 float sb = dot(cq - line_b.cpt, line_b.normal);
-                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                bool seg1 = sb > 0.0;
                 uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
                                : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;

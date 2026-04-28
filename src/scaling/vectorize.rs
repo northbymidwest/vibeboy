@@ -1761,6 +1761,33 @@ fn build_aa_line(
     Some(AaLine { cpt, normal })
 }
 
+/// Junction-anchored wedge AA line: cpt = junction position J (instead of
+/// the curve's closest_t to the pixel), tangent evaluated at `t_eval`.
+/// Returns the unit tangent alongside the line so the caller can align
+/// line_b's normal to line_a's tangent direction.
+fn build_junction_aa_line(
+    sc: &CpData, t_eval: f32, j: (f32, f32),
+    pixels: &[u32], img_w: usize, img_h: usize,
+) -> Option<(AaLine, (f32, f32))> {
+    let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t_eval);
+    let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
+    if tl < 1e-4 { return None; }
+    let tang_unit = (tang.0 / tl, tang.1 / tl);
+    let normal = (-tang_unit.1, tang_unit.0);
+
+    let prev_split = sc.prev_dir >= 0 && {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir);
+        l != r
+    };
+    let next_split = sc.next_dir >= 0 && {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir);
+        l != r
+    };
+    if !prev_split && !next_split { return None; }
+
+    Some((AaLine { cpt: j, normal }, tang_unit))
+}
+
 /// Resolve one segment of the wedge-AA color LUT for `sc_a` (the through
 /// curve at a T-junction). Returns (pos_color, neg_color) aligned to
 /// `line_a_normal`. See "Wedge AA model" comment in rasterize() for context.
@@ -2361,42 +2388,74 @@ fn rasterize(
                 //
                 // Crossings (valence-4): both hits are IS_CROSSING at the
                 // same corner — partner identification is direct.
-                let slot1_neighbor_match = |sc_a: &CpData, sc_b: &CpData| -> bool {
+                // slot1_neighbor_match returns Some(t_b_eval) if sc_b is the
+                // stem-side curve for sc_a's junction, where t_b_eval is the
+                // parameter value on sc_b's curve at which it passes through
+                // (or terminates at) the junction. None if no structural
+                // junction relationship.
+                //
+                // Three structural cases, all handled without closest_t:
+                //   (a) sc_b IS slot 1 of sc_a's corner — 2-CP-chain stem.
+                //       Cell graph creates slot 1 with next_ci=-1, so the
+                //       2-CP construction puts the junction-side endpoint
+                //       at a1 = slot1.pos, hit at t=1.
+                //   (b) sc_b is slot 1's neighbor — slot 1 was filtered, sc_b
+                //       is the chain CP at the adjacent corner that owns the
+                //       stem span via clamped Bezier toward slot 1's pos.
+                //       sc_b's curve ghost-extends through slot 1's pos at
+                //       whichever of sc_b's prev/next is IS_ENDPOINT-flagged
+                //       (t=0 for prev side, t=1 for next side).
+                let slot1_neighbor_t = |sc_a: &CpData, sc_b: &CpData| -> Option<f32> {
                     let slot1_ci = ((sc_a.icy as usize * corners_w + sc_a.icx as usize) * 2 + 1) as i32;
-                    if (slot1_ci as usize) >= flags.len() { return false; }
-                    // 2-CP-chain stem: slot 1 itself renders the straight-line
-                    // span (both stem endpoints are markers, so the filter keeps
-                    // slot 1 in all_cps). The "stem render CP" IS slot 1.
-                    if sc_b.ci == slot1_ci { return true; }
-                    // Regular stem: slot 1 is filtered; its surviving non-(-1)
-                    // neighbor in cp_neighbors is the stem render CP at an
-                    // adjacent corner.
+                    if (slot1_ci as usize) >= flags.len() { return None; }
+                    // Case (a)
+                    if sc_b.ci == slot1_ci { return Some(1.0); }
+                    // Case (b)
                     let slot1_prev = cp_neighbors[(slot1_ci as usize) * 4];
                     let slot1_next = cp_neighbors[(slot1_ci as usize) * 4 + 1];
-                    slot1_prev == sc_b.ci || slot1_next == sc_b.ci
+                    if slot1_prev != sc_b.ci && slot1_next != sc_b.ci { return None; }
+                    let prev_is_end = sc_b.prev_ci >= 0
+                        && (flags[sc_b.prev_ci as usize] & IS_ENDPOINT) != 0;
+                    let next_is_end = sc_b.next_ci >= 0
+                        && (flags[sc_b.next_ci as usize] & IS_ENDPOINT) != 0;
+                    if prev_is_end { Some(0.0) }
+                    else if next_is_end { Some(1.0) }
+                    else { None }  // shouldn't happen for a real slot-1 neighbor
                 };
                 let mut through_h: Option<usize> = None;
                 let mut stem_h: Option<usize> = None;
+                let mut t_b_eval: f32 = 0.0;
                 if num_hits >= 2 && hit_d2[1] < aa_threshold {
                     let cp0 = &all_cps[hit_idx[0] as usize];
                     let cp1 = &all_cps[hit_idx[1] as usize];
-                    let cp0_t = (cp0.flag & IS_TJUNCTION) != 0 && slot1_neighbor_match(cp0, cp1);
-                    let cp1_t = (cp1.flag & IS_TJUNCTION) != 0 && slot1_neighbor_match(cp1, cp0);
+                    let cp0_t = if (cp0.flag & IS_TJUNCTION) != 0 {
+                        slot1_neighbor_t(cp0, cp1)
+                    } else {
+                        None
+                    };
+                    let cp1_t = if (cp1.flag & IS_TJUNCTION) != 0 {
+                        slot1_neighbor_t(cp1, cp0)
+                    } else {
+                        None
+                    };
                     let both_x_same =
                         (cp0.flag & IS_CROSSING) != 0
                         && (cp1.flag & IS_CROSSING) != 0
                         && cp0.icx == cp1.icx
                         && cp0.icy == cp1.icy;
-                    if cp0_t {
+                    if let Some(t) = cp0_t {
                         through_h = Some(0);
                         stem_h = Some(1);
-                    } else if cp1_t {
+                        t_b_eval = t;
+                    } else if let Some(t) = cp1_t {
                         through_h = Some(1);
                         stem_h = Some(0);
+                        t_b_eval = t;
                     } else if both_x_same {
-                        // Crossings: either order works.
+                        // Crossings: sc_b's curve passes through J at t_branch.
                         through_h = Some(0);
                         stem_h = Some(1);
+                        t_b_eval = all_cps[hit_idx[1] as usize].t_branch;
                     }
                 }
                 // The wedge AA model assumes the 3-color region (the wedge
@@ -2414,24 +2473,66 @@ fn rasterize(
                 // is at least free of the spurious-third-color artifact.
                 if let Some(ah) = through_h {
                     let sc_a = &all_cps[hit_idx[ah] as usize];
+                    // J = point on the through curve at t_branch (where the
+                    // curve passes "through itself" at the junction). NOT
+                    // sc_a.pos (= polynomial control point): for non-ghost-
+                    // extended CPs (e.g. an arch with all interior neighbors)
+                    // the curve at t_branch differs from pos by the curve's
+                    // 0.125*p0 + 0.75*p1 + 0.125*p2 vs p1 offset.
+                    let j = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, sc_a.t_branch);
                     let pix_half = inv_scale * 0.5;
-                    let in_pixel = (sc_a.pos.0 - center.0).abs() <= pix_half
-                                && (sc_a.pos.1 - center.1).abs() <= pix_half;
+                    let in_pixel = (j.0 - center.0).abs() <= pix_half
+                                && (j.1 - center.1).abs() <= pix_half;
                     if !in_pixel {
                         through_h = None;
                         stem_h = None;
                     }
                 }
                 // line_a = through curve, line_b = stem render curve.
+                //
+                // Junction-anchored: both lines pass through the actual
+                // junction J = sc_a.pos (= geometric meeting point of the
+                // through and stem curves post-correction). Tangents are
+                // evaluated at the t value where each curve passes nearest J:
+                //   - line_a (through): t = sc_a.t_branch (curve passes
+                //     through its own pos at t_branch by construction).
+                //   - line_b (stem): if sc_b.pos coincides with J (2-CP-chain
+                //     stem at slot 1 of junction corner, or crossing partner
+                //     at same corner), use sc_b.t_branch. Otherwise (regular
+                //     stem at adjacent corner), use closest_t on sc_b's curve
+                //     to J.
+                // This makes the 4-wedge partition geometrically meaningful
+                // (both lines literally cross at J) and lets sb-sign directly
+                // separate seg0 (pre-junction) from seg1 (post-junction)
+                // along line_a, eliminating the b_separates / center_in_seg1
+                // fallback.
                 let mut line_a: Option<AaLine> = None;
                 let mut line_b: Option<AaLine> = None;
                 let mut line_a_hit: (u32, f32) = (0, 0.0);
                 if let (Some(ah), Some(bh)) = (through_h, stem_h) {
                     let sc_a = &all_cps[hit_idx[ah] as usize];
                     let sc_b = &all_cps[hit_idx[bh] as usize];
-                    line_a = build_aa_line(sc_a, hit_t[ah], pixels, img_w, img_h);
-                    line_b = build_aa_line(sc_b, hit_t[bh], pixels, img_w, img_h);
-                    line_a_hit = (hit_idx[ah], hit_t[ah]);
+                    // J = beval(sc_a, t_branch) — point on the rendered through
+                    // curve at the junction parameter (NOT sc_a.pos, which is
+                    // a polynomial control point and may differ from the curve
+                    // for non-ghost-extended CPs).
+                    let j = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, sc_a.t_branch);
+                    let la = build_junction_aa_line(sc_a, sc_a.t_branch, j, pixels, img_w, img_h);
+                    // t_b_eval was determined structurally by the gate above.
+                    let lb = build_junction_aa_line(sc_b, t_b_eval, j, pixels, img_w, img_h);
+                    if let (Some((la_line, tang_a_unit)), Some((mut lb_line, _))) = (la, lb) {
+                        // Align line_b.normal so sb > 0 means "in tang_a
+                        // direction" along the through curve, i.e., post-
+                        // junction (seg 1). If lb's normal opposes tang_a,
+                        // flip it so sb-sign tracks pre/post consistently.
+                        if lb_line.normal.0 * tang_a_unit.0
+                           + lb_line.normal.1 * tang_a_unit.1 < 0.0 {
+                            lb_line.normal = (-lb_line.normal.0, -lb_line.normal.1);
+                        }
+                        line_a = Some(la_line);
+                        line_b = Some(lb_line);
+                        line_a_hit = (hit_idx[ah], hit_t[ah]);
+                    }
                 }
 
                 if !need_aa {
@@ -2489,30 +2590,14 @@ fn rasterize(
                     let (pos_seg1, neg_seg1) =
                         resolve_lut_segment(sc_a, line_a.normal, pixels, img_w, img_h, true)
                             .unwrap_or(uniform_pn);
-                    // Segment selection: line_b only separates seg 0 from seg 1
-                    // when it actually crosses line_a's curve in [0, 1] — i.e.,
-                    // the mid-seg-0 and mid-seg-1 points on line_a lie on
-                    // opposite sides of line_b. When line_b is geometrically
-                    // outside line_a's curve range (e.g., a stem at an adjacent
-                    // corner), both segments fall on the same side and sb-
-                    // sidedness is meaningless. In that case all wedges of the
-                    // pixel share one segment; pick it from the curve's t at
-                    // the pixel center.
-                    let (seg1_side, b_separates) = if sc_a.is_line {
-                        (1.0, false)
-                    } else {
-                        let p_seg0 = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos,
-                                            sc_a.t_branch * 0.5);
-                        let p_seg1 = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos,
-                                            (sc_a.t_branch + 1.0) * 0.5);
-                        let s0 = (p_seg0.0 - line_b.cpt.0) * line_b.normal.0
-                               + (p_seg0.1 - line_b.cpt.1) * line_b.normal.1;
-                        let s1 = (p_seg1.0 - line_b.cpt.0) * line_b.normal.0
-                               + (p_seg1.1 - line_b.cpt.1) * line_b.normal.1;
-                        (s1, s0 * s1 < 0.0)
-                    };
-                    let center_in_seg1 = a_t >= sc_a.t_branch;
-
+                    // Segment selection: line_b's normal is aligned to line_a's
+                    // tangent direction (see line construction above), so a
+                    // wedge centroid with sb > 0 lies in the tang_a direction
+                    // from the junction = post-junction (seg 1), and sb < 0 =
+                    // pre-junction (seg 0). The 4 wedges map (sa-sign, sb-sign)
+                    // to 4 LUT entries directly.
+                    let _ = a_t; // line_a_hit's a_t is no longer used here
+                    let _ = sc_a;
                     let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
                     let mut total_area = 0.0f32;
                     for poly in wedges.iter() {
@@ -2521,13 +2606,9 @@ fn rasterize(
                         let cq = polygon_centroid(poly);
                         let sa = (cq.0 - line_a.cpt.0) * line_a.normal.0
                                + (cq.1 - line_a.cpt.1) * line_a.normal.1;
-                        let in_seg1 = if b_separates {
-                            let sb = (cq.0 - line_b.cpt.0) * line_b.normal.0
-                                   + (cq.1 - line_b.cpt.1) * line_b.normal.1;
-                            sb * seg1_side > 0.0
-                        } else {
-                            center_in_seg1
-                        };
+                        let sb = (cq.0 - line_b.cpt.0) * line_b.normal.0
+                               + (cq.1 - line_b.cpt.1) * line_b.normal.1;
+                        let in_seg1 = sb > 0.0;
                         let color = if in_seg1 {
                             if sa > 0.0 { pos_seg1 } else { neg_seg1 }
                         } else {
