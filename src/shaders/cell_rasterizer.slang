@@ -3,6 +3,17 @@
 // Each workgroup handles a 2x2 source-pixel tile. CPs in the tile's
 // neighborhood are loaded into shared memory ONCE, then all output
 // pixels in the tile evaluate against shared memory.
+//
+// Magic numbers:
+//   2x2 source-pixel tile per workgroup — chosen to keep enough output
+//     pixels per tile at typical scales (4x-12x) for the 256 threads to
+//     amortize the shared-memory load cost.
+//   numthreads(256, 1, 1) — workgroup size; loads CPs cooperatively then
+//     splits output pixels across threads.
+//   MAX_TILE_CPS = 50 — shared-memory cap for active CPs (see SlimCP doc).
+//   98 = 7*7*2 — CP scan slot count: 7x7 corners around the tile center
+//     (3-corner radius = 5x5 source pixels reachable, plus a 1-pixel cell
+//     bbox extension), times 2 slots per corner.
 
 import modules.color;
 import modules.bspline;
@@ -168,6 +179,11 @@ bool resolve_color(float2 pt, SlimCP sc, ResolveData rd, float t, out uint out_c
     // an endpoint that's structurally co-located with another CP's curve
     // (degenerate stem at t=1, clamped Bezier extension at t=0), the local
     // edges describe a different region. Defer to the next-closest candidate.
+    //
+    // The t == 0.0 / t == 1.0 exact compares are sound because closest_on_*
+    // routines clamp t to exactly 0 or 1 at the endpoints — they don't return
+    // 1e-7 noise. Don't relax this to an epsilon: a curve whose closest
+    // point is *just* inside (t=0.001) shouldn't defer.
     bool prev_extends =
         (rd.prev_ci < 0) || ((cp_flags[rd.prev_ci] & IS_ENDPOINT) != 0u);
     bool next_extends =
@@ -384,9 +400,10 @@ uint sample_from_shared(float2 pt, uint fallback_color,
         }
     }
 
-    // Export cached indices for sample_from_cached's reuse at wedge centroids.
-    // Passed as 4 individual ints (not an array) — Slang/SPIRV-Cross handles
-    // array out-params unevenly across backends; scalars are uniformly safe.
+    // Export the d²-sorted top-4 indices for the wedge AA path to reuse
+    // (line_b search at the pixel center). Passed as 4 individual ints
+    // (not an array) — Slang/SPIRV-Cross handles array out-params unevenly
+    // across backends; scalars are uniformly safe.
     cached_idx_0 = (num_hits > 0) ? hits[0].idx : -1;
     cached_idx_1 = (num_hits > 1) ? hits[1].idx : -1;
     cached_idx_2 = (num_hits > 2) ? hits[2].idx : -1;
@@ -420,49 +437,6 @@ uint sample_from_shared(float2 pt, uint fallback_color,
     return fallback_color;
 }
 
-/// Re-classify a query point near the main pixel center using ONLY the
-/// cached top-4 hits the main scan already produced. Wedge centroids are
-/// inside the same pixel as center (≤ inv_scale/2 away), so the relevant
-/// candidate CPs are the same — just recompute closest_t/d² at the new
-/// query point against those 4. Avoids 4× full sh_cps[] scans per AA pixel.
-uint sample_from_cached(float2 pt, uint fallback_color,
-                        int cached_idx_0, int cached_idx_1,
-                        int cached_idx_2, int cached_idx_3, int cached_n) {
-    int idx_arr[4] = { cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3 };
-    SHit hits[4];
-    int num_hits = 0;
-    for (int i = 0; i < 4; i++) { hits[i].d2 = 1e10; hits[i].idx = -1; }
-
-    for (int c = 0; c < cached_n; c++) {
-        int idx = idx_arr[c];
-        if (idx < 0) continue;
-        SlimCP sc = sh_cps[uint(idx)];
-        float2 result = sc.is_line
-            ? closest_on_chain_segment(sc, pt)
-            : bspline_refine(sc.prev_pos, sc.pos, sc.next_pos, pt, 0.5, 1e10);
-        if (result.y >= 1.0) continue;
-
-        for (int h = 0; h < 4; h++) {
-            if (result.y < hits[h].d2) {
-                for (int j = 3; j > h; j--) hits[j] = hits[j-1];
-                hits[h].d2 = result.y;
-                hits[h].t = result.x;
-                hits[h].idx = idx;
-                if (num_hits < 4) num_hits++;
-                break;
-            }
-        }
-    }
-
-    for (int h = 0; h < num_hits; h++) {
-        SlimCP sc = sh_cps[uint(hits[h].idx)];
-        ResolveData rd = read_resolve_data(sc.ci);
-        uint cc;
-        if (resolve_color(pt, sc, rd, hits[h].t, cc)) return cc;
-    }
-    return fallback_color;
-}
-
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gid: SV_GroupID) {
@@ -492,6 +466,9 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
             int cx = center_cx + dx;
             int cy = center_cy + dy;
 
+            // corners_h = img_h + 1 isn't in the uniform struct, so we use
+            // `cy > img_h` (== `cy >= corners_h`). Asymmetric form is
+            // intentional, not a bug.
             if (cx < 0 || cy < 0 || cx >= int(u.corners_w) || cy > int(u.img_h)) continue;
             int ci = (cy * int(u.corners_w) + cx) * 2 + slot;
             uint flag = cp_flags[ci];
@@ -639,43 +616,133 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                                                 cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n,
                                                 second_d2);
 
-        float aa_threshold = 2.0 / (u.scale * u.scale);
+        // AA threshold: a pixel's half-diagonal² in source units is
+        // 0.5/scale². Beyond that, the curve passes outside the pixel
+        // and the analytical pixel-coverage formula saturates to a
+        // solid color anyway, so AA work would be wasted. The same
+        // tight bound applies to single-curve AA and the wedge AA
+        // gate so each fires only on pixels the curve(s) pass through.
+        float aa_threshold = 0.5 / (u.scale * u.scale);
         bool need_aa = (best_idx >= 0 && best_d2 < aa_threshold);
-        // Wedge AA only runs at junctions where 2+ curves are close. For
-        // single-curve edges (most AA pixels) we skip line_a/line_b/clip
-        // entirely and fall through to single-curve AA.
-        bool need_wedge_aa = need_aa && (second_d2 < aa_threshold);
 
-        // Multi-curve wedge AA: build line_a from best hit, look for line_b
-        // among the cached top-4 hits from the main scan (excluding best).
-        // The cached hits are already sorted ascending by d², so the first
-        // valid one with d² < aa_threshold is the closest 2nd-curve
-        // candidate — no need to rescan all sh_cps.
+        // Wedge AA model
+        // ==============
+        // line_a: tangent at the through curve (carries up to 4 colors via
+        //   t_branch — segment 0 covers t < t_branch with prev edge colors,
+        //   segment 1 covers t >= t_branch with next edge colors).
+        // line_b: tangent at the stem render curve. Selects which line_a
+        //   segment a wedge belongs to via sb-sign — but only when line_b
+        //   actually crosses line_a's render range (b_separates). Outside
+        //   that range all wedges share the segment containing the pixel
+        //   center (center_in_seg1).
+        // Pixel is clipped against line_a then line_b → 4 wedges. Each
+        // picks one of {pos_seg0, neg_seg0, pos_seg1, neg_seg1} via two
+        // sign tests on the centroid.
+        //
+        // Wedge AA fires only when the structural junction relationship
+        // holds. At a T-junction corner, slot 0 holds the through curve;
+        // slot 1 holds the original stem CP (filtered — its render span is
+        // owned by an adjacent corner via clamped Bezier). Slot 1's
+        // surviving non-(-1) neighbor IS the stem render CP. So candidate
+        // A is the through-curve CP at a junction iff
+        //   (a) A is IS_TJUNCTION-flagged, AND
+        //   (b) slot 1 at A's corner has B's ci as one of its neighbors.
+        // Crossings (valence-4): both hits are IS_CROSSING at the same
+        // corner — partner identification is direct.
         AaLine line_a;
         AaLine line_b;
         line_a.valid = false;
         line_b.valid = false;
-        if (need_wedge_aa) {
-            SlimCP sc_a = sh_cps[uint(best_idx)];
-            ResolveData rd_a = read_resolve_data(sc_a.ci);
-            line_a = build_aa_line(sc_a, rd_a, best_t, best_d2);
-            if (line_a.valid) {
-                int idx_arr[4] = { cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3 };
-                for (int c = 0; c < cached_n; c++) {
-                    int idx = idx_arr[c];
-                    if (idx < 0 || idx == best_idx) continue;
-                    SlimCP sc_i = sh_cps[uint(idx)];
-                    float2 r = sc_i.is_line
-                        ? closest_on_chain_segment(sc_i, center)
-                        : bspline_refine(sc_i.prev_pos, sc_i.pos, sc_i.next_pos, center, 0.5, 1e10);
-                    if (r.y >= aa_threshold) continue;
-                    ResolveData rd_i = read_resolve_data(sc_i.ci);
-                    uint c_chk;
-                    if (!resolve_color(center, sc_i, rd_i, r.x, c_chk)) continue;
-                    AaLine cand = build_aa_line(sc_i, rd_i, r.x, r.y);
-                    if (!cand.valid) continue;
-                    line_b = cand;
-                    break;  // cached hits are d²-sorted; first valid wins
+        SlimCP sc_a;
+        ResolveData rd_a;
+        float line_a_t = 0.0;
+        if (need_aa && best_idx >= 0 && (second_d2 < aa_threshold)) {
+            int second_idx = (cached_n > 0 && cached_idx_0 != best_idx) ? cached_idx_0
+                           : (cached_n > 1 && cached_idx_1 != best_idx) ? cached_idx_1
+                           : -1;
+            if (second_idx >= 0) {
+                SlimCP sc0 = sh_cps[uint(best_idx)];
+                SlimCP sc1 = sh_cps[uint(second_idx)];
+                int ci0 = sc0.ci;
+                int ci1 = sc1.ci;
+                uint f0 = cp_flags[ci0];
+                uint f1 = cp_flags[ci1];
+
+                int slot1_ci_0 = (ci0 / 2) * 2 + 1;
+                int slot1_ci_1 = (ci1 / 2) * 2 + 1;
+                // 2-CP-chain stem: slot 1 itself renders as the stem (both
+                // stem endpoints are markers, slot 1 isn't filtered). The
+                // "stem render CP" IS slot 1. Otherwise: slot 1 is filtered
+                // and its surviving non-(-1) neighbor IS the stem render CP.
+                bool cp0_through = ((f0 & IS_TJUNCTION) != 0u)
+                    && (ci1 == slot1_ci_0
+                        || cp_neighbors[slot1_ci_0 * 4] == ci1
+                        || cp_neighbors[slot1_ci_0 * 4 + 1] == ci1);
+                bool cp1_through = ((f1 & IS_TJUNCTION) != 0u)
+                    && (ci0 == slot1_ci_1
+                        || cp_neighbors[slot1_ci_1 * 4] == ci0
+                        || cp_neighbors[slot1_ci_1 * 4 + 1] == ci0);
+                bool both_x_same =
+                    ((f0 & IS_CROSSING) != 0u)
+                    && ((f1 & IS_CROSSING) != 0u)
+                    && (ci0 / 2) == (ci1 / 2);
+
+                int through_idx = -1;
+                int stem_idx = -1;
+                float through_t = 0.0;
+                float stem_t = 0.0;
+                if (cp0_through) {
+                    through_idx = best_idx;
+                    stem_idx = second_idx;
+                    through_t = best_t;
+                } else if (cp1_through) {
+                    through_idx = second_idx;
+                    stem_idx = best_idx;
+                    through_t = 0.0;  // recompute below
+                } else if (both_x_same) {
+                    through_idx = best_idx;
+                    stem_idx = second_idx;
+                    through_t = best_t;
+                }
+
+                // The wedge AA model assumes the 3-color region (the wedge
+                // emanating from the junction) overlaps the pixel. That's
+                // true only when the junction — the geometric meeting point
+                // of the through and stem curves, which equals the through
+                // CP's pos post-correction — lies inside the pixel square.
+                // When two curves pass near a pixel but their junction is
+                // outside it, the local geometry is 2-color; falling back to
+                // single-curve AA avoids mixing in a spurious third color.
+                if (through_idx >= 0) {
+                    SlimCP sc_through_test = sh_cps[uint(through_idx)];
+                    float pix_half_test = inv_scale * 0.5;
+                    if (abs(sc_through_test.pos.x - center.x) > pix_half_test
+                        || abs(sc_through_test.pos.y - center.y) > pix_half_test) {
+                        through_idx = -1;
+                        stem_idx = -1;
+                    }
+                }
+
+                if (through_idx >= 0) {
+                    sc_a = sh_cps[uint(through_idx)];
+                    rd_a = read_resolve_data(sc_a.ci);
+                    // For the cp1_through case, recompute through_t at center.
+                    if (through_idx != best_idx) {
+                        float2 r = sc_a.is_line
+                            ? closest_on_chain_segment(sc_a, center)
+                            : bspline_refine(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, center, 0.5, 1e10);
+                        through_t = r.x;
+                    }
+                    line_a_t = through_t;
+                    line_a = build_aa_line(sc_a, rd_a, through_t, 0.0);
+
+                    // Build line_b from stem_idx (recompute t at center).
+                    SlimCP sc_b = sh_cps[uint(stem_idx)];
+                    ResolveData rd_b = read_resolve_data(sc_b.ci);
+                    float2 rb = sc_b.is_line
+                        ? closest_on_chain_segment(sc_b, center)
+                        : bspline_refine(sc_b.prev_pos, sc_b.pos, sc_b.next_pos, center, 0.5, 1e10);
+                    line_b = build_aa_line(sc_b, rd_b, rb.x, rb.y);
                 }
             }
         }
@@ -696,44 +763,119 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
             Poly w2 = clip_polygon(below_a, line_b, true);
             Poly w3 = clip_polygon(below_a, line_b, false);
 
+            // Through-curve color LUT: at a T-junction the through curve
+            // (= sc_a) carries all 3 colors via its prev/next edge segments
+            // split at t_branch. Build each segment's (pos, neg) using the
+            // same edge-selection logic as resolve_color (so a missing edge
+            // falls back to the other one — both segments share colors),
+            // then align to line_a.normal.
+            uint a_pl = 0u, a_pr = 0u, a_nl = 0u, a_nr = 0u;
+            if (rd_a.prev_dir >= 0) get_edge_colors(rd_a.icx, rd_a.icy, rd_a.prev_dir, a_pl, a_pr);
+            if (rd_a.next_dir >= 0) get_edge_colors(rd_a.icx, rd_a.icy, rd_a.next_dir, a_nl, a_nr);
+            bool a_prev_valid = (a_pl != a_pr);
+            bool a_next_valid = (a_nl != a_nr);
+
+            uint pos_seg0 = center_color, neg_seg0 = center_color;
+            uint pos_seg1 = center_color, neg_seg1 = center_color;
+            for (int seg = 0; seg < 2; seg++) {
+                uint cl = 0u, cr = 0u;
+                float ref_t = 0.0;
+                bool ok = false;
+                if (rd_a.prev_ci < 0) {
+                    if (a_next_valid) { cl = a_nr; cr = a_nl; ref_t = 1.0; ok = true; }
+                } else if (rd_a.next_ci < 0) {
+                    if (a_prev_valid) { cl = a_pl; cr = a_pr; ref_t = 0.0; ok = true; }
+                } else if (seg == 0) {
+                    if (a_prev_valid)      { cl = a_pl; cr = a_pr; ref_t = 0.0; ok = true; }
+                    else if (a_next_valid) { cl = a_nr; cr = a_nl; ref_t = 1.0; ok = true; }
+                } else {
+                    if (a_next_valid)      { cl = a_nr; cr = a_nl; ref_t = 1.0; ok = true; }
+                    else if (a_prev_valid) { cl = a_pl; cr = a_pr; ref_t = 0.0; ok = true; }
+                }
+                if (!ok) continue;
+                float2 ot = bspline_deriv(rd_a.orig_prev, rd_a.orig_pos, rd_a.orig_next, ref_t);
+                float2 on = float2(-ot.y, ot.x);
+                bool flip_o = dot(line_a.normal, on) < 0.0;
+                uint op = flip_o ? cr : cl;
+                uint ng = flip_o ? cl : cr;
+                if (seg == 0) { pos_seg0 = op; neg_seg0 = ng; }
+                else          { pos_seg1 = op; neg_seg1 = ng; }
+            }
+
+            // Segment selection: line_b only separates seg 0 from seg 1
+            // when it crosses line_a's curve in [0, 1] — i.e., the mid-
+            // seg-0 and mid-seg-1 points lie on opposite sides of line_b.
+            // When line_b is geometrically outside line_a's curve range
+            // (e.g., a stem at an adjacent corner), both segments fall
+            // on the same side and sb-sidedness is meaningless. In that
+            // case all wedges of the pixel share one segment, picked from
+            // the curve's t at the pixel center.
+            float seg1_side = 1.0;
+            bool b_separates = false;
+            if (!sc_a.is_line) {
+                float t_pre = sc_a.t_branch * 0.5;
+                float t_post = (sc_a.t_branch + 1.0) * 0.5;
+                float2 p_pre = bspline_eval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, t_pre);
+                float2 p_post = bspline_eval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, t_post);
+                float s0 = dot(p_pre - line_b.cpt, line_b.normal);
+                float s1 = dot(p_post - line_b.cpt, line_b.normal);
+                seg1_side = s1;
+                b_separates = (s0 * s1) < 0.0;
+            }
+            bool center_in_seg1 = line_a_t >= sc_a.t_branch;
+
             float3 sum_lin = float3(0, 0, 0);
             float total_area = 0.0;
 
-            // Process each wedge inline (avoids array of struct issues)
+            // Wedges processed inline (array-of-struct quirks in the past).
+            // Per-wedge: 2 dot products + LUT lookup, no closest-point and
+            // no per-wedge resolve_color.
             float a0 = polygon_area(w0);
             if (a0 > 1e-9) {
-                float2 c = polygon_centroid(w0);
-                uint cc = sample_from_cached(c, fallback, cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n);
+                float2 cq = polygon_centroid(w0);
+                float sa = dot(cq - line_a.cpt, line_a.normal);
+                float sb = dot(cq - line_b.cpt, line_b.normal);
+                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
+                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                col = pow(col, float3(2.2));
-                sum_lin += col * a0;
+                sum_lin += pow(col, float3(2.2)) * a0;
                 total_area += a0;
             }
             float a1 = polygon_area(w1);
             if (a1 > 1e-9) {
-                float2 c = polygon_centroid(w1);
-                uint cc = sample_from_cached(c, fallback, cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n);
+                float2 cq = polygon_centroid(w1);
+                float sa = dot(cq - line_a.cpt, line_a.normal);
+                float sb = dot(cq - line_b.cpt, line_b.normal);
+                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
+                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                col = pow(col, float3(2.2));
-                sum_lin += col * a1;
+                sum_lin += pow(col, float3(2.2)) * a1;
                 total_area += a1;
             }
             float a2 = polygon_area(w2);
             if (a2 > 1e-9) {
-                float2 c = polygon_centroid(w2);
-                uint cc = sample_from_cached(c, fallback, cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n);
+                float2 cq = polygon_centroid(w2);
+                float sa = dot(cq - line_a.cpt, line_a.normal);
+                float sb = dot(cq - line_b.cpt, line_b.normal);
+                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
+                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                col = pow(col, float3(2.2));
-                sum_lin += col * a2;
+                sum_lin += pow(col, float3(2.2)) * a2;
                 total_area += a2;
             }
             float a3 = polygon_area(w3);
             if (a3 > 1e-9) {
-                float2 c = polygon_centroid(w3);
-                uint cc = sample_from_cached(c, fallback, cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n);
+                float2 cq = polygon_centroid(w3);
+                float sa = dot(cq - line_a.cpt, line_a.normal);
+                float sb = dot(cq - line_b.cpt, line_b.normal);
+                bool seg1 = b_separates ? ((sb * seg1_side) > 0.0) : center_in_seg1;
+                uint cc = seg1 ? ((sa > 0.0) ? pos_seg1 : neg_seg1)
+                               : ((sa > 0.0) ? pos_seg0 : neg_seg0);
                 float3 col = float3(float((cc >> 16u) & 0xFFu), float((cc >> 8u) & 0xFFu), float(cc & 0xFFu)) / 255.0;
-                col = pow(col, float3(2.2));
-                sum_lin += col * a3;
+                sum_lin += pow(col, float3(2.2)) * a3;
                 total_area += a3;
             }
 

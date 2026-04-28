@@ -1639,6 +1639,9 @@ struct AaLine {
 }
 
 struct CpData {
+    /// Cell-graph CP index (= corner_index*2 + slot). Stored so the
+    /// rasterizer can find slot-1 at the same corner via flags/neighbors.
+    ci: i32,
     pos: (f32, f32),
     orig_pos: (f32, f32),
     prev_pos: (f32, f32),
@@ -1671,6 +1674,136 @@ struct CpData {
     /// uses a closed-form line-segment distance instead of the cubic solver,
     /// avoiding the float-noise vs degeneracy-threshold trap.
     is_line: bool,
+    /// CP flags from the cell graph (IS_TJUNCTION, IS_CROSSING, ...).
+    /// Used by the rasterizer to gate wedge AA — slot 1 stem CPs at
+    /// T-junctions get filtered out of all_cps because their span is
+    /// owned by the interior chain neighbor, so a same-corner check
+    /// alone can't identify T-junctions; we need the IS_TJUNCTION flag
+    /// on the through-curve CP instead.
+    flag: u32,
+}
+
+#[inline(always)]
+fn get_px_color(pixels: &[u32], img_w: usize, img_h: usize, px: i32, py: i32) -> u32 {
+    let px = px.clamp(0, img_w as i32 - 1) as usize;
+    let py = py.clamp(0, img_h as i32 - 1) as usize;
+    pixels[py * img_w + px]
+}
+
+#[inline(always)]
+fn get_edge_colors(
+    pixels: &[u32], img_w: usize, img_h: usize,
+    icx: i32, icy: i32, dir: i32,
+) -> (u32, u32) {
+    match dir {
+        0 => (get_px_color(pixels, img_w, img_h, icx - 1, icy - 1),
+              get_px_color(pixels, img_w, img_h, icx, icy - 1)),
+        1 => (get_px_color(pixels, img_w, img_h, icx, icy - 1),
+              get_px_color(pixels, img_w, img_h, icx, icy)),
+        2 => (get_px_color(pixels, img_w, img_h, icx, icy),
+              get_px_color(pixels, img_w, img_h, icx - 1, icy)),
+        3 => (get_px_color(pixels, img_w, img_h, icx - 1, icy),
+              get_px_color(pixels, img_w, img_h, icx - 1, icy - 1)),
+        _ => (0, 0),
+    }
+}
+
+/// sRGB decode: u32 ARGB → (r, g, b) in linear space.
+#[inline(always)]
+fn srgb_decode(c: u32) -> (f32, f32, f32) {
+    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
+    let b = (c & 0xFF) as f32 / 255.0;
+    (r.powf(2.2), g.powf(2.2), b.powf(2.2))
+}
+
+/// sRGB encode: linear (r, g, b) → ARGB u32 with alpha=0xFF.
+#[inline(always)]
+fn srgb_encode_argb(r: f32, g: f32, b: f32) -> u32 {
+    let r_o = (r.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+    let g_o = (g.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+    let b_o = (b.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
+    0xFF000000 | (r_o << 16) | (g_o << 8) | b_o
+}
+
+#[inline(always)]
+fn polygon_centroid(poly: &[(f32, f32)]) -> (f32, f32) {
+    let n = poly.len() as f32;
+    let sx: f32 = poly.iter().map(|p| p.0).sum();
+    let sy: f32 = poly.iter().map(|p| p.1).sum();
+    (sx / n, sy / n)
+}
+
+/// Build line_a/line_b classifier line for the wedge AA path. Returns None
+/// when the CP has no usable edge (no color discontinuity to either side via
+/// prev_dir/next_dir) — such a line wouldn't separate distinct color
+/// regions and shouldn't drive a wedge.
+fn build_aa_line(
+    sc: &CpData, t: f32,
+    pixels: &[u32], img_w: usize, img_h: usize,
+) -> Option<AaLine> {
+    let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+    let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
+    let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
+    if tl < 1e-4 { return None; }
+    let normal = (-tang.1 / tl, tang.0 / tl);
+
+    let prev_split = sc.prev_dir >= 0 && {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir);
+        l != r
+    };
+    let next_split = sc.next_dir >= 0 && {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir);
+        l != r
+    };
+    if !prev_split && !next_split { return None; }
+
+    Some(AaLine { cpt, normal })
+}
+
+/// Resolve one segment of the wedge-AA color LUT for `sc_a` (the through
+/// curve at a T-junction). Returns (pos_color, neg_color) aligned to
+/// `line_a_normal`. See "Wedge AA model" comment in rasterize() for context.
+fn resolve_lut_segment(
+    sc_a: &CpData,
+    line_a_normal: (f32, f32),
+    pixels: &[u32], img_w: usize, img_h: usize,
+    target_is_seg1: bool,
+) -> Option<(u32, u32)> {
+    let (mut pl, mut pr) = (0u32, 0u32);
+    let (mut nl, mut nr) = (0u32, 0u32);
+    if sc_a.prev_dir >= 0 {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc_a.icx, sc_a.icy, sc_a.prev_dir);
+        pl = l; pr = r;
+    }
+    if sc_a.next_dir >= 0 {
+        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc_a.icx, sc_a.icy, sc_a.next_dir);
+        nl = l; nr = r;
+    }
+    let prev_valid = pl != pr;
+    let next_valid = nl != nr;
+    let (color_left, color_right, ref_t);
+    if sc_a.prev_ci < 0 {
+        if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
+        else { return None; }
+    } else if sc_a.next_ci < 0 {
+        if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
+        else { return None; }
+    } else if !target_is_seg1 {
+        if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
+        else if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
+        else { return None; }
+    } else {
+        if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
+        else if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
+        else { return None; }
+    }
+    let ot = beval_deriv(sc_a.orig_prev, sc_a.orig_pos, sc_a.orig_next, ref_t);
+    let on = (-ot.1, ot.0);
+    let flip = line_a_normal.0 * on.0 + line_a_normal.1 * on.1 < 0.0;
+    let pos = if flip { color_right } else { color_left };
+    let neg = if flip { color_left } else { color_right };
+    Some((pos, neg))
 }
 
 fn rasterize(
@@ -1869,6 +2002,7 @@ fn rasterize(
         };
 
         all_cps.push(CpData {
+            ci: ci as i32,
             pos: cp,
             orig_pos: orig_pos_out,
             prev_pos: pp,
@@ -1886,6 +2020,7 @@ fn rasterize(
             next_ci,
             t_branch,
             is_line: two_cp_chain,
+            flag: flags[ci],
         });
     }
 
@@ -1919,7 +2054,7 @@ fn rasterize(
     let total_entries = cell_offset[grid_total] as usize;
 
     // Pass 3: fill flat array
-    let mut grid_data = vec![0u16; total_entries];
+    let mut grid_data = vec![0u32; total_entries];
     let mut fill_pos = cell_offset[..grid_total].to_vec();
     for (i, sc) in all_cps.iter().enumerate() {
         let min_gx = ((sc.bbox_min.0 - 1.0) / grid_cell).floor().max(0.0) as usize;
@@ -1930,29 +2065,13 @@ fn rasterize(
             for gx in min_gx..=max_gx.min(grid_w - 1) {
                 let ci = gy * grid_w + gx;
                 let pos = fill_pos[ci] as usize;
-                grid_data[pos] = i as u16;
+                grid_data[pos] = i as u32;
                 fill_pos[ci] += 1;
             }
         }
     }
 
     let mut output = vec![0u32; out_w * out_h];
-
-    // Compute edge colors on-the-fly from pixel buffer
-    let get_px_color = |px: i32, py: i32| -> u32 {
-        let px = px.clamp(0, img_w as i32 - 1) as usize;
-        let py = py.clamp(0, img_h as i32 - 1) as usize;
-        pixels[py * img_w + px]
-    };
-    let get_edge_colors = |icx: i32, icy: i32, dir: i32| -> (u32, u32) {
-        match dir {
-            0 => (get_px_color(icx - 1, icy - 1), get_px_color(icx, icy - 1)),
-            1 => (get_px_color(icx, icy - 1), get_px_color(icx, icy)),
-            2 => (get_px_color(icx, icy), get_px_color(icx - 1, icy)),
-            3 => (get_px_color(icx - 1, icy), get_px_color(icx - 1, icy - 1)),
-            _ => (0, 0),
-        }
-    };
 
     let resolve_from_cp =
         |pt: (f32, f32), sc: &CpData, t: f32| -> Option<u32> {
@@ -1964,6 +2083,12 @@ fn rasterize(
             // returned None falls through to the fallback color (the source
             // pixel underneath), which is correct for genuine
             // outside-the-curve-extent pixels.
+            //
+            // The t == 0.0 / t == 1.0 exact compares are sound because
+            // closest_on_segment / closest_on_span_poly clamp t to exactly
+            // 0 or 1 at the endpoints — they don't return 1e-7 noise. Don't
+            // relax this to an epsilon: a curve whose closest point is
+            // *just* inside (t=0.001) shouldn't defer.
             let prev_extends =
                 sc.prev_ci < 0 || (flags[sc.prev_ci as usize] & IS_ENDPOINT) != 0;
             let next_extends =
@@ -1973,8 +2098,8 @@ fn rasterize(
             }
             let (mut pl, mut pr) = (0u32, 0u32);
             let (mut nl, mut nr) = (0u32, 0u32);
-            if sc.prev_dir >= 0 { let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.prev_dir); pl = l; pr = r; }
-            if sc.next_dir >= 0 { let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.next_dir); nl = l; nr = r; }
+            if sc.prev_dir >= 0 { let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir); pl = l; pr = r; }
+            if sc.next_dir >= 0 { let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir); nl = l; nr = r; }
 
             let prev_valid = pl != pr;
             let next_valid = nl != nr;
@@ -2052,33 +2177,13 @@ fn rasterize(
         };
 
     let inv_scale = 1.0 / scale_factor;
-    let aa_threshold = 2.0 / (scale_factor * scale_factor);
-
-    // Build a classifier line for an AA hit: tangent line at the curve's
-    // closest_t. Returns None when the CP has no usable edge (no color
-    // discontinuity to either side via prev_dir/next_dir) — such a line
-    // wouldn't separate distinct color regions and shouldn't drive a wedge.
-    let build_aa_line = |sc: &CpData, t: f32,
-                          get_edge_colors: &dyn Fn(i32, i32, i32) -> (u32, u32)|
-                          -> Option<AaLine> {
-        let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
-        let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
-        let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
-        if tl < 1e-4 { return None; }
-        let normal = (-tang.1 / tl, tang.0 / tl);
-
-        let prev_split = sc.prev_dir >= 0 && {
-            let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.prev_dir);
-            l != r
-        };
-        let next_split = sc.next_dir >= 0 && {
-            let (l, r) = get_edge_colors(sc.icx, sc.icy, sc.next_dir);
-            l != r
-        };
-        if !prev_split && !next_split { return None; }
-
-        Some(AaLine { cpt, normal })
-    };
+    // AA threshold: a pixel's half-diagonal² in source units is
+    // 0.5/scale². Beyond that, the curve passes outside the pixel's
+    // bounds and the analytical pixel-coverage formula saturates to
+    // a solid color anyway, so AA work would be wasted. Apply this
+    // tight bound to both single-curve AA and the wedge AA gate so
+    // each fires only on pixels the curve(s) actually pass through.
+    let aa_threshold = 0.5 / (scale_factor * scale_factor);
 
     // Sutherland-Hodgman: clip a convex polygon against the half-plane
     // selected by `keep_pos` of `line`. Returns the clipped polygon.
@@ -2130,364 +2235,424 @@ fn rasterize(
 
     // Rasterize row range into output chunk
     let rasterize_rows = |chunk: &mut [u32], start: usize,
-        all_cps: &[CpData], grid_data: &[u16], cell_offset: &[u32]|
+        all_cps: &[CpData], grid_data: &[u32], cell_offset: &[u32]|
     {
-                let chunk_rows = chunk.len() / out_w;
-                for local_y in 0..chunk_rows {
-                    let opy = start + local_y;
-                    let center_y = (opy as f32 + 0.5) * inv_scale;
-                    let fb_y = (center_y.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
-                    let gy = (center_y.floor() as usize).min(grid_h - 1);
-                    let gy_offset = gy * grid_w;
+        let chunk_rows = chunk.len() / out_w;
+        for local_y in 0..chunk_rows {
+            let opy = start + local_y;
+            let center_y = (opy as f32 + 0.5) * inv_scale;
+            let fb_y = (center_y.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
+            let gy = (center_y.floor() as usize).min(grid_h - 1);
+            let gy_offset = gy * grid_w;
 
-                    for opx in 0..out_w {
-            let center_x = (opx as f32 + 0.5) * inv_scale;
-            let center = (center_x, center_y);
-            let fb_x = (center_x.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
-            let fallback = pixels[fb_y * img_w + fb_x];
+            for opx in 0..out_w {
+                let center_x = (opx as f32 + 0.5) * inv_scale;
+                let center = (center_x, center_y);
+                let fb_x = (center_x.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
+                let fallback = pixels[fb_y * img_w + fb_x];
 
-            let gx = (center_x.floor() as usize).min(grid_w - 1);
-            let cell_idx = gy_offset + gx;
-            let cell_start = cell_offset[cell_idx] as usize;
-            let cell_end = cell_offset[cell_idx + 1] as usize;
+                let gx = (center_x.floor() as usize).min(grid_w - 1);
+                let cell_idx = gy_offset + gx;
+                let cell_start = cell_offset[cell_idx] as usize;
+                let cell_end = cell_offset[cell_idx + 1] as usize;
 
-            // Fixed-size top-4 hit array (avoids Vec allocation per pixel)
-            let mut hit_d2 = [1e10f32; 4];
-            let mut hit_t = [0.0f32; 4];
-            let mut hit_idx = [0u32; 4];
-            let mut num_hits = 0usize;
+                // Fixed-size top-4 hit array (avoids Vec allocation per pixel)
+                let mut hit_d2 = [1e10f32; 4];
+                let mut hit_t = [0.0f32; 4];
+                let mut hit_idx = [0u32; 4];
+                let mut num_hits = 0usize;
 
-            for ci in cell_start..cell_end {
-                let cp_i = grid_data[ci];
-                let sc = &all_cps[cp_i as usize];
+                for ci in cell_start..cell_end {
+                    let cp_i = grid_data[ci];
+                    let sc = &all_cps[cp_i as usize];
 
-                // Quick screen: 3-sample reject (matches GPU bspline_quick_screen)
-                let b0 = (sc.poly_cx, sc.poly_cy); // beval at t=0
-                let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
-                           0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
-                let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
-                let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
-                let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
-                let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
-                let quick_d2 = qd0.min(qdm).min(qd1);
-                if quick_d2 > 2.0 { continue; }
+                    // Quick screen: 3-sample reject (matches GPU bspline_quick_screen)
+                    let b0 = (sc.poly_cx, sc.poly_cy); // beval at t=0
+                    let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
+                               0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
+                    let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
+                    let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
+                    let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
+                    let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
+                    let quick_d2 = qd0.min(qdm).min(qd1);
+                    if quick_d2 > 2.0 { continue; }
 
-                // Closest-point: closed-form for 2-CP-chain straight lines,
-                // exact cubic solver for parabolic spans.
-                let result = if sc.is_line {
-                    let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
-                                       0.5 * (sc.prev_pos.1 + sc.pos.1));
-                    let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
-                                       0.5 * (sc.pos.1 + sc.next_pos.1));
-                    closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
-                } else {
-                    closest_on_span_poly(
-                        sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
-                        sc.poly_cx, sc.poly_cy, center.0, center.1,
-                    )
-                };
-                let span_best_t = result.0;
-                let span_best_d2 = result.1;
+                    // Closest-point: closed-form for 2-CP-chain straight lines,
+                    // exact cubic solver for parabolic spans.
+                    let result = if sc.is_line {
+                        let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
+                                           0.5 * (sc.prev_pos.1 + sc.pos.1));
+                        let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
+                                           0.5 * (sc.pos.1 + sc.next_pos.1));
+                        closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
+                    } else {
+                        closest_on_span_poly(
+                            sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
+                            sc.poly_cx, sc.poly_cy, center.0, center.1,
+                        )
+                    };
+                    let span_best_t = result.0;
+                    let span_best_d2 = result.1;
 
-                if span_best_d2 < 1.0 {
-                    // Insert sorted into top 4
-                    for h in 0..4 {
-                        if span_best_d2 < hit_d2[h] {
-                            // Shift down
-                            for j in (h + 1..4).rev() {
-                                hit_d2[j] = hit_d2[j - 1];
-                                hit_t[j] = hit_t[j - 1];
-                                hit_idx[j] = hit_idx[j - 1];
-                            }
-                            hit_d2[h] = span_best_d2;
-                            hit_t[h] = span_best_t;
-                            hit_idx[h] = cp_i as u32;
-                            if num_hits < 4 { num_hits += 1; }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            let best_idx = if num_hits > 0 { hit_idx[0] as i32 } else { -1 };
-            let best_t = if num_hits > 0 { hit_t[0] } else { 0.0 };
-            let best_d2 = if num_hits > 0 { hit_d2[0] } else { 1e10 };
-
-            // Resolve color from hits. Track which hit actually resolved to
-            // a valid color so the AA path uses the SAME CP that produced
-            // center_color, not just the closest one (which may have
-            // returned None via endpoint-defer in resolve_from_cp).
-            let mut center_color = fallback;
-            let mut resolved_h: i32 = -1;
-            for h in 0..num_hits {
-                if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[h] as usize], hit_t[h]) {
-                    center_color = c;
-                    resolved_h = h as i32;
-                    break;
-                }
-            }
-
-            // For AA, use the hit that actually resolved to a valid color
-            // (so endpoint-deferred hits don't drive the AA blend).
-            let (aa_idx, aa_t, aa_d2) = if resolved_h >= 0 {
-                (
-                    hit_idx[resolved_h as usize] as i32,
-                    hit_t[resolved_h as usize],
-                    hit_d2[resolved_h as usize],
-                )
-            } else {
-                (best_idx, best_t, best_d2)
-            };
-            let need_aa = aa_idx >= 0 && aa_d2 < aa_threshold;
-            // Wedge AA only fires at junctions where 2+ curves are within
-            // aa_threshold. For single-curve edges (the common AA case) we
-            // skip aa_lines[] construction entirely and fall through to
-            // the single-curve AA branch.
-            let need_wedge_aa = need_aa && num_hits >= 2 && hit_d2[1] < aa_threshold;
-
-            let mut aa_lines: [Option<AaLine>; 4] = [None, None, None, None];
-            let mut aa_lines_n = 0usize;
-            if need_wedge_aa {
-                for h in 0..num_hits {
-                    if hit_d2[h] >= aa_threshold { break; }
-                    let sc = &all_cps[hit_idx[h] as usize];
-                    // Don't gate on resolve_from_cp here: a stem at its
-                    // endpoint defers center-color resolution to the through-
-                    // curve (correct for the pixel center), but its tangent is
-                    // still a useful wedge partition line. build_aa_line
-                    // already returns None when no edge colors exist.
-                    if let Some(line) = build_aa_line(sc, hit_t[h], &get_edge_colors) {
-                        aa_lines[aa_lines_n] = Some(line);
-                        aa_lines_n += 1;
-                        if aa_lines_n == 4 { break; }
-                    }
-                }
-            }
-
-            if !need_aa {
-                chunk[local_y * out_w + opx] = pack_color(center_color);
-            } else if aa_lines_n >= 2 {
-                // Multi-curve wedge AA: partition the pixel square by the
-                // top-2 classifier lines, area-weighted blend.
-                let pix_h = inv_scale * 0.5;
-                let pixel: [(f32, f32); 4] = [
-                    (center.0 - pix_h, center.1 - pix_h),
-                    (center.0 + pix_h, center.1 - pix_h),
-                    (center.0 + pix_h, center.1 + pix_h),
-                    (center.0 - pix_h, center.1 + pix_h),
-                ];
-                let line_a = aa_lines[0].as_ref().unwrap();
-                let line_b = aa_lines[1].as_ref().unwrap();
-
-                let pixel_vec: Vec<(f32, f32)> = pixel.to_vec();
-                let above_a = clip_polygon(&pixel_vec, line_a, true);
-                let below_a = clip_polygon(&pixel_vec, line_a, false);
-                // line_a partitions pixel into above/below; line_b further
-                // partitions each half. Each wedge is sampled at its centroid
-                // by classify_at below — the per-line pos/neg colors aren't
-                // used for the final blend, only the wedge geometry is.
-                let pp = clip_polygon(&above_a, line_b, true);
-                let pn = clip_polygon(&above_a, line_b, false);
-                let np = clip_polygon(&below_a, line_b, true);
-                let nn = clip_polygon(&below_a, line_b, false);
-                let wedges: [&[(f32, f32)]; 4] = [&pp, &pn, &np, &nn];
-
-                let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
-                let mut total_area = 0.0f32;
-                let centroid = |poly: &[(f32, f32)]| -> (f32, f32) {
-                    let n = poly.len() as f32;
-                    let sx: f32 = poly.iter().map(|p| p.0).sum();
-                    let sy: f32 = poly.iter().map(|p| p.1).sum();
-                    (sx / n, sy / n)
-                };
-                // Re-classify a query point near the pixel center. The full
-                // grid scan is expensive at high scale factors, but wedge
-                // centroids are inside the same pixel as the center (≤
-                // inv_scale/2 away), so the relevant CP candidates are the
-                // same top-4 hits[] we already collected for the center.
-                // Just recompute closest_t/d² against those at the new
-                // query point — no fresh spatial-grid iteration.
-                let classify_at = |query: (f32, f32)| -> u32 {
-                    let mut hd2 = [1e10f32; 4];
-                    let mut ht = [0.0f32; 4];
-                    let mut hi = [0u32; 4];
-                    let mut nh = 0usize;
-                    for cached_h in 0..num_hits {
-                        let cp_i = hit_idx[cached_h];
-                        let sc = &all_cps[cp_i as usize];
-                        let r = if sc.is_line {
-                            let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
-                                               0.5 * (sc.prev_pos.1 + sc.pos.1));
-                            let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
-                                               0.5 * (sc.pos.1 + sc.next_pos.1));
-                            closest_on_segment(a0x, a0y, a1x, a1y, query.0, query.1)
-                        } else {
-                            closest_on_span_poly(
-                                sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
-                                sc.poly_cx, sc.poly_cy, query.0, query.1,
-                            )
-                        };
-                        if r.1 < 1.0 {
-                            for h in 0..4 {
-                                if r.1 < hd2[h] {
-                                    for j in (h + 1..4).rev() {
-                                        hd2[j] = hd2[j - 1];
-                                        ht[j] = ht[j - 1];
-                                        hi[j] = hi[j - 1];
-                                    }
-                                    hd2[h] = r.1;
-                                    ht[h] = r.0;
-                                    hi[h] = cp_i;
-                                    if nh < 4 { nh += 1; }
-                                    break;
+                    if span_best_d2 < 1.0 {
+                        // Insert sorted into top 4
+                        for h in 0..4 {
+                            if span_best_d2 < hit_d2[h] {
+                                // Shift down
+                                for j in (h + 1..4).rev() {
+                                    hit_d2[j] = hit_d2[j - 1];
+                                    hit_t[j] = hit_t[j - 1];
+                                    hit_idx[j] = hit_idx[j - 1];
                                 }
+                                hit_d2[h] = span_best_d2;
+                                hit_t[h] = span_best_t;
+                                hit_idx[h] = cp_i as u32;
+                                if num_hits < 4 { num_hits += 1; }
+                                break;
                             }
                         }
                     }
-                    let qfb_x = (query.0.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
-                    let qfb_y = (query.1.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
-                    let qfallback = pixels[qfb_y * img_w + qfb_x];
-                    for h in 0..nh {
-                        if let Some(c) = resolve_from_cp(query, &all_cps[hi[h] as usize], ht[h]) {
-                            return c;
-                        }
+                }
+
+                let best_idx = if num_hits > 0 { hit_idx[0] as i32 } else { -1 };
+                let best_t = if num_hits > 0 { hit_t[0] } else { 0.0 };
+                let best_d2 = if num_hits > 0 { hit_d2[0] } else { 1e10 };
+
+                // Resolve color from hits. Track which hit actually resolved to
+                // a valid color so the AA path uses the SAME CP that produced
+                // center_color, not just the closest one (which may have
+                // returned None via endpoint-defer in resolve_from_cp).
+                let mut center_color = fallback;
+                let mut resolved_h: i32 = -1;
+                for h in 0..num_hits {
+                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[h] as usize], hit_t[h]) {
+                        center_color = c;
+                        resolved_h = h as i32;
+                        break;
                     }
-                    qfallback
+                }
+
+                // For AA, use the hit that actually resolved to a valid color
+                // (so endpoint-deferred hits don't drive the AA blend).
+                let (aa_idx, aa_t, aa_d2) = if resolved_h >= 0 {
+                    (
+                        hit_idx[resolved_h as usize] as i32,
+                        hit_t[resolved_h as usize],
+                        hit_d2[resolved_h as usize],
+                    )
+                } else {
+                    (best_idx, best_t, best_d2)
                 };
-                for poly in wedges.iter() {
-                    let area = polygon_area(poly);
-                    if area < 1e-9 { continue; }
-                    // Classify the wedge by sampling at its centroid using
-                    // the full rasterizer classification (independent of
-                    // line_a/line_b's pos/neg side codes).
-                    let c = centroid(poly);
-                    let color = classify_at(c);
-                    let rr = ((color >> 16) & 0xFF) as f32 / 255.0;
-                    let gg = ((color >> 8) & 0xFF) as f32 / 255.0;
-                    let bb = (color & 0xFF) as f32 / 255.0;
-                    sum_r += rr.powf(2.2) * area;
-                    sum_g += gg.powf(2.2) * area;
-                    sum_b += bb.powf(2.2) * area;
-                    total_area += area;
+                let need_aa = aa_idx >= 0 && aa_d2 < aa_threshold;
+
+                // Wedge AA needs the closest curve to be the actual through
+                // curve at a junction AND the second-closest to be the
+                // matching stem render curve. Identify this structurally:
+                //
+                // At a T-junction corner, slot 0 holds the through curve;
+                // slot 1 holds the original stem CP (filtered from all_cps —
+                // its render span is owned by an adjacent corner via clamped
+                // Bezier). Slot 1's surviving non-(-1) neighbor IS the stem
+                // render CP. So: candidate A is the through-curve CP at a
+                // junction iff
+                //   (a) A is IS_TJUNCTION-flagged, AND
+                //   (b) slot 1 at A's corner has B's ci as one of its
+                //       neighbors (i.e., B is the stem render CP).
+                //
+                // Crossings (valence-4): both hits are IS_CROSSING at the
+                // same corner — partner identification is direct.
+                let slot1_neighbor_match = |sc_a: &CpData, sc_b: &CpData| -> bool {
+                    let slot1_ci = ((sc_a.icy as usize * corners_w + sc_a.icx as usize) * 2 + 1) as i32;
+                    if (slot1_ci as usize) >= flags.len() { return false; }
+                    // 2-CP-chain stem: slot 1 itself renders the straight-line
+                    // span (both stem endpoints are markers, so the filter keeps
+                    // slot 1 in all_cps). The "stem render CP" IS slot 1.
+                    if sc_b.ci == slot1_ci { return true; }
+                    // Regular stem: slot 1 is filtered; its surviving non-(-1)
+                    // neighbor in cp_neighbors is the stem render CP at an
+                    // adjacent corner.
+                    let slot1_prev = cp_neighbors[(slot1_ci as usize) * 4];
+                    let slot1_next = cp_neighbors[(slot1_ci as usize) * 4 + 1];
+                    slot1_prev == sc_b.ci || slot1_next == sc_b.ci
+                };
+                let mut through_h: Option<usize> = None;
+                let mut stem_h: Option<usize> = None;
+                if num_hits >= 2 && hit_d2[1] < aa_threshold {
+                    let cp0 = &all_cps[hit_idx[0] as usize];
+                    let cp1 = &all_cps[hit_idx[1] as usize];
+                    let cp0_t = (cp0.flag & IS_TJUNCTION) != 0 && slot1_neighbor_match(cp0, cp1);
+                    let cp1_t = (cp1.flag & IS_TJUNCTION) != 0 && slot1_neighbor_match(cp1, cp0);
+                    let both_x_same =
+                        (cp0.flag & IS_CROSSING) != 0
+                        && (cp1.flag & IS_CROSSING) != 0
+                        && cp0.icx == cp1.icx
+                        && cp0.icy == cp1.icy;
+                    if cp0_t {
+                        through_h = Some(0);
+                        stem_h = Some(1);
+                    } else if cp1_t {
+                        through_h = Some(1);
+                        stem_h = Some(0);
+                    } else if both_x_same {
+                        // Crossings: either order works.
+                        through_h = Some(0);
+                        stem_h = Some(1);
+                    }
+                }
+                // The wedge AA model assumes the 3-color region (the wedge
+                // emanating from the junction) overlaps the pixel. That's
+                // true only when the junction itself — the geometric meeting
+                // point of the through and stem curves, which equals the
+                // through CP's pos post-correction — lies inside the pixel
+                // square. When two curves pass near a pixel but their junction
+                // lies outside it, the local geometry is 2-color and the
+                // wedge LUT mixes a third color that isn't actually present
+                // there. Fall back to single-curve AA in that case.
+                // TODO: real handling for multi-curve pixels where the
+                // junction is outside (e.g. two parallel boundaries cutting
+                // the same pixel). For now they get single-curve AA, which
+                // is at least free of the spurious-third-color artifact.
+                if let Some(ah) = through_h {
+                    let sc_a = &all_cps[hit_idx[ah] as usize];
+                    let pix_half = inv_scale * 0.5;
+                    let in_pixel = (sc_a.pos.0 - center.0).abs() <= pix_half
+                                && (sc_a.pos.1 - center.1).abs() <= pix_half;
+                    if !in_pixel {
+                        through_h = None;
+                        stem_h = None;
+                    }
+                }
+                // line_a = through curve, line_b = stem render curve.
+                let mut line_a: Option<AaLine> = None;
+                let mut line_b: Option<AaLine> = None;
+                let mut line_a_hit: (u32, f32) = (0, 0.0);
+                if let (Some(ah), Some(bh)) = (through_h, stem_h) {
+                    let sc_a = &all_cps[hit_idx[ah] as usize];
+                    let sc_b = &all_cps[hit_idx[bh] as usize];
+                    line_a = build_aa_line(sc_a, hit_t[ah], pixels, img_w, img_h);
+                    line_b = build_aa_line(sc_b, hit_t[bh], pixels, img_w, img_h);
+                    line_a_hit = (hit_idx[ah], hit_t[ah]);
                 }
 
-                if total_area > 0.0 {
-                    let r_out = ((sum_r / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                    let g_out = ((sum_g / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                    let b_out = ((sum_b / total_area).powf(1.0/2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                    chunk[local_y * out_w + opx] = 0xFF000000 | (r_out << 16) | (g_out << 8) | b_out;
-                } else {
+                if !need_aa {
                     chunk[local_y * out_w + opx] = pack_color(center_color);
-                }
-            } else {
-                let sc = &all_cps[aa_idx as usize];
-                let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
-                let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
-                let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
+                } else if let (Some(line_a), Some(line_b)) = (line_a.as_ref(), line_b.as_ref()) {
+                    // Wedge AA model
+                    // ==============
+                    // line_a: tangent at the closest curve (sc_a, the through
+                    //   curve at T-junctions). Carries up to 4 colors via
+                    //   t_branch — segment 0 covers t < t_branch (prev edge
+                    //   colors), segment 1 covers t >= t_branch (next edge
+                    //   colors). Each segment has a (pos, neg) pair indexed by
+                    //   the sa-sign at the wedge centroid.
+                    // line_b: tangent at the second-closest curve. Selects which
+                    //   line_a segment a wedge belongs to via sb-sign — but only
+                    //   when line_b actually crosses line_a's render range
+                    //   (b_separates). Outside that range all wedges share the
+                    //   segment containing the pixel center (center_in_seg1).
+                    // Pixel is clipped against line_a then line_b → 4 wedges.
+                    // Each picks one of {pos_seg0, neg_seg0, pos_seg1, neg_seg1}
+                    // via two sign tests on the centroid.
+                    //
+                    // Multi-curve wedge AA: partition the pixel square by the
+                    // two classifier lines, area-weighted blend.
+                    let pix_h = inv_scale * 0.5;
+                    let pixel: [(f32, f32); 4] = [
+                        (center.0 - pix_h, center.1 - pix_h),
+                        (center.0 + pix_h, center.1 - pix_h),
+                        (center.0 + pix_h, center.1 + pix_h),
+                        (center.0 - pix_h, center.1 + pix_h),
+                    ];
+                    let (a_idx, a_t) = line_a_hit;
+                    let sc_a = &all_cps[a_idx as usize];
 
-                if tl < 1e-4 {
-                    chunk[local_y * out_w + opx] = pack_color(center_color);
-                } else {
-                    let normal = (-tang.1 / tl, tang.0 / tl);
-                    let d = (center.0 - cpt.0) * normal.0 + (center.1 - cpt.1) * normal.1;
+                    let above_a = clip_polygon(&pixel, line_a, true);
+                    let below_a = clip_polygon(&pixel, line_a, false);
+                    let pp = clip_polygon(&above_a, line_b, true);
+                    let pn = clip_polygon(&above_a, line_b, false);
+                    let np = clip_polygon(&below_a, line_b, true);
+                    let nn = clip_polygon(&below_a, line_b, false);
+                    let wedges: [&[(f32, f32)]; 4] = [&pp, &pn, &np, &nn];
 
-                    // Compute edge colors on-the-fly
-                    let (aa_pl, aa_pr) = if sc.prev_dir >= 0 { get_edge_colors(sc.icx, sc.icy, sc.prev_dir) } else { (0, 0) };
-                    let (aa_nl, aa_nr) = if sc.next_dir >= 0 { get_edge_colors(sc.icx, sc.icy, sc.next_dir) } else { (0, 0) };
+                    // Through-curve color LUT: at a T-junction the through
+                    // curve (= sc_a) carries all 3 colors via its prev/next
+                    // edge segments split at t_branch. Resolve once per
+                    // segment using the same edge-selection logic as
+                    // resolve_from_cp (so a missing edge falls back to the
+                    // other one — both segments share colors), then align
+                    // to line_a.normal so a single sa-sign test classifies
+                    // both segments.
+                    let uniform_pn = (center_color, center_color);
+                    let (pos_seg0, neg_seg0) =
+                        resolve_lut_segment(sc_a, line_a.normal, pixels, img_w, img_h, false)
+                            .unwrap_or(uniform_pn);
+                    let (pos_seg1, neg_seg1) =
+                        resolve_lut_segment(sc_a, line_a.normal, pixels, img_w, img_h, true)
+                            .unwrap_or(uniform_pn);
+                    // Segment selection: line_b only separates seg 0 from seg 1
+                    // when it actually crosses line_a's curve in [0, 1] — i.e.,
+                    // the mid-seg-0 and mid-seg-1 points on line_a lie on
+                    // opposite sides of line_b. When line_b is geometrically
+                    // outside line_a's curve range (e.g., a stem at an adjacent
+                    // corner), both segments fall on the same side and sb-
+                    // sidedness is meaningless. In that case all wedges of the
+                    // pixel share one segment; pick it from the curve's t at
+                    // the pixel center.
+                    let (seg1_side, b_separates) = if sc_a.is_line {
+                        (1.0, false)
+                    } else {
+                        let p_seg0 = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos,
+                                            sc_a.t_branch * 0.5);
+                        let p_seg1 = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos,
+                                            (sc_a.t_branch + 1.0) * 0.5);
+                        let s0 = (p_seg0.0 - line_b.cpt.0) * line_b.normal.0
+                               + (p_seg0.1 - line_b.cpt.1) * line_b.normal.1;
+                        let s1 = (p_seg1.0 - line_b.cpt.0) * line_b.normal.0
+                               + (p_seg1.1 - line_b.cpt.1) * line_b.normal.1;
+                        (s1, s0 * s1 < 0.0)
+                    };
+                    let center_in_seg1 = a_t >= sc_a.t_branch;
 
-                    // Resolve both colors from edge colors
-                    let mut color_left = 0u32;
-                    let mut color_right = 0u32;
-                    let mut have_edge = false;
-                    let mut ref_t = 0.0f32;
-
-                    if aa_t < sc.t_branch && aa_pl != aa_pr {
-                        color_left = aa_pl;
-                        color_right = aa_pr;
-                        ref_t = 0.0;
-                        have_edge = true;
-                    } else if aa_t >= sc.t_branch && aa_nl != aa_nr {
-                        color_left = aa_nr;
-                        color_right = aa_nl;
-                        ref_t = 1.0;
-                        have_edge = true;
-                    } else if aa_nl != aa_nr {
-                        color_left = aa_nr;
-                        color_right = aa_nl;
-                        ref_t = 1.0;
-                        have_edge = true;
-                    } else if aa_pl != aa_pr {
-                        color_left = aa_pl;
-                        color_right = aa_pr;
-                        ref_t = 0.0;
-                        have_edge = true;
+                    let mut sum_r = 0.0f32; let mut sum_g = 0.0f32; let mut sum_b = 0.0f32;
+                    let mut total_area = 0.0f32;
+                    for poly in wedges.iter() {
+                        let area = polygon_area(poly);
+                        if area < 1e-9 { continue; }
+                        let cq = polygon_centroid(poly);
+                        let sa = (cq.0 - line_a.cpt.0) * line_a.normal.0
+                               + (cq.1 - line_a.cpt.1) * line_a.normal.1;
+                        let in_seg1 = if b_separates {
+                            let sb = (cq.0 - line_b.cpt.0) * line_b.normal.0
+                                   + (cq.1 - line_b.cpt.1) * line_b.normal.1;
+                            sb * seg1_side > 0.0
+                        } else {
+                            center_in_seg1
+                        };
+                        let color = if in_seg1 {
+                            if sa > 0.0 { pos_seg1 } else { neg_seg1 }
+                        } else {
+                            if sa > 0.0 { pos_seg0 } else { neg_seg0 }
+                        };
+                        let (rl, gl, bl) = srgb_decode(color);
+                        sum_r += rl * area;
+                        sum_g += gl * area;
+                        sum_b += bl * area;
+                        total_area += area;
                     }
 
-                    if !have_edge {
+                    chunk[local_y * out_w + opx] = if total_area > 0.0 {
+                        let inv = 1.0 / total_area;
+                        srgb_encode_argb(sum_r * inv, sum_g * inv, sum_b * inv)
+                    } else {
+                        pack_color(center_color)
+                    };
+                } else {
+                    let sc = &all_cps[aa_idx as usize];
+                    let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
+                    let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
+                    let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
+
+                    if tl < 1e-4 {
                         chunk[local_y * out_w + opx] = pack_color(center_color);
                     } else {
-                        let orig_tang =
-                            beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
-                        let orig_norm = (-orig_tang.1, orig_tang.0);
-                        let flip =
-                            normal.0 * orig_norm.0 + normal.1 * orig_norm.1 < 0.0;
-                        let pos_side = if flip { color_right } else { color_left };
-                        let neg_side = if flip { color_left } else { color_right };
+                        let normal = (-tang.1 / tl, tang.0 / tl);
+                        let d = (center.0 - cpt.0) * normal.0 + (center.1 - cpt.1) * normal.1;
 
-                        if pos_side == neg_side {
+                        // Compute edge colors on-the-fly
+                        let (aa_pl, aa_pr) = if sc.prev_dir >= 0 { get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir) } else { (0, 0) };
+                        let (aa_nl, aa_nr) = if sc.next_dir >= 0 { get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir) } else { (0, 0) };
+
+                        // Resolve both colors from edge colors
+                        let mut color_left = 0u32;
+                        let mut color_right = 0u32;
+                        let mut have_edge = false;
+                        let mut ref_t = 0.0f32;
+
+                        if aa_t < sc.t_branch && aa_pl != aa_pr {
+                            color_left = aa_pl;
+                            color_right = aa_pr;
+                            ref_t = 0.0;
+                            have_edge = true;
+                        } else if aa_t >= sc.t_branch && aa_nl != aa_nr {
+                            color_left = aa_nr;
+                            color_right = aa_nl;
+                            ref_t = 1.0;
+                            have_edge = true;
+                        } else if aa_nl != aa_nr {
+                            color_left = aa_nr;
+                            color_right = aa_nl;
+                            ref_t = 1.0;
+                            have_edge = true;
+                        } else if aa_pl != aa_pr {
+                            color_left = aa_pl;
+                            color_right = aa_pr;
+                            ref_t = 0.0;
+                            have_edge = true;
+                        }
+
+                        if !have_edge {
                             chunk[local_y * out_w + opx] = pack_color(center_color);
                         } else {
-                            // Exact pixel coverage by the tangent line.
-                            // Pixel = unit square at center, line at signed
-                            // perpendicular distance d_p from center (in
-                            // pixel-side units), normal absolute components
-                            // (a, b) with a >= b >= 0.
-                            //   - In the linear regime |d_p| <= (a-b)/2:
-                            //     line crosses two parallel edges, coverage
-                            //     is linear → frac = 0.5 + d_p/a (matches the
-                            //     old L∞ formula).
-                            //   - In the corner-cut regime (a-b)/2 < |d_p| <
-                            //     (a+b)/2: line cuts a triangle off one
-                            //     corner, coverage is quadratic.
-                            //   - |d_p| >= (a+b)/2: line outside pixel,
-                            //     coverage saturates.
-                            let nx = normal.0.abs();
-                            let ny = normal.1.abs();
-                            let a = nx.max(ny);
-                            let b = nx.min(ny);
-                            let half_ext = (a + b) * 0.5;
-                            let lin_ext = (a - b) * 0.5;
-                            let d_p = d / inv_scale;
-                            let frac = if d_p >= half_ext {
-                                1.0
-                            } else if d_p <= -half_ext {
-                                0.0
-                            } else if d_p.abs() <= lin_ext {
-                                0.5 + d_p / a
-                            } else if d_p > 0.0 {
-                                let t = half_ext - d_p;
-                                1.0 - 0.5 * t * t / (a * b)
-                            } else {
-                                let t = half_ext + d_p;
-                                0.5 * t * t / (a * b)
-                            };
+                            let orig_tang =
+                                beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+                            let orig_norm = (-orig_tang.1, orig_tang.0);
+                            let flip =
+                                normal.0 * orig_norm.0 + normal.1 * orig_norm.1 < 0.0;
+                            let pos_side = if flip { color_right } else { color_left };
+                            let neg_side = if flip { color_left } else { color_right };
 
-                            // Blend in linear light (sRGB decode → blend → sRGB encode)
-                            let r0 = (((pos_side >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
-                            let g0 = (((pos_side >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
-                            let b0 = ((pos_side & 0xFF) as f32 / 255.0).powf(2.2);
-                            let r1 = (((neg_side >> 16) & 0xFF) as f32 / 255.0).powf(2.2);
-                            let g1 = (((neg_side >> 8) & 0xFF) as f32 / 255.0).powf(2.2);
-                            let b1 = ((neg_side & 0xFF) as f32 / 255.0).powf(2.2);
-                            let ri = ((frac * r0 + (1.0 - frac) * r1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                            let gi = ((frac * g0 + (1.0 - frac) * g1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                            let bi = ((frac * b0 + (1.0 - frac) * b1).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u32;
-                            chunk[local_y * out_w + opx] = 0xFF000000 | (ri << 16) | (gi << 8) | bi;
+                            if pos_side == neg_side {
+                                chunk[local_y * out_w + opx] = pack_color(center_color);
+                            } else {
+                                // Exact pixel coverage by the tangent line.
+                                // Pixel = unit square at center, line at signed
+                                // perpendicular distance d_p from center (in
+                                // pixel-side units), normal absolute components
+                                // (a, b) with a >= b >= 0.
+                                //   - In the linear regime |d_p| <= (a-b)/2:
+                                //     line crosses two parallel edges, coverage
+                                //     is linear → frac = 0.5 + d_p/a (matches the
+                                //     old L∞ formula).
+                                //   - In the corner-cut regime (a-b)/2 < |d_p| <
+                                //     (a+b)/2: line cuts a triangle off one
+                                //     corner, coverage is quadratic.
+                                //   - |d_p| >= (a+b)/2: line outside pixel,
+                                //     coverage saturates.
+                                let nx = normal.0.abs();
+                                let ny = normal.1.abs();
+                                let a = nx.max(ny);
+                                let b = nx.min(ny);
+                                let half_ext = (a + b) * 0.5;
+                                let lin_ext = (a - b) * 0.5;
+                                let d_p = d / inv_scale;
+                                let frac = if d_p >= half_ext {
+                                    1.0
+                                } else if d_p <= -half_ext {
+                                    0.0
+                                } else if d_p.abs() <= lin_ext {
+                                    0.5 + d_p / a
+                                } else if d_p > 0.0 {
+                                    let t = half_ext - d_p;
+                                    1.0 - 0.5 * t * t / (a * b)
+                                } else {
+                                    let t = half_ext + d_p;
+                                    0.5 * t * t / (a * b)
+                                };
+
+                                // Blend in linear light (sRGB decode → blend → sRGB encode)
+                                let (r0, g0, b0) = srgb_decode(pos_side);
+                                let (r1, g1, b1) = srgb_decode(neg_side);
+                                let inv_frac = 1.0 - frac;
+                                chunk[local_y * out_w + opx] = srgb_encode_argb(
+                                    frac * r0 + inv_frac * r1,
+                                    frac * g0 + inv_frac * g1,
+                                    frac * b0 + inv_frac * b1,
+                                );
+                            }
                         }
                     }
                 }
-            }
-        } // opx
+            } // opx
         } // local_y
     };
 
