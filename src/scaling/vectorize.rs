@@ -1726,31 +1726,54 @@ fn srgb_encode_argb(r: f32, g: f32, b: f32) -> u32 {
     0xFF000000 | (r_o << 16) | (g_o << 8) | b_o
 }
 
-/// Build line_a/line_b classifier line for the wedge AA path. Returns None
-/// when the CP has no usable edge (no color discontinuity to either side via
-/// prev_dir/next_dir) — such a line wouldn't separate distinct color
-/// regions and shouldn't drive a wedge.
+/// Exact pixel coverage by a tangent line. `d_perp_pixel` is the line's
+/// signed perpendicular distance from pixel center in pixel-side units.
+/// Returns area on the line's positive side, in [0, 1].
+///   |d_p| <= (a-b)/2     → linear regime (line crosses parallel edges)
+///   (a-b)/2 < |d_p| < (a+b)/2 → corner-cut quadratic
+///   |d_p| >= (a+b)/2     → saturated
+#[inline(always)]
+fn line_coverage_pos(normal: (f32, f32), d_perp_pixel: f32) -> f32 {
+    let nx = normal.0.abs();
+    let ny = normal.1.abs();
+    let a = nx.max(ny);
+    let b = nx.min(ny);
+    let half_ext = (a + b) * 0.5;
+    let lin_ext = (a - b) * 0.5;
+    if d_perp_pixel >= half_ext { 1.0 }
+    else if d_perp_pixel <= -half_ext { 0.0 }
+    else if d_perp_pixel.abs() <= lin_ext { 0.5 + d_perp_pixel / a }
+    else if d_perp_pixel > 0.0 {
+        let t = half_ext - d_perp_pixel;
+        1.0 - 0.5 * t * t / (a * b)
+    } else {
+        let t = half_ext + d_perp_pixel;
+        0.5 * t * t / (a * b)
+    }
+}
+
+/// Build an AaLine + the curve's pos/neg side colors at parameter `t`.
+/// `cpt` is the closest point on the curve (sc) at `t`; `normal` is the
+/// unit perpendicular to the tangent. Colors come from the t_branch
+/// segment containing `t` via `resolve_lut_segment`. Returns None when
+/// the tangent is too short (singular point on the curve) or the curve
+/// has no usable edge color discontinuity. Used by single-curve and
+/// dual-curve AA — wedge AA uses `build_junction_aa_line` instead since
+/// its cpt is an external junction point and colors are resolved per
+/// segment by the LUT.
 fn build_aa_line(
     sc: &CpData, t: f32,
     pixels: &[u32], img_w: usize, img_h: usize,
-) -> Option<AaLine> {
-    let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+) -> Option<(AaLine, u32, u32)> {
     let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
     let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
     if tl < 1e-4 { return None; }
     let normal = (-tang.1 / tl, tang.0 / tl);
-
-    let prev_split = sc.prev_dir >= 0 && {
-        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir);
-        l != r
-    };
-    let next_split = sc.next_dir >= 0 && {
-        let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir);
-        l != r
-    };
-    if !prev_split && !next_split { return None; }
-
-    Some(AaLine { cpt, normal })
+    let target_seg1 = t >= sc.t_branch;
+    let (pos, neg) =
+        resolve_lut_segment(sc, normal, pixels, img_w, img_h, target_seg1)?;
+    let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+    Some((AaLine { cpt, normal }, pos, neg))
 }
 
 /// Junction-anchored wedge AA line: cpt = junction position J (instead of
@@ -2618,110 +2641,127 @@ fn rasterize(
                     } else {
                         pack_color(center_color)
                     };
-                } else {
-                    let sc = &all_cps[aa_idx as usize];
-                    let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
-                    let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, aa_t);
-                    let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
-
-                    if tl < 1e-4 {
-                        chunk[local_y * out_w + opx] = pack_color(center_color);
-                    } else {
-                        let normal = (-tang.1 / tl, tang.0 / tl);
-                        let d = (center.0 - cpt.0) * normal.0 + (center.1 - cpt.1) * normal.1;
-
-                        // Compute edge colors on-the-fly
-                        let (aa_pl, aa_pr) = if sc.prev_dir >= 0 { get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir) } else { (0, 0) };
-                        let (aa_nl, aa_nr) = if sc.next_dir >= 0 { get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir) } else { (0, 0) };
-
-                        // Resolve both colors from edge colors
-                        let mut color_left = 0u32;
-                        let mut color_right = 0u32;
-                        let mut have_edge = false;
-                        let mut ref_t = 0.0f32;
-
-                        if aa_t < sc.t_branch && aa_pl != aa_pr {
-                            color_left = aa_pl;
-                            color_right = aa_pr;
-                            ref_t = 0.0;
-                            have_edge = true;
-                        } else if aa_t >= sc.t_branch && aa_nl != aa_nr {
-                            color_left = aa_nr;
-                            color_right = aa_nl;
-                            ref_t = 1.0;
-                            have_edge = true;
-                        } else if aa_nl != aa_nr {
-                            color_left = aa_nr;
-                            color_right = aa_nl;
-                            ref_t = 1.0;
-                            have_edge = true;
-                        } else if aa_pl != aa_pr {
-                            color_left = aa_pl;
-                            color_right = aa_pr;
-                            ref_t = 0.0;
-                            have_edge = true;
+                } else if let Some(packed) = ({
+                    // Dual-curve AA: two distinct-chain curves passing through
+                    // the pixel without an actual junction inside it.
+                    //
+                    // line_a: tangent at sc_a's closest_t (= aa_idx hit).
+                    // line_b: tangent at sc_b's closest_t (= first non-chain
+                    //   neighbor hit within aa_threshold).
+                    // K = intersection of the two lines (may be outside pixel).
+                    //
+                    // Boundary-sweep with K as origin: each line leg of a
+                    // wedge polygon is on a ray through K, so its cross-
+                    // product contribution is zero. Pixel-edge sub-segments
+                    // alone reproduce 2·area(wedge) when summed signed (no
+                    // abs per segment — the closed-loop math gives the
+                    // correct sign for K outside the pixel).
+                    //
+                    // Returns Some(packed_color) on success, None for any
+                    // degeneracy (no valid second curve, parallel lines,
+                    // missing edge colors).
+                    if aa_idx < 0 { None }
+                    else {
+                        let sc_a = &all_cps[aa_idx as usize];
+                        // Pick sc_b: first hit not on sc_a's chain, within
+                        // threshold. Hits are sorted ascending by d2, so we
+                        // can break once d2 exceeds threshold.
+                        let mut bh: Option<usize> = None;
+                        for h in 0..num_hits {
+                            if hit_idx[h] as i32 == aa_idx { continue; }
+                            if hit_d2[h] >= aa_threshold { break; }
+                            let cp_b = &all_cps[hit_idx[h] as usize];
+                            let same_chain = sc_a.ci == cp_b.ci
+                                || sc_a.ci == cp_b.prev_ci
+                                || sc_a.ci == cp_b.next_ci
+                                || cp_b.ci == sc_a.prev_ci
+                                || cp_b.ci == sc_a.next_ci;
+                            if !same_chain { bh = Some(h); break; }
                         }
+                        bh.and_then(|bh| {
+                            let sc_b = &all_cps[hit_idx[bh] as usize];
+                            let bt = hit_t[bh];
 
-                        if !have_edge {
-                            chunk[local_y * out_w + opx] = pack_color(center_color);
-                        } else {
-                            let orig_tang =
-                                beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
-                            let orig_norm = (-orig_tang.1, orig_tang.0);
-                            let flip =
-                                normal.0 * orig_norm.0 + normal.1 * orig_norm.1 < 0.0;
-                            let pos_side = if flip { color_right } else { color_left };
-                            let neg_side = if flip { color_left } else { color_right };
+                            let (la, a_pos, a_neg) =
+                                build_aa_line(sc_a, aa_t, pixels, img_w, img_h)?;
+                            let (lb, b_pos, b_neg) =
+                                build_aa_line(sc_b, bt, pixels, img_w, img_h)?;
+                            if a_pos == a_neg && b_pos == b_neg { return None; }
 
-                            if pos_side == neg_side {
-                                chunk[local_y * out_w + opx] = pack_color(center_color);
-                            } else {
-                                // Exact pixel coverage by the tangent line.
-                                // Pixel = unit square at center, line at signed
-                                // perpendicular distance d_p from center (in
-                                // pixel-side units), normal absolute components
-                                // (a, b) with a >= b >= 0.
-                                //   - In the linear regime |d_p| <= (a-b)/2:
-                                //     line crosses two parallel edges, coverage
-                                //     is linear → frac = 0.5 + d_p/a (matches the
-                                //     old L∞ formula).
-                                //   - In the corner-cut regime (a-b)/2 < |d_p| <
-                                //     (a+b)/2: line cuts a triangle off one
-                                //     corner, coverage is quadratic.
-                                //   - |d_p| >= (a+b)/2: line outside pixel,
-                                //     coverage saturates.
-                                let nx = normal.0.abs();
-                                let ny = normal.1.abs();
-                                let a = nx.max(ny);
-                                let b = nx.min(ny);
-                                let half_ext = (a + b) * 0.5;
-                                let lin_ext = (a - b) * 0.5;
-                                let d_p = d / inv_scale;
-                                let frac = if d_p >= half_ext {
-                                    1.0
-                                } else if d_p <= -half_ext {
-                                    0.0
-                                } else if d_p.abs() <= lin_ext {
-                                    0.5 + d_p / a
-                                } else if d_p > 0.0 {
-                                    let t = half_ext - d_p;
-                                    1.0 - 0.5 * t * t / (a * b)
-                                } else {
-                                    let t = half_ext + d_p;
-                                    0.5 * t * t / (a * b)
-                                };
+                            // Inner-side: which side of curve A faces curve B?
+                            // dot(cpt_b - cpt_a, na) > 0 → B is on A's pos side.
+                            let delta_ba = (lb.cpt.0 - la.cpt.0, lb.cpt.1 - la.cpt.1);
+                            let inner_a_pos = delta_ba.0 * la.normal.0 + delta_ba.1 * la.normal.1 > 0.0;
+                            let inner_b_pos = -delta_ba.0 * lb.normal.0 + -delta_ba.1 * lb.normal.1 > 0.0;
+                            let a_inner = if inner_a_pos { a_pos } else { a_neg };
+                            let a_outer = if inner_a_pos { a_neg } else { a_pos };
+                            let b_inner = if inner_b_pos { b_pos } else { b_neg };
+                            let b_outer = if inner_b_pos { b_neg } else { b_pos };
 
-                                // Blend in linear light (sRGB decode → blend → sRGB encode)
-                                let (r0, g0, b0) = srgb_decode(pos_side);
-                                let (r1, g1, b1) = srgb_decode(neg_side);
-                                let inv_frac = 1.0 - frac;
-                                chunk[local_y * out_w + opx] = srgb_encode_argb(
-                                    frac * r0 + inv_frac * r1,
-                                    frac * g0 + inv_frac * g1,
-                                    frac * b0 + inv_frac * b1,
-                                );
+                            // Dual-curve assumes the two curves border a
+                            // shared middle region, so A_inner == B_inner.
+                            // When they disagree, the local geometry has 3
+                            // distinct colors (near-junction missed by the
+                            // structural detector — e.g. two chains terminating
+                            // at the same point just outside the pixel).
+                            // Defer to single-curve AA.
+                            if a_inner != b_inner { return None; }
+
+                            // 3-stripe formula. Lines that don't cross in the
+                            // pixel partition it into A_outer | middle | B_outer
+                            // (A_outer ∩ B_outer is empty, so the areas sum to
+                            // the pixel). Each outer fraction is a single-line
+                            // coverage — closed-form, no boundary sweep.
+                            let d_a = ((center.0 - la.cpt.0) * la.normal.0
+                                     + (center.1 - la.cpt.1) * la.normal.1) / inv_scale;
+                            let d_b = ((center.0 - lb.cpt.0) * lb.normal.0
+                                     + (center.1 - lb.cpt.1) * lb.normal.1) / inv_scale;
+                            let frac_a_pos = line_coverage_pos(la.normal, d_a);
+                            let frac_b_pos = line_coverage_pos(lb.normal, d_b);
+                            let frac_a_outer = if inner_a_pos { 1.0 - frac_a_pos } else { frac_a_pos };
+                            let frac_b_outer = if inner_b_pos { 1.0 - frac_b_pos } else { frac_b_pos };
+
+                            // Lines crossing inside the pixel → A_outer and
+                            // B_outer regions overlap, fractions sum > 1.
+                            // Defer to single-curve AA.
+                            if frac_a_outer + frac_b_outer > 1.0 + 1e-4 {
+                                return None;
                             }
+                            let frac_middle = (1.0 - frac_a_outer - frac_b_outer).max(0.0);
+
+                            // Blend in linear light.
+                            let (a_or, a_og, a_ob) = srgb_decode(a_outer);
+                            let (b_or, b_og, b_ob) = srgb_decode(b_outer);
+                            let (m_r, m_g, m_b) = srgb_decode(a_inner);
+                            let r = a_or * frac_a_outer + b_or * frac_b_outer + m_r * frac_middle;
+                            let g = a_og * frac_a_outer + b_og * frac_b_outer + m_g * frac_middle;
+                            let b = a_ob * frac_a_outer + b_ob * frac_b_outer + m_b * frac_middle;
+                            Some(srgb_encode_argb(r, g, b))
+                        })
+                    }
+                }) {
+                    chunk[local_y * out_w + opx] = packed;
+                } else {
+                    // Single-curve AA fallback: tangent line + pixel coverage
+                    // formula. build_aa_line bundles geometry + color
+                    // resolution; line_coverage_pos gives the closed-form
+                    // area on the line's positive side.
+                    let sc = &all_cps[aa_idx as usize];
+                    match build_aa_line(sc, aa_t, pixels, img_w, img_h) {
+                        Some((line, pos_side, neg_side)) if pos_side != neg_side => {
+                            let d_p = ((center.0 - line.cpt.0) * line.normal.0
+                                     + (center.1 - line.cpt.1) * line.normal.1) / inv_scale;
+                            let frac = line_coverage_pos(line.normal, d_p);
+                            let (r0, g0, b0) = srgb_decode(pos_side);
+                            let (r1, g1, b1) = srgb_decode(neg_side);
+                            let inv_frac = 1.0 - frac;
+                            chunk[local_y * out_w + opx] = srgb_encode_argb(
+                                frac * r0 + inv_frac * r1,
+                                frac * g0 + inv_frac * g1,
+                                frac * b0 + inv_frac * b1,
+                            );
                         }
+                        _ => chunk[local_y * out_w + opx] = pack_color(center_color),
                     }
                 }
             } // opx

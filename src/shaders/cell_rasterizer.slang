@@ -240,20 +240,19 @@ bool resolve_color(float2 pt, SlimCP sc, ResolveData rd, float t, out uint out_c
 }
 
 /// Linear approximation of a curve at the AA hit's closest_t, plus the
-/// curve's pos/neg side colors. Used by the multi-curve wedge AA path.
+/// curve's pos/neg side colors. Drives single-curve AA, dual-curve AA,
+/// and (with cpt anchored at J) wedge AA.
 struct AaLine {
     float2 cpt;
     float2 normal;
     uint pos_color;
     uint neg_color;
-    float d2;
     bool valid;
 };
 
-AaLine build_aa_line(SlimCP sc, ResolveData rd, float t, float d2) {
+AaLine build_aa_line(SlimCP sc, ResolveData rd, float t) {
     AaLine result;
     result.valid = false;
-    result.d2 = d2;
     result.cpt = float2(0, 0);
     result.normal = float2(0, 0);
     result.pos_color = 0u;
@@ -303,7 +302,6 @@ AaLine build_junction_aa_line(SlimCP sc, ResolveData rd, float t_eval, float2 j,
                               out float2 out_tang_unit) {
     AaLine result;
     result.valid = false;
-    result.d2 = 0.0;
     result.cpt = j;
     result.normal = float2(0, 0);
     result.pos_color = 0u;
@@ -333,12 +331,75 @@ AaLine build_junction_aa_line(SlimCP sc, ResolveData rd, float t_eval, float2 j,
     return result;
 }
 
+/// Find the closest cached hit that's not on `sc_a_ci`'s chain (1-step
+/// neighbor test) and is within `aa_threshold`. Returns the cached slot
+/// index in [0, 4) or -1 if no qualifying hit exists.
+int find_second_chain_hit(int sc_a_ci, int best_idx,
+                          int idx0, int idx1, int idx2, int idx3,
+                          float d2_0, float d2_1, float d2_2, float d2_3,
+                          int cached_n, float aa_threshold) {
+    int idxs[4] = { idx0, idx1, idx2, idx3 };
+    float d2s[4] = { d2_0, d2_1, d2_2, d2_3 };
+    int sa_prev = cp_neighbors[sc_a_ci * 4];
+    int sa_next = cp_neighbors[sc_a_ci * 4 + 1];
+    for (int s = 0; s < 4; s++) {
+        if (s >= cached_n) break;
+        int ci = idxs[s];
+        if (ci < 0 || ci == best_idx) continue;
+        if (d2s[s] >= aa_threshold) break;
+        SlimCP cand = sh_cps[uint(ci)];
+        bool same_chain = (sc_a_ci == cand.ci)
+            || (sc_a_ci == cp_neighbors[cand.ci * 4])
+            || (sc_a_ci == cp_neighbors[cand.ci * 4 + 1])
+            || (cand.ci == sa_prev)
+            || (cand.ci == sa_next);
+        if (!same_chain) return s;
+    }
+    return -1;
+}
+
+/// Exact pixel coverage by a tangent line. d_perp_pixel is the line's
+/// signed perpendicular distance from pixel center in pixel-side units.
+/// Returns the area on the line's positive side, in [0, 1].
+///   |d_p| <= (a-b)/2     → linear regime (line crosses parallel edges)
+///   (a-b)/2 < |d_p| < (a+b)/2 → corner-cut quadratic
+///   |d_p| >= (a+b)/2     → saturated
+float line_coverage_pos(float2 normal, float d_perp_pixel) {
+    float nx = abs(normal.x);
+    float ny = abs(normal.y);
+    float a = max(nx, ny);
+    float b = min(nx, ny);
+    float half_ext = (a + b) * 0.5;
+    float lin_ext = (a - b) * 0.5;
+    if (d_perp_pixel >= half_ext) return 1.0;
+    if (d_perp_pixel <= -half_ext) return 0.0;
+    if (abs(d_perp_pixel) <= lin_ext) return 0.5 + d_perp_pixel / a;
+    if (d_perp_pixel > 0.0) {
+        float t = half_ext - d_perp_pixel;
+        return 1.0 - 0.5 * t * t / (a * b);
+    }
+    float t = half_ext + d_perp_pixel;
+    return 0.5 * t * t / (a * b);
+}
+
+/// Decode an ARGB packed color into linear sRGB (gamma 2.2).
+float3 srgb_to_linear(uint c) {
+    float3 srgb = float3(float((c >> 16u) & 0xFFu),
+                         float((c >> 8u) & 0xFFu),
+                         float(c & 0xFFu)) / 255.0;
+    return pow(srgb, float3(2.2));
+}
+
 struct SHit { float d2; float t; int idx; };
 
 uint sample_from_shared(float2 pt, uint fallback_color,
                         out int out_idx, out float out_t, out float out_d2,
                         out int cached_idx_0, out int cached_idx_1,
                         out int cached_idx_2, out int cached_idx_3,
+                        out float cached_t_0, out float cached_t_1,
+                        out float cached_t_2, out float cached_t_3,
+                        out float cached_d2_0, out float cached_d2_1,
+                        out float cached_d2_2, out float cached_d2_3,
                         out int cached_n, out float second_d2) {
     SHit hits[4];
     int num_hits = 0;
@@ -385,6 +446,14 @@ uint sample_from_shared(float2 pt, uint fallback_color,
     cached_idx_1 = (num_hits > 1) ? hits[1].idx : -1;
     cached_idx_2 = (num_hits > 2) ? hits[2].idx : -1;
     cached_idx_3 = (num_hits > 3) ? hits[3].idx : -1;
+    cached_t_0 = (num_hits > 0) ? hits[0].t : 0.0;
+    cached_t_1 = (num_hits > 1) ? hits[1].t : 0.0;
+    cached_t_2 = (num_hits > 2) ? hits[2].t : 0.0;
+    cached_t_3 = (num_hits > 3) ? hits[3].t : 0.0;
+    cached_d2_0 = (num_hits > 0) ? hits[0].d2 : 1e10;
+    cached_d2_1 = (num_hits > 1) ? hits[1].d2 : 1e10;
+    cached_d2_2 = (num_hits > 2) ? hits[2].d2 : 1e10;
+    cached_d2_3 = (num_hits > 3) ? hits[3].d2 : 1e10;
     cached_n = num_hits;
     // second_d2 lets the wedge-AA gate skip ALL its work (line_a build,
     // line_b search, polygon clip, centroid sampling) when the next-closest
@@ -587,11 +656,15 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
         float best_t = 0.0;
         float best_d2 = 1e10;
         int cached_idx_0 = -1, cached_idx_1 = -1, cached_idx_2 = -1, cached_idx_3 = -1;
+        float cached_t_0 = 0.0, cached_t_1 = 0.0, cached_t_2 = 0.0, cached_t_3 = 0.0;
+        float cached_d2_0 = 1e10, cached_d2_1 = 1e10, cached_d2_2 = 1e10, cached_d2_3 = 1e10;
         int cached_n = 0;
         float second_d2 = 1e10;
         uint center_color = sample_from_shared(center, fallback, best_idx, best_t, best_d2,
-                                                cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3, cached_n,
-                                                second_d2);
+                                                cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3,
+                                                cached_t_0, cached_t_1, cached_t_2, cached_t_3,
+                                                cached_d2_0, cached_d2_1, cached_d2_2, cached_d2_3,
+                                                cached_n, second_d2);
 
         // AA threshold: a pixel's half-diagonal² in source units is
         // 0.5/scale². Beyond that, the curve passes outside the pixel
@@ -915,87 +988,80 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
         } else if (!need_aa) {
             output_img.Store(int2(opx, opy), (center_color).unpack_rgba());
         } else {
-            SlimCP sc = sh_cps[uint(best_idx)];
-            ResolveData rd = read_resolve_data(sc.ci);
+            // Try dual-curve AA first; fall through to single-curve if any
+            // gate fails. Dual-curve handles two distinct-chain curves
+            // passing through a pixel that isn't a structural junction.
+            // Both paths share build_aa_line + line_coverage_pos.
+            bool handled = false;
+            SlimCP sc_a = sh_cps[uint(best_idx)];
+            ResolveData rd_a = read_resolve_data(sc_a.ci);
+            AaLine la = build_aa_line(sc_a, rd_a, best_t);
 
-            float2 cpt = bspline_eval(sc.prev_pos, sc.pos, sc.next_pos, best_t);
-            float2 tang = bspline_deriv(sc.prev_pos, sc.pos, sc.next_pos, best_t);
-            float tl = length(tang);
-
-            if (tl < 1e-4) {
-                output_img.Store(int2(opx, opy), (center_color).unpack_rgba());
-            } else {
-                float2 normal = float2(-tang.y, tang.x) / tl;
-                float d = dot(center - cpt, normal);
-
-                uint aa_pl = 0u, aa_pr = 0u, aa_nl = 0u, aa_nr = 0u;
-                if (rd.prev_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.prev_dir, aa_pl, aa_pr);
-                if (rd.next_dir >= 0) get_edge_colors(rd.icx, rd.icy, rd.next_dir, aa_nl, aa_nr);
-
-                uint color_left, color_right;
-                bool have_edge = false;
-                float ref_t;
-
-                if (best_t < sc.t_branch && aa_pl != aa_pr) {
-                    color_left = aa_pl; color_right = aa_pr; ref_t = 0.0; have_edge = true;
-                } else if (best_t >= sc.t_branch && aa_nl != aa_nr) {
-                    color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;
-                } else if (aa_nl != aa_nr) {
-                    color_left = aa_nr; color_right = aa_nl; ref_t = 1.0; have_edge = true;
-                } else if (aa_pl != aa_pr) {
-                    color_left = aa_pl; color_right = aa_pr; ref_t = 0.0; have_edge = true;
+            // ---- Dual-curve attempt ----
+            if (la.valid && la.pos_color != la.neg_color && cached_n >= 2) {
+                int sec_slot = find_second_chain_hit(
+                    sc_a.ci, best_idx,
+                    cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3,
+                    cached_d2_0, cached_d2_1, cached_d2_2, cached_d2_3,
+                    cached_n, aa_threshold);
+                if (sec_slot >= 0) {
+                    int sec_idx = (sec_slot == 0) ? cached_idx_0
+                                : (sec_slot == 1) ? cached_idx_1
+                                : (sec_slot == 2) ? cached_idx_2
+                                : cached_idx_3;
+                    float sec_t = (sec_slot == 0) ? cached_t_0
+                                : (sec_slot == 1) ? cached_t_1
+                                : (sec_slot == 2) ? cached_t_2
+                                : cached_t_3;
+                    SlimCP sc_b = sh_cps[uint(sec_idx)];
+                    ResolveData rd_b = read_resolve_data(sc_b.ci);
+                    AaLine lb = build_aa_line(sc_b, rd_b, sec_t);
+                    if (lb.valid && lb.pos_color != lb.neg_color) {
+                        // Inner-side: which side of A faces B (and vice versa)?
+                        float2 delta_ba = lb.cpt - la.cpt;
+                        bool inner_a_pos = dot(delta_ba, la.normal) > 0.0;
+                        bool inner_b_pos = dot(-delta_ba, lb.normal) > 0.0;
+                        uint a_inner = inner_a_pos ? la.pos_color : la.neg_color;
+                        uint b_inner = inner_b_pos ? lb.pos_color : lb.neg_color;
+                        // Dual-curve assumes a shared middle region. If
+                        // inner colors disagree, geometry has 3 distinct
+                        // colors (junction missed by structural detector).
+                        if (a_inner == b_inner) {
+                            float d_a = dot(center - la.cpt, la.normal) / inv_scale;
+                            float d_b = dot(center - lb.cpt, lb.normal) / inv_scale;
+                            float fa_pos = line_coverage_pos(la.normal, d_a);
+                            float fb_pos = line_coverage_pos(lb.normal, d_b);
+                            float fa_outer = inner_a_pos ? (1.0 - fa_pos) : fa_pos;
+                            float fb_outer = inner_b_pos ? (1.0 - fb_pos) : fb_pos;
+                            // Lines crossing inside pixel → A_outer ∩ B_outer
+                            // overlap → fractions sum > 1. Defer.
+                            if (fa_outer + fb_outer <= 1.0 + 1e-4) {
+                                float fm = max(0.0, 1.0 - fa_outer - fb_outer);
+                                uint a_outer = inner_a_pos ? la.neg_color : la.pos_color;
+                                uint b_outer = inner_b_pos ? lb.neg_color : lb.pos_color;
+                                float3 lin = srgb_to_linear(a_outer) * fa_outer
+                                           + srgb_to_linear(b_outer) * fb_outer
+                                           + srgb_to_linear(a_inner) * fm;
+                                output_img.Store(int2(opx, opy),
+                                    float4(pow(lin, float3(1.0 / 2.2)), 1.0));
+                                handled = true;
+                            }
+                        }
+                    }
                 }
+            }
 
-                if (!have_edge) {
+            // ---- Single-curve fallback ----
+            if (!handled) {
+                if (!la.valid || la.pos_color == la.neg_color) {
                     output_img.Store(int2(opx, opy), (center_color).unpack_rgba());
                 } else {
-                    float2 orig_tang = bspline_deriv(rd.orig_prev, rd.orig_pos, rd.orig_next, ref_t);
-                    float2 orig_norm = float2(-orig_tang.y, orig_tang.x);
-                    bool flip = dot(normal, orig_norm) < 0.0;
-                    uint pos_side = flip ? color_right : color_left;
-                    uint neg_side = flip ? color_left : color_right;
-
-                    if (pos_side == neg_side) {
-                        output_img.Store(int2(opx, opy), (center_color).unpack_rgba());
-                    } else {
-                        // Exact pixel coverage. Linear in |d_p| <= (a-b)/2
-                        // (matches L∞), quadratic in (a-b)/2 < |d_p| <
-                        // (a+b)/2 (line cuts a triangle off a corner),
-                        // saturates outside [(a+b)/2, -(a+b)/2].
-                        float nx = abs(normal.x);
-                        float ny = abs(normal.y);
-                        float a = max(nx, ny);
-                        float b = min(nx, ny);
-                        float half_ext = (a + b) * 0.5;
-                        float lin_ext = (a - b) * 0.5;
-                        float d_p = d / inv_scale;
-                        float frac;
-                        if (d_p >= half_ext) {
-                            frac = 1.0;
-                        } else if (d_p <= -half_ext) {
-                            frac = 0.0;
-                        } else if (abs(d_p) <= lin_ext) {
-                            frac = 0.5 + d_p / a;
-                        } else if (d_p > 0.0) {
-                            float t = half_ext - d_p;
-                            frac = 1.0 - 0.5 * t * t / (a * b);
-                        } else {
-                            float t = half_ext + d_p;
-                            frac = 0.5 * t * t / (a * b);
-                        }
-
-                        // Blend in linear light (sRGB decode → blend → sRGB encode)
-                        float3 c0 = float3(float((pos_side >> 16u) & 0xFFu),
-                                           float((pos_side >> 8u) & 0xFFu),
-                                           float(pos_side & 0xFFu)) / 255.0;
-                        float3 c1 = float3(float((neg_side >> 16u) & 0xFFu),
-                                           float((neg_side >> 8u) & 0xFFu),
-                                           float(neg_side & 0xFFu)) / 255.0;
-                        c0 = pow(c0, float3(2.2));
-                        c1 = pow(c1, float3(2.2));
-                        float3 blended = pow(frac * c0 + (1.0 - frac) * c1, float3(1.0 / 2.2));
-                        output_img.Store(int2(opx, opy), float4(blended, 1.0));
-                    }
+                    float d_p = dot(center - la.cpt, la.normal) / inv_scale;
+                    float frac = line_coverage_pos(la.normal, d_p);
+                    float3 lin = srgb_to_linear(la.pos_color) * frac
+                               + srgb_to_linear(la.neg_color) * (1.0 - frac);
+                    output_img.Store(int2(opx, opy),
+                        float4(pow(lin, float3(1.0 / 2.2)), 1.0));
                 }
             }
         }
