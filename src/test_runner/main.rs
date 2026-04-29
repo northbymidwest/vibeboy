@@ -75,16 +75,14 @@ enum Command {
         /// Output file path (.svg for vector, .png for raster)
         #[arg(long, default_value = "output.svg")]
         out: String,
-        /// Vectorize filter: vectorize (default), gpu-full
-        #[arg(long, default_value = "vectorize")]
-        filter: String,
         /// Scale factor for raster output (default 4)
         #[arg(long, default_value = "4")]
         scale: usize,
-        /// Use GPU shader for rasterization (where available)
+        /// Use GPU shaders for the full vectorize+rasterize pipeline
+        /// (defaults to CPU). Falls back to CPU on GPU failure.
         #[arg(long)]
         gpu: bool,
-        /// Force CPU-only (no GPU shaders)
+        /// Force CPU-only (overrides --gpu).
         #[arg(long)]
         cpu_filter: bool,
     },
@@ -260,8 +258,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, filter, scale, gpu, cpu_filter } => {
-            commands::cmd_vectorize(&path, &out, &filter, scale, gpu && !cpu_filter);
+        Command::Vectorize { path, out, scale, gpu, cpu_filter } => {
+            commands::cmd_vectorize(&path, &out, scale, gpu && !cpu_filter);
         }
         Command::Analyze {
             path,

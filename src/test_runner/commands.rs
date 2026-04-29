@@ -83,44 +83,35 @@ fn vectorize_and_save(
         return;
     }
 
-    let (raster_pixels, out_w, out_h) = match format {
-        "gpu-full" => {
-            gpu_with_cpu_fallback(
-                "gpu-full",
-                use_gpu,
-                || {
-                    #[cfg(feature = "sdl3-gpu-shaders")]
-                    {
-                        vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(
-                            pixels, width, height, scale,
-                        )
-                    }
-                    #[cfg(not(feature = "sdl3-gpu-shaders"))]
-                    {
-                        None
-                    }
-                },
-                || {
-                    let scale_f = scale as f32;
-                    let ow = (width as f32 * scale_f).round() as usize;
-                    let oh = (height as f32 * scale_f).round() as usize;
-                    let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
-                    (r, ow, oh)
-                },
-            )
-        }
-        "vectorize" | _ => {
-            let scale_f = scale as f32;
-            let out_w = (width as f32 * scale_f).round() as usize;
-            let out_h = (height as f32 * scale_f).round() as usize;
-            let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
-            (r, out_w, out_h)
-        }
+    let scale_f = scale as f32;
+    let cpu_fallback = || {
+        let ow = (width as f32 * scale_f).round() as usize;
+        let oh = (height as f32 * scale_f).round() as usize;
+        let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
+        (r, ow, oh)
     };
+    let (raster_pixels, out_w, out_h) = gpu_with_cpu_fallback(
+        "vectorize",
+        use_gpu,
+        || {
+            #[cfg(feature = "sdl3-gpu-shaders")]
+            {
+                vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(
+                    pixels, width, height, scale,
+                )
+            }
+            #[cfg(not(feature = "sdl3-gpu-shaders"))]
+            {
+                None
+            }
+        },
+        cpu_fallback,
+    );
     save_pixels_png(&raster_pixels, out_w, out_h, out);
+    let backend = if use_gpu { "gpu" } else { "cpu" };
     eprintln!(
-        "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, format={})",
-        width, height, out, out_w, out_h, scale, format
+        "Vectorized+rasterized {}x{} image -> {} ({}x{} at {}x, backend={}, format={})",
+        width, height, out, out_w, out_h, scale, backend, format
     );
 }
 
@@ -231,14 +222,14 @@ pub fn cmd_screenshot(
         (raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT)
     };
 
-    if matches!(format, "raster" | "gpu-full" | "vectorize") {
+    if matches!(format, "raster" | "vectorize") {
         vectorize_and_save(fb, GB_FB_WIDTH, GB_FB_HEIGHT, out, format, scale, use_gpu);
     } else {
         save_pixels(fb, fb_w, fb_h, out, format, frames);
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: bool) {
+pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -256,13 +247,7 @@ pub fn cmd_vectorize(input: &Path, out: &str, filter: &str, scale: usize, gpu: b
         })
         .collect();
 
-    let format = match filter {
-        "vectorize" => "vectorize",
-        "gpu-full" => "gpu-full",
-        other => other,
-    };
-
-    vectorize_and_save(&pixels, width, height, out, format, scale, gpu);
+    vectorize_and_save(&pixels, width, height, out, "vectorize", scale, gpu);
 
     if let Ok(spec) = std::env::var("VIBEBOY_OVERLAY_CURVES") {
         let nn = spec.parse::<usize>().unwrap_or(8);
