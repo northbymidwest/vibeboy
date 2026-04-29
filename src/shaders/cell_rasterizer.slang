@@ -337,23 +337,30 @@ int find_second_chain_hit(int sc_a_ci, int best_idx,
                           int idx0, int idx1, int idx2,
                           float d2_0, float d2_1, float d2_2,
                           int cached_n, float aa_threshold) {
-    int idxs[3] = { idx0, idx1, idx2 };
-    float d2s[3] = { d2_0, d2_1, d2_2 };
     int sa_prev = cp_neighbors[sc_a_ci * 4];
     int sa_next = cp_neighbors[sc_a_ci * 4 + 1];
-    for (int s = 0; s < 3; s++) {
-        if (s >= cached_n) break;
-        int ci = idxs[s];
-        if (ci < 0 || ci == best_idx) continue;
-        if (d2s[s] >= aa_threshold) break;
-        SlimCP cand = sh_cps[uint(ci)];
-        bool same_chain = (sc_a_ci == cand.ci)
-            || (sc_a_ci == cp_neighbors[cand.ci * 4])
-            || (sc_a_ci == cp_neighbors[cand.ci * 4 + 1])
-            || (cand.ci == sa_prev)
-            || (cand.ci == sa_next);
-        if (!same_chain) return s;
-    }
+
+    // Each iteration is a closure over (slot, ci, d2). Unrolled across
+    // s ∈ {0, 1, 2} on constant indices to keep idxs/d2s in registers
+    // (dynamic-indexed local arrays force GPU compilers to spill).
+    #define TRY_SEC_HIT(s, ci_v, d2_v) \
+        if ((s) < cached_n) { \
+            int _ci = (ci_v); \
+            if (_ci >= 0 && _ci != best_idx) { \
+                if ((d2_v) >= aa_threshold) return -1; \
+                SlimCP _cand = sh_cps[uint(_ci)]; \
+                bool _same = (sc_a_ci == _cand.ci) \
+                    || (sc_a_ci == cp_neighbors[_cand.ci * 4]) \
+                    || (sc_a_ci == cp_neighbors[_cand.ci * 4 + 1]) \
+                    || (_cand.ci == sa_prev) \
+                    || (_cand.ci == sa_next); \
+                if (!_same) return (s); \
+            } \
+        }
+    TRY_SEC_HIT(0, idx0, d2_0)
+    TRY_SEC_HIT(1, idx1, d2_1)
+    TRY_SEC_HIT(2, idx2, d2_2)
+    #undef TRY_SEC_HIT
     return -1;
 }
 
@@ -402,7 +409,12 @@ uint sample_from_shared(float2 pt, uint fallback_color,
                         out int cached_n, out float second_d2) {
     SHit hits[3];
     int num_hits = 0;
-    for (int i = 0; i < 3; i++) { hits[i].d2 = 1e10; hits[i].idx = -1; }
+    // Init via constant indices — keeps hits[] in registers vs spilling
+    // to local memory (dynamic-indexed loop would force the latter on
+    // most GPU compilers).
+    hits[0].d2 = 1e10; hits[0].idx = -1; hits[0].t = 0.0;
+    hits[1].d2 = 1e10; hits[1].idx = -1; hits[1].t = 0.0;
+    hits[2].d2 = 1e10; hits[2].idx = -1; hits[2].t = 0.0;
 
     // Clamp to MAX_TILE_CPS: the load loop's atomic add can exceed the cap
     // in dense tiles, but only slots [0, MAX_TILE_CPS) are actually written.
@@ -424,15 +436,20 @@ uint sample_from_shared(float2 pt, uint fallback_color,
         float span_best_d2 = result.y;
 
         if (span_best_d2 < 1.0) {
-            for (int h = 0; h < 3; h++) {
-                if (span_best_d2 < hits[h].d2) {
-                    for (int j = 2; j > h; j--) hits[j] = hits[j-1];
-                    hits[h].d2 = span_best_d2;
-                    hits[h].t = span_best_t;
-                    hits[h].idx = int(i);
-                    if (num_hits < 3) num_hits++;
-                    break;
-                }
+            // Insertion sort via explicit if/else over constant indices —
+            // keeps hits[] register-allocated.
+            if (span_best_d2 < hits[0].d2) {
+                hits[2] = hits[1];
+                hits[1] = hits[0];
+                hits[0].d2 = span_best_d2; hits[0].t = span_best_t; hits[0].idx = int(i);
+                if (num_hits < 3) num_hits++;
+            } else if (span_best_d2 < hits[1].d2) {
+                hits[2] = hits[1];
+                hits[1].d2 = span_best_d2; hits[1].t = span_best_t; hits[1].idx = int(i);
+                if (num_hits < 3) num_hits++;
+            } else if (span_best_d2 < hits[2].d2) {
+                hits[2].d2 = span_best_d2; hits[2].t = span_best_t; hits[2].idx = int(i);
+                if (num_hits < 3) num_hits++;
             }
         }
     }
@@ -462,17 +479,34 @@ uint sample_from_shared(float2 pt, uint fallback_color,
     out_t = (num_hits > 0) ? hits[0].t : 0.0;
     out_d2 = (num_hits > 0) ? hits[0].d2 : 1e10;
 
-    for (int h = 0; h < num_hits; h++) {
-        SlimCP sc = sh_cps[uint(hits[h].idx)];
+    // Try resolve on each hit in order — unrolled across constant indices
+    // so hits[] stays register-allocated. Promote the resolved hit's data
+    // to out-params so the AA path uses the same CP that produced the
+    // center color, not a closer one that was endpoint-deferred.
+    if (num_hits >= 1) {
+        SlimCP sc = sh_cps[uint(hits[0].idx)];
         ResolveData rd = read_resolve_data(sc.ci);
         uint c;
-        if (resolve_color(pt, sc, rd, hits[h].t, c)) {
-            // Promote the resolved hit's data to the out-params so the AA
-            // path uses the same CP that produced the center color, not a
-            // closer one that was endpoint-deferred.
-            out_idx = hits[h].idx;
-            out_t = hits[h].t;
-            out_d2 = hits[h].d2;
+        if (resolve_color(pt, sc, rd, hits[0].t, c)) {
+            out_idx = hits[0].idx; out_t = hits[0].t; out_d2 = hits[0].d2;
+            return c;
+        }
+    }
+    if (num_hits >= 2) {
+        SlimCP sc = sh_cps[uint(hits[1].idx)];
+        ResolveData rd = read_resolve_data(sc.ci);
+        uint c;
+        if (resolve_color(pt, sc, rd, hits[1].t, c)) {
+            out_idx = hits[1].idx; out_t = hits[1].t; out_d2 = hits[1].d2;
+            return c;
+        }
+    }
+    if (num_hits >= 3) {
+        SlimCP sc = sh_cps[uint(hits[2].idx)];
+        ResolveData rd = read_resolve_data(sc.ci);
+        uint c;
+        if (resolve_color(pt, sc, rd, hits[2].t, c)) {
+            out_idx = hits[2].idx; out_t = hits[2].t; out_d2 = hits[2].d2;
             return c;
         }
     }

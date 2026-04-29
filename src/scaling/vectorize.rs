@@ -2213,20 +2213,20 @@ fn rasterize(
             let span_best_d2 = result.1;
             if span_best_d2 >= 1.0 { return; }
 
-            // Insertion sort into top 3.
-            for h in 0..3 {
-                if span_best_d2 < hit_d2[h] {
-                    for j in (h + 1..3).rev() {
-                        hit_d2[j] = hit_d2[j - 1];
-                        hit_t[j] = hit_t[j - 1];
-                        hit_idx[j] = hit_idx[j - 1];
-                    }
-                    hit_d2[h] = span_best_d2;
-                    hit_t[h] = span_best_t;
-                    hit_idx[h] = cp_i;
-                    if *num_hits < 3 { *num_hits += 1; }
-                    break;
-                }
+            // Insertion sort via explicit if/else over constant indices.
+            // Mirrors the GPU rasterizer's structure for consistency.
+            if span_best_d2 < hit_d2[0] {
+                hit_d2[2] = hit_d2[1]; hit_t[2] = hit_t[1]; hit_idx[2] = hit_idx[1];
+                hit_d2[1] = hit_d2[0]; hit_t[1] = hit_t[0]; hit_idx[1] = hit_idx[0];
+                hit_d2[0] = span_best_d2; hit_t[0] = span_best_t; hit_idx[0] = cp_i;
+                if *num_hits < 3 { *num_hits += 1; }
+            } else if span_best_d2 < hit_d2[1] {
+                hit_d2[2] = hit_d2[1]; hit_t[2] = hit_t[1]; hit_idx[2] = hit_idx[1];
+                hit_d2[1] = span_best_d2; hit_t[1] = span_best_t; hit_idx[1] = cp_i;
+                if *num_hits < 3 { *num_hits += 1; }
+            } else if span_best_d2 < hit_d2[2] {
+                hit_d2[2] = span_best_d2; hit_t[2] = span_best_t; hit_idx[2] = cp_i;
+                if *num_hits < 3 { *num_hits += 1; }
             }
         };
 
@@ -2309,24 +2309,35 @@ fn rasterize(
                 // returned None via endpoint-defer in resolve_from_cp).
                 let mut center_color = fallback;
                 let mut resolved_h: i32 = -1;
-                for h in 0..num_hits {
-                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[h] as usize], hit_t[h]) {
+                // Try each hit in order — unrolled across constant indices
+                // for consistency with the GPU rasterizer.
+                if num_hits >= 1 && resolved_h < 0 {
+                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[0] as usize], hit_t[0]) {
                         center_color = c;
-                        resolved_h = h as i32;
-                        break;
+                        resolved_h = 0;
+                    }
+                }
+                if num_hits >= 2 && resolved_h < 0 {
+                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[1] as usize], hit_t[1]) {
+                        center_color = c;
+                        resolved_h = 1;
+                    }
+                }
+                if num_hits >= 3 && resolved_h < 0 {
+                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[2] as usize], hit_t[2]) {
+                        center_color = c;
+                        resolved_h = 2;
                     }
                 }
 
                 // For AA, use the hit that actually resolved to a valid color
                 // (so endpoint-deferred hits don't drive the AA blend).
-                let (aa_idx, aa_t, aa_d2) = if resolved_h >= 0 {
-                    (
-                        hit_idx[resolved_h as usize] as i32,
-                        hit_t[resolved_h as usize],
-                        hit_d2[resolved_h as usize],
-                    )
-                } else {
-                    (best_idx, best_t, best_d2)
+                // resolved_h ∈ {0, 1, 2}; explicit selection avoids dynamic indexing.
+                let (aa_idx, aa_t, aa_d2) = match resolved_h {
+                    0 => (hit_idx[0] as i32, hit_t[0], hit_d2[0]),
+                    1 => (hit_idx[1] as i32, hit_t[1], hit_d2[1]),
+                    2 => (hit_idx[2] as i32, hit_t[2], hit_d2[2]),
+                    _ => (best_idx, best_t, best_d2),
                 };
                 let need_aa = aa_idx >= 0 && aa_d2 < aa_threshold;
 
@@ -2430,7 +2441,9 @@ fn rasterize(
                 // the same pixel). For now they get single-curve AA, which
                 // is at least free of the spurious-third-color artifact.
                 if let Some(ah) = through_h {
-                    let sc_a = &all_cps[hit_idx[ah] as usize];
+                    // ah ∈ {0, 1}; explicit selection avoids dynamic indexing.
+                    let sc_a = if ah == 0 { &all_cps[hit_idx[0] as usize] }
+                                          else { &all_cps[hit_idx[1] as usize] };
                     // J = point on the through curve at t_branch (where the
                     // curve passes "through itself" at the junction). NOT
                     // sc_a.pos (= polynomial control point): for non-ghost-
@@ -2468,8 +2481,11 @@ fn rasterize(
                 let mut line_b: Option<AaLine> = None;
                 let mut line_a_hit: (u32, f32) = (0, 0.0);
                 if let (Some(ah), Some(bh)) = (through_h, stem_h) {
-                    let sc_a = &all_cps[hit_idx[ah] as usize];
-                    let sc_b = &all_cps[hit_idx[bh] as usize];
+                    // ah, bh ∈ {0, 1}; explicit selection.
+                    let sc_a = if ah == 0 { &all_cps[hit_idx[0] as usize] }
+                                          else { &all_cps[hit_idx[1] as usize] };
+                    let sc_b = if bh == 0 { &all_cps[hit_idx[0] as usize] }
+                                          else { &all_cps[hit_idx[1] as usize] };
                     // J = beval(sc_a, t_branch) — point on the rendered through
                     // curve at the junction parameter (NOT sc_a.pos, which is
                     // a polynomial control point and may differ from the curve
@@ -2489,7 +2505,8 @@ fn rasterize(
                         }
                         line_a = Some(la_line);
                         line_b = Some(lb_line);
-                        line_a_hit = (hit_idx[ah], hit_t[ah]);
+                        line_a_hit = if ah == 0 { (hit_idx[0], hit_t[0]) }
+                                                else { (hit_idx[1], hit_t[1]) };
                     }
                 }
 
@@ -2657,21 +2674,35 @@ fn rasterize(
                         // Pick sc_b: first hit not on sc_a's chain, within
                         // threshold. Hits are sorted ascending by d2, so we
                         // can break once d2 exceeds threshold.
+                        // Pick first non-chain hit, unrolled across constant
+                        // indices for consistency with the GPU rasterizer.
                         let mut bh: Option<usize> = None;
-                        for h in 0..num_hits {
-                            if hit_idx[h] as i32 == aa_idx { continue; }
-                            if hit_d2[h] >= aa_threshold { break; }
-                            let cp_b = &all_cps[hit_idx[h] as usize];
-                            let same_chain = sc_a.ci == cp_b.ci
-                                || sc_a.ci == cp_b.prev_ci
-                                || sc_a.ci == cp_b.next_ci
-                                || cp_b.ci == sc_a.prev_ci
-                                || cp_b.ci == sc_a.next_ci;
-                            if !same_chain { bh = Some(h); break; }
+                        macro_rules! try_sec {
+                            ($s:expr, $hi:expr, $ht:expr, $hd:expr) => {
+                                if bh.is_none() && $s < num_hits
+                                    && $hi as i32 != aa_idx
+                                    && $hd < aa_threshold {
+                                    let cp_b = &all_cps[$hi as usize];
+                                    let same_chain = sc_a.ci == cp_b.ci
+                                        || sc_a.ci == cp_b.prev_ci
+                                        || sc_a.ci == cp_b.next_ci
+                                        || cp_b.ci == sc_a.prev_ci
+                                        || cp_b.ci == sc_a.next_ci;
+                                    if !same_chain { bh = Some($s); }
+                                }
+                            };
                         }
+                        try_sec!(0, hit_idx[0], hit_t[0], hit_d2[0]);
+                        try_sec!(1, hit_idx[1], hit_t[1], hit_d2[1]);
+                        try_sec!(2, hit_idx[2], hit_t[2], hit_d2[2]);
                         bh.and_then(|bh| {
-                            let sc_b = &all_cps[hit_idx[bh] as usize];
-                            let bt = hit_t[bh];
+                            // bh ∈ {0, 1, 2}; explicit selection.
+                            let (b_idx, bt) = match bh {
+                                0 => (hit_idx[0], hit_t[0]),
+                                1 => (hit_idx[1], hit_t[1]),
+                                _ => (hit_idx[2], hit_t[2]),
+                            };
+                            let sc_b = &all_cps[b_idx as usize];
 
                             let (la, a_pos, a_neg) =
                                 build_aa_line(sc_a, aa_t, pixels, img_w, img_h)?;
