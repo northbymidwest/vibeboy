@@ -10,10 +10,13 @@
 //     amortize the shared-memory load cost.
 //   numthreads(256, 1, 1) — workgroup size; loads CPs cooperatively then
 //     splits output pixels across threads.
-//   MAX_TILE_CPS = 50 — shared-memory cap for active CPs (see SlimCP doc).
-//   98 = 7*7*2 — CP scan slot count: 7x7 corners around the tile center
-//     (3-corner radius = 5x5 source pixels reachable, plus a 1-pixel cell
-//     bbox extension), times 2 slots per corner.
+//   MAX_TILE_CPS = 26 — absolute upper bound on candidate CPs for a 2x2
+//     tile: 18 base slots (3x3 unique cell corners x 2 slots) + 8
+//     T-junction stem fan-out slots (one per non-center corner; center's
+//     stem-bottom is always inside the 3x3 walk so no outward fan-out).
+//   26 = 18+8 — CP scan slot count: 9 unique corners covering the tile's
+//     4 cells (each cell's 4 corners) plus the per-T-junction fan-out
+//     to catch stem-bottom CPs that sit outside the 3x3 walk.
 
 import modules.color;
 import modules.bspline;
@@ -74,14 +77,10 @@ WTexture2D<float4> output_img : register(u0, space1);
 WTexture2D<float4> output_img;
 #endif
 
-// Cache cap. Pre-bbox-cull this could fill at the 7x7-window's hard upper
-// bound (98), but the tile bbox cull at load time typically keeps actual
-// fill below 30 for sparse pixel art. Halving the cap halves shared memory
-// per workgroup, which roughly doubles occupancy on memory-bound GPUs.
-// If a tile genuinely has > MAX_TILE_CPS relevant CPs, late entries are
-// dropped — the per-pixel scan clamps n to this cap to avoid uninitialized
-// reads, accepting a quality regression in dense scenes (rare for pixel art).
-static const uint MAX_TILE_CPS = 50u;
+// Cache cap = absolute worst-case candidate count for the 26-slot walk:
+// 18 base (3x3 unique corners x 2 slots) + 8 fan-out (every non-center
+// corner has a T-junction whose stem-bottom sits outside the 3x3 walk).
+static const uint MAX_TILE_CPS = 26u;
 
 struct SlimCP {
     float2 pos;
@@ -335,14 +334,14 @@ AaLine build_junction_aa_line(SlimCP sc, ResolveData rd, float t_eval, float2 j,
 /// neighbor test) and is within `aa_threshold`. Returns the cached slot
 /// index in [0, 4) or -1 if no qualifying hit exists.
 int find_second_chain_hit(int sc_a_ci, int best_idx,
-                          int idx0, int idx1, int idx2, int idx3,
-                          float d2_0, float d2_1, float d2_2, float d2_3,
+                          int idx0, int idx1, int idx2,
+                          float d2_0, float d2_1, float d2_2,
                           int cached_n, float aa_threshold) {
-    int idxs[4] = { idx0, idx1, idx2, idx3 };
-    float d2s[4] = { d2_0, d2_1, d2_2, d2_3 };
+    int idxs[3] = { idx0, idx1, idx2 };
+    float d2s[3] = { d2_0, d2_1, d2_2 };
     int sa_prev = cp_neighbors[sc_a_ci * 4];
     int sa_next = cp_neighbors[sc_a_ci * 4 + 1];
-    for (int s = 0; s < 4; s++) {
+    for (int s = 0; s < 3; s++) {
         if (s >= cached_n) break;
         int ci = idxs[s];
         if (ci < 0 || ci == best_idx) continue;
@@ -395,15 +394,15 @@ struct SHit { float d2; float t; int idx; };
 uint sample_from_shared(float2 pt, uint fallback_color,
                         out int out_idx, out float out_t, out float out_d2,
                         out int cached_idx_0, out int cached_idx_1,
-                        out int cached_idx_2, out int cached_idx_3,
+                        out int cached_idx_2,
                         out float cached_t_0, out float cached_t_1,
-                        out float cached_t_2, out float cached_t_3,
+                        out float cached_t_2,
                         out float cached_d2_0, out float cached_d2_1,
-                        out float cached_d2_2, out float cached_d2_3,
+                        out float cached_d2_2,
                         out int cached_n, out float second_d2) {
-    SHit hits[4];
+    SHit hits[3];
     int num_hits = 0;
-    for (int i = 0; i < 4; i++) { hits[i].d2 = 1e10; hits[i].idx = -1; }
+    for (int i = 0; i < 3; i++) { hits[i].d2 = 1e10; hits[i].idx = -1; }
 
     // Clamp to MAX_TILE_CPS: the load loop's atomic add can exceed the cap
     // in dense tiles, but only slots [0, MAX_TILE_CPS) are actually written.
@@ -425,35 +424,32 @@ uint sample_from_shared(float2 pt, uint fallback_color,
         float span_best_d2 = result.y;
 
         if (span_best_d2 < 1.0) {
-            for (int h = 0; h < 4; h++) {
+            for (int h = 0; h < 3; h++) {
                 if (span_best_d2 < hits[h].d2) {
-                    for (int j = 3; j > h; j--) hits[j] = hits[j-1];
+                    for (int j = 2; j > h; j--) hits[j] = hits[j-1];
                     hits[h].d2 = span_best_d2;
                     hits[h].t = span_best_t;
                     hits[h].idx = int(i);
-                    if (num_hits < 4) num_hits++;
+                    if (num_hits < 3) num_hits++;
                     break;
                 }
             }
         }
     }
 
-    // Export the d²-sorted top-4 indices for the wedge AA path to reuse
-    // (line_b search at the pixel center). Passed as 4 individual ints
+    // Export the d²-sorted top-3 indices for the wedge AA path to reuse
+    // (line_b search at the pixel center). Passed as 3 individual ints
     // (not an array) — Slang/SPIRV-Cross handles array out-params unevenly
     // across backends; scalars are uniformly safe.
     cached_idx_0 = (num_hits > 0) ? hits[0].idx : -1;
     cached_idx_1 = (num_hits > 1) ? hits[1].idx : -1;
     cached_idx_2 = (num_hits > 2) ? hits[2].idx : -1;
-    cached_idx_3 = (num_hits > 3) ? hits[3].idx : -1;
     cached_t_0 = (num_hits > 0) ? hits[0].t : 0.0;
     cached_t_1 = (num_hits > 1) ? hits[1].t : 0.0;
     cached_t_2 = (num_hits > 2) ? hits[2].t : 0.0;
-    cached_t_3 = (num_hits > 3) ? hits[3].t : 0.0;
     cached_d2_0 = (num_hits > 0) ? hits[0].d2 : 1e10;
     cached_d2_1 = (num_hits > 1) ? hits[1].d2 : 1e10;
     cached_d2_2 = (num_hits > 2) ? hits[2].d2 : 1e10;
-    cached_d2_3 = (num_hits > 3) ? hits[3].d2 : 1e10;
     cached_n = num_hits;
     // second_d2 lets the wedge-AA gate skip ALL its work (line_a build,
     // line_b search, polygon clip, centroid sampling) when the next-closest
@@ -501,22 +497,46 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
     GroupMemoryBarrierWithGroupSync();
 
     if (valid_tile) {
-        int center_cx = src_x0 + 1;
-        int center_cy = src_y0 + 1;
-
-        for (uint slot_idx = local_tid; slot_idx < 98u; slot_idx += 256u) {
-            int local_idx = int(slot_idx) / 2;
-            int slot = int(slot_idx) % 2;
-            int dy = local_idx / 7 - 3;
-            int dx = local_idx % 7 - 3;
-            int cx = center_cx + dx;
-            int cy = center_cy + dy;
-
-            // corners_h = img_h + 1 isn't in the uniform struct, so we use
-            // `cy > img_h` (== `cy >= corners_h`). Asymmetric form is
-            // intentional, not a bug.
-            if (cx < 0 || cy < 0 || cx >= int(u.corners_w) || cy > int(u.img_h)) continue;
-            int ci = (cy * int(u.corners_w) + cx) * 2 + slot;
+        // Slot layout for the 26-candidate scan over a 2x2 source tile:
+        //   slots 0..17 — 3x3 unique corners covering the tile's 4 cells,
+        //                 corner_idx = slot/2 ∈ 0..8 row-major (dx, dy ∈
+        //                 {0, 1, 2}), slot_within = slot & 1.
+        //   slots 18..25 — T-junction stem fan-out for the 8 non-center
+        //                  corners. The center corner (corner_idx==4) is
+        //                  skipped because all 4 cardinal stem directions
+        //                  point INTO the 3x3 walk — its stem-bottom is
+        //                  always already loaded by the base slots.
+        for (uint slot_idx = local_tid; slot_idx < 26u; slot_idx += 256u) {
+            int ci;
+            if (slot_idx < 18u) {
+                uint corner_idx = slot_idx / 2u;
+                uint slot = slot_idx & 1u;
+                int cx = src_x0 + int(corner_idx % 3u);
+                int cy = src_y0 + int(corner_idx / 3u);
+                if (cx < 0 || cy < 0 || cx >= int(u.corners_w) || cy > int(u.img_h)) continue;
+                ci = (cy * int(u.corners_w) + cx) * 2 + int(slot);
+            } else {
+                // Fan-out target: at corner C (non-center), if slot 0 is a
+                // T-junction through-CP, the stem-bottom CP can sit outside
+                // the 3x3 walk. Look it up via slot 1's chain link. Skip
+                // when stem-bottom IS already a corner in the 3x3 walk.
+                uint fan_idx = slot_idx - 18u;
+                uint corner_idx = fan_idx + ((fan_idx >= 4u) ? 1u : 0u);
+                int cx = src_x0 + int(corner_idx % 3u);
+                int cy = src_y0 + int(corner_idx / 3u);
+                if (cx < 0 || cy < 0 || cx >= int(u.corners_w) || cy > int(u.img_h)) continue;
+                int slot0_ci = (cy * int(u.corners_w) + cx) * 2;
+                if ((cp_flags[slot0_ci] & IS_TJUNCTION) == 0u) continue;
+                int slot1_ci = slot0_ci + 1;
+                int sp = cp_neighbors[slot1_ci * 4];
+                int sn = cp_neighbors[slot1_ci * 4 + 1];
+                ci = (sp >= 0) ? sp : sn;
+                if (ci < 0) continue;
+                int s_cx = (ci / 2) % int(u.corners_w);
+                int s_cy = (ci / 2) / int(u.corners_w);
+                if (s_cx >= src_x0 && s_cx <= src_x0 + 2
+                 && s_cy >= src_y0 && s_cy <= src_y0 + 2) continue;
+            }
             uint flag = cp_flags[ci];
             if (flag == 0u) continue;
 
@@ -655,15 +675,15 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
         int best_idx = -1;
         float best_t = 0.0;
         float best_d2 = 1e10;
-        int cached_idx_0 = -1, cached_idx_1 = -1, cached_idx_2 = -1, cached_idx_3 = -1;
-        float cached_t_0 = 0.0, cached_t_1 = 0.0, cached_t_2 = 0.0, cached_t_3 = 0.0;
-        float cached_d2_0 = 1e10, cached_d2_1 = 1e10, cached_d2_2 = 1e10, cached_d2_3 = 1e10;
+        int cached_idx_0 = -1, cached_idx_1 = -1, cached_idx_2 = -1;
+        float cached_t_0 = 0.0, cached_t_1 = 0.0, cached_t_2 = 0.0;
+        float cached_d2_0 = 1e10, cached_d2_1 = 1e10, cached_d2_2 = 1e10;
         int cached_n = 0;
         float second_d2 = 1e10;
         uint center_color = sample_from_shared(center, fallback, best_idx, best_t, best_d2,
-                                                cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3,
-                                                cached_t_0, cached_t_1, cached_t_2, cached_t_3,
-                                                cached_d2_0, cached_d2_1, cached_d2_2, cached_d2_3,
+                                                cached_idx_0, cached_idx_1, cached_idx_2,
+                                                cached_t_0, cached_t_1, cached_t_2,
+                                                cached_d2_0, cached_d2_1, cached_d2_2,
                                                 cached_n, second_d2);
 
         // AA threshold: a pixel's half-diagonal² in source units is
@@ -1001,18 +1021,16 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
             if (la.valid && la.pos_color != la.neg_color && cached_n >= 2) {
                 int sec_slot = find_second_chain_hit(
                     sc_a.ci, best_idx,
-                    cached_idx_0, cached_idx_1, cached_idx_2, cached_idx_3,
-                    cached_d2_0, cached_d2_1, cached_d2_2, cached_d2_3,
+                    cached_idx_0, cached_idx_1, cached_idx_2,
+                    cached_d2_0, cached_d2_1, cached_d2_2,
                     cached_n, aa_threshold);
                 if (sec_slot >= 0) {
                     int sec_idx = (sec_slot == 0) ? cached_idx_0
                                 : (sec_slot == 1) ? cached_idx_1
-                                : (sec_slot == 2) ? cached_idx_2
-                                : cached_idx_3;
+                                : cached_idx_2;
                     float sec_t = (sec_slot == 0) ? cached_t_0
                                 : (sec_slot == 1) ? cached_t_1
-                                : (sec_slot == 2) ? cached_t_2
-                                : cached_t_3;
+                                : cached_t_2;
                     SlimCP sc_b = sh_cps[uint(sec_idx)];
                     ResolveData rd_b = read_resolve_data(sc_b.ci);
                     AaLine lb = build_aa_line(sc_b, rd_b, sec_t);

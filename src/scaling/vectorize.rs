@@ -1648,8 +1648,6 @@ struct CpData {
     next_pos: (f32, f32),
     orig_prev: (f32, f32),
     orig_next: (f32, f32),
-    bbox_min: (f32, f32),
-    bbox_max: (f32, f32),
     /// Precomputed polynomial coefficients: B(t) = a*t² + b*t + c
     /// B'(t) = 2*a*t + b, B''(t) = 2*a
     poly_ax: f32, poly_ay: f32,
@@ -1968,17 +1966,6 @@ fn rasterize(
             (cp, pp, np)
         };
 
-        // Bbox: include the real prev/next positions (not ghosts) so that
-        // pixels in the cell-radius around endpoint neighbors still find this
-        // span as a candidate. Ghosts can be far outside the curve's extent.
-        let bbox_min = (
-            prev_pos.0.min(cp.0).min(next_pos.0),
-            prev_pos.1.min(cp.1).min(next_pos.1),
-        );
-        let bbox_max = (
-            prev_pos.0.max(cp.0).max(next_pos.0),
-            prev_pos.1.max(cp.1).max(next_pos.1),
-        );
         // Polynomial form: B(t) = a*t² + b*t + c (uniform B-spline, virtual
         // ghosts make the eval equivalent to the clamped Bezier).
         // a = 0.5*(p0 - 2*p1 + p2), b = p1 - p0, c = 0.5*(p0 + p1).
@@ -2051,8 +2038,6 @@ fn rasterize(
             next_pos: np,
             orig_prev: orig_prev_out,
             orig_next: orig_next_out,
-            bbox_min,
-            bbox_max,
             poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
             prev_dir: cp_neighbors[ci * 4 + 2],
             next_dir: cp_neighbors[ci * 4 + 3],
@@ -2066,51 +2051,14 @@ fn rasterize(
         });
     }
 
-    // Build spatial grid for fast CP lookup.
-    // 1×1 source-pixel cells for tighter spatial queries.
-    // Use a flat packed array instead of Vec<Vec<>> to avoid pointer chasing.
-    let grid_cell = 1.0f32;
-    let grid_w = ((img_w as f32 / grid_cell).ceil() as usize).max(1);
-    let grid_h = ((img_h as f32 / grid_cell).ceil() as usize).max(1);
-    let grid_total = grid_w * grid_h;
-
-    // Pass 1: count CPs per cell
-    let mut cell_count = vec![0u16; grid_total];
-    for sc in &all_cps {
-        let min_gx = ((sc.bbox_min.0 - 1.0) / grid_cell).floor().max(0.0) as usize;
-        let min_gy = ((sc.bbox_min.1 - 1.0) / grid_cell).floor().max(0.0) as usize;
-        let max_gx = ((sc.bbox_max.0 + 1.0) / grid_cell).floor() as usize;
-        let max_gy = ((sc.bbox_max.1 + 1.0) / grid_cell).floor() as usize;
-        for gy in min_gy..=max_gy.min(grid_h - 1) {
-            for gx in min_gx..=max_gx.min(grid_w - 1) {
-                cell_count[gy * grid_w + gx] += 1;
-            }
-        }
-    }
-
-    // Pass 2: compute offsets (prefix sum)
-    let mut cell_offset = vec![0u32; grid_total + 1];
-    for i in 0..grid_total {
-        cell_offset[i + 1] = cell_offset[i] + cell_count[i] as u32;
-    }
-    let total_entries = cell_offset[grid_total] as usize;
-
-    // Pass 3: fill flat array
-    let mut grid_data = vec![0u32; total_entries];
-    let mut fill_pos = cell_offset[..grid_total].to_vec();
+    // Reverse map: cell-graph CP index → all_cps array position, or -1 for
+    // CPs filtered out by the topology pass. The 4-cell-corner walk in
+    // rasterize_rows looks up CPs by their ci directly (slot 0 and slot 1
+    // at each of the cell's 4 corners) instead of iterating a per-cell
+    // bbox-overlap list.
+    let mut ci_to_all_cps: Vec<i32> = vec![-1; num_cps];
     for (i, sc) in all_cps.iter().enumerate() {
-        let min_gx = ((sc.bbox_min.0 - 1.0) / grid_cell).floor().max(0.0) as usize;
-        let min_gy = ((sc.bbox_min.1 - 1.0) / grid_cell).floor().max(0.0) as usize;
-        let max_gx = ((sc.bbox_max.0 + 1.0) / grid_cell).floor() as usize;
-        let max_gy = ((sc.bbox_max.1 + 1.0) / grid_cell).floor() as usize;
-        for gy in min_gy..=max_gy.min(grid_h - 1) {
-            for gx in min_gx..=max_gx.min(grid_w - 1) {
-                let ci = gy * grid_w + gx;
-                let pos = fill_pos[ci] as usize;
-                grid_data[pos] = i as u32;
-                fill_pos[ci] += 1;
-            }
-        }
+        ci_to_all_cps[sc.ci as usize] = i as i32;
     }
 
     let mut output = vec![0u32; out_w * out_h];
@@ -2229,15 +2177,64 @@ fn rasterize(
 
     // Rasterize row range into output chunk
     let rasterize_rows = |chunk: &mut [u32], start: usize,
-        all_cps: &[CpData], grid_data: &[u32], cell_offset: &[u32]|
+        all_cps: &[CpData], ci_to_all_cps: &[i32]|
     {
+        // Per-fragment span test: insert into a top-3 hit array if close
+        // enough. `cp_i` is the all_cps array position (matches the slot
+        // returned by the wedge-AA dual-curve hit lookup).
+        let mut try_cp = |cp_i: u32, center: (f32, f32),
+                          hit_d2: &mut [f32; 3], hit_t: &mut [f32; 3],
+                          hit_idx: &mut [u32; 3], num_hits: &mut usize| {
+            let sc = &all_cps[cp_i as usize];
+            // Quick screen: 3-sample distance² reject.
+            let b0 = (sc.poly_cx, sc.poly_cy);
+            let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
+                       0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
+            let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
+            let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
+            let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
+            let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
+            let quick_d2 = qd0.min(qdm).min(qd1);
+            if quick_d2 > 2.0 { return; }
+
+            let result = if sc.is_line {
+                let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
+                                   0.5 * (sc.prev_pos.1 + sc.pos.1));
+                let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
+                                   0.5 * (sc.pos.1 + sc.next_pos.1));
+                closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
+            } else {
+                closest_on_span_poly(
+                    sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
+                    sc.poly_cx, sc.poly_cy, center.0, center.1,
+                )
+            };
+            let span_best_t = result.0;
+            let span_best_d2 = result.1;
+            if span_best_d2 >= 1.0 { return; }
+
+            // Insertion sort into top 3.
+            for h in 0..3 {
+                if span_best_d2 < hit_d2[h] {
+                    for j in (h + 1..3).rev() {
+                        hit_d2[j] = hit_d2[j - 1];
+                        hit_t[j] = hit_t[j - 1];
+                        hit_idx[j] = hit_idx[j - 1];
+                    }
+                    hit_d2[h] = span_best_d2;
+                    hit_t[h] = span_best_t;
+                    hit_idx[h] = cp_i;
+                    if *num_hits < 3 { *num_hits += 1; }
+                    break;
+                }
+            }
+        };
+
         let chunk_rows = chunk.len() / out_w;
         for local_y in 0..chunk_rows {
             let opy = start + local_y;
             let center_y = (opy as f32 + 0.5) * inv_scale;
             let fb_y = (center_y.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
-            let gy = (center_y.floor() as usize).min(grid_h - 1);
-            let gy_offset = gy * grid_w;
 
             for opx in 0..out_w {
                 let center_x = (opx as f32 + 0.5) * inv_scale;
@@ -2245,64 +2242,58 @@ fn rasterize(
                 let fb_x = (center_x.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
                 let fallback = pixels[fb_y * img_w + fb_x];
 
-                let gx = (center_x.floor() as usize).min(grid_w - 1);
-                let cell_idx = gy_offset + gx;
-                let cell_start = cell_offset[cell_idx] as usize;
-                let cell_end = cell_offset[cell_idx + 1] as usize;
-
-                // Fixed-size top-4 hit array (avoids Vec allocation per pixel)
-                let mut hit_d2 = [1e10f32; 4];
-                let mut hit_t = [0.0f32; 4];
-                let mut hit_idx = [0u32; 4];
+                // Top-3 hit array (avoids Vec allocation per pixel).
+                let mut hit_d2 = [1e10f32; 3];
+                let mut hit_t = [0.0f32; 3];
+                let mut hit_idx = [0u32; 3];
                 let mut num_hits = 0usize;
 
-                for ci in cell_start..cell_end {
-                    let cp_i = grid_data[ci];
-                    let sc = &all_cps[cp_i as usize];
-
-                    // Quick screen: 3-sample reject (matches GPU bspline_quick_screen)
-                    let b0 = (sc.poly_cx, sc.poly_cy); // beval at t=0
-                    let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
-                               0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
-                    let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
-                    let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
-                    let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
-                    let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
-                    let quick_d2 = qd0.min(qdm).min(qd1);
-                    if quick_d2 > 2.0 { continue; }
-
-                    // Closest-point: closed-form for 2-CP-chain straight lines,
-                    // exact cubic solver for parabolic spans.
-                    let result = if sc.is_line {
-                        let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
-                                           0.5 * (sc.prev_pos.1 + sc.pos.1));
-                        let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
-                                           0.5 * (sc.pos.1 + sc.next_pos.1));
-                        closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
-                    } else {
-                        closest_on_span_poly(
-                            sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
-                            sc.poly_cx, sc.poly_cy, center.0, center.1,
-                        )
-                    };
-                    let span_best_t = result.0;
-                    let span_best_d2 = result.1;
-
-                    if span_best_d2 < 1.0 {
-                        // Insert sorted into top 4
-                        for h in 0..4 {
-                            if span_best_d2 < hit_d2[h] {
-                                // Shift down
-                                for j in (h + 1..4).rev() {
-                                    hit_d2[j] = hit_d2[j - 1];
-                                    hit_t[j] = hit_t[j - 1];
-                                    hit_idx[j] = hit_idx[j - 1];
+                // 4-cell-corner walk: a quadratic B-spline bows ≤0.5 units
+                // from chord, so spans centered further than the cell's own
+                // corners can't reach into the cell. Test slot 0 + slot 1 at
+                // each cell corner via the ci → all_cps reverse map.
+                let cell_x = (center_x.floor() as i32).clamp(0, img_w as i32 - 1) as usize;
+                let cell_y = (center_y.floor() as i32).clamp(0, img_h as i32 - 1) as usize;
+                for cdy in 0..2 {
+                    for cdx in 0..2 {
+                        let cx = cell_x + cdx;
+                        let cy = cell_y + cdy;
+                        if cx >= corners_w || cy >= img_h + 1 { continue; }
+                        let slot0_ci = (cy * corners_w + cx) * 2;
+                        // slot 0
+                        let m0 = ci_to_all_cps[slot0_ci];
+                        if m0 >= 0 {
+                            try_cp(m0 as u32, center, &mut hit_d2, &mut hit_t,
+                                   &mut hit_idx, &mut num_hits);
+                        }
+                        // slot 1
+                        let m1 = ci_to_all_cps[slot0_ci + 1];
+                        if m1 >= 0 {
+                            try_cp(m1 as u32, center, &mut hit_d2, &mut hit_t,
+                                   &mut hit_idx, &mut num_hits);
+                        }
+                        // T-junction stem fan-out: at this cell corner if
+                        // slot 0 is a T-junction through-CP, the stem-bottom
+                        // CP can sit at offset (+2, +1) etc. — outside the
+                        // 4-corner walk. Look it up via slot 1's chain link.
+                        if (flags[slot0_ci] & IS_TJUNCTION) != 0 {
+                            let slot1_ci = slot0_ci + 1;
+                            let prev_ci = cp_neighbors[slot1_ci * 4];
+                            let next_ci = cp_neighbors[slot1_ci * 4 + 1];
+                            let sci = if prev_ci >= 0 { prev_ci } else { next_ci };
+                            if sci >= 0 {
+                                let s_cx = (sci as usize / 2) % corners_w;
+                                let s_cy = (sci as usize / 2) / corners_w;
+                                // Skip when stem-bottom is already a cell corner.
+                                let already = s_cx >= cell_x && s_cx <= cell_x + 1
+                                           && s_cy >= cell_y && s_cy <= cell_y + 1;
+                                if !already {
+                                    let mf = ci_to_all_cps[sci as usize];
+                                    if mf >= 0 {
+                                        try_cp(mf as u32, center, &mut hit_d2, &mut hit_t,
+                                               &mut hit_idx, &mut num_hits);
+                                    }
                                 }
-                                hit_d2[h] = span_best_d2;
-                                hit_t[h] = span_best_t;
-                                hit_idx[h] = cp_i as u32;
-                                if num_hits < 4 { num_hits += 1; }
-                                break;
                             }
                         }
                     }
@@ -2778,12 +2769,11 @@ fn rasterize(
         std::thread::scope(|scope| {
             let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
             let all_cps = &all_cps;
-            let grid_data = &grid_data;
-            let cell_offset = &cell_offset;
+            let ci_to_all_cps = &ci_to_all_cps;
             let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
                 let start = ci * rows_per_thread;
                 scope.spawn(move || {
-                    rasterize_rows(chunk, start, all_cps, grid_data, cell_offset);
+                    rasterize_rows(chunk, start, all_cps, ci_to_all_cps);
                 })
             }).collect();
             for h in handles { h.join().unwrap(); }
@@ -2791,7 +2781,7 @@ fn rasterize(
     }
     #[cfg(target_arch = "wasm32")]
     {
-        rasterize_rows(&mut output, 0, &all_cps, &grid_data, &cell_offset);
+        rasterize_rows(&mut output, 0, &all_cps, &ci_to_all_cps);
     }
 
     output
