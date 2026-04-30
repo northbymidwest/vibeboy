@@ -453,8 +453,8 @@ pub fn super_xbr_compute_and_blit(
 
 // ── Full GPU vectorize pipeline ─────────────────────────────────────────────
 //
-// Six-stage pipeline: similarity_graph → resolve_crossings → cell_graph →
-// optimize_energy → tjunction_correction → cell_rasterizer.
+// Seven-stage pipeline: similarity_graph → resolve_crossings → cell_graph →
+// optimize_energy → tjunction_snap → crossing_pack → cell_rasterizer.
 // All stages run on GPU with no CPU readback between stages.
 // Buffers are cached between frames for zero per-frame allocation.
 
@@ -471,18 +471,20 @@ struct CellRastBufCache {
     flag_buf: gpu::Buffer,
     opt_out_buf: gpu::Buffer,
     orig_pos_buf: gpu::Buffer,
+    crossing_t_buf: gpu::Buffer,
     px_xfer: gpu::TransferBuffer,
 }
 
 /// All pipelines for the full GPU vectorize pipeline.
-/// Six stages: similarity_graph → resolve_crossings → cell_graph →
-/// optimize_energy → tjunction_correction → cell_rasterizer.
+/// Seven stages: similarity_graph → resolve_crossings → cell_graph →
+/// optimize_energy → tjunction_snap → crossing_pack → cell_rasterizer.
 pub struct GpuVectorizePipelines {
     sim_graph: gpu::ComputePipeline,
     resolve: gpu::ComputePipeline,
     cell_graph: gpu::ComputePipeline,
     optimizer: gpu::ComputePipeline,
     tjunction: gpu::ComputePipeline,
+    crossing_pack: gpu::ComputePipeline,
     rasterizer: gpu::ComputePipeline,
     buf_cache: Option<CellRastBufCache>,
 }
@@ -554,22 +556,28 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.dxil")),
-        3, 1, 0, (256, 1, 1), "update_tjunction")?;
+        2, 1, 0, (256, 1, 1), "update_tjunction")?;
+
+    let xpack = make(device,
+        include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.spv")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")),
+        include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.dxil")),
+        3, 1, 0, (256, 1, 1), "crossing_pack")?;
 
     let rast = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.dxil")),
-        5, 0, 1, (256, 1, 1), "cell_rasterizer")?;
+        5, 1, 1, (256, 1, 1), "cell_rasterizer")?;
 
-    eprintln!("Full GPU vectorize pipeline ready (6 stages)");
-    Some(GpuVectorizePipelines { sim_graph: sim, resolve, cell_graph: cell, optimizer: opt, tjunction: tjunc, rasterizer: rast, buf_cache: None })
+    eprintln!("Full GPU vectorize pipeline ready (7 stages)");
+    Some(GpuVectorizePipelines { sim_graph: sim, resolve, cell_graph: cell, optimizer: opt, tjunction: tjunc, crossing_pack: xpack, rasterizer: rast, buf_cache: None })
 }
 
-/// Dispatch stages 1-4b (similarity graph through T-junction correction).
+/// Dispatch stages 1-5b (similarity graph through crossing intersection pack).
 /// Shared between live pipeline and screenshot pipeline.
-/// Returns the buffer containing the optimized+corrected positions.
-fn dispatch_stages_1_4b(
+/// Returns the buffer containing the optimized+snapped positions.
+fn dispatch_stages_1_5b(
     device: &gpu::Device,
     cmd: &gpu::CommandBuffer,
     pipelines: &GpuVectorizePipelines,
@@ -581,6 +589,7 @@ fn dispatch_stages_1_4b(
     flag_buf: &gpu::Buffer,
     opt_out_buf: &gpu::Buffer,
     orig_pos_buf: &gpu::Buffer,
+    crossing_t_buf: &gpu::Buffer,
     img_w: u32, img_h: u32,
 ) -> gpu::Buffer {
     let graph_stride = 2 * img_w + 1;
@@ -667,26 +676,32 @@ fn dispatch_stages_1_4b(
     }
     let optimized_pos = cur_in;
 
-    // Stage 4b: T-junction position correction + stem CP alignment.
-    // Save optimized positions as orig_positions for the center weight
-    // (the shader must use the pre-correction center, not the corrected one).
-    // Dispatch 3 times for convergence when junction CPs are neighbors.
-    let tjunc_orig = opt_out_buf.clone(); // reuse the other ping-pong buffer
-    {
-        let cp = device.begin_copy_pass(cmd).expect("tjunc orig copy");
-        unsafe {
-            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: optimized_pos.raw(), offset: 0 };
-            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: tjunc_orig.raw(), offset: 0 };
-            sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size, false);
-        }
-        device.end_copy_pass(cp);
-    }
+    // Stage 5a: T-junction stem CP snap. Dispatch 3× for convergence when
+    // stem CPs are also neighbors of other T-junctions.
+    let _ = orig_pos_buf; // no longer needed after legacy inverse-correction was removed
     for _ in 0..3 {
         let cp = device.begin_compute_pass(cmd, &[],
             &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&optimized_pos).with_cycle(false)],
         ).expect("tjunc pass");
         cp.bind_compute_pipeline(&pipelines.tjunction);
-        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone(), tjunc_orig.clone()]);
+        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone()]);
+        #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
+        cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
+        cp.dispatch(num_cps.div_ceil(256), 1, 1);
+        device.end_compute_pass(cp);
+    }
+
+    // Stage 5b: Crossing intersection pack. Writes (t_NS, t_EW) to the
+    // crossing_t buffer. Reads finalized positions, so must run after the
+    // tjunction snap loop. The rasterizer pass (next) declares crossing_t_buf
+    // as a RW binding too — that's what triggers SDL3's automatic
+    // buffer-write→buffer-read barrier; pure RO bindings don't.
+    {
+        let cp = device.begin_compute_pass(cmd, &[],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(crossing_t_buf).with_cycle(false)],
+        ).expect("xpack pass");
+        cp.bind_compute_pipeline(&pipelines.crossing_pack);
+        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone(), optimized_pos.clone()]);
         #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
         cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
         cp.dispatch(num_cps.div_ceil(256), 1, 1);
@@ -725,6 +740,7 @@ pub fn gpu_vectorize_full_pipeline(
         let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
         let nbr_size = (num_cps * 4 * 4).max(4);
         let flag_size = (num_cps * 4).max(4);
+        let crossing_t_size = (num_cps * 4).max(4);
         pipelines.buf_cache = Some(CellRastBufCache {
             img_w, img_h,
             px_buf: device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf"),
@@ -735,6 +751,7 @@ pub fn gpu_vectorize_full_pipeline(
             flag_buf: device.create_buffer().with_usage(rw).with_size(flag_size).build().expect("flag buf"),
             opt_out_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("opt out buf"),
             orig_pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("orig pos buf"),
+            crossing_t_buf: device.create_buffer().with_usage(rw).with_size(crossing_t_size).build().expect("crossing_t buf"),
             px_xfer: device.create_transfer_buffer()
                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
                 .with_size(px_size).build().expect("px xfer"),
@@ -760,22 +777,45 @@ pub fn gpu_vectorize_full_pipeline(
         device.end_copy_pass(cp);
     }
 
-    // Stages 1-4b: vectorize pipeline (shared with screenshot path)
-    let optimized_pos = dispatch_stages_1_4b(
+    // Stages 1-5b: vectorize pipeline (shared with screenshot path)
+    let optimized_pos = dispatch_stages_1_5b(
         device, &cmd, pipelines,
         &b.px_buf, &b.graph_buf, &b.graph_snapshot,
         &b.pos_buf, &b.nbr_buf, &b.flag_buf,
-        &b.opt_out_buf, &b.orig_pos_buf, img_w, img_h,
+        &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf, img_w, img_h,
     );
 
-    // Stage 5: Tile-based cell rasterizer (one workgroup per 2×2 source tile)
+    // Stage 6: Tile-based cell rasterizer (one workgroup per 2×2 source tile).
+    //
+    // SDL3 sync gotcha: crossing_t_buf was just RW-written by crossing_pack,
+    // and we need the rasterizer's read of it to see those writes. SDL3 has
+    // no explicit barrier primitive — the only sync point is the compute
+    // pass boundary, AND the boundary only fences resources declared as
+    // writeable bindings on `SDL_BeginGPUComputePass`. RO bindings via
+    // `SDL_BindGPUComputeStorageBuffers` are *not* tracked for hazards, so
+    // a buffer that's RW-written in pass A and only RO-read in pass B sits
+    // outside the sync model and gets stale reads.
+    //
+    // The fix is to list `crossing_t_buf` in this pass's storage_buffer
+    // _bindings (i.e., as a writeable binding) even though the shader only
+    // reads it. SDL3 then sees the producer→consumer edge and emits the
+    // backend barrier (Vulkan: VkBufferMemoryBarrier; Metal:
+    // MTLComputeCommandEncoder dependency; D3D12: resource state transition).
+    // The shader-side type still has to be `RWStructuredBuffer<float>` to
+    // keep the slang→SPV/MSL/DXIL/WGSL emitters happy; we just never write.
+    //
+    // See SDL_gpu.h's `SDL_BeginGPUComputePass` (~line 3640): "A compute
+    // pass is defined by a set of texture subresources and buffers that
+    // may be written to" — and `SDL_BindGPUComputeStorageBuffers` (~line
+    // 3747): "Binds storage buffers as readonly" — those two together
+    // define the leaky tracking model.
     {
         let tiles_w = img_w.div_ceil(2);
         let tiles_h = img_h.div_ceil(2);
         let total_tiles = tiles_w * tiles_h;
         let cp = device.begin_compute_pass(&cmd,
             &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
-            &[]).expect("rast pass");
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.crossing_t_buf).with_cycle(false)]).expect("rast pass");
         cp.bind_compute_pipeline(&pipelines.rasterizer);
         cp.bind_compute_storage_buffers(0, &[b.px_buf.clone(), optimized_pos.clone(), b.orig_pos_buf.clone(), b.flag_buf.clone(), b.nbr_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, out_w: u32, out_h: u32,
@@ -1188,13 +1228,14 @@ pub fn gpu_full_pipeline_screenshot(
 
     let graph_snapshot = device.create_buffer().with_usage(ro).with_size(graph_size.max(4)).build().ok()?;
     let orig_pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
+    let crossing_t_buf = device.create_buffer().with_usage(rw).with_size((num_cps * 4).max(4)).build().ok()?;
 
-    // Stages 1-4b: shared vectorize pipeline dispatch
-    dispatch_stages_1_4b(
+    // Stages 1-5b: shared vectorize pipeline dispatch
+    dispatch_stages_1_5b(
         &device, &cmd, &pipelines,
         &px_buf, &graph_buf, &graph_snapshot,
         &pos_buf, &nbr_buf, &flag_buf,
-        &opt_out_buf, &orig_pos_buf, img_w, img_h,
+        &opt_out_buf, &orig_pos_buf, &crossing_t_buf, img_w, img_h,
     );
 
     // Debug: download positions before and after optimizer
@@ -1373,7 +1414,7 @@ pub fn gpu_full_pipeline_screenshot(
       let total_tiles = tiles_w * tiles_h;
       let cp = device.begin_compute_pass(&cmd,
           &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
-          &[]).ok()?;
+          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&crossing_t_buf).with_cycle(false)]).ok()?;
       cp.bind_compute_pipeline(&pipelines.rasterizer);
       cp.bind_compute_storage_buffers(0, &[px_buf.clone(), pos_buf.clone(), orig_pos_buf.clone(), flag_buf.clone(), nbr_buf.clone()]);
       #[repr(C)] struct U{iw:u32,ih:u32,ow:u32,oh:u32,s:f32,cw:u32,tw:u32,th:u32}

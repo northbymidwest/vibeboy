@@ -69,6 +69,12 @@ StructuredBuffer<int> cp_neighbors : register(t4, space0);
 #else
 StructuredBuffer<int> cp_neighbors;
 #endif
+[[vk::binding(1, 1)]]
+#ifdef DXIL_TARGET
+RWStructuredBuffer<float> crossing_t : register(u1, space1);
+#else
+RWStructuredBuffer<float> crossing_t;
+#endif
 [[vk::image_format("rgba8")]]
 [[vk::binding(0, 1)]]
 #ifdef DXIL_TARGET
@@ -664,9 +670,14 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 // the rendered curve's B(0.5) (= 0.125*pp + 0.75*cp +
                 // 0.125*np with ghost adjustment) back onto itself to find
                 // t. This aligns t_branch with the algebraic ghost-aware
-                // stem snap and crossing inverse correction performed by
-                // update_tjunction.
-                if (two_cp_chain) {
+                // stem snap performed by update_tjunction. Crossings
+                // override the default with the actual curve-curve
+                // intersection parameter from `crossing_t` (Stage 5b), so
+                // the rasterizer's J = beval(...t_branch) lands on the
+                // geometric intersection, not the integer grid corner.
+                if ((flag & IS_CROSSING) != 0u) {
+                    sh_cps[idx].t_branch = crossing_t[ci];
+                } else if (two_cp_chain) {
                     // Straight-line span: B(t) is linear, interior_mid = cp =
                     // midpoint, closest t is trivially 0.5.
                     sh_cps[idx].t_branch = 0.5;

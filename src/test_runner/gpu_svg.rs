@@ -270,15 +270,23 @@ struct NodeMap {
     /// Each entry's neighbors define one chain through this corner.
     chains: BTreeMap<u64, Vec<ChainNeighbors>>,
     /// Position used at *kinks* (boundary lands here exactly, no single chain
-    /// matches the face traversal). Chosen so half-Qs converge on the same
-    /// point the rasterizer's nearest-CP curves intersect at:
+    /// matches the face traversal). Chosen so the path's incoming/outgoing
+    /// half-Qs converge on the same point the rasterizer's curves do:
     ///   * T-junction: the stem CP's position (snap-corrected to lie on the
     ///     through curve at t=0.5).
-    ///   * Crossing: `(prev + 6·this + next)/8` — the chain's t=0.5 midpoint.
-    ///     Both crossing slots' B-splines converge on this point through
-    ///     iterative inverse correction, so the chains intersect there.
+    ///   * Crossing: B(t = crossing_t) — the geometric intersection of the
+    ///     two chains, computed from the optimizer-final positions.
     ///   * Plain chain endpoint (border/isolated): the CP's own position.
     kink_pos: BTreeMap<u64, (f64, f64)>,
+    /// Bezier parameter at which the B-spline span at this kink's CP passes
+    /// through `kink_pos`. Used by the de Casteljau split that emits the
+    /// half-Beziers on either side of the kink:
+    ///   * T-junction stems / regular kinks: 0.5 (kp = B(0.5) by construction).
+    ///   * Chain endpoints: 0.5 — actually irrelevant since the endpoint-partner
+    ///     branch emits the full Bezier without subdivision.
+    ///   * Crossings: `crossing_t[ci]` — generally not 0.5.
+    /// Default 0.5 for any kink not explicitly populated.
+    kink_t: BTreeMap<u64, f64>,
 }
 
 /// Compute the face-loop node ID where the CP at `ci` would appear, based on
@@ -314,6 +322,7 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
     let num_cps = cw * (data.img_h + 1) * 2;
     let mut chains: BTreeMap<u64, Vec<ChainNeighbors>> = BTreeMap::new();
     let mut kink_pos: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
+    let mut kink_t: BTreeMap<u64, f64> = BTreeMap::new();
 
     let neighbor_node = |nci: i32| -> Option<u64> {
         if nci < 0 { return None; }
@@ -337,24 +346,50 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
         let is_through = data.flags[ci] & IS_TJUNCTION != 0;
         let is_crossing = data.flags[ci] & IS_CROSSING != 0;
         let kp_value = if is_crossing {
-            // Crossing kp = chain's t=0.5 midpoint (where the rasterizer's two
-            // chain B-splines actually intersect). The optimizer can move the
-            // CP away from the inverse-corrected position, so we read the
-            // post-optimization positions from the latest pass and evaluate.
+            // Crossing kp = the geometric intersection of this CP's curve
+            // and its partner's. Under the new pipeline crossings stay at
+            // the optimizer's position, and `crossing_t[ci]` holds the
+            // exact parameter on this slot's curve at which the two
+            // curves cross. Evaluate B(t) with ghost-extended endpoints
+            // (matching the rasterizer's clamped Bezier rendering) so the
+            // SVG kink lands on the same point the wedge AA anchors at.
+            // Slot 0 (N-S) and slot 1 (E-W) both produce the same
+            // geometric point within FP epsilon, so override order
+            // doesn't matter.
             let prev_idx = data.neighbors[ci * 4];
             let next_idx = data.neighbors[ci * 4 + 1];
             if prev_idx >= 0 && next_idx >= 0 {
-                let prev_pos = (
+                let prev_real = (
                     data.positions[prev_idx as usize * 2] as f64,
                     data.positions[prev_idx as usize * 2 + 1] as f64,
                 );
-                let next_pos = (
+                let next_real = (
                     data.positions[next_idx as usize * 2] as f64,
                     data.positions[next_idx as usize * 2 + 1] as f64,
                 );
+                let prev_is_end =
+                    data.flags[prev_idx as usize] & IS_ENDPOINT != 0;
+                let next_is_end =
+                    data.flags[next_idx as usize] & IS_ENDPOINT != 0;
+                let pp = if prev_is_end {
+                    (2.0 * prev_real.0 - pos.0, 2.0 * prev_real.1 - pos.1)
+                } else {
+                    prev_real
+                };
+                let np = if next_is_end {
+                    (2.0 * next_real.0 - pos.0, 2.0 * next_real.1 - pos.1)
+                } else {
+                    next_real
+                };
+                let t = data.crossing_t[ci] as f64;
+                let u = 1.0 - t;
+                // B(t) = 0.5·u²·pp + (u·t + 0.5)·cp + 0.5·t²·np
+                let w_prev = 0.5 * u * u;
+                let w_curr = u * t + 0.5;
+                let w_next = 0.5 * t * t;
                 (
-                    (prev_pos.0 + 6.0 * pos.0 + next_pos.0) / 8.0,
-                    (prev_pos.1 + 6.0 * pos.1 + next_pos.1) / 8.0,
+                    w_prev * pp.0 + w_curr * pos.0 + w_next * np.0,
+                    w_prev * pp.1 + w_curr * pos.1 + w_next * np.1,
                 )
             } else {
                 pos
@@ -362,6 +397,15 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
         } else {
             pos
         };
+        // Crossings: also record the Bezier parameter τ at which this
+        // chain's B-spline span passes through kp. The path emitter
+        // de-Casteljau-splits the equivalent Bezier at τ to get the
+        // half-Beziers on either side of the kink. For crossings τ is
+        // generally not 0.5; for everything else 0.5 is the default and
+        // we don't write to the map.
+        if is_crossing {
+            kink_t.insert(nid, data.crossing_t[ci] as f64);
+        }
         // Override priority: prefer the IS_ENDPOINT (stem at T-junctions, on
         // the through curve) or IS_CROSSING (chain intersection point) over a
         // through CP's position that may have been inserted first by slot 0.
@@ -379,7 +423,7 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
         }
     }
 
-    NodeMap { chains, kink_pos }
+    NodeMap { chains, kink_pos, kink_t }
 }
 
 /// Returns the matching chain at `nid` (whose neighbors match the face's
@@ -431,6 +475,14 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
 
     let is_optimized = |nid: u64| map.chains.contains_key(&nid);
     let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+    let lerp = |a: (f64, f64), b: (f64, f64), t: f64| {
+        (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
+    };
+    // Per-kink Bezier parameter τ at which the B-spline span at the
+    // kink CP passes through `kink_pos`. Defaults to 0.5; populated to
+    // `crossing_t[ci]` for IS_CROSSING CPs in build_node_map. Drives
+    // the de Casteljau split below.
+    let kink_t = |nid: u64| -> f64 { map.kink_t.get(&nid).copied().unwrap_or(0.5) };
     let grid_pos = |nid: u64| -> (f64, f64) {
         let (x4, y4) = unpack_node(nid);
         (x4 as f64 / 4.0, y4 as f64 / 4.0)
@@ -562,12 +614,19 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
         } else if is_kink(i) {
             let prev_loop = nodes[(i + n - 1) % n];
             let kp = map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid));
+            // τ for the de Casteljau split below. 0.5 for ordinary kinks
+            // (T-junction stems, plain endpoints) where kp = B(0.5) of the
+            // span at this CP. For IS_CROSSING kinks, τ = crossing_t so
+            // the half-Bezier endpoints land on the geometric intersection
+            // (which is generally not at t = 0.5).
+            let t = kink_t(nid);
 
             // Q on the prev side: face arrived at this kink along an interior
             // chain. The shape depends on the chain partner at prev_loop.
             //   * Interior partner — prev iteration emitted a smooth Q ending
             //     at mid(partner.pos, this_chain.pos); render the second half
-            //     (de Casteljau split at t=0.5) to land on kp.
+            //     of the equivalent Bezier (de Casteljau split at τ) to land
+            //     on kp. Sub-Bezier control: lerp(pen, part.pos, τ).
             //   * Endpoint partner — pen comes in at partner.pos (the chain's
             //     clamped end). Render the full B-spline segment AT this CP
             //     with prev-side ghost expansion as a single Q from pen
@@ -575,7 +634,7 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
             if let Some(part) = partial_chain(nid, prev_loop) {
                 let partner_interior = chain_partner(nid, prev_loop)
                     .is_some_and(|p| p.prev.is_some() && p.next.is_some());
-                let control = if partner_interior { mid(pen, part.pos) } else { part.pos };
+                let control = if partner_interior { lerp(pen, part.pos, t) } else { part.pos };
                 data.append(cmd_quad(control, kp));
                 pen = kp;
             }
@@ -583,7 +642,8 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
             // Q on the next side: face leaves this kink along an interior
             // chain. Mirror of the prev side.
             //   * Interior partner — emit the first-half de Casteljau Q from
-            //     kp to mid(this_chain.pos, partner.pos).
+            //     kp to mid(this_chain.pos, partner.pos). Sub-Bezier control:
+            //     lerp(part.pos, end, τ).
             //   * Endpoint partner — the chain ends at next_loop with a
             //     clamped Bézier landing on partner.pos. Emit a single Q with
             //     control = part.pos and end = partner.pos.
@@ -595,7 +655,7 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
                             data.append(cmd_line(kp));
                         }
                         let end = mid(part.pos, partner.pos);
-                        let control = mid(part.pos, end);
+                        let control = lerp(part.pos, end, t);
                         data.append(cmd_quad(control, end));
                         pen = end;
                     } else {

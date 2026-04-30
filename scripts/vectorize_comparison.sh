@@ -74,22 +74,20 @@ for name in "${NAMES[@]}"; do
         continue
     fi
 
-    # CPU vectorize: --filter vectorize always runs the CPU rasterizer.
+    # CPU vectorize: default path runs the full CPU pipeline.
     out="$OUT_DIR/${name}_cpu_8x.png"
     if should_render "$out"; then
         echo "  $name — CPU..."
         cargo run --release --bin test_runner -- vectorize "$input" \
-            --out "$out" --filter vectorize --scale "$SCALE" 2>/dev/null
+            --out "$out" --scale "$SCALE" --cpu-filter 2>/dev/null
     fi
 
-    # GPU vectorize: --filter gpu-full + --gpu invokes the SDL3 GPU shader
-    # pipeline. (Without --filter gpu-full, --gpu is silently ignored and
-    # the run falls through to the CPU path — same output as above.)
+    # GPU vectorize: --gpu runs the full GPU shader pipeline.
     out="$OUT_DIR/${name}_gpu_8x.png"
     if should_render "$out"; then
         echo "  $name — GPU..."
         cargo run --release --bin test_runner -- vectorize "$input" \
-            --out "$out" --filter gpu-full --scale "$SCALE" --gpu 2>/dev/null
+            --out "$out" --scale "$SCALE" --gpu 2>/dev/null
     fi
 done
 

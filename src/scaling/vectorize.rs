@@ -33,11 +33,18 @@ const DIR_N: u32 = 128;
 
 /// Intermediate output from the vectorize-gpu pipeline (stages 1-5).
 /// Contains optimized B-spline control points with connectivity and flags.
+///
+/// `crossing_t[ci]` holds the curve-curve intersection parameter for IS_CROSSING
+/// CPs (t on the curve owned by `ci`). Non-crossing entries are 0.5 (the
+/// natural midpoint). The rasterizer uses this as `t_branch` — the t at which
+/// resolution switches from prev-edge to next-edge colors and the wedge AA
+/// junction point lives.
 pub struct VectorizeData {
     pub positions: Vec<f32>,
     pub orig_positions: Vec<f32>,
     pub neighbors: Vec<i32>,
     pub flags: Vec<u32>,
+    pub crossing_t: Vec<f32>,
     pub graph: Vec<u32>,  // resolved similarity graph (2*w+1 × 2*h+1)
     pub img_w: usize,
     pub img_h: usize,
@@ -57,13 +64,15 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     let orig_positions = positions.clone();
     let positions = optimize_energy(&positions, &orig_positions, &neighbors, &flags, num_cps);
     let mut positions = positions;
-    update_tjunctions(&mut positions, &neighbors, &flags, num_cps);
+    let mut crossing_t = vec![0.5f32; num_cps];
+    update_tjunctions(&mut positions, &mut crossing_t, &neighbors, &flags, num_cps);
 
     VectorizeData {
         positions,
         orig_positions,
         neighbors,
         flags,
+        crossing_t,
         graph,
         img_w: src_w,
         img_h: src_h,
@@ -83,6 +92,7 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<
         &data.orig_positions,
         &data.flags,
         &data.neighbors,
+        &data.crossing_t,
         data.img_w,
         data.img_h,
         out_w,
@@ -1410,67 +1420,414 @@ fn optimize_energy(
 }
 
 // ============================================================================
+// Stage 5a: B-spline curve intersection (used by Stage 5b crossing cache)
+// ============================================================================
+
+/// Real roots of c4·t⁴ + c3·t³ + c2·t² + c1·t + c0 = 0 in [0, 1].
+/// Ferrari's method via the resolvent cubic. Returns at most 4 roots.
+fn solve_quartic_in_unit(c4: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
+    let mut out: [Option<f32>; 4] = [None; 4];
+
+    // Degeneracy detection — relative to the other coefficients, not an
+    // absolute threshold. Two B-spline spans whose second-derivatives are
+    // parallel (e.g. both ~diagonal) produce u2 ≈ 0, hence c4 ≈ 1e-16
+    // while c0..c2 sit at ~1e-2. An absolute `1e-20` cutoff misses this.
+    // 1e-6 because dividing by a coefficient that small still amplifies
+    // noise enough to swamp legitimate roots.
+    let scale = c0.abs().max(c1.abs()).max(c2.abs()).max(c3.abs()).max(c4.abs());
+    let eps = 1e-6 * scale.max(1.0);
+    if c4.abs() < eps {
+        return solve_cubic_in_unit(c3, c2, c1, c0);
+    }
+
+    // Normalize: t⁴ + a·t³ + b·t² + c·t + d = 0
+    let a = c3 / c4;
+    let b = c2 / c4;
+    let c = c1 / c4;
+    let d = c0 / c4;
+
+    // Depress via t = u - a/4. Result: u⁴ + p·u² + q·u + r = 0
+    let a2 = a * a;
+    let p = b - 3.0 * a2 / 8.0;
+    let q = c - a * b / 2.0 + a2 * a / 8.0;
+    let r = d - a * c / 4.0 + a2 * b / 16.0 - 3.0 * a2 * a2 / 256.0;
+    let shift = -a / 4.0;
+
+    // Biquadratic special case: u⁴ + p·u² + r = 0.
+    if q.abs() < 1e-12 {
+        let disc = p * p - 4.0 * r;
+        if disc < 0.0 {
+            return out;
+        }
+        let sq = disc.sqrt();
+        let u2_a = (-p + sq) / 2.0;
+        let u2_b = (-p - sq) / 2.0;
+        let mut idx = 0;
+        for u2 in [u2_a, u2_b] {
+            if u2 >= 0.0 {
+                let u = u2.sqrt();
+                for u_signed in [u, -u] {
+                    let t = u_signed + shift;
+                    if (0.0..=1.0).contains(&t) && idx < 4 {
+                        out[idx] = Some(t);
+                        idx += 1;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    // Resolvent cubic: 8·y³ + 8·p·y² + (2·p² − 8·r)·y − q² = 0.
+    // Pick any real root y0; use it to factor the quartic into two quadratics.
+    let cy = solve_cubic_real_root(8.0, 8.0 * p, 2.0 * p * p - 8.0 * r, -q * q);
+
+    // Two quadratics: u² ± √(2y) · u + (p/2 + y ∓ q/(2√(2y))) = 0
+    let two_y = 2.0 * cy;
+    if two_y < 0.0 {
+        return out;
+    }
+    let m = two_y.sqrt();
+    if m.abs() < 1e-12 {
+        return out;
+    }
+    let q_over_2m = q / (2.0 * m);
+    let half_p_plus_y = p / 2.0 + cy;
+
+    let mut idx = 0;
+    for (sign_m, sign_q) in [(1.0_f32, -1.0_f32), (-1.0, 1.0)] {
+        // u² + (sign_m · m) · u + (half_p_plus_y + sign_q · q_over_2m) = 0
+        let bb = sign_m * m;
+        let cc = half_p_plus_y + sign_q * q_over_2m;
+        let disc = bb * bb - 4.0 * cc;
+        if disc < 0.0 {
+            continue;
+        }
+        let sq = disc.sqrt();
+        for u_root in [(-bb + sq) / 2.0, (-bb - sq) / 2.0] {
+            let t = u_root + shift;
+            if (0.0..=1.0).contains(&t) && idx < 4 {
+                out[idx] = Some(t);
+                idx += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Solve c3·t³ + c2·t² + c1·t + c0 = 0 in [0,1]; returns at most 3 roots.
+fn solve_cubic_in_unit(c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
+    let mut out = [None; 4];
+    let scale = c0.abs().max(c1.abs()).max(c2.abs()).max(c3.abs());
+    let eps = 1e-6 * scale.max(1.0);
+    if c3.abs() < eps {
+        // Quadratic
+        if c2.abs() < eps {
+            if c1.abs() > eps {
+                let t = -c0 / c1;
+                if (0.0..=1.0).contains(&t) {
+                    out[0] = Some(t);
+                }
+            }
+            return out;
+        }
+        let disc = c1 * c1 - 4.0 * c2 * c0;
+        if disc < 0.0 {
+            return out;
+        }
+        let sq = disc.sqrt();
+        let mut idx = 0;
+        for t in [(-c1 + sq) / (2.0 * c2), (-c1 - sq) / (2.0 * c2)] {
+            if (0.0..=1.0).contains(&t) {
+                out[idx] = Some(t);
+                idx += 1;
+            }
+        }
+        return out;
+    }
+
+    // Cardano. Normalize to t³ + a·t² + b·t + c = 0, depress with t = u - a/3.
+    let a = c2 / c3;
+    let b = c1 / c3;
+    let cc = c0 / c3;
+    let p = b - a * a / 3.0;
+    let q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + cc;
+    let shift = -a / 3.0;
+    let disc = q * q / 4.0 + p * p * p / 27.0;
+
+    if disc > 0.0 {
+        let sq = disc.sqrt();
+        let u1 = (-q / 2.0 + sq).cbrt();
+        let u2 = (-q / 2.0 - sq).cbrt();
+        let t = u1 + u2 + shift;
+        if (0.0..=1.0).contains(&t) {
+            out[0] = Some(t);
+        }
+    } else {
+        // disc <= 0: three real roots via trigonometric form.
+        let r = (-p / 3.0).max(0.0).sqrt();
+        let cos_arg = if r > 1e-20 { (-q / 2.0) / (r * r * r) } else { 0.0 };
+        let theta = cos_arg.clamp(-1.0, 1.0).acos();
+        for k in 0..3 {
+            let t = 2.0 * r * ((theta + 2.0 * std::f32::consts::PI * k as f32) / 3.0).cos() + shift;
+            if (0.0..=1.0).contains(&t) {
+                out[k] = Some(t);
+            }
+        }
+    }
+    out
+}
+
+/// Returns one real root of c3·y³ + c2·y² + c1·y + c0 = 0. Used by the
+/// quartic resolvent — we only need a single real root, which is guaranteed
+/// to exist for any real cubic.
+fn solve_cubic_real_root(c3: f32, c2: f32, c1: f32, c0: f32) -> f32 {
+    let a = c2 / c3;
+    let b = c1 / c3;
+    let cc = c0 / c3;
+    let p = b - a * a / 3.0;
+    let q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + cc;
+    let shift = -a / 3.0;
+    let disc = q * q / 4.0 + p * p * p / 27.0;
+
+    if disc >= 0.0 {
+        let sq = disc.sqrt();
+        let u1 = (-q / 2.0 + sq).cbrt();
+        let u2 = (-q / 2.0 - sq).cbrt();
+        u1 + u2 + shift
+    } else {
+        let r = (-p / 3.0).sqrt();
+        let theta = ((-q / 2.0) / (r * r * r)).clamp(-1.0, 1.0).acos();
+        2.0 * r * (theta / 3.0).cos() + shift
+    }
+}
+
+/// Result of intersecting two quadratic uniform B-spline spans.
+#[derive(Clone, Copy, Debug)]
+pub struct CurveIntersect {
+    pub p: (f32, f32),
+    pub t_a: f32,
+    pub t_b: f32,
+}
+
+/// Quadratic uniform B-spline span coefficients: B(t) = a·t² + b·t + c.
+/// Standard formula B(t) = 0.5(1-t)²·P0 + ((1-t)t + 0.5)·P1 + 0.5·t²·P2 expands to:
+///   a = 0.5·P0 − P1 + 0.5·P2
+///   b = −P0 + P1
+///   c = 0.5·P0 + 0.5·P1
+#[inline]
+fn bspline_poly(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32))
+    -> ((f32, f32), (f32, f32), (f32, f32))
+{
+    let a = (0.5 * p0.0 - p1.0 + 0.5 * p2.0, 0.5 * p0.1 - p1.1 + 0.5 * p2.1);
+    let b = (-p0.0 + p1.0, -p0.1 + p1.1);
+    let c = (0.5 * p0.0 + 0.5 * p1.0, 0.5 * p0.1 + 0.5 * p1.1);
+    (a, b, c)
+}
+
+/// Intersect two quadratic uniform B-spline spans. The pipeline guarantees
+/// they cross within `t,s ∈ [0,1]` at a 4-way crossing, so we pick the
+/// in-unit root closest to (0.5, 0.5).
+pub fn intersect_quadratic_bsplines(
+    a_p0: (f32, f32), a_p1: (f32, f32), a_p2: (f32, f32),
+    b_p0: (f32, f32), b_p1: (f32, f32), b_p2: (f32, f32),
+) -> CurveIntersect {
+    let (aa, ba, ca) = bspline_poly(a_p0, a_p1, a_p2);
+    let (ab, bb, cb) = bspline_poly(b_p0, b_p1, b_p2);
+
+    // f(t) = aa.x·t² + ba.x·t + ca.x  matched against  g(s) = ab.x·s² + bb.x·s + cb.x  (same for y).
+    // Eliminate s via the resultant of two quadratics in s. With
+    //   A = -ab.x, B = -bb.x, C = f(t) - cb.x
+    //   D = -ab.y, E = -bb.y, F = h(t) - cb.y
+    // Res(p,q) = (AF - CD)² - (AE - BD)·(BF - CE)
+    // U(t) = AF − CD = ab.y·f(t) − ab.x·h(t) + ab.x·cb.y − ab.y·cb.x   (deg 2)
+    // V(t) = BF − CE = bb.y·f(t) − bb.x·h(t) + bb.x·cb.y − bb.y·cb.x   (deg 2)
+    // M    = AE − BD = ab.x·bb.y − bb.x·ab.y                           (constant)
+    // R(t) = U(t)² − M·V(t) = quartic in t.
+    let m = ab.0 * bb.1 - bb.0 * ab.1;
+
+    let u2 = ab.1 * aa.0 - ab.0 * aa.1;
+    let u1 = ab.1 * ba.0 - ab.0 * ba.1;
+    let u0 = ab.1 * ca.0 - ab.0 * ca.1 + ab.0 * cb.1 - ab.1 * cb.0;
+
+    let v2 = bb.1 * aa.0 - bb.0 * aa.1;
+    let v1 = bb.1 * ba.0 - bb.0 * ba.1;
+    let v0 = bb.1 * ca.0 - bb.0 * ca.1 + bb.0 * cb.1 - bb.1 * cb.0;
+
+    // U² − M·V coefficients:
+    let r4 = u2 * u2;
+    let r3 = 2.0 * u1 * u2;
+    let r2 = u1 * u1 + 2.0 * u0 * u2 - m * v2;
+    let r1 = 2.0 * u0 * u1 - m * v1;
+    let r0 = u0 * u0 - m * v0;
+
+    let roots = solve_quartic_in_unit(r4, r3, r2, r1, r0);
+
+    // Pick the root closest to t=0.5 (the optimizer keeps crossings near the grid corner).
+    let mut best_t = 0.5f32;
+    let mut best_dist = f32::INFINITY;
+    for r in roots.iter().flatten() {
+        let d = (*r - 0.5).abs();
+        if d < best_dist {
+            best_dist = d;
+            best_t = *r;
+        }
+    }
+    let t = best_t;
+
+    // Intersection point from curve A.
+    let p = (
+        aa.0 * t * t + ba.0 * t + ca.0,
+        aa.1 * t * t + ba.1 * t + ca.1,
+    );
+
+    // Find s on curve B such that B_b(s) = p. Two quadratics (one per axis);
+    // pick the [0,1] root closest to 0.5 from whichever axis has a non-degenerate
+    // leading coefficient.
+    let s = solve_b_param_for_point(ab, bb, cb, p);
+
+    CurveIntersect { p, t_a: t, t_b: s }
+}
+
+/// Given B(s) = a·s² + b·s + c (component-wise) and a target point `target`,
+/// find s ∈ [0,1] satisfying both axes (any consistent root). Picks the
+/// in-range root closest to 0.5 from the better-conditioned axis.
+fn solve_b_param_for_point(
+    a: (f32, f32), b: (f32, f32), c: (f32, f32), target: (f32, f32),
+) -> f32 {
+    fn roots_axis(aa: f32, bb: f32, cc: f32, t: f32) -> [Option<f32>; 2] {
+        // aa·s² + bb·s + (cc − t) = 0
+        let mut out = [None; 2];
+        let kk = cc - t;
+        if aa.abs() < 1e-12 {
+            if bb.abs() > 1e-12 {
+                let s = -kk / bb;
+                if (0.0..=1.0).contains(&s) {
+                    out[0] = Some(s);
+                }
+            }
+            return out;
+        }
+        let disc = bb * bb - 4.0 * aa * kk;
+        if disc < 0.0 {
+            return out;
+        }
+        let sq = disc.sqrt();
+        let mut idx = 0;
+        for s in [(-bb + sq) / (2.0 * aa), (-bb - sq) / (2.0 * aa)] {
+            if (0.0..=1.0).contains(&s) {
+                out[idx] = Some(s);
+                idx += 1;
+            }
+        }
+        out
+    }
+
+    // Prefer the axis with the larger leading coefficient (better conditioning).
+    let prefer_x = a.0.abs() >= a.1.abs();
+    let primary = if prefer_x {
+        roots_axis(a.0, b.0, c.0, target.0)
+    } else {
+        roots_axis(a.1, b.1, c.1, target.1)
+    };
+
+    let mut best = 0.5f32;
+    let mut best_dist = f32::INFINITY;
+    for s in primary.iter().flatten() {
+        let d = (*s - 0.5).abs();
+        if d < best_dist {
+            best_dist = d;
+            best = *s;
+        }
+    }
+    best
+}
+
+// ============================================================================
 // Stage 5: Update T-junctions
 // ============================================================================
 
-fn update_tjunctions(positions: &mut [f32], neighbors: &[i32], flags: &[u32], num_cps: usize) {
-    // Unified iterative solver matching the GPU shader (update_tjunction.slang).
-    // Save original positions, then iterate 3 passes. Each pass processes ALL
-    // junction CPs in one loop:
-    //   - Crossings: inverse B-spline correction (each slot independently —
-    //     different pp/np require different corrected positions for both curves
-    //     to pass through the same grid_pos at t=0.5)
-    //   - T-junctions: forward B-spline correction + stem snapping
-    // Both use orig for the center weight and latest neighbor positions.
-    // 3 passes converge to sub-pixel accuracy (contraction ≈ 0.17/pass).
-    let orig = positions.to_vec();
+fn update_tjunctions(
+    positions: &mut [f32],
+    crossing_t: &mut [f32],
+    neighbors: &[i32],
+    flags: &[u32],
+    num_cps: usize,
+) {
+    // Two jobs, ordered so each sees the other's input in its final form:
+    //   - Phase 1 (IS_TJUNCTION): stem-snap onto the rendered through-curve
+    //     via the ghost-aware algebraic B(0.5) formula. 3 passes to converge
+    //     (contraction ≈ 0.17/pass). Writes only stem CP positions.
+    //   - Phase 2 (IS_CROSSING, slot 0 only): solve the curve-curve
+    //     intersection of the N-S and E-W spans, write `(t_ns, t_ew)` into
+    //     `crossing_t`. Must run *after* Phase 1 because a crossing's
+    //     N/S/E/W neighbor can be a stem CP that gets repositioned by Phase 1
+    //     (e.g., when an adjacent T-junction's through curve clamps onto the
+    //     crossing). Reading stale stem positions would shift the
+    //     intersection enough to flip wedge classification on near-boundary
+    //     pixels.
+
+    let read_pos = |positions: &[f32], ci: usize| -> (f32, f32) {
+        (positions[ci * 2], positions[ci * 2 + 1])
+    };
+    let is_end = |idx: i32| -> bool {
+        idx >= 0 && (flags[idx as usize] & IS_ENDPOINT) != 0
+    };
+
+    // Phase 1: T-junction stem snap. 3 passes for convergence.
     for _ in 0..3 {
         for i in 0..num_cps {
             let f = flags[i];
+            if (f & IS_TJUNCTION) == 0 { continue; }
             let prev_idx = neighbors[i * 4];
             let next_idx = neighbors[i * 4 + 1];
             if prev_idx < 0 || next_idx < 0 { continue; }
 
-            let prev_pos = (positions[prev_idx as usize * 2], positions[prev_idx as usize * 2 + 1]);
-            let next_pos = (positions[next_idx as usize * 2], positions[next_idx as usize * 2 + 1]);
-            let grid_pos = (orig[i * 2], orig[i * 2 + 1]);
-            let prev_is_end = (flags[prev_idx as usize] & IS_ENDPOINT) != 0;
-            let next_is_end = (flags[next_idx as usize] & IS_ENDPOINT) != 0;
-
-            if (f & IS_CROSSING) != 0 {
-                // Ghost-aware inverse correction. Solve B_rendered(0.5) = grid
-                // for cp, accounting for ghost extension at endpoint neighbors.
-                let (a, bp, bn) = match (prev_is_end, next_is_end) {
-                    (false, false) => (0.75, 0.125, 0.125),
-                    (true,  false) => (0.625, 0.25,  0.125),
-                    (false, true ) => (0.625, 0.125, 0.25),
-                    (true,  true ) => (0.5,   0.25,  0.25),
+            let prev_pos = read_pos(positions, prev_idx as usize);
+            let next_pos = read_pos(positions, next_idx as usize);
+            let prev_is_end = is_end(prev_idx);
+            let next_is_end = is_end(next_idx);
+            let through = read_pos(positions, i);
+            let stem = i ^ 1;
+            if stem < num_cps && (flags[stem] & !IS_ENDPOINT) == 1 {
+                let (sp, st, sn) = match (prev_is_end, next_is_end) {
+                    (false, false) => (0.125, 0.75,  0.125),
+                    (true,  false) => (0.25,  0.625, 0.125),
+                    (false, true ) => (0.125, 0.625, 0.25),
+                    (true,  true ) => (0.25,  0.5,   0.25),
                 };
-                let corrected = (
-                    (grid_pos.0 - bp * prev_pos.0 - bn * next_pos.0) / a,
-                    (grid_pos.1 - bp * prev_pos.1 - bn * next_pos.1) / a,
-                );
-                positions[i * 2] = corrected.0;
-                positions[i * 2 + 1] = corrected.1;
-            } else if (f & IS_TJUNCTION) != 0 {
-                // Through-CP stays at the optimizer's position. Snap the stem
-                // onto the rendered through-curve via the ghost-aware
-                // algebraic B(0.5) formula.
-                let through = (positions[i * 2], positions[i * 2 + 1]);
-                let stem = i ^ 1;
-                if stem < num_cps && (flags[stem] & !IS_ENDPOINT) == 1 {
-                    // Coefficients depend on which neighbors are endpoints.
-                    let (sp, st, sn) = match (prev_is_end, next_is_end) {
-                        (false, false) => (0.125, 0.75,  0.125),
-                        (true,  false) => (0.25,  0.625, 0.125),
-                        (false, true ) => (0.125, 0.625, 0.25),
-                        (true,  true ) => (0.25,  0.5,   0.25),
-                    };
-                    positions[stem * 2]     = sp * prev_pos.0 + st * through.0 + sn * next_pos.0;
-                    positions[stem * 2 + 1] = sp * prev_pos.1 + st * through.1 + sn * next_pos.1;
-                }
+                positions[stem * 2]     = sp * prev_pos.0 + st * through.0 + sn * next_pos.0;
+                positions[stem * 2 + 1] = sp * prev_pos.1 + st * through.1 + sn * next_pos.1;
             }
         }
+    }
+
+    // Phase 2: write t values for every crossing. Runs after Phase 1 so any
+    // stem-CP neighbor reads see the snapped position.
+    for i in 0..num_cps {
+        if (flags[i] & IS_CROSSING) == 0 || (i & 1) != 0 { continue; }
+        let other = i + 1;
+        if other >= num_cps { continue; }
+
+        let n_idx = neighbors[i * 4];
+        let s_idx = neighbors[i * 4 + 1];
+        let e_idx = neighbors[other * 4];
+        let w_idx = neighbors[other * 4 + 1];
+        if n_idx < 0 || s_idx < 0 || e_idx < 0 || w_idx < 0 { continue; }
+
+        let cp_a = read_pos(positions, i);
+        let cp_b = read_pos(positions, other);
+        let ghost = |np: (f32, f32), is_endpoint: bool, cp: (f32, f32)| -> (f32, f32) {
+            if is_endpoint { (2.0 * np.0 - cp.0, 2.0 * np.1 - cp.1) } else { np }
+        };
+        let n_in = ghost(read_pos(positions, n_idx as usize), is_end(n_idx), cp_a);
+        let s_in = ghost(read_pos(positions, s_idx as usize), is_end(s_idx), cp_a);
+        let e_in = ghost(read_pos(positions, e_idx as usize), is_end(e_idx), cp_b);
+        let w_in = ghost(read_pos(positions, w_idx as usize), is_end(w_idx), cp_b);
+
+        let r = intersect_quadratic_bsplines(n_in, cp_a, s_in, e_in, cp_b, w_in);
+        crossing_t[i]     = r.t_a; // t on N-S curve (slot 0)
+        crossing_t[other] = r.t_b; // t on E-W curve (slot 1)
     }
 }
 
@@ -1852,6 +2209,7 @@ fn rasterize(
     orig_positions: &[f32],
     flags: &[u32],
     cp_neighbors: &[i32],
+    crossing_t: &[f32],
     img_w: usize,
     img_h: usize,
     out_w: usize,
@@ -1995,7 +2353,13 @@ fn rasterize(
         // spans this is 0.5; for clamped spans we find the clamped curve's t
         // at the position the equivalent interior B-spline would reach at
         // t=0.5 (the natural before/after-sc pivot in physical space).
-        let t_branch = if two_cp_chain {
+        // Crossings override the default with the actual curve-curve
+        // intersection parameter from `crossing_t`, so the rasterizer's
+        // J = beval(...t_branch) lands on the geometric intersection, not
+        // the integer grid corner.
+        let t_branch = if (flag & IS_CROSSING) != 0 {
+            crossing_t[ci]
+        } else if two_cp_chain {
             // Straight line: interior_mid = cp = midpoint, closest t is 0.5.
             0.5
         } else if prev_is_end || next_is_end {
@@ -2441,15 +2805,8 @@ fn rasterize(
                 // the same pixel). For now they get single-curve AA, which
                 // is at least free of the spurious-third-color artifact.
                 if let Some(ah) = through_h {
-                    // ah ∈ {0, 1}; explicit selection avoids dynamic indexing.
                     let sc_a = if ah == 0 { &all_cps[hit_idx[0] as usize] }
                                           else { &all_cps[hit_idx[1] as usize] };
-                    // J = point on the through curve at t_branch (where the
-                    // curve passes "through itself" at the junction). NOT
-                    // sc_a.pos (= polynomial control point): for non-ghost-
-                    // extended CPs (e.g. an arch with all interior neighbors)
-                    // the curve at t_branch differs from pos by the curve's
-                    // 0.125*p0 + 0.75*p1 + 0.125*p2 vs p1 offset.
                     let j = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, sc_a.t_branch);
                     let pix_half = inv_scale * 0.5;
                     let in_pixel = (j.0 - center.0).abs() <= pix_half
@@ -2823,4 +3180,148 @@ fn rasterize(
 #[inline(always)]
 fn pack_color(c: u32) -> u32 {
     0xFF000000 | (c & 0x00FFFFFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect_in_unit(roots: [Option<f32>; 4]) -> Vec<f32> {
+        let mut v: Vec<f32> = roots.into_iter().flatten().collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    }
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() < eps
+    }
+
+    fn assert_root(quartic_roots: &[f32], expected: f32, eps: f32) {
+        assert!(
+            quartic_roots.iter().any(|r| approx_eq(*r, expected, eps)),
+            "expected root {expected} not found in {quartic_roots:?}",
+        );
+    }
+
+    // ---------- quartic solver ----------
+
+    #[test]
+    fn quartic_biquadratic_two_unit_roots() {
+        // (t² − 0.25)(t² − 0.49) = 0  →  roots ±0.5, ±0.7. In [0,1]: 0.5, 0.7.
+        // Expanded: t⁴ − 0.74·t² + 0.1225 = 0
+        let roots = collect_in_unit(solve_quartic_in_unit(1.0, 0.0, -0.74, 0.0, 0.1225));
+        assert_eq!(roots.len(), 2);
+        assert_root(&roots, 0.5, 1e-4);
+        assert_root(&roots, 0.7, 1e-4);
+    }
+
+    #[test]
+    fn quartic_four_distinct_unit_roots() {
+        // (t − 0.1)(t − 0.4)(t − 0.6)(t − 0.9) = 0
+        // (t² − 0.5t + 0.04)(t² − 1.5t + 0.54)
+        // = t⁴ − 2.0·t³ + 1.33·t² − 0.33·t + 0.0216
+        let roots = collect_in_unit(solve_quartic_in_unit(1.0, -2.0, 1.33, -0.33, 0.0216));
+        assert_eq!(roots.len(), 4);
+        for expected in [0.1, 0.4, 0.6, 0.9] {
+            assert_root(&roots, expected, 5e-3);
+        }
+    }
+
+    #[test]
+    fn quartic_no_real_roots_in_unit() {
+        // (t² + 1)² = 0 has only complex roots.
+        let roots = collect_in_unit(solve_quartic_in_unit(1.0, 0.0, 2.0, 0.0, 1.0));
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn quartic_single_unit_root_with_others_outside() {
+        // (t − 0.3)(t + 1)(t² + 4) = 0  →  only 0.3 in [0,1].
+        // = (t² + 0.7t − 0.3)(t² + 4) = t⁴ + 0.7t³ + 3.7t² + 2.8t − 1.2
+        let roots = collect_in_unit(solve_quartic_in_unit(1.0, 0.7, 3.7, 2.8, -1.2));
+        assert_eq!(roots.len(), 1);
+        assert_root(&roots, 0.3, 1e-4);
+    }
+
+    #[test]
+    fn quartic_degenerate_cubic() {
+        // (t − 0.4)(t − 0.6)(t − 2) = t³ − 3·t² + 2.24·t − 0.48
+        let roots = collect_in_unit(solve_quartic_in_unit(0.0, 1.0, -3.0, 2.24, -0.48));
+        assert_eq!(roots.len(), 2);
+        assert_root(&roots, 0.4, 1e-4);
+        assert_root(&roots, 0.6, 1e-4);
+    }
+
+    // ---------- B-spline span intersection ----------
+
+    /// Helper: evaluate a quadratic uniform B-spline span at t.
+    fn beval2(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, f32) {
+        let u = 1.0 - t;
+        (
+            0.5 * u * u * p0.0 + (u * t + 0.5) * p1.0 + 0.5 * t * t * p2.0,
+            0.5 * u * u * p0.1 + (u * t + 0.5) * p1.1 + 0.5 * t * t * p2.1,
+        )
+    }
+
+    #[test]
+    fn intersect_axis_aligned_through_corner() {
+        // Curve A: vertical (P0=top, P1=mid, P2=bot), all at x=0.
+        // Curve B: horizontal, all at y=0.
+        // Intersection at origin. Both span centers (P1) are at origin so curves
+        // are straight; intersection should land at (0,0) with t=s=0.5.
+        let r = intersect_quadratic_bsplines(
+            (0.0, -1.0), (0.0, 0.0), (0.0, 1.0),
+            (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0),
+        );
+        assert!(approx_eq(r.p.0, 0.0, 1e-4) && approx_eq(r.p.1, 0.0, 1e-4),
+            "p = {:?}", r.p);
+        assert!(approx_eq(r.t_a, 0.5, 1e-4));
+        assert!(approx_eq(r.t_b, 0.5, 1e-4));
+    }
+
+    #[test]
+    fn intersect_offset_cps_recovers_actual_curves() {
+        // Two curves with off-center mid-CPs (the realistic case after the
+        // optimizer moves things). Intersection point and t-values should be
+        // such that B_a(t_a) == B_b(t_b) within tolerance.
+        let a0 = (-1.0, -1.2);
+        let a1 = ( 0.1,  0.05);
+        let a2 = ( 0.9,  1.4);
+        let b0 = (-1.3,  1.0);
+        let b1 = (-0.05, 0.1);
+        let b2 = ( 1.2, -0.9);
+
+        let r = intersect_quadratic_bsplines(a0, a1, a2, b0, b1, b2);
+
+        let pa = beval2(a0, a1, a2, r.t_a);
+        let pb = beval2(b0, b1, b2, r.t_b);
+        // Both evaluated points should equal r.p and each other.
+        assert!(approx_eq(pa.0, r.p.0, 1e-3), "pa.x={} r.p.x={}", pa.0, r.p.0);
+        assert!(approx_eq(pa.1, r.p.1, 1e-3), "pa.y={} r.p.y={}", pa.1, r.p.1);
+        assert!(approx_eq(pb.0, r.p.0, 1e-3), "pb.x={} r.p.x={}", pb.0, r.p.0);
+        assert!(approx_eq(pb.1, r.p.1, 1e-3), "pb.y={} r.p.y={}", pb.1, r.p.1);
+        assert!((0.0..=1.0).contains(&r.t_a));
+        assert!((0.0..=1.0).contains(&r.t_b));
+    }
+
+    #[test]
+    fn intersect_curved_x_pattern() {
+        // X-shape with curvature: NW-SE curve and SW-NE curve, mid-CPs offset
+        // off the corner. Verify the returned (p, t_a, t_b) satisfy both curves.
+        let a0 = (-2.0, -2.0);
+        let a1 = ( 0.0,  0.3);
+        let a2 = ( 2.0,  2.0);
+        let b0 = (-2.0,  2.0);
+        let b1 = (-0.2,  0.0);
+        let b2 = ( 2.0, -2.0);
+
+        let r = intersect_quadratic_bsplines(a0, a1, a2, b0, b1, b2);
+
+        let pa = beval2(a0, a1, a2, r.t_a);
+        let pb = beval2(b0, b1, b2, r.t_b);
+        let dx = pa.0 - pb.0;
+        let dy = pa.1 - pb.1;
+        assert!(dx * dx + dy * dy < 1e-4,
+            "B_a(t_a)={pa:?}  B_b(t_b)={pb:?}  delta=({dx},{dy})");
+    }
 }

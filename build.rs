@@ -36,6 +36,7 @@ const SHADERS: &[&str] = &[
     "cell_rasterizer",
     "optimize_energy",
     "update_tjunction",
+    "crossing_pack",
 ];
 
 fn main() {

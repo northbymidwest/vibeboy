@@ -1,8 +1,9 @@
 //! Full GPU vectorize pipeline using wgpu (WebGPU-compatible).
 //!
-//! Six-stage pipeline matching the SDL3 GPU version:
+//! Seven-stage pipeline matching the SDL3 GPU version:
 //! 1. similarity_graph → 2. resolve_crossings → 3. cell_graph →
-//! 4. optimize_energy → 5. update_tjunction → 6. cell_rasterizer
+//! 4. optimize_energy → 5. update_tjunction → 5b. crossing_pack →
+//! 6. cell_rasterizer
 //!
 //! All shaders are loaded from WGSL (cross-compiled from Slang via slangc).
 
@@ -15,6 +16,7 @@ pub struct WgpuVectorizePipeline {
     cell_graph: wgpu::ComputePipeline,
     optimizer: wgpu::ComputePipeline,
     tjunction: wgpu::ComputePipeline,
+    crossing_pack: wgpu::ComputePipeline,
     rasterizer: wgpu::ComputePipeline,
     // Cached buffers (allocated once, reused each frame)
     bufs: Option<VecBufs>,
@@ -31,13 +33,14 @@ struct VecBufs {
     flag_buf: wgpu::Buffer,
     opt_out_buf: wgpu::Buffer,
     orig_pos_buf: wgpu::Buffer,
-    tjunc_orig_buf: wgpu::Buffer,
+    crossing_t_buf: wgpu::Buffer,
     // One uniform buffer per stage to avoid write conflicts
     uni_sim: wgpu::Buffer,
     uni_resolve: wgpu::Buffer,
     uni_cell: wgpu::Buffer,
     uni_opt: wgpu::Buffer,
     uni_tjunc: wgpu::Buffer,
+    uni_xpack: wgpu::Buffer,
     uni_rast: wgpu::Buffer,
     output_tex: wgpu::Texture,
     output_tex_w: u32,
@@ -49,6 +52,7 @@ struct VecBufs {
     bg_opt_p1: [wgpu::BindGroup; 3],
     bg_opt_p2: [wgpu::BindGroup; 3],
     bg_tjunc: [wgpu::BindGroup; 2],
+    bg_xpack: [wgpu::BindGroup; 2],
     bg_rast: [wgpu::BindGroup; 3],
 }
 
@@ -80,13 +84,14 @@ fn create_compute_pipeline(
 }
 
 impl WgpuVectorizePipeline {
-    /// Create all 6 compute pipelines from compiled WGSL shaders.
+    /// Create all 7 compute pipelines from compiled WGSL shaders.
     pub fn new(device: &wgpu::Device) -> Self {
         let sim_wgsl = include_str!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.wgsl"));
         let resolve_wgsl = include_str!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.wgsl"));
         let cell_wgsl = include_str!(concat!(env!("OUT_DIR"), "/cell_graph_comp.wgsl"));
         let opt_wgsl = include_str!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.wgsl"));
         let tjunc_wgsl = include_str!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.wgsl"));
+        let xpack_wgsl = include_str!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.wgsl"));
         let rast_wgsl = include_str!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.wgsl"));
 
         WgpuVectorizePipeline {
@@ -95,6 +100,7 @@ impl WgpuVectorizePipeline {
             cell_graph: create_compute_pipeline(device, cell_wgsl, "cell_graph"),
             optimizer: create_compute_pipeline(device, opt_wgsl, "optimize_energy"),
             tjunction: create_compute_pipeline(device, tjunc_wgsl, "update_tjunction"),
+            crossing_pack: create_compute_pipeline(device, xpack_wgsl, "crossing_pack"),
             rasterizer: create_compute_pipeline(device, rast_wgsl, "cell_rasterizer"),
             bufs: None,
         }
@@ -140,6 +146,7 @@ impl WgpuVectorizePipeline {
             view_formats: &[],
         });
 
+        let crossing_t_size = (num_cps * 4) as u64;
         let px_buf = mk("pixels", px_size, storage_ro);
         let graph_buf = mk("graph", graph_size, storage_rw);
         let graph_snapshot = mk("graph_snap", graph_size, storage_ro | wgpu::BufferUsages::COPY_SRC);
@@ -148,12 +155,13 @@ impl WgpuVectorizePipeline {
         let flag_buf = mk("flags", flag_size, storage_rw);
         let opt_out_buf = mk("opt_out", pos_size, storage_rw);
         let orig_pos_buf = mk("orig_pos", pos_size, storage_rw);
-        let tjunc_orig_buf = mk("tjunc_orig_pos", pos_size, storage_ro);
+        let crossing_t_buf = mk("crossing_t", crossing_t_size, storage_rw);
         let uni_sim = mk("uni_sim", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_resolve = mk("uni_resolve", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_cell = mk("uni_cell", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_opt = mk("uni_opt", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_tjunc = mk("uni_tjunc", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let uni_xpack = mk("uni_xpack", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_rast = mk("uni_rast", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
 
         let tex_view = output_tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -210,16 +218,32 @@ impl WgpuVectorizePipeline {
             bg(&self.optimizer, 1, &[wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() }]),
             bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt.as_entire_binding() }]),
         ];
-        // update_tjunction: uniforms at vk set 1 (group 1), all buffers at vk set 0 (group 0)
+        // update_tjunction: 3 buffers at group 0 (positions RW + nbr/flag RO),
+        // uniforms at group 1. The legacy IS_CROSSING branch was removed,
+        // so `orig_positions` is no longer bound here.
         let bg_tjunc = [
             bg(&self.tjunction, 0, &[
                 wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: tjunc_orig_buf.as_entire_binding() },
             ]),
             bg(&self.tjunction, 1, &[wgpu::BindGroupEntry { binding: 0, resource: uni_tjunc.as_entire_binding() }]),
         ];
+        // crossing_pack: crossing_t RW at group 0 binding 0, three RO inputs
+        // at bindings 1/2/3, uniforms at group 1.
+        let bg_xpack = [
+            bg(&self.crossing_pack, 0, &[
+                wgpu::BindGroupEntry { binding: 0, resource: crossing_t_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: pos_buf.as_entire_binding() },
+            ]),
+            bg(&self.crossing_pack, 1, &[wgpu::BindGroupEntry { binding: 0, resource: uni_xpack.as_entire_binding() }]),
+        ];
+        // Rasterizer: group 1 holds the output texture *and* crossing_t (now
+        // declared as RWStructuredBuffer in the slang shader so wgpu emits
+        // a barrier from the prior crossing_pack write — the shader only
+        // reads, but wgpu's hazard tracking needs the RW binding type).
         let bg_rast = [
             bg(&self.rasterizer, 0, &[
                 wgpu::BindGroupEntry { binding: 0, resource: px_buf.as_entire_binding() },
@@ -228,20 +252,23 @@ impl WgpuVectorizePipeline {
                 wgpu::BindGroupEntry { binding: 3, resource: flag_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: nbr_buf.as_entire_binding() },
             ]),
-            bg(&self.rasterizer, 1, &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&tex_view),
-            }]),
+            bg(&self.rasterizer, 1, &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: crossing_t_buf.as_entire_binding() },
+            ]),
             bg(&self.rasterizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_rast.as_entire_binding() }]),
         ];
 
         self.bufs = Some(VecBufs {
             img_w, img_h,
             px_buf, graph_buf, graph_snapshot, pos_buf, nbr_buf, flag_buf,
-            opt_out_buf, orig_pos_buf, tjunc_orig_buf,
-            uni_sim, uni_resolve, uni_cell, uni_opt, uni_tjunc, uni_rast,
+            opt_out_buf, orig_pos_buf, crossing_t_buf,
+            uni_sim, uni_resolve, uni_cell, uni_opt, uni_tjunc, uni_xpack, uni_rast,
             output_tex, output_tex_w: out_w, output_tex_h: out_h,
-            bg_sim, bg_resolve, bg_cell, bg_opt_p1, bg_opt_p2, bg_tjunc, bg_rast,
+            bg_sim, bg_resolve, bg_cell, bg_opt_p1, bg_opt_p2, bg_tjunc, bg_xpack, bg_rast,
         });
     }
 
@@ -287,6 +314,7 @@ impl WgpuVectorizePipeline {
         let uni_opt: [u32; 4] = [num_cps, f32::to_bits(0.01), f32::to_bits(0.25), f32::to_bits(2.5)];
         write_uniform(queue, &b.uni_opt, &uni_opt);
         write_uniform(queue, &b.uni_tjunc, &[num_cps, 0, 0, 0]);
+        write_uniform(queue, &b.uni_xpack, &[num_cps, 0, 0, 0]);
         let tiles_w = (img_w + 1) / 2;
         let tiles_h = (img_h + 1) / 2;
         let uni_rast: [u32; 8] = [
@@ -351,13 +379,14 @@ impl WgpuVectorizePipeline {
             cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
         }
 
-        // Buffer copy: optimized positions → tjunc_orig_pos (snapshot before t-junction)
-        encoder.copy_buffer_to_buffer(&b.pos_buf, 0, &b.tjunc_orig_buf, 0, pos_size);
-
-        // Compute pass 4: t-junction (3 iterations for convergence) + rasterizer
+        // Compute pass 4: tjunction snap (3×) → crossing pack → rasterizer.
+        // tjunction now writes only stem CPs (legacy IS_CROSSING branch
+        // dropped); crossing_pack runs once after the snap loop converges
+        // so neighbor stem positions are visible to the quartic solve.
+        let _ = pos_size; // kept in scope for clarity, no longer copied
         {
             let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("tjunc+rast"),
+                label: Some("tjunc+xpack+rast"),
                 timestamp_writes: None,
             });
             cp.set_pipeline(&self.tjunction);
@@ -366,6 +395,10 @@ impl WgpuVectorizePipeline {
                 cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
                 cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
             }
+            cp.set_pipeline(&self.crossing_pack);
+            cp.set_bind_group(0, &b.bg_xpack[0], &[]);
+            cp.set_bind_group(1, &b.bg_xpack[1], &[]);
+            cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
             cp.set_pipeline(&self.rasterizer);
             cp.set_bind_group(0, &b.bg_rast[0], &[]);
             cp.set_bind_group(1, &b.bg_rast[1], &[]);

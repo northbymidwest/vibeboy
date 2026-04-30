@@ -11,13 +11,16 @@ type Texture = ProtocolObject<dyn MTLTexture>;
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
-/// Full GPU vectorize pipeline via Metal compute (6 stages).
+/// Full GPU vectorize pipeline via Metal compute (7 stages: similarity_graph
+/// → resolve_crossings → cell_graph → optimize_energy → update_tjunction →
+/// crossing_pack → cell_rasterizer).
 pub(super) struct MetalVectorizePipeline {
     sim_graph: ComputePipeline,
     resolve: ComputePipeline,
     cell_graph: ComputePipeline,
     optimizer: ComputePipeline,
     tjunction: ComputePipeline,
+    crossing_pack: ComputePipeline,
     rasterizer: ComputePipeline,
     // Cached buffers (allocated once, reused)
     bufs: Option<MetalVecBufs>,
@@ -34,7 +37,7 @@ pub(super) struct MetalVecBufs {
     flag_buf: Buffer,
     opt_out_buf: Buffer,
     orig_pos_buf: Buffer,
-    tjunc_orig_buf: Buffer,
+    crossing_t_buf: Buffer,
 }
 
 fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
@@ -60,6 +63,7 @@ impl MetalVectorizePipeline {
             cell_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")))?,
             optimizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")))?,
             tjunction: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")))?,
+            crossing_pack: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")))?,
             rasterizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")))?,
             bufs: None,
         })
@@ -93,7 +97,7 @@ impl MetalVectorizePipeline {
                 flag_buf: mk_buf(device, (num_cps * 4) as usize),
                 opt_out_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 orig_pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
-                tjunc_orig_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
+                crossing_t_buf: mk_buf(device, (num_cps * 4) as usize),
             });
         }
         let b = self.bufs.as_ref().unwrap();
@@ -128,7 +132,7 @@ impl MetalVectorizePipeline {
         {
             let enc = cmd.blitCommandEncoder().unwrap();
             for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
-                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf] {
+                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf] {
                 enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
             }
             enc.endEncoding();
@@ -238,18 +242,9 @@ impl MetalVectorizePipeline {
             enc.endEncoding();
         }
 
-        // Copy optimized positions → tjunc_orig_pos (snapshot before t-junction)
-        {
-            let enc = cmd.blitCommandEncoder().unwrap();
-            unsafe {
-                enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &b.pos_buf, 0, &b.tjunc_orig_buf, 0, (num_cps * 2 * 4) as usize,
-                );
-            }
-            enc.endEncoding();
-        }
-
-        // Stage 4b: T-junction correction (3 iterations for convergence)
+        // Stage 5a: T-junction stem snap (3× for convergence). The legacy
+        // IS_CROSSING inverse-correction branch is gone, so the tjunction
+        // shader now binds only nbr/flag (RO) + pos (RW) — no tjunc_orig.
         for _ in 0..3 {
             let uni = mk_uni(&[num_cps, 0, 0, 0]);
             let enc = cmd.computeCommandEncoder().unwrap();
@@ -258,8 +253,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 1);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 2);
-                enc.setBuffer_offset_atIndex(Some(&b.tjunc_orig_buf), 0, 3);
-                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 4);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
                     MTLSize { width: 256, height: 1, depth: 1 },
@@ -268,7 +262,29 @@ impl MetalVectorizePipeline {
             enc.endEncoding();
         }
 
-        // Stage 5: Cell rasterizer
+        // Stage 5b: Crossing intersection pack. Writes (t_NS, t_EW) to
+        // crossing_t for every IS_CROSSING CP and 0.5 elsewhere. Reads
+        // finalized stem positions from the prior tjunction snap loop —
+        // Metal inserts the necessary inter-encoder barriers automatically.
+        {
+            let uni = mk_uni(&[num_cps, 0, 0, 0]);
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&self.crossing_pack);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.crossing_t_buf), 0, 4);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
+                    MTLSize { width: 256, height: 1, depth: 1 },
+                );
+            }
+            enc.endEncoding();
+        }
+
+        // Stage 6: Cell rasterizer
         {
             let uni = mk_uni(&[img_w, img_h, out_w, out_h,
                 f32::to_bits(scale), corners_w, tiles_w, tiles_h]);
@@ -281,6 +297,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 3);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 5);
+                enc.setBuffer_offset_atIndex(Some(&b.crossing_t_buf), 0, 6);
                 enc.setTexture_atIndex(Some(out_tex), 0);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: (tiles_w * tiles_h) as usize, height: 1, depth: 1 },
