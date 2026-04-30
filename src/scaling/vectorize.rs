@@ -1625,9 +1625,22 @@ fn bspline_poly(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32))
     (a, b, c)
 }
 
-/// Intersect two quadratic uniform B-spline spans. The pipeline guarantees
-/// they cross within `t,s ∈ [0,1]` at a 4-way crossing, so we pick the
-/// in-unit root closest to (0.5, 0.5).
+/// Intersect two quadratic uniform B-spline spans via 2D Newton from a
+/// closest-point seed. The crossing-pack pipeline guarantees both spans
+/// pass through a single transverse intersection near the cell corner —
+/// the optimizer drives both crossing CPs to the same geometric point,
+/// so `a_p1 == b_p1` is the optimizer's intersection estimate (good to
+/// within sub-pixel after energy minimization). Newton from there
+/// converges in 2–3 iterations.
+///
+/// Earlier versions used a Sylvester resultant + Ferrari quartic root-
+/// finder + back-solve for s. That had two precision walls: Ferrari's
+/// depression-by-c4 step amplified noise badly when r4 = u2² was small
+/// (curves with near-parallel second derivatives), and the single-axis
+/// back-solve picked the wrong root when the axis quadratic had two
+/// roots in [0, 1]. Newton bypasses both — it works directly on
+/// F(t, s) = B_a(t) − B_b(s) without forming the resultant or back-
+/// solving an axis.
 pub fn intersect_quadratic_bsplines(
     a_p0: (f32, f32), a_p1: (f32, f32), a_p2: (f32, f32),
     b_p0: (f32, f32), b_p1: (f32, f32), b_p2: (f32, f32),
@@ -1635,112 +1648,54 @@ pub fn intersect_quadratic_bsplines(
     let (aa, ba, ca) = bspline_poly(a_p0, a_p1, a_p2);
     let (ab, bb, cb) = bspline_poly(b_p0, b_p1, b_p2);
 
-    // f(t) = aa.x·t² + ba.x·t + ca.x  matched against  g(s) = ab.x·s² + bb.x·s + cb.x  (same for y).
-    // Eliminate s via the resultant of two quadratics in s. With
-    //   A = -ab.x, B = -bb.x, C = f(t) - cb.x
-    //   D = -ab.y, E = -bb.y, F = h(t) - cb.y
-    // Res(p,q) = (AF - CD)² - (AE - BD)·(BF - CE)
-    // U(t) = AF − CD = ab.y·f(t) − ab.x·h(t) + ab.x·cb.y − ab.y·cb.x   (deg 2)
-    // V(t) = BF − CE = bb.y·f(t) − bb.x·h(t) + bb.x·cb.y − bb.y·cb.x   (deg 2)
-    // M    = AE − BD = ab.x·bb.y − bb.x·ab.y                           (constant)
-    // R(t) = U(t)² − M·V(t) = quartic in t.
-    let m = ab.0 * bb.1 - bb.0 * ab.1;
+    // Seed: a_p1 == b_p1 after the optimizer (both crossing CPs at the
+    // same geometric point). For each curve, find the t/s where the
+    // curve is closest to that point — accounts for ghost-extended
+    // neighbors and chain asymmetry, which a fixed t=0.5 seed wouldn't.
+    let ref_pt = a_p1;
+    let mut t = closest_on_span_poly(aa.0, aa.1, ba.0, ba.1, ca.0, ca.1, ref_pt.0, ref_pt.1).0;
+    let mut s = closest_on_span_poly(ab.0, ab.1, bb.0, bb.1, cb.0, cb.1, ref_pt.0, ref_pt.1).0;
 
-    let u2 = ab.1 * aa.0 - ab.0 * aa.1;
-    let u1 = ab.1 * ba.0 - ab.0 * ba.1;
-    let u0 = ab.1 * ca.0 - ab.0 * ca.1 + ab.0 * cb.1 - ab.1 * cb.0;
+    // 2D Newton on F(t, s) = B_a(t) − B_b(s) = 0.
+    //   J = [B_a'(t).x  −B_b'(s).x ]    det = −B_a'(t).x · B_b'(s).y
+    //       [B_a'(t).y  −B_b'(s).y ]          + B_a'(t).y · B_b'(s).x
+    // |det| = magnitude of the cross product of the two tangents — zero
+    // only at a tangent crossing, which the optimizer doesn't produce
+    // (the contract is a transverse 4-way). Bail if det is too small to
+    // avoid div-by-zero on degenerate inputs.
+    for _ in 0..6 {
+        let bx_a = aa.0 * t * t + ba.0 * t + ca.0;
+        let by_a = aa.1 * t * t + ba.1 * t + ca.1;
+        let bx_b = ab.0 * s * s + bb.0 * s + cb.0;
+        let by_b = ab.1 * s * s + bb.1 * s + cb.1;
+        let fx = bx_a - bx_b;
+        let fy = by_a - by_b;
 
-    let v2 = bb.1 * aa.0 - bb.0 * aa.1;
-    let v1 = bb.1 * ba.0 - bb.0 * ba.1;
-    let v0 = bb.1 * ca.0 - bb.0 * ca.1 + bb.0 * cb.1 - bb.1 * cb.0;
-
-    // U² − M·V coefficients:
-    let r4 = u2 * u2;
-    let r3 = 2.0 * u1 * u2;
-    let r2 = u1 * u1 + 2.0 * u0 * u2 - m * v2;
-    let r1 = 2.0 * u0 * u1 - m * v1;
-    let r0 = u0 * u0 - m * v0;
-
-    let roots = solve_quartic_in_unit(r4, r3, r2, r1, r0);
-
-    // Pick the root closest to t=0.5 (the optimizer keeps crossings near the grid corner).
-    let mut best_t = 0.5f32;
-    let mut best_dist = f32::INFINITY;
-    for r in roots.iter().flatten() {
-        let d = (*r - 0.5).abs();
-        if d < best_dist {
-            best_dist = d;
-            best_t = *r;
-        }
+        let dax = 2.0 * aa.0 * t + ba.0;
+        let day = 2.0 * aa.1 * t + ba.1;
+        let dbx = 2.0 * ab.0 * s + bb.0;
+        let dby = 2.0 * ab.1 * s + bb.1;
+        let det = -dax * dby + day * dbx;
+        if det.abs() < 1e-12 { break; }
+        // (Δt, Δs) = J⁻¹·F. With J⁻¹ = (1/det)·[[-dby, dbx], [-day, dax]],
+        // Δt = (-dby·Fx + dbx·Fy) / det, Δs = (-day·Fx + dax·Fy) / det.
+        // Newton update: (t, s) ← (t, s) − (Δt, Δs).
+        let inv = 1.0 / det;
+        let step_t = inv * (-dby * fx + dbx * fy);
+        let step_s = inv * (-day * fx + dax * fy);
+        t -= step_t;
+        s -= step_s;
+        if step_t.abs() < 1e-7 && step_s.abs() < 1e-7 { break; }
     }
-    let t = best_t;
+    let t = t.clamp(0.0, 1.0);
+    let s = s.clamp(0.0, 1.0);
 
-    // Intersection point from curve A.
     let p = (
         aa.0 * t * t + ba.0 * t + ca.0,
         aa.1 * t * t + ba.1 * t + ca.1,
     );
 
-    // Find s on curve B such that B_b(s) = p. Two quadratics (one per axis);
-    // pick the [0,1] root closest to 0.5 from whichever axis has a non-degenerate
-    // leading coefficient.
-    let s = solve_b_param_for_point(ab, bb, cb, p);
-
     CurveIntersect { p, t_a: t, t_b: s }
-}
-
-/// Given B(s) = a·s² + b·s + c (component-wise) and a target point `target`,
-/// find s ∈ [0,1] satisfying both axes (any consistent root). Picks the
-/// in-range root closest to 0.5 from the better-conditioned axis.
-fn solve_b_param_for_point(
-    a: (f32, f32), b: (f32, f32), c: (f32, f32), target: (f32, f32),
-) -> f32 {
-    fn roots_axis(aa: f32, bb: f32, cc: f32, t: f32) -> [Option<f32>; 2] {
-        // aa·s² + bb·s + (cc − t) = 0
-        let mut out = [None; 2];
-        let kk = cc - t;
-        if aa.abs() < 1e-12 {
-            if bb.abs() > 1e-12 {
-                let s = -kk / bb;
-                if (0.0..=1.0).contains(&s) {
-                    out[0] = Some(s);
-                }
-            }
-            return out;
-        }
-        let disc = bb * bb - 4.0 * aa * kk;
-        if disc < 0.0 {
-            return out;
-        }
-        let sq = disc.sqrt();
-        let mut idx = 0;
-        for s in [(-bb + sq) / (2.0 * aa), (-bb - sq) / (2.0 * aa)] {
-            if (0.0..=1.0).contains(&s) {
-                out[idx] = Some(s);
-                idx += 1;
-            }
-        }
-        out
-    }
-
-    // Prefer the axis with the larger leading coefficient (better conditioning).
-    let prefer_x = a.0.abs() >= a.1.abs();
-    let primary = if prefer_x {
-        roots_axis(a.0, b.0, c.0, target.0)
-    } else {
-        roots_axis(a.1, b.1, c.1, target.1)
-    };
-
-    let mut best = 0.5f32;
-    let mut best_dist = f32::INFINITY;
-    for s in primary.iter().flatten() {
-        let d = (*s - 0.5).abs();
-        if d < best_dist {
-            best_dist = d;
-            best = *s;
-        }
-    }
-    best
 }
 
 // ============================================================================
