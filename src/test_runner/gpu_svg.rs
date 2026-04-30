@@ -650,30 +650,12 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
 }
 
 // ---------------------------------------------------------------------------
-// Background color detection
-// ---------------------------------------------------------------------------
-
-fn detect_bg(pixels: &[u32], w: usize, h: usize) -> u32 {
-    let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
-    for x in 0..w {
-        *counts.entry(pixels[x]).or_default() += 1;
-        *counts.entry(pixels[(h - 1) * w + x]).or_default() += 1;
-    }
-    for y in 1..h - 1 {
-        *counts.entry(pixels[y * w]).or_default() += 1;
-        *counts.entry(pixels[y * w + w - 1]).or_default() += 1;
-    }
-    counts.into_iter().max_by_key(|&(_, n)| n).map(|(c, _)| c).unwrap_or(0)
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Render vectorize-gpu pipeline output as a filled-region SVG document.
 pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
     let (w, h) = (data.img_w, data.img_h);
-    let bg = detect_bg(pixels, w, h);
 
     let edges = build_cell_edges(data, pixels);
     let faces = trace_faces(&edges);
@@ -685,18 +667,14 @@ pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
         .set("height", h * 4)
         .set("shape-rendering", "geometricPrecision");
 
-    doc = doc.add(
-        svg::node::element::Rectangle::new()
-            .set("width", w)
-            .set("height", h)
-            .set("fill", hex(bg)),
-    );
-
     // Group face paths by color into one `Data` builder per color, so each
-    // fill becomes a single `<path>` element in the document.
+    // fill becomes a single `<path>` element in the document. Every color
+    // region — including what would visually look like the background — is
+    // emitted explicitly so adjacent regions share a path-vs-path boundary
+    // and the SVG renderer's AA stays consistent across all seams.
     let mut by_color: BTreeMap<u32, Data> = BTreeMap::new();
     for (nodes, color) in &faces {
-        if *color == bg || *color == VOID_COLOR { continue; }
+        if *color == VOID_COLOR { continue; }
         let entry = by_color.entry(*color).or_default();
         append_face_path(nodes, &map, entry);
     }
