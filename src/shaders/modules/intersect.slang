@@ -16,6 +16,31 @@
 
 module;
 
+// One Newton step on a quadratic D'(t) = c2·t² + c1·t + c0. Polishes a
+// closed-form root from a quadratic solve to ~1 ULP. Skips when the
+// derivative is small or the step would move t too far (rare near-
+// double-root cases where Newton diverges).
+[ForceInline] float polish_root_q(float t, float c2, float c1, float c0) {
+    float dp = fma(fma(c2, t, c1), t, c0);
+    float ddp = fma(2.0 * c2, t, c1);
+    if (abs(ddp) > 1e-10) {
+        float step = dp / ddp;
+        if (abs(step) < 0.5) t -= step;
+    }
+    return t;
+}
+
+// One Newton step on a cubic D'(t) = c3·t³ + c2·t² + c1·t + c0.
+[ForceInline] float polish_root_c(float t, float c3, float c2, float c1, float c0) {
+    float dp = fma(fma(fma(c3, t, c2), t, c1), t, c0);
+    float ddp = fma(fma(3.0 * c3, t, 2.0 * c2), t, c1);
+    if (abs(ddp) > 1e-10) {
+        float step = dp / ddp;
+        if (abs(step) < 0.5) t -= step;
+    }
+    return t;
+}
+
 // Try parameter t against the running best for closest-point search.
 [ForceInline] void try_closest_t(float t, float2 a, float2 b, float2 e,
                                   inout float best_t, inout float best_d2) {
@@ -47,15 +72,19 @@ module;
 
     if (abs(c3) < 1e-12) {
         if (abs(c2) > 1e-12) {
-            float disc = c1 * c1 - 4.0 * c2 * c0;
+            // FMA on `b²−4ac`: single-rounding sum recovers ~1 extra bit
+            // and avoids disc rounding to the wrong sign at near-double-root.
+            float disc = fma(c1, c1, -4.0 * c2 * c0);
             if (disc >= 0.0) {
                 float sq = sqrt(disc);
                 float q = -0.5 * (c1 + sign(c1) * sq);
-                try_closest_t(q / c2, a, b, e, best_t, best_d2);
-                if (abs(q) > 1e-20) try_closest_t(c0 / q, a, b, e, best_t, best_d2);
+                try_closest_t(polish_root_q(q / c2, c2, c1, c0), a, b, e, best_t, best_d2);
+                if (abs(q) > 1e-20) {
+                    try_closest_t(polish_root_q(c0 / q, c2, c1, c0), a, b, e, best_t, best_d2);
+                }
             }
         } else if (abs(c1) > 1e-12) {
-            try_closest_t(-c0 / c1, a, b, e, best_t, best_d2);
+            try_closest_t(polish_root_q(-c0 / c1, 0.0, c1, c0), a, b, e, best_t, best_d2);
         }
         return best_t;
     }
@@ -67,20 +96,23 @@ module;
     float p = bb - aa * aa / 3.0;
     float q = 2.0 * aa * aa * aa / 27.0 - aa * bb / 3.0 + cc;
     float shift = -aa / 3.0;
-    float disc = q * q / 4.0 + p * p * p / 27.0;
+    // FMA on q²/4 + p³/27: one extra bit at the disc≈0 (triple-root) boundary.
+    float disc = fma(q * 0.5, q * 0.5, p * p * p / 27.0);
     if (disc >= 0.0) {
         float sq = sqrt(disc);
         float u1 = sign(-q * 0.5 + sq) * pow(abs(-q * 0.5 + sq), 1.0 / 3.0);
         float u2 = sign(-q * 0.5 - sq) * pow(abs(-q * 0.5 - sq), 1.0 / 3.0);
-        try_closest_t(u1 + u2 + shift, a, b, e, best_t, best_d2);
+        float t1 = polish_root_c(u1 + u2 + shift, c3, c2, c1, c0);
+        try_closest_t(t1, a, b, e, best_t, best_d2);
     } else {
         float r = sqrt(max(-p / 3.0, 0.0));
         float cos_arg = (r > 1e-20) ? (-q * 0.5) / (r * r * r) : 0.0;
         float theta = acos(clamp(cos_arg, -1.0, 1.0));
         float TAU = 6.283185307;
         for (int k = 0; k < 3; ++k) {
-            try_closest_t(2.0 * r * cos((theta + TAU * float(k)) / 3.0) + shift,
-                          a, b, e, best_t, best_d2);
+            float t1 = polish_root_c(2.0 * r * cos((theta + TAU * float(k)) / 3.0) + shift,
+                                      c3, c2, c1, c0);
+            try_closest_t(t1, a, b, e, best_t, best_d2);
         }
     }
     return best_t;
