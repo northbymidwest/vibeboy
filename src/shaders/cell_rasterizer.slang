@@ -606,14 +606,63 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
             float2 prev_pos = (prev_ci >= 0) ? read_pos(prev_ci) : cp_real;
             float2 next_pos = (next_ci >= 0) ? read_pos(next_ci) : cp_real;
 
-            // Tile bbox cull: the per-pixel scan accepts a CP if its bbox
-            // (extended by 1 unit) reaches the pixel. Tile spans src_x0..
-            // src_x0+2 in source coords, so a CP's bbox-extended region
-            // intersects the tile iff bbox_max ≥ tile_min-1 and bbox_min ≤
-            // tile_max+1. CPs that fail this can never affect any pixel in
-            // the tile and don't need to take a shared-memory slot.
-            float2 bbox_min = min(min(prev_pos, cp_real), next_pos);
-            float2 bbox_max = max(max(prev_pos, cp_real), next_pos);
+            // Compute the ghost-adjusted control triple (pp, cp, np) that
+            // matches what bspline_eval will rasterize. Endpoint segments
+            // get the clamped-Bezier ghost so B(0)/B(1) land on the real
+            // endpoint position; 2-CP chains get the straight-line
+            // construction so B(t) = lerp(a0, a1, t).
+            bool prev_is_end = (prev_ci >= 0) && ((cp_flags[prev_ci] & IS_ENDPOINT) != 0u);
+            bool next_is_end = (next_ci >= 0) && ((cp_flags[next_ci] & IS_ENDPOINT) != 0u);
+            float2 cp;
+            float2 pp;
+            float2 np;
+            if (two_cp_chain) {
+                int other = (prev_ci < 0) ? next_ci : prev_ci;
+                float2 other_pos = read_pos(other);
+                float2 a0 = (prev_ci < 0) ? cp_real : other_pos;
+                float2 a1 = (next_ci < 0) ? cp_real : other_pos;
+                pp = 1.5 * a0 - 0.5 * a1;
+                cp = 0.5 * (a0 + a1);
+                np = 1.5 * a1 - 0.5 * a0;
+            } else {
+                cp = cp_real;
+                pp = prev_is_end ? (2.0 * prev_pos - cp) : prev_pos;
+                np = next_is_end ? (2.0 * next_pos - cp) : next_pos;
+            }
+
+            // Tight spline AABB from polynomial form B(t) = a·t² + b·t + c.
+            // Extrema at t ∈ {0, 1} plus (when a ≠ 0) the interior critical
+            // point t* = −b/(2a) when it lands in [0, 1]. Strictly contains
+            // the curve, so any pixel outside (bbox extended by 1) cannot
+            // be within the AA acceptance threshold of the spline.
+            float2 poly_a = 0.5 * (pp - 2.0 * cp + np);
+            float2 poly_b = cp - pp;
+            float2 poly_c = 0.5 * (pp + cp);
+            float2 b_at_0 = poly_c;
+            float2 b_at_1 = poly_c + poly_b + poly_a;
+            float2 bbox_min = min(b_at_0, b_at_1);
+            float2 bbox_max = max(b_at_0, b_at_1);
+            if (abs(poly_a.x) > 1e-12) {
+                float t = -poly_b.x / (2.0 * poly_a.x);
+                if (t > 0.0 && t < 1.0) {
+                    float xt = poly_c.x + poly_b.x * t + poly_a.x * t * t;
+                    bbox_min.x = min(bbox_min.x, xt);
+                    bbox_max.x = max(bbox_max.x, xt);
+                }
+            }
+            if (abs(poly_a.y) > 1e-12) {
+                float t = -poly_b.y / (2.0 * poly_a.y);
+                if (t > 0.0 && t < 1.0) {
+                    float yt = poly_c.y + poly_b.y * t + poly_a.y * t * t;
+                    bbox_min.y = min(bbox_min.y, yt);
+                    bbox_max.y = max(bbox_max.y, yt);
+                }
+            }
+
+            // Tile bbox cull: spans src_x0..src_x0+2 in source coords, so a
+            // CP's bbox-extended region intersects the tile iff bbox_max ≥
+            // tile_min-1 and bbox_min ≤ tile_max+1. CPs that fail this
+            // can't affect any pixel in the tile.
             float tile_min_x = float(src_x0) - 1.0;
             float tile_min_y = float(src_y0) - 1.0;
             float tile_max_x = float(src_x0 + 2) + 1.0;
@@ -623,39 +672,6 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
 
             uint idx = sh_num_cps.add(1u);
             if (idx < MAX_TILE_CPS) {
-                // If a neighbor is an endpoint, replace its position with a
-                // virtual ghost = 2*real - cp so that bspline_eval(...,t=0|1)
-                // lands exactly on the real endpoint position. For interior
-                // neighbors, ghost == real; nothing changes.
-                bool prev_is_end = (prev_ci >= 0) && ((cp_flags[prev_ci] & IS_ENDPOINT) != 0u);
-                bool next_is_end = (next_ci >= 0) && ((cp_flags[next_ci] & IS_ENDPOINT) != 0u);
-                float2 cp;
-                float2 pp;
-                float2 np;
-                if (two_cp_chain) {
-                    // Render as a straight line between the two markers.
-                    // Pick p0=(3·a0-a1)/2, p1=midpoint, p2=(3·a1-a0)/2 so
-                    // bspline_eval gives B(t)=lerp(a0,a1,t) — needed for the
-                    // AA path's cpt/tangent evaluation, which goes through
-                    // beval. Closest-point queries dispatch to a line
-                    // solver via is_line, bypassing bspline_refine entirely.
-                    int other = (prev_ci < 0) ? next_ci : prev_ci;
-                    float2 other_pos = read_pos(other);
-                    float2 a0 = (prev_ci < 0) ? cp_real : other_pos;
-                    float2 a1 = (next_ci < 0) ? cp_real : other_pos;
-                    pp = 1.5 * a0 - 0.5 * a1;
-                    cp = 0.5 * (a0 + a1);
-                    np = 1.5 * a1 - 0.5 * a0;
-                } else {
-                    cp = cp_real;
-                    pp = prev_is_end ? (2.0 * prev_pos - cp) : prev_pos;
-                    np = next_is_end ? (2.0 * next_pos - cp) : next_pos;
-                }
-
-                // Bbox: include the real prev/next positions (not ghosts) so
-                // that pixels in the cell-radius around endpoint neighbors
-                // still find this span as a candidate. Ghosts can be far
-                // outside the curve's actual extent.
                 sh_cps[idx].pos = cp;
                 sh_cps[idx].prev_pos = pp;
                 sh_cps[idx].next_pos = np;

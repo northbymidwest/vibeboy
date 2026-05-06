@@ -2050,6 +2050,54 @@ struct CpData {
     /// alone can't identify T-junctions; we need the IS_TJUNCTION flag
     /// on the through-curve CP instead.
     flag: u32,
+    /// Tight axis-aligned bounding box of the spline segment (B(t) for
+    /// t ∈ [0, 1], in raster coords). Computed from analytical extrema
+    /// of the parametric quadratic, so it strictly contains the curve
+    /// without the slack of an AABB over the three control points.
+    bbox_min: (f32, f32),
+    bbox_max: (f32, f32),
+}
+
+/// Tight AABB of a uniform quadratic B-spline segment (or the equivalent
+/// clamped Bézier when ghost-extended). Returns `(min, max)`.
+///
+/// B(t) = a·t² + b·t + c per axis where the coefficients come from the
+/// polynomial form already used elsewhere. AABB extrema are at t ∈ {0, 1}
+/// and (if a ≠ 0) at the interior critical point t* = −b/(2a) when it
+/// falls within [0, 1].
+fn spline_aabb(
+    poly_ax: f32, poly_ay: f32,
+    poly_bx: f32, poly_by: f32,
+    poly_cx: f32, poly_cy: f32,
+) -> ((f32, f32), (f32, f32)) {
+    // x at t=0 is poly_cx; at t=1 is poly_cx + poly_bx + poly_ax.
+    let x0 = poly_cx;
+    let x1 = poly_cx + poly_bx + poly_ax;
+    let mut x_min = x0.min(x1);
+    let mut x_max = x0.max(x1);
+    if poly_ax.abs() > 1e-12 {
+        let t = -poly_bx / (2.0 * poly_ax);
+        if t > 0.0 && t < 1.0 {
+            let xt = poly_cx + poly_bx * t + poly_ax * t * t;
+            x_min = x_min.min(xt);
+            x_max = x_max.max(xt);
+        }
+    }
+
+    let y0 = poly_cy;
+    let y1 = poly_cy + poly_by + poly_ay;
+    let mut y_min = y0.min(y1);
+    let mut y_max = y0.max(y1);
+    if poly_ay.abs() > 1e-12 {
+        let t = -poly_by / (2.0 * poly_ay);
+        if t > 0.0 && t < 1.0 {
+            let yt = poly_cy + poly_by * t + poly_ay * t * t;
+            y_min = y_min.min(yt);
+            y_max = y_max.max(yt);
+        }
+    }
+
+    ((x_min, y_min), (x_max, y_max))
 }
 
 #[inline(always)]
@@ -2408,6 +2456,9 @@ fn rasterize(
             )
         };
 
+        let (bbox_min, bbox_max) = spline_aabb(
+            poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
+        );
         all_cps.push(CpData {
             ci: ci as i32,
             pos: cp,
@@ -2426,6 +2477,8 @@ fn rasterize(
             t_branch,
             is_line: two_cp_chain,
             flag: flags[ci],
+            bbox_min,
+            bbox_max,
         });
     }
 
@@ -2564,16 +2617,17 @@ fn rasterize(
                           hit_d2: &mut [f32; 3], hit_t: &mut [f32; 3],
                           hit_idx: &mut [u32; 3], num_hits: &mut usize| {
             let sc = &all_cps[cp_i as usize];
-            // Quick screen: 3-sample distance² reject.
-            let b0 = (sc.poly_cx, sc.poly_cy);
-            let bm = (0.125 * sc.prev_pos.0 + 0.75 * sc.pos.0 + 0.125 * sc.next_pos.0,
-                       0.125 * sc.prev_pos.1 + 0.75 * sc.pos.1 + 0.125 * sc.next_pos.1);
-            let b1 = (0.5 * (sc.pos.0 + sc.next_pos.0), 0.5 * (sc.pos.1 + sc.next_pos.1));
-            let qd0 = (center.0-b0.0)*(center.0-b0.0) + (center.1-b0.1)*(center.1-b0.1);
-            let qdm = (center.0-bm.0)*(center.0-bm.0) + (center.1-bm.1)*(center.1-bm.1);
-            let qd1 = (center.0-b1.0)*(center.0-b1.0) + (center.1-b1.1)*(center.1-b1.1);
-            let quick_d2 = qd0.min(qdm).min(qd1);
-            if quick_d2 > 2.0 { return; }
+
+            // Sound spline-AABB cull: spline ⊆ AABB → dist(pt, spline) ≥
+            // dist(pt, AABB), so if pt is > 1 unit outside the AABB no part
+            // of the spline is within the AA acceptance threshold (d² < 1).
+            // Replaces an unsound 3-sample-distance quick screen that could
+            // produce false negatives (rejecting CPs whose closest point on
+            // the curve was actually within reach but not at a sample).
+            if center.0 < sc.bbox_min.0 - 1.0 || center.0 > sc.bbox_max.0 + 1.0 ||
+               center.1 < sc.bbox_min.1 - 1.0 || center.1 > sc.bbox_max.1 + 1.0 {
+                return;
+            }
 
             let result = if sc.is_line {
                 let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
