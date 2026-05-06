@@ -258,11 +258,21 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
 /// One CP's chain at a face-loop node. The position is the CP's optimized
 /// position — this is what becomes the Q control when a face follows this
 /// chain through the node.
+///
+/// `t_branch` is the parameter on this chain's B-spline span at which the
+/// span passes through `kink_pos[nid]`. 0.5 for ordinary kinks (T-junction
+/// stems, plain endpoints — kink_pos = B(0.5) by construction); for
+/// IS_CROSSING CPs it's `crossing_t[ci]` of the slot owning this chain.
+/// At a crossing two chains meet at the same node, each carrying its own
+/// `t_branch` (slot 0's and slot 1's are generally different and are NOT
+/// interchangeable — using the wrong slot's τ on the other slot's bezier
+/// gives a wrong de Casteljau control point).
 #[derive(Clone)]
 struct ChainNeighbors {
     prev: Option<u64>,
     next: Option<u64>,
     pos: (f64, f64),
+    t_branch: f64,
 }
 
 struct NodeMap {
@@ -278,15 +288,6 @@ struct NodeMap {
     ///     two chains, computed from the optimizer-final positions.
     ///   * Plain chain endpoint (border/isolated): the CP's own position.
     kink_pos: BTreeMap<u64, (f64, f64)>,
-    /// Bezier parameter at which the B-spline span at this kink's CP passes
-    /// through `kink_pos`. Used by the de Casteljau split that emits the
-    /// half-Beziers on either side of the kink:
-    ///   * T-junction stems / regular kinks: 0.5 (kp = B(0.5) by construction).
-    ///   * Chain endpoints: 0.5 — actually irrelevant since the endpoint-partner
-    ///     branch emits the full Bezier without subdivision.
-    ///   * Crossings: `crossing_t[ci]` — generally not 0.5.
-    /// Default 0.5 for any kink not explicitly populated.
-    kink_t: BTreeMap<u64, f64>,
 }
 
 /// Compute the face-loop node ID where the CP at `ci` would appear, based on
@@ -322,7 +323,6 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
     let num_cps = cw * (data.img_h + 1) * 2;
     let mut chains: BTreeMap<u64, Vec<ChainNeighbors>> = BTreeMap::new();
     let mut kink_pos: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
-    let mut kink_t: BTreeMap<u64, f64> = BTreeMap::new();
 
     let neighbor_node = |nci: i32| -> Option<u64> {
         if nci < 0 { return None; }
@@ -336,10 +336,12 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
             data.positions[ci * 2] as f64,
             data.positions[ci * 2 + 1] as f64,
         );
+        let is_crossing_now = data.flags[ci] & IS_CROSSING != 0;
         chains.entry(nid).or_default().push(ChainNeighbors {
             prev: neighbor_node(data.neighbors[ci * 4]),
             next: neighbor_node(data.neighbors[ci * 4 + 1]),
             pos,
+            t_branch: if is_crossing_now { data.crossing_t[ci] as f64 } else { 0.5 },
         });
 
         let is_endpoint = data.flags[ci] & IS_ENDPOINT != 0;
@@ -397,15 +399,12 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
         } else {
             pos
         };
-        // Crossings: also record the Bezier parameter τ at which this
-        // chain's B-spline span passes through kp. The path emitter
-        // de-Casteljau-splits the equivalent Bezier at τ to get the
-        // half-Beziers on either side of the kink. For crossings τ is
-        // generally not 0.5; for everything else 0.5 is the default and
-        // we don't write to the map.
-        if is_crossing {
-            kink_t.insert(nid, data.crossing_t[ci] as f64);
-        }
+        // (τ for the de Casteljau split is now stored per chain on
+        // `ChainNeighbors.t_branch`, populated above when each CP's chain
+        // entry is pushed. At a crossing both slots' chain entries land
+        // on the same `nid` but with different τs; the path emitter picks
+        // the right one by matching prev_loop / next_loop to the chain.)
+
         // Override priority: prefer the IS_ENDPOINT (stem at T-junctions, on
         // the through curve) or IS_CROSSING (chain intersection point) over a
         // through CP's position that may have been inserted first by slot 0.
@@ -423,7 +422,7 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
         }
     }
 
-    NodeMap { chains, kink_pos, kink_t }
+    NodeMap { chains, kink_pos }
 }
 
 /// Returns the matching chain at `nid` (whose neighbors match the face's
@@ -478,11 +477,6 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
     let lerp = |a: (f64, f64), b: (f64, f64), t: f64| {
         (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
     };
-    // Per-kink Bezier parameter τ at which the B-spline span at the
-    // kink CP passes through `kink_pos`. Defaults to 0.5; populated to
-    // `crossing_t[ci]` for IS_CROSSING CPs in build_node_map. Drives
-    // the de Casteljau split below.
-    let kink_t = |nid: u64| -> f64 { map.kink_t.get(&nid).copied().unwrap_or(0.5) };
     let grid_pos = |nid: u64| -> (f64, f64) {
         let (x4, y4) = unpack_node(nid);
         (x4 as f64 / 4.0, y4 as f64 / 4.0)
@@ -614,74 +608,99 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
         } else if is_kink(i) {
             let prev_loop = nodes[(i + n - 1) % n];
             let kp = map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid));
-            // τ for the de Casteljau split below. 0.5 for ordinary kinks
-            // (T-junction stems, plain endpoints) where kp = B(0.5) of the
-            // span at this CP. For IS_CROSSING kinks, τ = crossing_t so
-            // the half-Bezier endpoints land on the geometric intersection
-            // (which is generally not at t = 0.5).
-            let t = kink_t(nid);
+            // τ for each de Casteljau split is read from the matched chain's
+            // `t_branch` (not from a per-node value). At a crossing the
+            // prev-side and next-side touch DIFFERENT chains (slot 0 vs
+            // slot 1) with different τs; both happen to evaluate to the
+            // same `kp` but the bezier control points lerp to that endpoint
+            // along different paths. Per-node `kink_t` would clobber one
+            // slot's τ with the other's and produce a visibly distorted
+            // half-curve on the loser slot's side.
 
-            // Q on the prev side: face arrived at this kink along an interior
-            // chain. The shape depends on the chain partner at prev_loop.
-            //   * Interior partner — prev iteration emitted a smooth Q ending
-            //     at mid(partner.pos, this_chain.pos); render the second half
-            //     of the equivalent Bezier (de Casteljau split at τ) to land
-            //     on kp. Sub-Bezier control: lerp(pen, part.pos, τ).
-            //   * Endpoint partner — pen comes in at partner.pos (the chain's
-            //     clamped end). Render the full B-spline segment AT this CP
-            //     with prev-side ghost expansion as a single Q from pen
-            //     through control = part.pos to kp.
+            // The chain's bezier span Q(P0, P1=part.pos, P2) is split at τ.
+            //   * Interior chain: P0 = mid(prev_cp.pos, part.pos),
+            //                      P2 = mid(part.pos, next_cp.pos).
+            //   * Clamped chain (one neighbor IS_ENDPOINT): the bezier is
+            //     ghost-extended so P0 (or P2) collapses onto the endpoint's
+            //     position rather than a midpoint. The de Casteljau split
+            //     formulas don't care — they only need pen / end to reflect
+            //     the *actual* P0 / P2 of the rendered bezier, which equals
+            //     either the midpoint or the clamped-endpoint position.
+            // The four faces around a kink corner each touch exactly one of
+            // the two halves (P0→kp first half, or kp→P2 second half) and
+            // may traverse it forward or backward. Adjacent faces sharing a
+            // half MUST emit the same control point, so the formula depends
+            // on WHICH half (P0-side vs P2-side), not direction:
+            //   * P0-side half: control = lerp(P0, P1, τ)
+            //   * P2-side half: control = lerp(P1, P2, τ)
+            // Direction is detected by matching prev_loop / next_loop
+            // against part.prev / part.next.
+
+            // Q on the prev side: face arrived at this kink. pen sits at
+            // P0 (forward arrival from prev side) or P2 (backward arrival
+            // from next side) — interior midpoints or clamped endpoints,
+            // either way correctly populated by the previous iter.
             if let Some(part) = partial_chain(nid, prev_loop) {
-                let partner_interior = chain_partner(nid, prev_loop)
-                    .is_some_and(|p| p.prev.is_some() && p.next.is_some());
-                let control = if partner_interior { lerp(pen, part.pos, t) } else { part.pos };
+                let control = if part.prev == Some(prev_loop) {
+                    // Forward first-half: pen=P0, control=lerp(P0, P1, τ).
+                    lerp(pen, part.pos, part.t_branch)
+                } else {
+                    // Backward second-half: pen=P2, control=lerp(P1, P2, τ).
+                    lerp(part.pos, pen, part.t_branch)
+                };
                 data.append(cmd_quad(control, kp));
                 pen = kp;
             }
 
-            // Q on the next side: face leaves this kink along an interior
-            // chain. Mirror of the prev side.
-            //   * Interior partner — emit the first-half de Casteljau Q from
-            //     kp to mid(this_chain.pos, partner.pos). Sub-Bezier control:
-            //     lerp(part.pos, end, τ).
-            //   * Endpoint partner — the chain ends at next_loop with a
-            //     clamped Bézier landing on partner.pos. Emit a single Q with
-            //     control = part.pos and end = partner.pos.
+            // Q on the next side: face leaves this kink. end = P0 or P2
+            // depending on direction (mid, or clamped endpoint).
             if let Some(part) = partial_chain(nid, next_nid) {
                 if let Some(partner) = chain_partner(nid, next_nid) {
+                    // P2 is mid(part.pos, partner.pos) for interior partners;
+                    // for endpoint partners the clamped bezier's P2 collapses
+                    // onto partner.pos directly.
                     let partner_interior = partner.prev.is_some() && partner.next.is_some();
-                    if partner_interior {
-                        if (pen.0 - kp.0).abs() > 1e-9 || (pen.1 - kp.1).abs() > 1e-9 {
-                            data.append(cmd_line(kp));
-                        }
-                        let end = mid(part.pos, partner.pos);
-                        let control = lerp(part.pos, end, t);
-                        data.append(cmd_quad(control, end));
-                        pen = end;
+                    let end = if partner_interior {
+                        mid(part.pos, partner.pos)
                     } else {
-                        // Pen sits where the previous chain (on which the
-                        // face arrived) clamped — partner_for_prev.pos. The
-                        // through chain's last segment AT this CP runs from
-                        // mid(prev_through, this_pos) through control =
-                        // this_pos (= part.pos) to partner.pos via ghost
-                        // expansion. We approximate by starting from pen so
-                        // the SVG remains continuous.
-                        data.append(cmd_quad(part.pos, partner.pos));
-                        pen = partner.pos;
+                        partner.pos
+                    };
+                    if (pen.0 - kp.0).abs() > 1e-9 || (pen.1 - kp.1).abs() > 1e-9 {
+                        data.append(cmd_line(kp));
                     }
+                    let control = if part.next == Some(next_nid) {
+                        // Forward second-half: end=P2, control=lerp(P1, P2, τ).
+                        lerp(part.pos, end, part.t_branch)
+                    } else {
+                        // Backward first-half: end=P0, control=lerp(P0, P1, τ).
+                        lerp(end, part.pos, part.t_branch)
+                    };
+                    data.append(cmd_quad(control, end));
+                    pen = end;
                 }
             } else if !is_kink(next_idx) && !is_optimized(next_nid) {
                 // Pen stays at kp; next iter handles its own start.
             } else if is_kink(next_idx) {
-                // Plain kink chained to another plain kink: line over.
-                let next_kp = map
-                    .kink_pos
-                    .get(&next_nid)
-                    .copied()
-                    .unwrap_or_else(|| grid_pos(next_nid));
-                if (pen.0 - next_kp.0).abs() > 1e-9 || (pen.1 - next_kp.1).abs() > 1e-9 {
-                    data.append(cmd_line(next_kp));
-                    pen = next_kp;
+                // Plain kink → another plain kink. Bare line *unless* this
+                // node owns an endpoint chain pointing to next_loop — in
+                // which case the next kink iter will emit the clamped Q
+                // from current pen, and a preemptive `L next_kp` would
+                // bulldoze pen to the wrong position and create a cusp.
+                let endpoint_chain_to_next = map.chains.get(&nid).is_some_and(|cs| {
+                    cs.iter().any(|ch| {
+                        ch.prev == Some(next_nid) || ch.next == Some(next_nid)
+                    })
+                });
+                if !endpoint_chain_to_next {
+                    let next_kp = map
+                        .kink_pos
+                        .get(&next_nid)
+                        .copied()
+                        .unwrap_or_else(|| grid_pos(next_nid));
+                    if (pen.0 - next_kp.0).abs() > 1e-9 || (pen.1 - next_kp.1).abs() > 1e-9 {
+                        data.append(cmd_line(next_kp));
+                        pen = next_kp;
+                    }
                 }
             }
         } else {
