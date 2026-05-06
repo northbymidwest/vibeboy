@@ -952,18 +952,22 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                 else          { pos_seg1 = op; neg_seg1 = ng; }
             }
 
-            // LUT decoded once. Indexed by (sa>0) | ((sb>0) << 1):
+            // LUT decoded once. Selected by (sa>0) | ((sb>0) << 1):
             //   0 = neg_seg0, 1 = pos_seg0, 2 = neg_seg1, 3 = pos_seg1.
-            float3 lut[4];
+            // Held as 4 scalar float3s (not an array) so the dynamic
+            // selection compiles to a register select tree instead of
+            // spilling 48 bytes of indexed scratch.
+            float3 lut0, lut1, lut2, lut3;
             {
-                uint cs[4] = { neg_seg0, pos_seg0, neg_seg1, pos_seg1 };
-                for (int k = 0; k < 4; k++) {
-                    uint cc = cs[k];
-                    float3 col = float3(float((cc >> 16u) & 0xFFu),
-                                        float((cc >> 8u) & 0xFFu),
-                                        float(cc & 0xFFu)) / 255.0;
-                    lut[k] = pow(col, float3(2.2));
-                }
+                #define DECODE_TO_LIN(cc) pow(float3(float(((cc) >> 16u) & 0xFFu), \
+                                                    float(((cc) >>  8u) & 0xFFu), \
+                                                    float( (cc)         & 0xFFu)) / 255.0, \
+                                              float3(2.2))
+                lut0 = DECODE_TO_LIN(neg_seg0);
+                lut1 = DECODE_TO_LIN(pos_seg0);
+                lut2 = DECODE_TO_LIN(neg_seg1);
+                lut3 = DECODE_TO_LIN(pos_seg1);
+                #undef DECODE_TO_LIN
             }
 
             // Boundary-sweep area accumulation. Walk the pixel boundary
@@ -1022,7 +1026,11 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                         float area = abs(uj.x * vj.y - uj.y * vj.x) * 0.5;
                         if (area >= 1e-9) {
                             int idx = (sa_m > 0.0 ? 1 : 0) | (sb_m > 0.0 ? 2 : 0);
-                            sum_lin += lut[idx] * area;
+                            float3 lut_sel = (idx == 0) ? lut0
+                                           : (idx == 1) ? lut1
+                                           : (idx == 2) ? lut2
+                                                        : lut3;
+                            sum_lin += lut_sel * area;
                             total_area += area;
                         }
                         u = v;
@@ -1038,7 +1046,11 @@ void main(uint3 tid: SV_DispatchThreadID, uint3 ltid: SV_GroupThreadID, uint3 gi
                     float area = abs(uj.x * vj.y - uj.y * vj.x) * 0.5;
                     if (area >= 1e-9) {
                         int idx = (sa_m > 0.0 ? 1 : 0) | (sb_m > 0.0 ? 2 : 0);
-                        sum_lin += lut[idx] * area;
+                        float3 lut_sel = (idx == 0) ? lut0
+                                       : (idx == 1) ? lut1
+                                       : (idx == 2) ? lut2
+                                                    : lut3;
+                        sum_lin += lut_sel * area;
                         total_area += area;
                     }
                 }

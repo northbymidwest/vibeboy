@@ -185,14 +185,17 @@ int nbr_cp_idx(int cx, int cy, int from_dir) {
             if (target_side != 0 && target_side != 2) return base + 1;
         } else if (t_count == 3u) {
             // Collect the 3 boundary directions and select through-pair
-            // using paper's shading/contour + angle heuristic.
-            int dirs[3]; int di = 0;
-            if (t_bnd_n) dirs[di++] = 0;
-            if (t_bnd_e) dirs[di++] = 1;
-            if (t_bnd_s) dirs[di++] = 2;
-            if (t_bnd_w) dirs[di++] = 3;
+            // using paper's shading/contour + angle heuristic. Materialize
+            // as 3 scalar ints (N→E→S→W order) instead of a dynamically-
+            // written array. int3 would 16-byte align and pair with main's
+            // copy when this fn inlines, spilling 32 bytes.
+            int d0, d1, d2;
+            if (!t_bnd_n)      { d0 = 1; d1 = 2; d2 = 3; }
+            else if (!t_bnd_e) { d0 = 0; d1 = 2; d2 = 3; }
+            else if (!t_bnd_s) { d0 = 0; d1 = 1; d2 = 3; }
+            else               { d0 = 0; d1 = 1; d2 = 2; }
             int pair0, pair1;
-            select_tjunction_pair(cx, cy, dirs[0], dirs[1], dirs[2], pair0, pair1);
+            select_tjunction_pair(cx, cy, d0, d1, d2, pair0, pair1);
             int target_side = from_dir ^ 2;
             if (target_side != pair0 && target_side != pair1) return base + 1;
         }
@@ -447,18 +450,31 @@ void main(uint3 tid: SV_DispatchThreadID) {
 
     } else if (bnd_count == 3u) {
         // Paper Section 3.3: select through-pair via shading/contour + angle heuristic.
-        int dirs[3]; int di = 0;
-        if (bnd_n) dirs[di++] = 0;
-        if (bnd_e) dirs[di++] = 1;
-        if (bnd_s) dirs[di++] = 2;
-        if (bnd_w) dirs[di++] = 3;
+        // Exactly 3 of {bnd_n, bnd_e, bnd_s, bnd_w} are set. Materialize the
+        // three set directions as scalars (preserving N→E→S→W order) so the
+        // compiler can hold them in registers — a dynamically-written array
+        // would spill to scratch. Plain ints rather than int3, since Metal
+        // aligns int3 to 16 bytes (4-byte pad) and would spill 32 bytes when
+        // a second copy from inlined nbr_cp_idx coexists.
+        int d0, d1, d2;
+        if (!bnd_n)      { d0 = 1; d1 = 2; d2 = 3; }
+        else if (!bnd_e) { d0 = 0; d1 = 2; d2 = 3; }
+        else if (!bnd_s) { d0 = 0; d1 = 1; d2 = 3; }
+        else             { d0 = 0; d1 = 1; d2 = 2; }
         int t_prev_dir, t_next_dir;
-        select_tjunction_pair(int(cx), int(cy), dirs[0], dirs[1], dirs[2],
+        select_tjunction_pair(int(cx), int(cy), d0, d1, d2,
                               t_prev_dir, t_next_dir);
 
-        int idx_arr[4] = { n_idx, e_idx, s_idx, w_idx };
-        int prev = idx_arr[t_prev_dir];
-        int next = idx_arr[t_next_dir];
+        // Select prev/next index by direction. Inline select tree avoids
+        // a 4-int array indexed by a runtime value.
+        int prev = (t_prev_dir == 0) ? n_idx
+                 : (t_prev_dir == 1) ? e_idx
+                 : (t_prev_dir == 2) ? s_idx
+                                     : w_idx;
+        int next = (t_next_dir == 0) ? n_idx
+                 : (t_next_dir == 1) ? e_idx
+                 : (t_next_dir == 2) ? s_idx
+                                     : w_idx;
 
         if (prev >= 0 && next >= 0) {
             int prev_slot = prev / 2;

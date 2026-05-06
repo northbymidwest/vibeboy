@@ -268,13 +268,33 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
         length
     };
 
+    // Pack 64 labels (each 0/1/2, 2 bits) into [u32; 4] (128 bits). Mirrors
+    // the shader's uint4 packing: idx = row*8 + col, uint_idx = idx / 16,
+    // shift = (idx % 16) * 2.
+    let get_label = |labels: &[u32; 4], row: i32, col: i32| -> u32 {
+        let idx = row * 8 + col;
+        let uint_idx = (idx >> 4) as usize;
+        let shift = (idx & 15) << 1;
+        (labels[uint_idx] >> shift) & 3
+    };
+    let set_label = |labels: &mut [u32; 4], row: i32, col: i32, value: u32| {
+        let idx = row * 8 + col;
+        let uint_idx = (idx >> 4) as usize;
+        let shift = (idx & 15) << 1;
+        let clear = !(3u32 << shift);
+        let v = (value & 3) << shift;
+        labels[uint_idx] = (labels[uint_idx] & clear) | v;
+    };
+
     // Simultaneous A/B component labeling in 8x8 window
     let sparse_pixel_sizes = |bx: usize, by: usize| -> (u32, u32) {
-        let mut labels = [0i32; 64];
-        labels[3 * 8 + 3] = 1;
-        labels[3 * 8 + 4] = 2;
-        labels[4 * 8 + 3] = 2;
-        labels[4 * 8 + 4] = 1;
+        // Seeds at (col,row) ∈ {(3,3),(4,4)}=1 (main/backslash) and
+        // {(4,3),(3,4)}=2 (anti/slash):
+        //   idx 27 (row 3, col 3) → uint_idx 1, shift 22 → 1u << 22 in [1]
+        //   idx 28 (row 3, col 4) → uint_idx 1, shift 24 → 2u << 24 in [1]
+        //   idx 35 (row 4, col 3) → uint_idx 2, shift  6 → 2u <<  6 in [2]
+        //   idx 36 (row 4, col 4) → uint_idx 2, shift  8 → 1u <<  8 in [2]
+        let mut labels: [u32; 4] = [0, (1 << 22) | (2 << 24), (2 << 6) | (1 << 8), 0];
 
         let mut size_a = 0u32;
         let mut size_b = 0u32;
@@ -283,29 +303,28 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
         let drow: [i32; 8] = [-1, 0, 1, 1, 1, 0, -1, -1];
         let dirs: [u32; 8] = [DIR_NW, DIR_W, DIR_SW, DIR_S, DIR_SE, DIR_E, DIR_NE, DIR_N];
 
-        let mut q_col = [0u32; 64];
-        let mut q_row = [0u32; 64];
-        let mut head = 0usize;
-        let mut tail = 0usize;
+        // BFS frontier: bit i set = cell idx i (= row*8+col) needs processing.
+        // 64 bits = [u32; 2]. Each cell enters/leaves the frontier exactly once.
+        //   bit 27 (row 3, col 3) and bit 28 (row 3, col 4) → frontier[0]
+        //   bit 35 (row 4, col 3) and bit 36 (row 4, col 4) → frontier[1] at
+        //                                                     bit 3 / 4.
+        let mut frontier: [u32; 2] = [(1 << 27) | (1 << 28), (1 << 3) | (1 << 4)];
 
-        q_col[tail] = 3;
-        q_row[tail] = 3;
-        tail += 1;
-        q_col[tail] = 4;
-        q_row[tail] = 3;
-        tail += 1;
-        q_col[tail] = 4;
-        q_row[tail] = 4;
-        tail += 1;
-        q_col[tail] = 3;
-        q_row[tail] = 4;
-        tail += 1;
+        while frontier[0] != 0 || frontier[1] != 0 {
+            // Pop the lowest set bit from frontier.
+            let idx: i32 = if frontier[0] != 0 {
+                let lo = frontier[0].trailing_zeros() as i32;
+                frontier[0] &= !(1u32 << lo);
+                lo
+            } else {
+                let hi = frontier[1].trailing_zeros() as i32;
+                frontier[1] &= !(1u32 << hi);
+                32 + hi
+            };
 
-        while head < tail {
-            let col = q_col[head] as i32;
-            let row = q_row[head] as i32;
-            head += 1;
-            let label = labels[row as usize * 8 + col as usize];
+            let row = idx >> 3;
+            let col = idx & 7;
+            let label = get_label(&labels, row, col) as i32;
 
             let px = bx as i32 + col - 3;
             let py = by as i32 + row - 3;
@@ -324,7 +343,7 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
                 if nc < 0 || nc >= 8 || nr < 0 || nr >= 8 {
                     continue;
                 }
-                if labels[nr as usize * 8 + nc as usize] != 0 {
+                if get_label(&labels, nr, nc) != 0 {
                     continue;
                 }
 
@@ -334,17 +353,19 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
                     continue;
                 }
 
-                labels[nr as usize * 8 + nc as usize] = label;
+                set_label(&mut labels, nr, nc, label as u32);
                 if label == 1 {
                     size_a += 1;
                 } else {
                     size_b += 1;
                 }
 
-                if tail < 64 {
-                    q_col[tail] = nc as u32;
-                    q_row[tail] = nr as u32;
-                    tail += 1;
+                // Set the new cell's bit in the frontier.
+                let n_idx = nr * 8 + nc;
+                if n_idx < 32 {
+                    frontier[0] |= 1u32 << n_idx;
+                } else {
+                    frontier[1] |= 1u32 << (n_idx - 32);
                 }
             }
         }
@@ -579,14 +600,16 @@ fn build_cell_graph(
                 }
             } else if t_count == 3 {
                 // Collect the 3 boundary directions and select through-pair
-                // using paper's shading/contour + angle heuristic.
-                let mut dirs = [0i32; 3];
-                let mut di = 0;
-                if t_bnd_n { dirs[di] = 0; di += 1; }
-                if t_bnd_e { dirs[di] = 1; di += 1; }
-                if t_bnd_s { dirs[di] = 2; di += 1; }
-                if t_bnd_w { dirs[di] = 3; }
-                let (pair0, pair1) = select_tjunction_pair(cx, cy, dirs[0], dirs[1], dirs[2]);
+                // using paper's shading/contour + angle heuristic. Materialize
+                // as scalars (N→E→S→W order) instead of a dynamically-written
+                // array — mirrors the shader, which would otherwise spill to
+                // scratch on GPU.
+                let (d0, d1, d2): (i32, i32, i32) =
+                    if !t_bnd_n { (1, 2, 3) }
+                    else if !t_bnd_e { (0, 2, 3) }
+                    else if !t_bnd_s { (0, 1, 3) }
+                    else { (0, 1, 2) };
+                let (pair0, pair1) = select_tjunction_pair(cx, cy, d0, d1, d2);
                 let target_side = from_dir ^ 2;
                 if target_side != pair0 && target_side != pair1 {
                     return base + 1;
@@ -1137,17 +1160,19 @@ fn build_cell_graph(
                 );
             } else if bnd_count == 3 {
                 // Paper Section 3.3: select through-pair via shading/contour + angle heuristic.
-                let mut dirs = [0i32; 3];
-                let mut di = 0;
-                if bnd_n { dirs[di] = 0; di += 1; }
-                if bnd_e { dirs[di] = 1; di += 1; }
-                if bnd_s { dirs[di] = 2; di += 1; }
-                if bnd_w { dirs[di] = 3; }
-                let (t_prev_dir, t_next_dir) = select_tjunction_pair(icx, icy, dirs[0], dirs[1], dirs[2]);
+                // Materialize the 3 set directions as scalars (N→E→S→W order)
+                // instead of a dynamically-written array — mirrors the shader,
+                // which would otherwise spill to scratch on GPU.
+                let (d0, d1, d2): (i32, i32, i32) =
+                    if !bnd_n { (1, 2, 3) }
+                    else if !bnd_e { (0, 2, 3) }
+                    else if !bnd_s { (0, 1, 3) }
+                    else { (0, 1, 2) };
+                let (t_prev_dir, t_next_dir) = select_tjunction_pair(icx, icy, d0, d1, d2);
 
-                let idx_arr = [n_idx, e_idx, s_idx, w_idx];
-                let prev = idx_arr[t_prev_dir as usize];
-                let next = idx_arr[t_next_dir as usize];
+                // Select prev/next index by direction (mirrors shader select tree).
+                let prev = match t_prev_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
+                let next = match t_next_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
 
                 // T-junction position correction
                 if prev >= 0 && next >= 0 {
@@ -1832,6 +1857,32 @@ fn closest_on_segment(
     (t, dx * dx + dy * dy)
 }
 
+// One Newton step on a quadratic D'(t) = c2·t² + c1·t + c0. Polishes a
+// closed-form quadratic root to ~1 ULP, skipping when the derivative is
+// small or the step would diverge (rare near-double-root cases).
+#[inline(always)]
+fn polish_root_q(t: f32, c2: f32, c1: f32, c0: f32) -> f32 {
+    let dp = c2.mul_add(t, c1).mul_add(t, c0);
+    let ddp = (2.0 * c2).mul_add(t, c1);
+    if ddp.abs() > 1e-10 {
+        let step = dp / ddp;
+        if step.abs() < 0.5 { return t - step; }
+    }
+    t
+}
+
+// One Newton step on a cubic D'(t) = c3·t³ + c2·t² + c1·t + c0.
+#[inline(always)]
+fn polish_root_c(t: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> f32 {
+    let dp = c3.mul_add(t, c2).mul_add(t, c1).mul_add(t, c0);
+    let ddp = (3.0 * c3).mul_add(t, 2.0 * c2).mul_add(t, c1);
+    if ddp.abs() > 1e-10 {
+        let step = dp / ddp;
+        if step.abs() < 0.5 { return t - step; }
+    }
+    t
+}
+
 /// Uses precomputed polynomial coefficients: B(t) = a*t² + b*t + c.
 ///
 /// Exact cubic solver: D(t) = |B(t)-pt|² is degree 4, D'(t) is cubic.
@@ -1879,12 +1930,15 @@ fn closest_on_span_poly(
             // This avoids catastrophic cancellation when c2 is small
             // (near-linear D') and the standard `(-c1 ± sq)/(2c2)` form
             // subtracts two nearly-equal numbers.
-            let disc = c1 * c1 - 4.0 * c2 * c0;
+            // FMA on the discriminant itself: single-rounding `b² - 4ac`
+            // recovers ~1 extra bit and prevents disc from rounding to the
+            // wrong sign at near-double-root configurations.
+            let disc = c1.mul_add(c1, -4.0 * c2 * c0);
             if disc >= 0.0 {
                 let sq = disc.sqrt();
                 let q = -0.5 * (c1 + c1.signum() * sq);
-                let t1 = q / c2;
-                let t2 = c0 / q;
+                let t1 = polish_root_c(q / c2, c3, c2, c1, c0);
+                let t2 = polish_root_q(c0 / q, c2, c1, c0);
                 for t in [t1, t2] {
                     if t > 0.0 && t < 1.0 {
                         let d = eval_d2(t);
@@ -1894,7 +1948,7 @@ fn closest_on_span_poly(
             }
         } else if c1.abs() > 1e-12 {
             // Linear: c1*t + c0 = 0
-            let t = -c0 / c1;
+            let t = polish_root_c(-c0 / c1, c3, c2, c1, c0);
             if t > 0.0 && t < 1.0 {
                 let d = eval_d2(t);
                 if d < best_d2 { best_d2 = d; best_t = t; }
@@ -1909,25 +1963,30 @@ fn closest_on_span_poly(
         let q = (2.0 * c2 * c2 * c2 - 9.0 * c3 * c2 * c1 + 27.0 * c3 * c3 * c0)
             / (27.0 * c3 * c3 * c3);
 
-        let disc = q * q / 4.0 + p * p * p / 27.0;
+        // FMA on q²/4 + p³/27: single-rounding sum, one extra bit at the
+        // disc≈0 boundary (near triple root) where the two terms cancel.
+        let disc = (q * 0.5).mul_add(q * 0.5, p * p * p / 27.0);
 
         if disc > 1e-12 {
             // One real root
             let sq = disc.sqrt();
             let u = (-q / 2.0 + sq).cbrt() + (-q / 2.0 - sq).cbrt();
-            let t = u + shift;
+            let t = polish_root_c(u + shift, c3, c2, c1, c0);
             if t > 0.0 && t < 1.0 {
                 let d = eval_d2(t);
                 if d < best_d2 { best_d2 = d; best_t = t; }
             }
         } else {
-            // Three real roots (trigonometric method)
-            let r = (-p * p * p / 27.0).max(0.0).sqrt();
-            let phi = if r.abs() < 1e-15 { 0.0 } else { (-q / (2.0 * r)).clamp(-1.0, 1.0).acos() };
-            let cube_r = r.cbrt() * 2.0;
+            // Three real roots (trigonometric). cube_r = 2·sqrt(-p/3) is
+            // mathematically equal to 2·cbrt(sqrt(-p³/27)) but reaches the
+            // value via one sqrt instead of (p*p*p, sqrt, cbrt) — faster
+            // *and* avoids the precision loss of cbrt-on-a-sqrt.
+            let r = (-p / 3.0).max(0.0).sqrt();
+            let cos_arg = if r > 1e-20 { (-q * 0.5) / (r * r * r) } else { 0.0 };
+            let phi = cos_arg.clamp(-1.0, 1.0).acos();
             for k in 0..3 {
                 let angle = (phi + std::f32::consts::TAU * k as f32) / 3.0;
-                let t = cube_r * angle.cos() + shift;
+                let t = polish_root_c(2.0 * r * angle.cos() + shift, c3, c2, c1, c0);
                 if t > 0.0 && t < 1.0 {
                     let d = eval_d2(t);
                     if d < best_d2 { best_d2 = d; best_t = t; }

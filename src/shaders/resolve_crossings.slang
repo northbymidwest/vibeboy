@@ -72,10 +72,7 @@ uint valence_mask(uint x, uint y) {
 
 // Count bits in valence mask
 uint valence_count(uint mask) {
-    uint c = 0u;
-    uint m = mask;
-    while (m != 0u) { c += m & 1u; m >>= 1u; }
-    return c;
+    return uint(countbits(mask));
 }
 
 // Walk a chain of valence-2 nodes using XOR direction tracking.
@@ -123,61 +120,107 @@ uint walk_chain(uint sx, uint sy, uint fx, uint fy) {
     return length;
 }
 
+// Pack 64 labels (each 0/1/2, 2 bits) into a uint4 (128 bits). Keeps the
+// labels array in registers instead of spilling 256 bytes of int[64] to
+// scratch. idx = row * 8 + col; uint_idx = idx / 16; shift = (idx % 16) * 2.
+uint get_label(uint4 labels, int row, int col) {
+    int idx = row * 8 + col;
+    int uint_idx = idx >> 4;
+    int shift = (idx & 15) << 1;
+    uint v;
+    if (uint_idx == 0)      v = labels.x;
+    else if (uint_idx == 1) v = labels.y;
+    else if (uint_idx == 2) v = labels.z;
+    else                    v = labels.w;
+    return (v >> shift) & 3u;
+}
+
+void set_label(inout uint4 labels, int row, int col, uint value) {
+    int idx = row * 8 + col;
+    int uint_idx = idx >> 4;
+    int shift = (idx & 15) << 1;
+    uint clear = ~(3u << shift);
+    uint v = (value & 3u) << shift;
+    if (uint_idx == 0)      labels.x = (labels.x & clear) | v;
+    else if (uint_idx == 1) labels.y = (labels.y & clear) | v;
+    else if (uint_idx == 2) labels.z = (labels.z & clear) | v;
+    else                    labels.w = (labels.w & clear) | v;
+}
+
 // Simultaneous A/B component labeling in 8x8 window around the crossing.
 void sparse_pixel_sizes(uint bx, uint by, out uint sizeA, out uint sizeB) {
-    int labels[64];
-    for (int i = 0; i < 64; i++) labels[i] = 0;
-    labels[3*8+3] = 1;
-    labels[3*8+4] = 2;
-    labels[4*8+3] = 2;
-    labels[4*8+4] = 1;
+    // 8x8 labels packed into uint4. Seeds at (col,row) ∈ {(3,3),(4,4)}=1
+    // (main/backslash) and {(4,3),(3,4)}=2 (anti/slash):
+    //   idx 27 (row 3, col 3) → uint_idx 1, shift 22 → 1u << 22 in .y
+    //   idx 28 (row 3, col 4) → uint_idx 1, shift 24 → 2u << 24 in .y
+    //   idx 35 (row 4, col 3) → uint_idx 2, shift  6 → 2u <<  6 in .z
+    //   idx 36 (row 4, col 4) → uint_idx 2, shift  8 → 1u <<  8 in .z
+    uint4 labels = uint4(
+        0u,
+        (1u << 22) | (2u << 24),
+        (2u <<  6) | (1u <<  8),
+        0u
+    );
 
     sizeA = 0u;
     sizeB = 0u;
 
-    uint q_col[64], q_row[64];
-    uint head = 0u, tail = 0u;
-    q_col[tail] = 3u; q_row[tail] = 3u; tail++;
-    q_col[tail] = 4u; q_row[tail] = 3u; tail++;
-    q_col[tail] = 4u; q_row[tail] = 4u; tail++;
-    q_col[tail] = 3u; q_row[tail] = 4u; tail++;
+    // BFS frontier: bit i set = cell idx i (= row*8+col) needs processing.
+    // 64 bits = uint2, lives in registers. Each cell enters/leaves the
+    // frontier exactly once — same total work as a queue, but no scratch.
+    //   bit 27 (row 3, col 3) and bit 28 (row 3, col 4) → frontier.x
+    //   bit 35 (row 4, col 3) and bit 36 (row 4, col 4) → frontier.y at
+    //                                                     bit 3 / 4.
+    uint2 frontier = uint2(
+        (1u << 27) | (1u << 28),
+        (1u <<  3) | (1u <<  4)
+    );
 
     static const int dcol[8] = { -1, -1, -1, 0, 1, 1, 1, 0 };
     static const int drow[8] = { -1, 0, 1, 1, 1, 0, -1, -1 };
     static const uint dirs[8] = { DIR_NW, DIR_W, DIR_SW, DIR_S, DIR_SE, DIR_E, DIR_NE, DIR_N };
 
-    while (head < tail) {
-        uint col = q_col[head];
-        uint row = q_row[head];
-        head++;
-        int label = labels[row*8u+col];
+    while (frontier.x != 0u || frontier.y != 0u) {
+        // Pop the lowest set bit from frontier.
+        int idx;
+        if (frontier.x != 0u) {
+            idx = firstbitlow(frontier.x);
+            frontier.x &= ~(1u << uint(idx));
+        } else {
+            int hi = firstbitlow(frontier.y);
+            frontier.y &= ~(1u << uint(hi));
+            idx = 32 + hi;
+        }
 
-        int px = int(bx) + int(col) - 3;
-        int py = int(by) + int(row) - 3;
+        int row = idx >> 3;
+        int col = idx & 7;
+        int label = int(get_label(labels, row, col));
+
+        int px = int(bx) + col - 3;
+        int py = int(by) + row - 3;
         if (px < 0 || py < 0 || px >= int(u.img_w) || py >= int(u.img_h)) continue;
 
         uint vmask = valence_mask(uint(px), uint(py));
 
         for (uint d = 0u; d < 8u; d++) {
             if ((vmask & dirs[d]) == 0u) continue;
-            int nc = int(col) + dcol[d];
-            int nr = int(row) + drow[d];
+            int nc = col + dcol[d];
+            int nr = row + drow[d];
             if (nc < 0 || nc >= 8 || nr < 0 || nr >= 8) continue;
-            if (labels[nr*8+nc] != 0) continue;
+            if (get_label(labels, nr, nc) != 0u) continue;
 
             int npx = int(bx) + nc - 3;
             int npy = int(by) + nr - 3;
             if (npx < 0 || npy < 0 || npx >= int(u.img_w) || npy >= int(u.img_h)) continue;
 
-            labels[nr*8+nc] = label;
+            set_label(labels, nr, nc, uint(label));
             if (label == 1) sizeA++;
             else sizeB++;
 
-            if (tail < 64u) {
-                q_col[tail] = uint(nc);
-                q_row[tail] = uint(nr);
-                tail++;
-            }
+            // Set the new cell's bit in the frontier.
+            int n_idx = nr * 8 + nc;
+            if (n_idx < 32) frontier.x |= 1u << uint(n_idx);
+            else            frontier.y |= 1u << uint(n_idx - 32);
         }
     }
 }
