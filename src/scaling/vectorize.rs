@@ -10,9 +10,9 @@
 //!
 //! Output is pixel-identical to the GPU pipeline.
 
-const IS_CORNER: u32 = 16;
-const IS_TJUNCTION: u32 = 32;
-const IS_CROSSING: u32 = 64;
+pub const IS_CORNER: u32 = 16;
+pub const IS_TJUNCTION: u32 = 32;
+pub const IS_CROSSING: u32 = 64;
 /// Chain endpoint (prev or next neighbor is -1). Set by write_cp/write_cp_full.
 /// The rasterizer uses clamped Bezier boundaries when an adjacent CP carries
 /// this bit, so the final span ends exactly at the endpoint position with a
@@ -1994,14 +1994,14 @@ struct CpData {
 }
 
 #[inline(always)]
-fn get_px_color(pixels: &[u32], img_w: usize, img_h: usize, px: i32, py: i32) -> u32 {
+pub fn get_px_color(pixels: &[u32], img_w: usize, img_h: usize, px: i32, py: i32) -> u32 {
     let px = px.clamp(0, img_w as i32 - 1) as usize;
     let py = py.clamp(0, img_h as i32 - 1) as usize;
     pixels[py * img_w + px]
 }
 
 #[inline(always)]
-fn get_edge_colors(
+pub fn get_edge_colors(
     pixels: &[u32], img_w: usize, img_h: usize,
     icx: i32, icy: i32, dir: i32,
 ) -> (u32, u32) {

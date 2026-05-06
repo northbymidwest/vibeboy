@@ -229,7 +229,7 @@ pub fn cmd_screenshot(
     }
 }
 
-pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool) {
+pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool, dump_cps: Option<&str>) {
     let img = image::open(input).unwrap_or_else(|e| {
         eprintln!("Failed to open image '{}': {}", input.display(), e);
         std::process::exit(1);
@@ -246,6 +246,10 @@ pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool) {
             0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
         })
         .collect();
+
+    if let Some(path) = dump_cps {
+        dump_cp_data(&pixels, width, height, path);
+    }
 
     vectorize_and_save(&pixels, width, height, out, "vectorize", scale, gpu);
 
@@ -269,7 +273,110 @@ pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool) {
     }
 }
 
-use vibeboy::scaling::vectorize::IS_ENDPOINT;
+use vibeboy::scaling::vectorize::{IS_CORNER, IS_CROSSING, IS_ENDPOINT, IS_TJUNCTION};
+
+/// Decode a flag bitfield to a JSON array of named bits. Returns "[]" if no
+/// known bits are set. Slot bits (1=junction, 2=interior) are emitted as
+/// "JUNCTION" or "INTERIOR" so the caller can read intent without knowing
+/// the encoding.
+fn flag_names(flag: u32) -> String {
+    let mut names: Vec<&'static str> = Vec::new();
+    match flag & 3 {
+        1 => names.push("JUNCTION"),
+        2 => names.push("INTERIOR"),
+        _ => {}
+    }
+    if flag & IS_CORNER != 0 { names.push("CORNER"); }
+    if flag & IS_TJUNCTION != 0 { names.push("TJUNCTION"); }
+    if flag & IS_CROSSING != 0 { names.push("CROSSING"); }
+    if flag & IS_ENDPOINT != 0 { names.push("ENDPOINT"); }
+    let mut s = String::from("[");
+    for (i, n) in names.iter().enumerate() {
+        if i > 0 { s.push_str(", "); }
+        s.push('"');
+        s.push_str(n);
+        s.push('"');
+    }
+    s.push(']');
+    s
+}
+
+/// Format an ARGB u32 as a `"#RRGGBB"` hex string.
+fn argb_hex(c: u32) -> String {
+    format!("\"#{:02X}{:02X}{:02X}\"", (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
+}
+
+/// Format an edge's (left, right) colors. The two pixels straddle the edge in
+/// the direction the rasterizer uses for `resolve_color` / `build_aa_line`.
+/// Returns `null` if `dir < 0` (inactive edge).
+fn edge_colors_json(pixels: &[u32], w: usize, h: usize, icx: i32, icy: i32, dir: i32) -> String {
+    if dir < 0 { return String::from("null"); }
+    let (l, r) = vibeboy::scaling::vectorize::get_edge_colors(pixels, w, h, icx, icy, dir);
+    format!("[{}, {}]", argb_hex(l), argb_hex(r))
+}
+
+/// Dump every control point's data to a JSON file (or stdout when path == "-").
+/// Emits one record per CP with: index, position, original position, neighbors
+/// (prev_ci, next_ci, prev_dir, next_dir), raw flag bits + decoded names,
+/// crossing_t, and the (left, right) source-pixel colors straddling the prev
+/// and next edges (the inputs the rasterizer feeds into resolve_color / AA).
+/// Inactive CPs (flag == 0) are included so the output's index matches
+/// `VectorizeData.positions[ci*2..]` 1:1.
+fn dump_cp_data(pixels: &[u32], w: usize, h: usize, path: &str) {
+    use std::io::Write;
+    let data = vibeboy::scaling::vectorize::vectorize(pixels, w, h);
+    let num_cps = data.flags.len();
+    let corners_w = data.img_w + 1;
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{{\n  \"img_w\": {}, \"img_h\": {}, \"num_cps\": {},\n  \"control_points\": [\n",
+        data.img_w, data.img_h, num_cps,
+    ));
+    for ci in 0..num_cps {
+        let px = data.positions[ci * 2];
+        let py = data.positions[ci * 2 + 1];
+        let ox = data.orig_positions[ci * 2];
+        let oy = data.orig_positions[ci * 2 + 1];
+        let prev_ci = data.neighbors[ci * 4];
+        let next_ci = data.neighbors[ci * 4 + 1];
+        let prev_dir = data.neighbors[ci * 4 + 2];
+        let next_dir = data.neighbors[ci * 4 + 3];
+        let flag = data.flags[ci];
+        let crossing_t = data.crossing_t[ci];
+        // Corner coordinates for this CP (matches `read_resolve_data` in
+        // both shader and CPU mirror: every 2 CPs share a corner slot).
+        let icx = (ci / 2) % corners_w;
+        let icy = (ci / 2) / corners_w;
+        let prev_edge = edge_colors_json(pixels, data.img_w, data.img_h, icx as i32, icy as i32, prev_dir);
+        let next_edge = edge_colors_json(pixels, data.img_w, data.img_h, icx as i32, icy as i32, next_dir);
+        let comma = if ci + 1 == num_cps { "" } else { "," };
+        out.push_str(&format!(
+            "    {{\"ci\": {}, \"pos\": [{:.6}, {:.6}], \"orig_pos\": [{:.6}, {:.6}], \
+             \"prev_ci\": {}, \"next_ci\": {}, \"prev_dir\": {}, \"next_dir\": {}, \
+             \"flag\": {}, \"flag_names\": {}, \"crossing_t\": {:.6}, \
+             \"icx\": {}, \"icy\": {}, \"prev_edge_colors\": {}, \"next_edge_colors\": {}}}{}\n",
+            ci, px, py, ox, oy, prev_ci, next_ci, prev_dir, next_dir,
+            flag, flag_names(flag), crossing_t, icx, icy, prev_edge, next_edge, comma,
+        ));
+    }
+    out.push_str("  ]\n}\n");
+
+    if path == "-" {
+        print!("{}", out);
+    } else {
+        let mut f = std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("Failed to create CP dump file '{}': {}", path, e);
+            std::process::exit(1);
+        });
+        f.write_all(out.as_bytes()).unwrap_or_else(|e| {
+            eprintln!("Failed to write CP dump: {}", e);
+            std::process::exit(1);
+        });
+        let active = data.flags.iter().filter(|&&f| f != 0).count();
+        eprintln!("Dumped {} CPs ({} active) to {}", num_cps, active, path);
+    }
+}
 
 /// Decide whether a CP should render its span (mirrors `rasterize`'s filter:
 /// skip CPs whose chain has no interior CP unless this is a 2-CP chain, and

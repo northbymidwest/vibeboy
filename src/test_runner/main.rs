@@ -85,6 +85,10 @@ enum Command {
         /// Force CPU-only (overrides --gpu).
         #[arg(long)]
         cpu_filter: bool,
+        /// Dump every control point's data (position, neighbors, flags,
+        /// crossing_t) to this path as JSON. Use "-" for stdout.
+        #[arg(long)]
+        dump_cps: Option<String>,
     },
     /// Generate a built-in boot ROM
     GenBootrom {
@@ -258,8 +262,8 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, scale, gpu, cpu_filter } => {
-            commands::cmd_vectorize(&path, &out, scale, gpu && !cpu_filter);
+        Command::Vectorize { path, out, scale, gpu, cpu_filter, dump_cps } => {
+            commands::cmd_vectorize(&path, &out, scale, gpu && !cpu_filter, dump_cps.as_deref());
         }
         Command::Analyze {
             path,
