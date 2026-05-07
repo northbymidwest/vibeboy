@@ -499,7 +499,23 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
         draw_span(&mut buf, pp, cp, np, color);
     }
 
-    // Mark CPs with small dots
+    // Mark pre-optimization CPs with white open squares (outline only)
+    for ci in 0..num_cps {
+        let flag = data.flags[ci];
+        if flag == 0 { continue; }
+        let op = (data.orig_positions[ci*2], data.orig_positions[ci*2+1]);
+        let px = (op.0 * pps).round() as i32;
+        let py = (op.1 * pps).round() as i32;
+        let r: i32 = 3;
+        for d in -r..=r {
+            plot(&mut buf, px+d, py-r, [255, 255, 255]);
+            plot(&mut buf, px+d, py+r, [255, 255, 255]);
+            plot(&mut buf, px-r, py+d, [255, 255, 255]);
+            plot(&mut buf, px+r, py+d, [255, 255, 255]);
+        }
+    }
+
+    // Mark post-optimization CPs with small filled dots
     for ci in 0..num_cps {
         let flag = data.flags[ci];
         if flag == 0 { continue; }
