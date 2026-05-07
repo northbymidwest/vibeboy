@@ -19,32 +19,32 @@ struct Uniforms {
     uint _pad1;
     uint _pad2;
 };
-[[vk::binding(0, 1)]]
+[[vk::binding(0, 2)]]
 #ifdef DXIL_TARGET
 ConstantBuffer<Uniforms> u : register(b0, space2);
 #else
 ConstantBuffer<Uniforms> u;
 #endif
 
-[[vk::binding(1, 0)]]
+[[vk::binding(0, 0)]]
 #ifdef DXIL_TARGET
 StructuredBuffer<int> neighbor_data : register(t0, space0);
 #else
 StructuredBuffer<int> neighbor_data;
 #endif
-[[vk::binding(2, 0)]]
+[[vk::binding(1, 0)]]
 #ifdef DXIL_TARGET
 StructuredBuffer<uint> node_flags : register(t1, space0);
 #else
 StructuredBuffer<uint> node_flags;
 #endif
-[[vk::binding(3, 0)]]
+[[vk::binding(2, 0)]]
 #ifdef DXIL_TARGET
 StructuredBuffer<float> positions : register(t2, space0);
 #else
 StructuredBuffer<float> positions;
 #endif
-[[vk::binding(0, 0)]]
+[[vk::binding(0, 1)]]
 #ifdef DXIL_TARGET
 RWStructuredBuffer<float> crossing_t : register(u0, space1);
 #else

@@ -16,26 +16,26 @@ struct Uniforms {
     uint _pad1;
     uint _pad2;
 };
-[[vk::binding(0, 1)]]
+[[vk::binding(0, 2)]]
 #ifdef DXIL_TARGET
 ConstantBuffer<Uniforms> u : register(b0, space2);
 #else
 ConstantBuffer<Uniforms> u;
 #endif
 
-[[vk::binding(1, 0)]]
+[[vk::binding(0, 0)]]
 #ifdef DXIL_TARGET
 StructuredBuffer<int> neighbor_data : register(t0, space0);
 #else
 StructuredBuffer<int> neighbor_data;
 #endif
-[[vk::binding(2, 0)]]
+[[vk::binding(1, 0)]]
 #ifdef DXIL_TARGET
 StructuredBuffer<uint> node_flags : register(t1, space0);
 #else
 StructuredBuffer<uint> node_flags;
 #endif
-[[vk::binding(0, 0)]]
+[[vk::binding(0, 1)]]
 #ifdef DXIL_TARGET
 RWStructuredBuffer<float> positions : register(u0, space1);
 #else
@@ -69,7 +69,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
     else if (!prev_is_end && next_is_end) { sp = 0.125; st = 0.625; sn = 0.25; }
     else { sp = 0.25;  st = 0.5;   sn = 0.25; }
 
-    float2 on_curve = sp * prev_pos + st * through + sn * next_pos;
+    float2 on_curve = float2(
+        fma(sp, prev_pos.x, fma(st, through.x, sn * next_pos.x)),
+        fma(sp, prev_pos.y, fma(st, through.y, sn * next_pos.y)));
     positions[stem * 2u] = on_curve.x;
     positions[stem * 2u + 1u] = on_curve.y;
 }
