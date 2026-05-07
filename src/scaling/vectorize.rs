@@ -1042,7 +1042,7 @@ fn build_cell_graph(
             }
 
             // No diagonal (or both kept): single CP
-            let mut pos = (cx as f32, cy as f32);
+            let pos = (cx as f32, cy as f32);
 
             let n_idx = if bnd_n { nbr_cp_idx(icx, icy - 1, 0) } else { -1 };
             let e_idx = if bnd_e { nbr_cp_idx(icx + 1, icy, 1) } else { -1 };
@@ -1174,19 +1174,10 @@ fn build_cell_graph(
                 let prev = match t_prev_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
                 let next = match t_next_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
 
-                // T-junction position correction
-                if prev >= 0 && next >= 0 {
-                    let prev_slot = prev / 2;
-                    let prev_cx = prev_slot % corners_w as i32;
-                    let prev_cy = prev_slot / corners_w as i32;
-                    let next_slot = next / 2;
-                    let next_cx = next_slot % corners_w as i32;
-                    let next_cy = next_slot / corners_w as i32;
-                    pos = (
-                        0.125 * prev_cx as f32 + 0.75 * cx as f32 + 0.125 * next_cx as f32,
-                        0.125 * prev_cy as f32 + 0.75 * cy as f32 + 0.125 * next_cy as f32,
-                    );
-                }
+                // Both slots stay at the grid corner. The stem CP gets snapped
+                // onto the rendered through-curve in update_tjunctions; storing
+                // a "corrected" position here would just bias the optimizer's
+                // positional energy toward an offset target.
 
                 write_cp_full(
                     &mut positions,

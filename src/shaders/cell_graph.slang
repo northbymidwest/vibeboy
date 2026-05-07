@@ -476,18 +476,10 @@ void main(uint3 tid: SV_DispatchThreadID) {
                  : (t_next_dir == 2) ? s_idx
                                      : w_idx;
 
-        if (prev >= 0 && next >= 0) {
-            int prev_slot = prev / 2;
-            int prev_cx = prev_slot % int(u.corners_w);
-            int prev_cy = prev_slot / int(u.corners_w);
-            int next_slot = next / 2;
-            int next_cx = next_slot % int(u.corners_w);
-            int next_cy = next_slot / int(u.corners_w);
-            pos = float2(
-                0.125 * float(prev_cx) + 0.75 * float(cx) + 0.125 * float(next_cx),
-                0.125 * float(prev_cy) + 0.75 * float(cy) + 0.125 * float(next_cy)
-            );
-        }
+        // Both slots stay at the grid corner. The stem CP gets snapped onto
+        // the rendered through-curve in update_tjunctions; storing a
+        // "corrected" position here would just bias the optimizer's
+        // positional energy toward an offset target.
 
         write_cp_full(base, pos, prev, next, 2u | IS_TJUNCTION, t_prev_dir, t_next_dir, int(cx), int(cy));
 
