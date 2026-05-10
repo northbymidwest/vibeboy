@@ -19,7 +19,6 @@ pub const IS_CROSSING: u32 = 64;
 /// real quadratic curve instead of a degenerate straight tail.
 pub const IS_ENDPOINT: u32 = 128;
 
-const NEWTON_ITER: i32 = 3;
 
 // Direction bitmask encoding (matches reference)
 const DIR_NW: u32 = 1;
@@ -487,6 +486,53 @@ fn build_cell_graph(
         g(2 * px + 1, 2 * py + 1)
     };
 
+    // True iff pixel (px, py) is topologically "isolated": after the
+    // similarity graph and resolve_crossings have run, the 4 corners around
+    // the candidate each emit a CP that participates in a 4-CP loop bounding
+    // just this pixel. Diagonal-resolved corners adjacent to such a pixel
+    // would otherwise contract toward a slot-shifted slot — we use this
+    // check to snap them back to the integer grid.
+    //
+    // Conditions:
+    //   1. All 4 cardinal neighbors are the same color, different from
+    //      candidate. (Diagonals can be anything, including same as
+    //      candidate.)
+    //   2. At each of the 4 corners around the candidate, the post-
+    //      resolve_crossings diagonal bit kept is the *cardinal-cardinal*
+    //      diagonal — i.e. the one connecting the uniform background. This
+    //      handles crossings (e.g. SE diagonal also being candidate-color)
+    //      where resolve_crossings has correctly picked the background
+    //      diagonal.
+    //
+    //      bit 0 = main (UL↔LR), bit 1 = anti (UR↔LL).
+    //      TL corner (cand at LR): need anti  (UR-LL = N↔W)
+    //      TR corner (cand at LL): need main  (UL-LR = N↔E)
+    //      BR corner (cand at UL): need anti  (UR-LL = E↔S)
+    //      BL corner (cand at UR): need main  (UL-LR = W↔S)
+    let is_isolated_pixel = |px: i32, py: i32| -> bool {
+        if px <= 0 || py <= 0
+            || px >= img_w as i32 - 1
+            || py >= img_h as i32 - 1
+        {
+            return false;
+        }
+        let cand = px_color(px, py);
+        let n = px_color(px, py - 1);
+        if n == cand { return false; }
+        let e = px_color(px + 1, py);
+        let s = px_color(px, py + 1);
+        let w = px_color(px - 1, py);
+        if n != e || n != s || n != w { return false; }
+        let diag_tl = g(2 * px,       2 * py);
+        let diag_tr = g(2 * (px + 1), 2 * py);
+        let diag_br = g(2 * (px + 1), 2 * (py + 1));
+        let diag_bl = g(2 * px,       2 * (py + 1));
+        (diag_tl & 2) != 0
+            && (diag_tr & 1) != 0
+            && (diag_br & 2) != 0
+            && (diag_bl & 1) != 0
+    };
+
     // Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
     let bnd_colors = |cx: i32, cy: i32, dir: i32| -> (u32, u32) {
         match dir {
@@ -856,7 +902,7 @@ fn build_cell_graph(
                 let cp1_alive = cp1_has_n || cp1_has_e;
 
                 if cp0_alive {
-                    let p0 = (cx as f32 - 0.25, cy as f32 + 0.25);
+                    let mut p0 = (cx as f32 - 0.25, cy as f32 + 0.25);
                     let prev0 = if cp0_has_s {
                         nbr_cp_idx(icx, icy + 1, 2)
                     } else {
@@ -877,6 +923,10 @@ fn build_cell_graph(
                             (w_pos.0 - p0.0, w_pos.1 - p0.1),
                         ) {
                             cp0_flag |= IS_CORNER;
+                            // has_main, cp0 (S+W bnd): candidate = LL at (icx-1, icy)
+                            if is_isolated_pixel(icx - 1, icy) {
+                                p0 = (cx as f32, cy as f32);
+                            }
                         }
                     }
                     let d0_prev = if cp0_has_s { 2 } else { -1 };
@@ -899,7 +949,7 @@ fn build_cell_graph(
                 }
 
                 if cp1_alive {
-                    let p1 = (cx as f32 + 0.25, cy as f32 - 0.25);
+                    let mut p1 = (cx as f32 + 0.25, cy as f32 - 0.25);
                     let prev1 = if cp1_has_n {
                         nbr_cp_idx(icx, icy - 1, 0)
                     } else {
@@ -920,6 +970,10 @@ fn build_cell_graph(
                             (e_pos.0 - p1.0, e_pos.1 - p1.1),
                         ) {
                             cp1_flag |= IS_CORNER;
+                            // has_main, cp1 (N+E bnd): candidate = UR at (icx, icy-1)
+                            if is_isolated_pixel(icx, icy - 1) {
+                                p1 = (cx as f32, cy as f32);
+                            }
                         }
                     }
                     let d1_prev = if cp1_has_n { 0 } else { -1 };
@@ -954,7 +1008,7 @@ fn build_cell_graph(
                 let cp1_alive = cp1_has_s || cp1_has_e;
 
                 if cp0_alive {
-                    let p0 = (cx as f32 - 0.25, cy as f32 - 0.25);
+                    let mut p0 = (cx as f32 - 0.25, cy as f32 - 0.25);
                     let prev0 = if cp0_has_n {
                         nbr_cp_idx(icx, icy - 1, 0)
                     } else {
@@ -975,6 +1029,10 @@ fn build_cell_graph(
                             (w_pos.0 - p0.0, w_pos.1 - p0.1),
                         ) {
                             cp0_flag |= IS_CORNER;
+                            // has_anti, cp0 (N+W bnd): candidate = UL at (icx-1, icy-1)
+                            if is_isolated_pixel(icx - 1, icy - 1) {
+                                p0 = (cx as f32, cy as f32);
+                            }
                         }
                     }
                     let d0_prev = if cp0_has_n { 0 } else { -1 };
@@ -997,7 +1055,7 @@ fn build_cell_graph(
                 }
 
                 if cp1_alive {
-                    let p1 = (cx as f32 + 0.25, cy as f32 + 0.25);
+                    let mut p1 = (cx as f32 + 0.25, cy as f32 + 0.25);
                     let prev1 = if cp1_has_s {
                         nbr_cp_idx(icx, icy + 1, 2)
                     } else {
@@ -1018,6 +1076,10 @@ fn build_cell_graph(
                             (e_pos.0 - p1.0, e_pos.1 - p1.1),
                         ) {
                             cp1_flag |= IS_CORNER;
+                            // has_anti, cp1 (S+E bnd): candidate = LR at (icx, icy)
+                            if is_isolated_pixel(icx, icy) {
+                                p1 = (cx as f32, cy as f32);
+                            }
                         }
                     }
                     let d1_prev = if cp1_has_s { 2 } else { -1 };
@@ -1322,19 +1384,80 @@ fn optimize_energy(
     };
 
     let read_neighbor_pos = |buf: &[f32], i: usize| -> (f32, f32) {
-        if (flags[i] & IS_TJUNCTION) != 0 {
-            let ci = i + 1;
-            if ci < num_cps {
-                let p = (buf[ci * 2], buf[ci * 2 + 1]);
-                if p.0 != 0.0 || p.1 != 0.0 {
-                    return p;
-                }
+        // T-junction ghost CP (junction-pinned, immediately follows a
+        // T-junction in CP indexing): synthesize the snapped position
+        // on-the-fly from T's through-pair instead of reading the stored
+        // (stale-during-optimization) value. This matches what
+        // update_tjunctions Phase 1 will write post-optimization.
+        //
+        // What this *does*: across outer passes, the stem CP sees a ghost
+        // position derived from T's current location, so its energy and
+        // gradient stay consistent with where T actually is rather than
+        // freezing at T's pre-optimization position.
+        //
+        // What this does NOT do: propagate the stem-segment energy's
+        // gradient back through the ghost to T (and the through-pair) within
+        // a pass. The optimizer is per-CP, and the chain rule
+        // ∂E_stem/∂T = ∂E_stem/∂ghost · 0.75 is currently dropped on T's
+        // side. Coupling fully would require evaluating the stem-segment
+        // term inside T's optimizer step (and at T_prev/T_next with weight
+        // 0.125 each).
+        //
+        // Weights depend on whether the through-pair neighbors are clamped
+        // boundary endpoints (multiplicity-3 knot adjustment).
+        if i > 0 && (flags[i] & 1) != 0 && (flags[i - 1] & IS_TJUNCTION) != 0 {
+            let t = i - 1;
+            let t_prev = neighbors[t * 4];
+            let t_next = neighbors[t * 4 + 1];
+            if t_prev >= 0 && t_next >= 0 {
+                let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
+                let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
+                let (sp, st, sn) = match (prev_is_end, next_is_end) {
+                    (false, false) => (0.125_f32, 0.75_f32,  0.125_f32),
+                    (true,  false) => (0.25,      0.625,     0.125),
+                    (false, true ) => (0.125,     0.625,     0.25),
+                    (true,  true ) => (0.25,      0.5,       0.25),
+                };
+                let pp = (buf[t_prev as usize * 2], buf[t_prev as usize * 2 + 1]);
+                let pt = (buf[t * 2], buf[t * 2 + 1]);
+                let pn = (buf[t_next as usize * 2], buf[t_next as usize * 2 + 1]);
+                return (
+                    sp * pp.0 + st * pt.0 + sn * pn.0,
+                    sp * pp.1 + st * pt.1 + sn * pn.1,
+                );
             }
         }
+        // Everyone else (including T-junctions themselves): return the
+        // stored position. The through-chain reading T as a neighbor now
+        // sees T's actual current position, not a stale ghost.
         (buf[i * 2], buf[i * 2 + 1])
     };
 
     let optimize_one_pass = |pos_in: &[f32], pos_out: &mut [f32]| {
+        // Walk to a grandneighbor: from node `via_idx`, return its neighbor
+        // that is not `back_idx`. Used to fetch p_{i-2} (via prev) or
+        // p_{i+2} (via next).
+        //
+        // Only IS_CORNER blocks the walk (paper's per-pattern exclusion: the
+        // triplet centered at a corner doesn't exist in the global energy).
+        // T-junctions are walkable — slots 0/1 hold the through-pair, so the
+        // "non-back" neighbor is the next node along the through-chain, and
+        // we get the curvature of the through-curve incorporated at the T.
+        // Endpoints are valence-1 by definition, so the walk naturally dies
+        // at -1; no explicit block needed.
+        let grandneighbor_idx = |via_idx: i32, back_idx: i32| -> i32 {
+            if via_idx < 0 {
+                return -1;
+            }
+            let vf = flags[via_idx as usize];
+            if (vf & IS_CORNER) != 0 {
+                return -1;
+            }
+            let a = neighbors[(via_idx as usize) * 4];
+            let b = neighbors[(via_idx as usize) * 4 + 1];
+            if a == back_idx { b } else { a }
+        };
+
         for i in 0..num_cps {
             let mut p = read_pos(pos_in, i);
             pos_out[i * 2] = p.0;
@@ -1342,7 +1465,7 @@ fn optimize_energy(
 
             let f = flags[i];
 
-            // Pinned nodes don't move
+            // Valence-1 junction pin (cell_graph sets bit 0 for these).
             if (f & 1) != 0 {
                 continue;
             }
@@ -1353,10 +1476,9 @@ fn optimize_energy(
                 continue;
             }
 
-            // Crossings: only process from slot 0 (even index) to avoid double-processing.
-            // The even slot writes the result to both slots AFTER optimization.
-            // Revert the initial copy that clobbered the even slot's write.
             let is_crossing = (f & IS_CROSSING) != 0;
+            // Crossings: only process the even slot; slot i+1 is the second chain.
+            // Revert the initial copy so the even slot's write wins.
             if is_crossing && (i & 1) != 0 {
                 let even = i - 1;
                 pos_out[i * 2] = pos_out[even * 2];
@@ -1364,54 +1486,375 @@ fn optimize_energy(
                 continue;
             }
 
+            // ---- Slot 0 (this index): one chain, three triplets ----
             let n0 = read_neighbor_pos(pos_in, prev_idx as usize);
             let n1 = read_neighbor_pos(pos_in, next_idx as usize);
             let p_orig = read_pos(orig_positions, i);
 
-            // For crossings, gather the other pair's neighbors
-            let (n2, n3) = if is_crossing && i + 1 < num_cps {
-                let other_prev = neighbors[(i + 1) * 4];
-                let other_next = neighbors[(i + 1) * 4 + 1];
-                let n2 = if other_prev >= 0 { read_neighbor_pos(pos_in, other_prev as usize) } else { (0.0, 0.0) };
-                let n3 = if other_next >= 0 { read_neighbor_pos(pos_in, other_next as usize) } else { (0.0, 0.0) };
-                (n2, n3)
-            } else {
-                ((0.0, 0.0), (0.0, 0.0))
+            let flags_prev = flags[prev_idx as usize];
+            let flags_next = flags[next_idx as usize];
+
+            // Half-segment exclusion at corners. The paper drops the
+            // curvature integral on the half of each curve segment that
+            // sits between a corner and its non-corner neighbor — i.e.
+            // from the midpoint adjacent to the corner up to the corner
+            // itself.
+            //
+            // For our quadratic B-spline segment centered at CP_j with
+            // neighbors L=CP_{j-1}, R=CP_{j+1}:
+            //   left half  (u∈[0,0.5])  goes from B(0)=mid(L,j) toward L
+            //   right half (u∈[0.5,1])  goes from B(0.5) toward R
+            //
+            // Drop rules (per segment):
+            //   center_corner            → drop the whole segment
+            //   left+right both corners  → drop the whole segment
+            //   only left corner         → use only the right half
+            //   only right corner        → use only the left half
+            //   neither                  → use the full segment
+            //
+            // Implementation trick: half-segments reuse the standard θ
+            // kernel by substituting m=(v_a+v_b)/2 for v_a (right half)
+            // or v_b (left half), with chain-rule coefficients halved
+            // accordingly.
+            let self_corner = (f & IS_CORNER) != 0;
+            let prev_corner = (flags_prev & IS_CORNER) != 0;
+            let next_corner = (flags_next & IS_CORNER) != 0;
+
+            let gprev_idx = grandneighbor_idx(prev_idx, i as i32);
+            let gnext_idx = grandneighbor_idx(next_idx, i as i32);
+            let gprev_corner = gprev_idx >= 0 && (flags[gprev_idx as usize] & IS_CORNER) != 0;
+            let gnext_corner = gnext_idx >= 0 && (flags[gnext_idx as usize] & IS_CORNER) != 0;
+
+            let nn0 = if gprev_idx >= 0 { read_neighbor_pos(pos_in, gprev_idx as usize) } else { (0.0, 0.0) };
+            let nn1 = if gnext_idx >= 0 { read_neighbor_pos(pos_in, gnext_idx as usize) } else { (0.0, 0.0) };
+            // SegMode = 0 full | 1 left-half | 2 right-half | 3 skip
+            // For each of the 3 segments touching i, decode based on which
+            // control points are corners.
+            let seg_mode = |center_corner: bool, left_corner: bool, right_corner: bool| -> u8 {
+                if center_corner { return 3; }
+                match (left_corner, right_corner) {
+                    (true,  true)  => 3,
+                    (true,  false) => 2, // left endpoint corner → right half
+                    (false, true)  => 1, // right endpoint corner → left half
+                    (false, false) => 0,
+                }
+            };
+            // Segment centered at i: CPs are (prev, self, next).
+            let mode_self = seg_mode(self_corner, prev_corner, next_corner);
+            // Segment centered at prev: CPs are (gprev, prev, self).
+            // Skip if gprev doesn't exist.
+            let mode_e_prev = if gprev_idx >= 0 { seg_mode(prev_corner, gprev_corner, self_corner) } else { 3 };
+            // Segment centered at next: CPs are (self, next, gnext).
+            let mode_e_next = if gnext_idx >= 0 { seg_mode(next_corner, self_corner, gnext_corner) } else { 3 };
+
+            // ---- Slot 1 (crossing's other chain) ----
+            let mut c_n0 = (0.0_f32, 0.0_f32);
+            let mut c_n1 = (0.0_f32, 0.0_f32);
+            let mut c_nn0 = (0.0_f32, 0.0_f32);
+            let mut c_nn1 = (0.0_f32, 0.0_f32);
+            let mut c_inc_self = false;
+            let mut c_inc_e_prev = false;
+            let mut c_inc_e_next = false;
+            if is_crossing && i + 1 < num_cps {
+                let other = i + 1;
+                let c_prev_idx = neighbors[other * 4];
+                let c_next_idx = neighbors[other * 4 + 1];
+                if c_prev_idx >= 0 {
+                    c_n0 = read_neighbor_pos(pos_in, c_prev_idx as usize);
+                }
+                if c_next_idx >= 0 {
+                    c_n1 = read_neighbor_pos(pos_in, c_next_idx as usize);
+                }
+
+                let other_flags = flags[other];
+                c_inc_self = (other_flags & IS_CORNER) == 0;
+
+                let c_inc_prev = c_prev_idx >= 0
+                    && (flags[c_prev_idx as usize] & IS_CORNER) == 0;
+                let c_inc_next = c_next_idx >= 0
+                    && (flags[c_next_idx as usize] & IS_CORNER) == 0;
+
+                let c_gprev = if c_inc_prev { grandneighbor_idx(c_prev_idx, other as i32) } else { -1 };
+                let c_gnext = if c_inc_next { grandneighbor_idx(c_next_idx, other as i32) } else { -1 };
+                if c_gprev >= 0 {
+                    c_nn0 = read_neighbor_pos(pos_in, c_gprev as usize);
+                    c_inc_e_prev = true;
+                }
+                if c_gnext >= 0 {
+                    c_nn1 = read_neighbor_pos(pos_in, c_gnext as usize);
+                    c_inc_e_next = true;
+                }
+            }
+
+            // Energy = sum of √(θ_j² + ε) over the (up to) three quadratic-spline
+            // segments touching p_i, plus crossings' second chain, plus
+            // positional ‖p − p_orig‖⁴. θ_j is the turning angle between segment
+            // j's start and end tangents — provably equal to ∫|κ|ds over that
+            // segment. ε smooths the L¹ kink at θ=0 so Newton can step through
+            // straight chains without sub-gradient handling.
+            //
+            // ∂θ_j/∂v_a = −perp(v_a) / |v_a|²        perp((x,y)) = (−y, x)
+            // ∂θ_j/∂v_b = +perp(v_b) / |v_b|²
+            //
+            // For each segment, p_i appears in v_a and/or v_b with a ±1 coefficient
+            // (or 0). We pass those signs as `s_va`, `s_vb`.
+            //
+            // L² energy: per-segment contribution = θ²/2. Spreads bending
+            // evenly along the chain (no L¹ sparsity / polygon-with-elbows
+            // effect). Sharp features are protected by the pattern-based
+            // IS_CORNER flag set above, so L²'s tendency to over-smooth large
+            // angles only acts on segments we actually want smooth.
+            //
+            // Hessian uses Gauss–Newton (sum of outer products of θ's
+            // gradient) — always PSD by construction. Plain Newton with a
+            // determinant guard and a step-magnitude cap. The step cap
+            // prevents long straight chains from overshooting once a
+            // neighbor moves by a small amount and the resulting tiny det
+            // produces a huge Newton step that diverges to NaN over later
+            // iterations.
+            const NEWTON_ITERS: i32 = 10;
+
+            let add_segment = |va: (f32, f32), vb: (f32, f32),
+                               s_va: f32, s_vb: f32,
+                               e: &mut f32, g: &mut (f32, f32),
+                               h: &mut [[f32; 2]; 2]| {
+                let cross = va.0 * vb.1 - va.1 * vb.0;
+                let dot = va.0 * vb.0 + va.1 * vb.1;
+                let theta = cross.atan2(dot);
+                *e += 0.5 * theta * theta;
+                let inv_lva2 = 1.0 / (va.0 * va.0 + va.1 * va.1).max(1e-20);
+                let inv_lvb2 = 1.0 / (vb.0 * vb.0 + vb.1 * vb.1).max(1e-20);
+                // dθ/dp = s_va · (−perp(va)/|va|²) + s_vb · (+perp(vb)/|vb|²)
+                // −perp((x,y)) = (y, −x); +perp((x,y)) = (−y, x)
+                let dtheta_dpx = s_va * (va.1 * inv_lva2) + s_vb * (-vb.1 * inv_lvb2);
+                let dtheta_dpy = s_va * (-va.0 * inv_lva2) + s_vb * (vb.0 * inv_lvb2);
+                // dE/dp = θ · dθ/dp; Gauss-Newton H = (dθ/dp) ⊗ (dθ/dp)
+                g.0 += theta * dtheta_dpx;
+                g.1 += theta * dtheta_dpy;
+                h[0][0] += dtheta_dpx * dtheta_dpx;
+                h[0][1] += dtheta_dpx * dtheta_dpy;
+                h[1][1] += dtheta_dpy * dtheta_dpy;
             };
 
-            // Corners: exclude curvature energy, keep positional energy only.
-            let exclude_curvature = (f & IS_CORNER) != 0;
+            // Add a B-spline segment in mode {0=full, 1=left half, 2=right half}.
+            // For half-segments we substitute m=(v_a+v_b)/2 for v_a (right half)
+            // or v_b (left half), with the chain-rule coefficients halved
+            // accordingly — reuses the same θ kernel. Mode 3 = skip.
+            let add_segment_mode = |mode: u8,
+                                    va: (f32, f32), vb: (f32, f32),
+                                    s_va: f32, s_vb: f32,
+                                    e: &mut f32, g: &mut (f32, f32),
+                                    h: &mut [[f32; 2]; 2]| {
+                match mode {
+                    0 => add_segment(va, vb, s_va, s_vb, e, g, h),
+                    1 => {
+                        // Left half: v_b → m, s_vb_eff = (s_va + s_vb)/2
+                        let m = (0.5 * (va.0 + vb.0), 0.5 * (va.1 + vb.1));
+                        add_segment(va, m, s_va, 0.5 * (s_va + s_vb), e, g, h);
+                    }
+                    2 => {
+                        // Right half: v_a → m, s_va_eff = (s_va + s_vb)/2
+                        let m = (0.5 * (va.0 + vb.0), 0.5 * (va.1 + vb.1));
+                        add_segment(m, vb, 0.5 * (s_va + s_vb), s_vb, e, g, h);
+                    }
+                    _ => {}
+                }
+            };
 
-            for _ in 0..NEWTON_ITER {
+            let evaluate = |p: (f32, f32)| -> (f32, (f32, f32), [[f32; 2]; 2]) {
+                let mut e = 0.0_f32;
+                let mut g = (0.0_f32, 0.0_f32);
+                let mut h = [[0.0_f32; 2]; 2];
+
+                // θ_{i-1}: segment (p_{i-2}, p_{i-1}, p_i). p_i appears only in v_b.
+                if mode_e_prev != 3 {
+                    let va = (n0.0 - nn0.0, n0.1 - nn0.1);
+                    let vb = (p.0 - n0.0, p.1 - n0.1);
+                    add_segment_mode(mode_e_prev, va, vb, 0.0, 1.0, &mut e, &mut g, &mut h);
+                }
+                // θ_i: segment (p_{i-1}, p_i, p_{i+1}). p_i in both v_a (+1) and v_b (-1).
+                if mode_self != 3 {
+                    let va = (p.0 - n0.0, p.1 - n0.1);
+                    let vb = (n1.0 - p.0, n1.1 - p.1);
+                    add_segment_mode(mode_self, va, vb, 1.0, -1.0, &mut e, &mut g, &mut h);
+                }
+                // θ_{i+1}: segment (p_i, p_{i+1}, p_{i+2}). p_i appears only in v_a (-1).
+                if mode_e_next != 3 {
+                    let va = (n1.0 - p.0, n1.1 - p.1);
+                    let vb = (nn1.0 - n1.0, nn1.1 - n1.1);
+                    add_segment_mode(mode_e_next, va, vb, -1.0, 0.0, &mut e, &mut g, &mut h);
+                }
+                // Crossing: same three terms on the second chain (slot i+1).
+                // The crossing's two slots share the same physical position p,
+                // so all three c_* angles depend on p the same way.
+                if is_crossing {
+                    if c_inc_e_prev {
+                        let va = (c_n0.0 - c_nn0.0, c_n0.1 - c_nn0.1);
+                        let vb = (p.0 - c_n0.0, p.1 - c_n0.1);
+                        add_segment(va, vb, 0.0, 1.0, &mut e, &mut g, &mut h);
+                    }
+                    if c_inc_self {
+                        let va = (p.0 - c_n0.0, p.1 - c_n0.1);
+                        let vb = (c_n1.0 - p.0, c_n1.1 - p.1);
+                        add_segment(va, vb, 1.0, -1.0, &mut e, &mut g, &mut h);
+                    }
+                    if c_inc_e_next {
+                        let va = (c_n1.0 - p.0, c_n1.1 - p.1);
+                        let vb = (c_nn1.0 - c_n1.0, c_nn1.1 - c_n1.1);
+                        add_segment(va, vb, -1.0, 0.0, &mut e, &mut g, &mut h);
+                    }
+                }
+
+                // Stem-via-ghost coupling. The stem CP S sees the ghost (= a
+                // weighted sum of the T-junction T and its through-pair) as
+                // its T-side neighbor; the stem's energy therefore depends on
+                // T, T_prev, T_next via ∂E_stem/∂ghost · ∂ghost/∂(those). The
+                // stem CP's own optimizer already handles ∂E_stem/∂S; this
+                // block adds the chain-rule contributions to T, T_prev, and
+                // T_next so they feel the stem trying to align (clamped-spline
+                // joint coupling). Same energy as before — just propagated
+                // correctly instead of dropped on T's side.
+                //
+                // ghost_weights returns (st, sp, sn) = (T's, T_prev's,
+                // T_next's) weight in the ghost formula. Matches the table in
+                // update_tjunctions Phase 1 (clamped-multiplicity B-spline).
+                let ghost_weights = |prev_is_end: bool, next_is_end: bool| -> (f32, f32, f32) {
+                    match (prev_is_end, next_is_end) {
+                        (false, false) => (0.75,  0.125, 0.125),
+                        (true,  false) => (0.625, 0.25,  0.125),
+                        (false, true ) => (0.625, 0.125, 0.25),
+                        (true,  true ) => (0.5,   0.25,  0.25),
+                    }
+                };
+                // Returns (s_pos, s_other_pos) for the stem CP attached to the
+                // T-junction at index t. None if no valid stem.
+                let stem_endpoints = |t: usize| -> Option<((f32, f32), (f32, f32))> {
+                    if t + 1 >= num_cps { return None; }
+                    let s_idx = neighbors[(t + 1) * 4];
+                    if s_idx < 0 { return None; }
+                    let s = s_idx as usize;
+                    let so = if neighbors[s * 4] == (t + 1) as i32 {
+                        neighbors[s * 4 + 1]
+                    } else {
+                        neighbors[s * 4]
+                    };
+                    if so < 0 { return None; }
+                    Some((read_pos(pos_in, s), read_neighbor_pos(pos_in, so as usize)))
+                };
+
+                // Case A: i is the T-junction itself. p substitutes for T.
+                if (f & IS_TJUNCTION) != 0 && prev_idx >= 0 && next_idx >= 0 {
+                    if let Some((s_pos, so_pos)) = stem_endpoints(i) {
+                        let prev_is_end = (flags_prev & IS_ENDPOINT) != 0;
+                        let next_is_end = (flags_next & IS_ENDPOINT) != 0;
+                        let (st, sp, sn) = ghost_weights(prev_is_end, next_is_end);
+                        let pp = read_neighbor_pos(pos_in, prev_idx as usize);
+                        let pn = read_neighbor_pos(pos_in, next_idx as usize);
+                        let ghost = (
+                            sp * pp.0 + st * p.0 + sn * pn.0,
+                            sp * pp.1 + st * p.1 + sn * pn.1,
+                        );
+                        let va = (s_pos.0 - so_pos.0, s_pos.1 - so_pos.1);
+                        let vb = (ghost.0 - s_pos.0, ghost.1 - s_pos.1);
+                        add_segment(va, vb, 0.0, st, &mut e, &mut g, &mut h);
+                    }
+                }
+
+                // Case B: one of i's neighbors is a T-junction j with i in
+                // j's through-pair. Add j's stem contribution; weight is sp
+                // (if i is j's T_prev) or sn (if i is j's T_next).
+                for slot in 0..2usize {
+                    let j_idx = neighbors[i * 4 + slot];
+                    if j_idx < 0 { continue; }
+                    let j = j_idx as usize;
+                    if (flags[j] & IS_TJUNCTION) == 0 { continue; }
+                    let j_prev = neighbors[j * 4];
+                    let j_next = neighbors[j * 4 + 1];
+                    if j_prev < 0 || j_next < 0 { continue; }
+                    let j_prev_is_end = (flags[j_prev as usize] & IS_ENDPOINT) != 0;
+                    let j_next_is_end = (flags[j_next as usize] & IS_ENDPOINT) != 0;
+                    let (st, sp, sn) = ghost_weights(j_prev_is_end, j_next_is_end);
+                    let p_t = read_pos(pos_in, j);
+                    let (weight, pp_for_ghost, pn_for_ghost) = if j_prev == i as i32 {
+                        (sp, p, read_neighbor_pos(pos_in, j_next as usize))
+                    } else if j_next == i as i32 {
+                        (sn, read_neighbor_pos(pos_in, j_prev as usize), p)
+                    } else {
+                        continue;
+                    };
+                    if let Some((s_pos, so_pos)) = stem_endpoints(j) {
+                        let ghost = (
+                            sp * pp_for_ghost.0 + st * p_t.0 + sn * pn_for_ghost.0,
+                            sp * pp_for_ghost.1 + st * p_t.1 + sn * pn_for_ghost.1,
+                        );
+                        let va = (s_pos.0 - so_pos.0, s_pos.1 - so_pos.1);
+                        let vb = (ghost.0 - s_pos.0, ghost.1 - s_pos.1);
+                        add_segment(va, vb, 0.0, weight, &mut e, &mut g, &mut h);
+                    }
+                }
+
+                // Positional energy ‖p − p_orig‖⁴ (unchanged from before).
                 let dx = p.0 - p_orig.0;
                 let dy = p.1 - p_orig.1;
                 let d2 = dx * dx + dy * dy;
+                e += s4 * d2 * d2;
+                g.0 += 4.0 * s4 * d2 * dx;
+                g.1 += 4.0 * s4 * d2 * dy;
+                h[0][0] += 4.0 * s4 * (2.0 * dx * dx + d2);
+                h[1][1] += 4.0 * s4 * (2.0 * dy * dy + d2);
+                h[0][1] += 8.0 * s4 * dx * dy;
 
-                let (gx, gy) = if exclude_curvature {
-                    (4.0 * s4 * d2 * dx, 4.0 * s4 * d2 * dy)
-                } else {
-                    let mut cx = 4.0 * (2.0 * p.0 - n0.0 - n1.0);
-                    let mut cy = 4.0 * (2.0 * p.1 - n0.1 - n1.1);
-                    if is_crossing {
-                        cx += 4.0 * (2.0 * p.0 - n2.0 - n3.0);
-                        cy += 4.0 * (2.0 * p.1 - n2.1 - n3.1);
+                (e, g, h)
+            };
+
+            for _ in 0..NEWTON_ITERS {
+                let (e_old, g, h) = evaluate(p);
+                let h00 = h[0][0];
+                let h11 = h[1][1];
+                let h01 = h[0][1];
+                let det = h00 * h11 - h01 * h01;
+
+                // Step direction. Two cases:
+                //   det >= ε:  full-rank Newton solve δ = −H⁻¹·g
+                //   det <  ε:  Gauss-Newton pseudo-inverse step. The H here
+                //              is rank-1 (single contributing segment, e.g.
+                //              corner CP at iter 0 before positional H kicks
+                //              in), with H = J·Jᵀ, g = θ·Jᵀ, |J|² = h00+h11
+                //              (the trace, since H = Jᵀ·J for our 2D row
+                //              vector J). Min-norm LS: δ = −g / |J|².
+                let (dx, dy) = if det.abs() < 1e-6 {
+                    let trace = h00 + h11;
+                    if trace < 1e-20 {
+                        break; // rank 0: no contribution at all
                     }
-                    (cx + 4.0 * s4 * d2 * dx, cy + 4.0 * s4 * d2 * dy)
+                    let inv_trace = 1.0 / trace;
+                    (-g.0 * inv_trace, -g.1 * inv_trace)
+                } else {
+                    let inv_det = 1.0 / det;
+                    (-(h11 * g.0 - h01 * g.1) * inv_det,
+                     -(-h01 * g.0 + h00 * g.1) * inv_det)
                 };
 
-                let curv_h: f32 = if exclude_curvature { 0.0 } else if is_crossing { 16.0 } else { 8.0 };
-                let h00 = curv_h + 4.0 * s4 * (2.0 * dx * dx + d2);
-                let h11 = curv_h + 4.0 * s4 * (2.0 * dy * dy + d2);
-                let h01 = 8.0 * s4 * dx * dy;
-
-                let det = h00 * h11 - h01 * h01;
-                if det.abs() < 1e-20 {
-                    break;
+                // Backtracking line search: try the full step, halve until
+                // energy decreases. Replaces the old fixed MAX_STEP cap —
+                // step-size now adapts to local geometry, avoiding
+                // overshoot in tight regions and allowing big strides in
+                // open ones.
+                let mut accepted = false;
+                let mut scale = 1.0_f32;
+                for _ in 0..6 {
+                    let p_trial = (p.0 + dx * scale, p.1 + dy * scale);
+                    let (e_new, _, _) = evaluate(p_trial);
+                    if e_new < e_old {
+                        p = p_trial;
+                        accepted = true;
+                        break;
+                    }
+                    scale *= 0.5;
                 }
-
-                let inv_det = 1.0 / det;
-                p.0 -= (h11 * gx - h01 * gy) * inv_det;
-                p.1 -= (-h01 * gx + h00 * gy) * inv_det;
+                if !accepted {
+                    break; // gradient direction couldn't find an improvement
+                }
             }
 
             pos_out[i * 2] = p.0;
@@ -1424,15 +1867,67 @@ fn optimize_energy(
         }
     };
 
-    // Pass 1: positions -> opt_out
-    let mut opt_out = vec![0.0f32; num_cps * 2];
-    optimize_one_pass(positions, &mut opt_out);
-
-    // Pass 2: opt_out -> final
-    let mut final_pos = vec![0.0f32; num_cps * 2];
-    optimize_one_pass(&opt_out, &mut final_pos);
-
-    final_pos
+    // Jacobi-style outer iteration with per-CP Anderson(2) acceleration.
+    //
+    //   f_k     = G(x_k) − x_k                    (Picard residual)
+    //   Δx      = x_k − x_{k-1}                   (history of input)
+    //   Δf      = f_k − f_{k-1}                   (history of residual)
+    //   γ       = (Δf · f_k) / (Δf · Δf)          (1-D least squares)
+    //   x_{k+1} = (x_k + f_k) − γ · (Δx + Δf)
+    //
+    // γ is clamped to [0, 1.5]: never anti-accelerate, never extrapolate
+    // more than 50% past the Picard step. At noisy CPs (corners,
+    // T-junctions where the inner Newton's local model is poorly
+    // conditioned) γ blows up when |Δf| is small relative to |f|, and
+    // unclamped Anderson overshoots into the rasterizer's NN-fallback
+    // region. Empirically converges in ~12 outer passes vs 100 for plain
+    // Picard, with no per-CP communication required (each CP carries 4
+    // floats of history: prev_x and prev_f).
+    // Per-CP Anderson(2) outer loop with safeguarded γ. 4 floats of history
+    // per CP (prev_p, prev_f); the 1-D least-squares γ is clamped to
+    // [0, 1.5] to prevent overshoot at noisy CPs (corners, T-junctions
+    // where the inner Newton's local model is poorly conditioned).
+    //
+    // Iteration counts match master / vectorscale (3 outer × 3 inner).
+    const OUTER_PASSES: usize = 3;
+    let mut buf_a = positions.to_vec();
+    let mut buf_b = vec![0.0f32; num_cps * 2];
+    let mut prev_p = vec![0.0f32; num_cps * 2];
+    let mut prev_f = vec![0.0f32; num_cps * 2];
+    let mut have_history = false;
+    for _ in 0..OUTER_PASSES {
+        optimize_one_pass(&buf_a, &mut buf_b);
+        for ci in 0..num_cps {
+            let p_x = buf_a[ci * 2];
+            let p_y = buf_a[ci * 2 + 1];
+            let f_x = buf_b[ci * 2]     - p_x;
+            let f_y = buf_b[ci * 2 + 1] - p_y;
+            if !have_history {
+                buf_b[ci * 2]     = p_x + f_x;
+                buf_b[ci * 2 + 1] = p_y + f_y;
+            } else {
+                let dx_x = p_x - prev_p[ci * 2];
+                let dx_y = p_y - prev_p[ci * 2 + 1];
+                let df_x = f_x - prev_f[ci * 2];
+                let df_y = f_y - prev_f[ci * 2 + 1];
+                let df_dot_df = df_x * df_x + df_y * df_y;
+                let mut gamma = if df_dot_df > 1e-12 {
+                    (df_x * f_x + df_y * f_y) / df_dot_df
+                } else { 0.0 };
+                if gamma < 0.0 { gamma = 0.0; }
+                if gamma > 1.5 { gamma = 1.5; }
+                buf_b[ci * 2]     = (p_x + f_x) - gamma * (dx_x + df_x);
+                buf_b[ci * 2 + 1] = (p_y + f_y) - gamma * (dx_y + df_y);
+            }
+            prev_p[ci * 2]     = p_x;
+            prev_p[ci * 2 + 1] = p_y;
+            prev_f[ci * 2]     = f_x;
+            prev_f[ci * 2 + 1] = f_y;
+        }
+        have_history = true;
+        std::mem::swap(&mut buf_a, &mut buf_b);
+    }
+    buf_a
 }
 
 // ============================================================================

@@ -56,6 +56,33 @@ uint px_color(int px, int py) {
     return g(2 * px + 1, 2 * py + 1);
 }
 
+// True iff pixel (px, py) is topologically "isolated": after the similarity
+// graph + crossing resolution, all four cardinal neighbors share its color
+// AND all four diagonal connections to it are kept (it sits in the middle
+// of an X-shape of diagonal links). Used to snap CP placements to the
+// integer grid corner so a lone single-pixel doesn't get a smeared
+// off-axis B-spline outline.
+bool is_isolated_pixel(int px, int py) {
+    if (px <= 0 || py <= 0
+        || px >= int(u.img_w) - 1
+        || py >= int(u.img_h) - 1) return false;
+    uint cand = px_color(px, py);
+    uint n_col = px_color(px, py - 1);
+    if (n_col == cand) return false;
+    uint e_col = px_color(px + 1, py);
+    uint s_col = px_color(px, py + 1);
+    uint w_col = px_color(px - 1, py);
+    if (n_col != e_col || n_col != s_col || n_col != w_col) return false;
+    uint diag_tl = g(2 * px,       2 * py);
+    uint diag_tr = g(2 * (px + 1), 2 * py);
+    uint diag_br = g(2 * (px + 1), 2 * (py + 1));
+    uint diag_bl = g(2 * px,       2 * (py + 1));
+    return ((diag_tl & 2u) != 0u)
+        && ((diag_tr & 1u) != 0u)
+        && ((diag_br & 2u) != 0u)
+        && ((diag_bl & 1u) != 0u);
+}
+
 // Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
 void bnd_colors(int cx, int cy, int dir, out uint ca, out uint cb) {
     switch (dir) {
@@ -345,6 +372,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
                 float2 s_pos = neighbor_cp_pos(int(cx), int(cy) + 1, 2);
                 float2 w_pos = neighbor_cp_pos(int(cx) - 1, int(cy), 3);
                 if (checkForCorner(s_pos - p0, w_pos - p0)) cp0_flag |= IS_CORNER;
+                if (is_isolated_pixel(int(cx) - 1, int(cy))) {
+                    p0 = float2(float(cx), float(cy));
+                }
             }
             int d0_prev = cp0_has_s ? 2 : -1;
             int d0_next = cp0_has_w ? 3 : -1;
@@ -361,6 +391,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
                 float2 n_pos = neighbor_cp_pos(int(cx), int(cy) - 1, 0);
                 float2 e_pos = neighbor_cp_pos(int(cx) + 1, int(cy), 1);
                 if (checkForCorner(n_pos - p1, e_pos - p1)) cp1_flag |= IS_CORNER;
+                if (is_isolated_pixel(int(cx), int(cy) - 1)) {
+                    p1 = float2(float(cx), float(cy));
+                }
             }
             int d1_prev = cp1_has_n ? 0 : -1;
             int d1_next = cp1_has_e ? 1 : -1;
@@ -388,6 +421,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
                 float2 n_pos = neighbor_cp_pos(int(cx), int(cy) - 1, 0);
                 float2 w_pos = neighbor_cp_pos(int(cx) - 1, int(cy), 3);
                 if (checkForCorner(n_pos - p0, w_pos - p0)) cp0_flag |= IS_CORNER;
+                if (is_isolated_pixel(int(cx) - 1, int(cy) - 1)) {
+                    p0 = float2(float(cx), float(cy));
+                }
             }
             int d0_prev = cp0_has_n ? 0 : -1;
             int d0_next = cp0_has_w ? 3 : -1;
@@ -404,6 +440,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
                 float2 s_pos = neighbor_cp_pos(int(cx), int(cy) + 1, 2);
                 float2 e_pos = neighbor_cp_pos(int(cx) + 1, int(cy), 1);
                 if (checkForCorner(s_pos - p1, e_pos - p1)) cp1_flag |= IS_CORNER;
+                if (is_isolated_pixel(int(cx), int(cy))) {
+                    p1 = float2(float(cx), float(cy));
+                }
             }
             int d1_prev = cp1_has_s ? 2 : -1;
             int d1_next = cp1_has_e ? 1 : -1;

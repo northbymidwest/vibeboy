@@ -22,6 +22,10 @@ pub struct WgpuVectorizePipeline {
     bufs: Option<VecBufs>,
 }
 
+/// Number of outer Anderson(2) passes for the optimizer. Mirrors the
+/// CPU and SDL3 GPU paths.
+const OUTER_PASSES: u32 = 3;
+
 struct VecBufs {
     img_w: u32,
     img_h: u32,
@@ -34,25 +38,40 @@ struct VecBufs {
     opt_out_buf: wgpu::Buffer,
     orig_pos_buf: wgpu::Buffer,
     crossing_t_buf: wgpu::Buffer,
-    // One uniform buffer per stage to avoid write conflicts
+    /// Per-CP Anderson(2) acceleration history (4 floats per CP).
+    /// Cleared at frame start so the +inf sentinel-vs-have-history
+    /// detection in the shader fires correctly on pass 0.
+    prev_state_buf: wgpu::Buffer,
+    // One uniform buffer per stage to avoid write conflicts. The
+    // optimizer needs two (one with have_history=0 for the first
+    // pass, one with =1 for subsequent passes) because we encode
+    // all dispatches into a single submit and can't rewrite a
+    // uniform between dispatches.
     uni_sim: wgpu::Buffer,
     uni_resolve: wgpu::Buffer,
     uni_cell: wgpu::Buffer,
-    uni_opt: wgpu::Buffer,
+    uni_opt_first: wgpu::Buffer,
+    uni_opt_rest: wgpu::Buffer,
     uni_tjunc: wgpu::Buffer,
     uni_xpack: wgpu::Buffer,
     uni_rast: wgpu::Buffer,
     output_tex: wgpu::Texture,
     output_tex_w: u32,
     output_tex_h: u32,
-    // Cached bind groups (recreated only when buffers change)
+    // Cached bind groups (recreated only when buffers change).
+    // For the optimizer we need 3 variants because of the
+    // pos↔opt_out ping-pong + the have_history toggle:
+    //   bg_opt_first: pass 0, reads pos_buf, writes opt_out_buf, uni_first
+    //   bg_opt_a:     pass 2/4/..., reads pos_buf, writes opt_out_buf, uni_rest
+    //   bg_opt_b:     pass 1/3/..., reads opt_out_buf, writes pos_buf, uni_rest
     bg_sim: [wgpu::BindGroup; 3],
     bg_resolve: [wgpu::BindGroup; 3],
     bg_cell: [wgpu::BindGroup; 3],
-    bg_opt_p1: [wgpu::BindGroup; 3],
-    bg_opt_p2: [wgpu::BindGroup; 3],
-    bg_tjunc: [wgpu::BindGroup; 2],
-    bg_xpack: [wgpu::BindGroup; 2],
+    bg_opt_first: [wgpu::BindGroup; 3],
+    bg_opt_a: [wgpu::BindGroup; 3],
+    bg_opt_b: [wgpu::BindGroup; 3],
+    bg_tjunc: [wgpu::BindGroup; 3],
+    bg_xpack: [wgpu::BindGroup; 3],
     bg_rast: [wgpu::BindGroup; 3],
 }
 
@@ -147,19 +166,23 @@ impl WgpuVectorizePipeline {
         });
 
         let crossing_t_size = (num_cps * 4) as u64;
+        let prev_state_size = (num_cps * 4 * 4) as u64; // 4 floats per CP
         let px_buf = mk("pixels", px_size, storage_ro);
         let graph_buf = mk("graph", graph_size, storage_rw);
         let graph_snapshot = mk("graph_snap", graph_size, storage_ro | wgpu::BufferUsages::COPY_SRC);
-        let pos_buf = mk("positions", pos_size, storage_rw);
+        let pos_buf = mk("positions", pos_size, storage_rw | wgpu::BufferUsages::COPY_DST);
         let nbr_buf = mk("neighbors", nbr_size, storage_rw);
         let flag_buf = mk("flags", flag_size, storage_rw);
-        let opt_out_buf = mk("opt_out", pos_size, storage_rw);
+        let opt_out_buf = mk("opt_out", pos_size, storage_rw | wgpu::BufferUsages::COPY_SRC);
         let orig_pos_buf = mk("orig_pos", pos_size, storage_rw);
         let crossing_t_buf = mk("crossing_t", crossing_t_size, storage_rw);
+        let prev_state_buf = mk("prev_state", prev_state_size,
+                                storage_rw | wgpu::BufferUsages::COPY_DST);
         let uni_sim = mk("uni_sim", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_resolve = mk("uni_resolve", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_cell = mk("uni_cell", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let uni_opt = mk("uni_opt", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let uni_opt_first = mk("uni_opt_first", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let uni_opt_rest  = mk("uni_opt_rest",  32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_tjunc = mk("uni_tjunc", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_xpack = mk("uni_xpack", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let uni_rast = mk("uni_rast", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
@@ -198,47 +221,72 @@ impl WgpuVectorizePipeline {
             ]),
             bg(&self.cell_graph, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_cell.as_entire_binding() }]),
         ];
-        let bg_opt_p1 = [
+        // Optimizer bind groups. Group 0 = inputs (pos_in, orig, nbrs, flags).
+        // Group 1 = outputs (pos_out + prev_state). Group 2 = uniforms.
+        // Three variants for the multi-pass loop:
+        //   bg_opt_first: pass 0, dir A (pos→opt), have_history=0
+        //   bg_opt_a:     pass 2/4/..., dir A (pos→opt), have_history=1
+        //   bg_opt_b:     pass 1/3/..., dir B (opt→pos), have_history=1
+        let bg_opt_first = [
             bg(&self.optimizer, 0, &[
                 wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: orig_pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: nbr_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: flag_buf.as_entire_binding() },
             ]),
-            bg(&self.optimizer, 1, &[wgpu::BindGroupEntry { binding: 0, resource: opt_out_buf.as_entire_binding() }]),
-            bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt.as_entire_binding() }]),
+            bg(&self.optimizer, 1, &[
+                wgpu::BindGroupEntry { binding: 0, resource: opt_out_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: prev_state_buf.as_entire_binding() },
+            ]),
+            bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt_first.as_entire_binding() }]),
         ];
-        let bg_opt_p2 = [
+        let bg_opt_a = [
+            bg(&self.optimizer, 0, &[
+                wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: orig_pos_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: nbr_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: flag_buf.as_entire_binding() },
+            ]),
+            bg(&self.optimizer, 1, &[
+                wgpu::BindGroupEntry { binding: 0, resource: opt_out_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: prev_state_buf.as_entire_binding() },
+            ]),
+            bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt_rest.as_entire_binding() }]),
+        ];
+        let bg_opt_b = [
             bg(&self.optimizer, 0, &[
                 wgpu::BindGroupEntry { binding: 0, resource: opt_out_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: orig_pos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: nbr_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: flag_buf.as_entire_binding() },
             ]),
-            bg(&self.optimizer, 1, &[wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() }]),
-            bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt.as_entire_binding() }]),
+            bg(&self.optimizer, 1, &[
+                wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: prev_state_buf.as_entire_binding() },
+            ]),
+            bg(&self.optimizer, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_opt_rest.as_entire_binding() }]),
         ];
         // update_tjunction: 3 buffers at group 0 (positions RW + nbr/flag RO),
-        // uniforms at group 1. The legacy IS_CROSSING branch was removed,
-        // so `orig_positions` is no longer bound here.
+        // update_tjunction: RO inputs (neighbor_data, node_flags) at group 0,
+        // RW positions at group 1 binding 0, uniforms at group 2.
         let bg_tjunc = [
             bg(&self.tjunction, 0, &[
-                wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: nbr_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: flag_buf.as_entire_binding() },
             ]),
-            bg(&self.tjunction, 1, &[wgpu::BindGroupEntry { binding: 0, resource: uni_tjunc.as_entire_binding() }]),
+            bg(&self.tjunction, 1, &[wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() }]),
+            bg(&self.tjunction, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_tjunc.as_entire_binding() }]),
         ];
-        // crossing_pack: crossing_t RW at group 0 binding 0, three RO inputs
-        // at bindings 1/2/3, uniforms at group 1.
+        // crossing_pack: RO inputs (neighbor_data, node_flags, positions) at
+        // group 0, RW crossing_t at group 1 binding 0, uniforms at group 2.
         let bg_xpack = [
             bg(&self.crossing_pack, 0, &[
-                wgpu::BindGroupEntry { binding: 0, resource: crossing_t_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: nbr_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: flag_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: pos_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: nbr_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: flag_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: pos_buf.as_entire_binding() },
             ]),
-            bg(&self.crossing_pack, 1, &[wgpu::BindGroupEntry { binding: 0, resource: uni_xpack.as_entire_binding() }]),
+            bg(&self.crossing_pack, 1, &[wgpu::BindGroupEntry { binding: 0, resource: crossing_t_buf.as_entire_binding() }]),
+            bg(&self.crossing_pack, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_xpack.as_entire_binding() }]),
         ];
         // Rasterizer: group 1 holds the output texture *and* crossing_t (now
         // declared as RWStructuredBuffer in the slang shader so wgpu emits
@@ -265,10 +313,10 @@ impl WgpuVectorizePipeline {
         self.bufs = Some(VecBufs {
             img_w, img_h,
             px_buf, graph_buf, graph_snapshot, pos_buf, nbr_buf, flag_buf,
-            opt_out_buf, orig_pos_buf, crossing_t_buf,
-            uni_sim, uni_resolve, uni_cell, uni_opt, uni_tjunc, uni_xpack, uni_rast,
+            opt_out_buf, orig_pos_buf, crossing_t_buf, prev_state_buf,
+            uni_sim, uni_resolve, uni_cell, uni_opt_first, uni_opt_rest, uni_tjunc, uni_xpack, uni_rast,
             output_tex, output_tex_w: out_w, output_tex_h: out_h,
-            bg_sim, bg_resolve, bg_cell, bg_opt_p1, bg_opt_p2, bg_tjunc, bg_xpack, bg_rast,
+            bg_sim, bg_resolve, bg_cell, bg_opt_first, bg_opt_a, bg_opt_b, bg_tjunc, bg_xpack, bg_rast,
         });
     }
 
@@ -311,8 +359,14 @@ impl WgpuVectorizePipeline {
         write_uniform(queue, &b.uni_sim, &[img_w, img_h, graph_stride, 0]);
         write_uniform(queue, &b.uni_resolve, &[img_w, img_h, graph_stride, 0]);
         write_uniform(queue, &b.uni_cell, &[img_w, img_h, graph_stride, corners_w]);
-        let uni_opt: [u32; 4] = [num_cps, f32::to_bits(0.01), f32::to_bits(0.25), f32::to_bits(2.5)];
-        write_uniform(queue, &b.uni_opt, &uni_opt);
+        // Optimizer uniform: { num_nodes, have_history, _pad0, _pad1 }.
+        // pass 0 uses uni_opt_first (have_history=0); subsequent passes
+        // use uni_opt_rest (have_history=1) so the Anderson formula
+        // applies and the pass-1 cancellation trick can fire when
+        // pass 1 line-search rejects all backtracks (see vibeboy commit
+        // 0aa19e29).
+        write_uniform(queue, &b.uni_opt_first, &[num_cps, 0, 0, 0]);
+        write_uniform(queue, &b.uni_opt_rest,  &[num_cps, 1, 0, 0]);
         write_uniform(queue, &b.uni_tjunc, &[num_cps, 0, 0, 0]);
         write_uniform(queue, &b.uni_xpack, &[num_cps, 0, 0, 0]);
         let tiles_w = (img_w + 1) / 2;
@@ -362,21 +416,43 @@ impl WgpuVectorizePipeline {
         let pos_size = (num_cps * 2 * 4) as u64;
         encoder.copy_buffer_to_buffer(&b.pos_buf, 0, &b.orig_pos_buf, 0, pos_size);
 
-        // Compute pass 3: optimizer
+        // Clear prev_state to zero before the optimizer runs. The
+        // shader uses a +inf sentinel in BA channels of pos_buf for
+        // its first-pass detection, but the SDL3 GPU and CPU paths
+        // both use a separate prev_state buffer where we only need
+        // (starting_p, f) initialized to zero. The have_history
+        // uniform tells the shader on pass 0 to take Picard and
+        // ignore prev_state contents; on pass 1+ prev_state has
+        // valid data from the prior pass.
+        let prev_state_size = (num_cps * 4 * 4) as u64;
+        encoder.clear_buffer(&b.prev_state_buf, 0, Some(prev_state_size));
+
+        // Compute pass 3: optimizer (OUTER_PASSES outer Anderson passes,
+        // alternating direction A (pos→opt) and B (opt→pos)).
         {
             let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("optimizer"),
                 timestamp_writes: None,
             });
             cp.set_pipeline(&self.optimizer);
-            cp.set_bind_group(0, &b.bg_opt_p1[0], &[]);
-            cp.set_bind_group(1, &b.bg_opt_p1[1], &[]);
-            cp.set_bind_group(2, &b.bg_opt_p1[2], &[]);
-            cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
-            cp.set_bind_group(0, &b.bg_opt_p2[0], &[]);
-            cp.set_bind_group(1, &b.bg_opt_p2[1], &[]);
-            cp.set_bind_group(2, &b.bg_opt_p2[2], &[]);
-            cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+            for pass in 0..OUTER_PASSES {
+                let bgs = if pass == 0 { &b.bg_opt_first }
+                          else if pass % 2 == 0 { &b.bg_opt_a }
+                          else { &b.bg_opt_b };
+                cp.set_bind_group(0, &bgs[0], &[]);
+                cp.set_bind_group(1, &bgs[1], &[]);
+                cp.set_bind_group(2, &bgs[2], &[]);
+                cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+            }
+        }
+        // After the loop the final write went to:
+        //   even OUTER_PASSES → opt_out_buf? no — pass `OUTER_PASSES-1`
+        //     odd index → bg_opt_b → writes pos_buf ✓
+        //   odd OUTER_PASSES → pass `OUTER_PASSES-1` even index →
+        //     bg_opt_a (or bg_opt_first) → writes opt_out_buf
+        // Downstream stages read pos_buf, so copy if needed.
+        if OUTER_PASSES % 2 == 1 {
+            encoder.copy_buffer_to_buffer(&b.opt_out_buf, 0, &b.pos_buf, 0, pos_size);
         }
 
         // Compute pass 4: tjunction snap (3×) → crossing pack → rasterizer.
@@ -390,14 +466,16 @@ impl WgpuVectorizePipeline {
                 timestamp_writes: None,
             });
             cp.set_pipeline(&self.tjunction);
+            cp.set_bind_group(0, &b.bg_tjunc[0], &[]);
+            cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
+            cp.set_bind_group(2, &b.bg_tjunc[2], &[]);
             for _ in 0..3 {
-                cp.set_bind_group(0, &b.bg_tjunc[0], &[]);
-                cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
                 cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
             }
             cp.set_pipeline(&self.crossing_pack);
             cp.set_bind_group(0, &b.bg_xpack[0], &[]);
             cp.set_bind_group(1, &b.bg_xpack[1], &[]);
+            cp.set_bind_group(2, &b.bg_xpack[2], &[]);
             cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
             cp.set_pipeline(&self.rasterizer);
             cp.set_bind_group(0, &b.bg_rast[0], &[]);

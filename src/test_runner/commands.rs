@@ -522,8 +522,18 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
         let cp = (data.positions[ci*2], data.positions[ci*2+1]);
         let px = (cp.0 * pps).round() as i32;
         let py = (cp.1 * pps).round() as i32;
-        let color = if (flag & IS_ENDPOINT) != 0 { [255, 255, 0] } else { [0, 255, 0] };
-        for dy in -2..=2 { for dx in -2..=2 {
+        let (color, r): ([u8; 3], i32) = if (flag & IS_CORNER) != 0 {
+            ([255, 0, 0], 4)
+        } else if (flag & IS_CROSSING) != 0 {
+            ([255, 0, 255], 3)
+        } else if (flag & IS_TJUNCTION) != 0 {
+            ([255, 165, 0], 3)
+        } else if (flag & IS_ENDPOINT) != 0 {
+            ([255, 255, 0], 2)
+        } else {
+            ([0, 255, 0], 2)
+        };
+        for dy in -r..=r { for dx in -r..=r {
             plot(&mut buf, px+dx, py+dy, color);
         }}
     }

@@ -472,6 +472,12 @@ struct CellRastBufCache {
     opt_out_buf: gpu::Buffer,
     orig_pos_buf: gpu::Buffer,
     crossing_t_buf: gpu::Buffer,
+    /// Per-CP Anderson(2) acceleration history (4 floats per CP).
+    /// Cleared at the start of each frame so the sentinel-based no-history
+    /// detection (|prev_f|² < 1e-15) holds on the first inner pass.
+    prev_state_buf: gpu::Buffer,
+    /// Pre-zeroed upload buffer used to wipe `prev_state_buf` each frame.
+    prev_state_xfer: gpu::TransferBuffer,
     px_xfer: gpu::TransferBuffer,
 }
 
@@ -550,7 +556,7 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.dxil")),
-        4, 1, 0, (256, 1, 1), "optimize_energy")?;
+        4, 2, 0, (256, 1, 1), "optimize_energy")?;
 
     let tjunc = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
@@ -589,6 +595,8 @@ fn dispatch_stages_1_5b(
     flag_buf: &gpu::Buffer,
     opt_out_buf: &gpu::Buffer,
     orig_pos_buf: &gpu::Buffer,
+    prev_state_buf: &gpu::Buffer,
+    prev_state_xfer: &gpu::TransferBuffer,
     crossing_t_buf: &gpu::Buffer,
     img_w: u32, img_h: u32,
 ) -> gpu::Buffer {
@@ -658,18 +666,33 @@ fn dispatch_stages_1_5b(
         device.end_copy_pass(cp);
     }
 
-    // Stage 4: Optimize energy (2-pass ping-pong)
+    // Stage 4: Optimize energy (2 outer Anderson passes × 3 inner Newton iters).
+    // The shader uses per-CP Anderson(2) acceleration with sentinel-based
+    // no-history detection — prev_state_buf must start each frame as all
+    // zeros so |prev_f|² < 1e-15 and the first pass takes the Picard step
+    // (which seeds the history slot for the second pass).
+    {
+        let cp = device.begin_copy_pass(cmd).expect("prev_state clear");
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(prev_state_xfer),
+            gpu::BufferRegion::new().with_buffer(prev_state_buf).with_size(num_cps * 4 * 4),
+            false);
+        device.end_copy_pass(cp);
+    }
     let mut cur_in = pos_buf.clone();
     let mut cur_out = opt_out_buf.clone();
-    for _ in 0..2u32 {
+    for pass in 0..3u32 {
         let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false)],
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false),
+              gpu::StorageBufferReadWriteBinding::new().with_buffer(prev_state_buf).with_cycle(false)],
         ).expect("opt pass");
         cp.bind_compute_pipeline(&pipelines.optimizer);
         cp.bind_compute_storage_buffers(0, &[cur_in.clone(), orig_pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
-        #[repr(C)] struct U { num_nodes: u32, gradient_step: f32, max_move: f32, positional_scale: f32 }
+        #[repr(C)] struct U { num_nodes: u32, have_history: u32, _pad0: u32, _pad1: u32 }
         cmd.push_compute_uniform_data(0, &U {
-            num_nodes: num_cps, gradient_step: 0.01, max_move: 0.25, positional_scale: 2.5 });
+            num_nodes: num_cps,
+            have_history: if pass == 0 { 0 } else { 1 },
+            _pad0: 0, _pad1: 0 });
         cp.dispatch(num_cps.div_ceil(256), 1, 1);
         device.end_compute_pass(cp);
         std::mem::swap(&mut cur_in, &mut cur_out);
@@ -741,6 +764,18 @@ pub fn gpu_vectorize_full_pipeline(
         let nbr_size = (num_cps * 4 * 4).max(4);
         let flag_size = (num_cps * 4).max(4);
         let crossing_t_size = (num_cps * 4).max(4);
+        let prev_state_size = (num_cps * 4 * 4).max(4);
+        let prev_state_xfer = device.create_transfer_buffer()
+            .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+            .with_size(prev_state_size).build().expect("prev_state xfer");
+        {
+            // Pre-fill the upload buffer with zeros once. Each frame the
+            // optimizer copy-pass uploads it into prev_state_buf, restoring
+            // the sentinel state |prev_f|² = 0.
+            let mut map = prev_state_xfer.map::<u8>(device, true);
+            for b in map.mem_mut().iter_mut() { *b = 0; }
+            map.unmap();
+        }
         pipelines.buf_cache = Some(CellRastBufCache {
             img_w, img_h,
             px_buf: device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf"),
@@ -752,6 +787,8 @@ pub fn gpu_vectorize_full_pipeline(
             opt_out_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("opt out buf"),
             orig_pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("orig pos buf"),
             crossing_t_buf: device.create_buffer().with_usage(rw).with_size(crossing_t_size).build().expect("crossing_t buf"),
+            prev_state_buf: device.create_buffer().with_usage(rw).with_size(prev_state_size).build().expect("prev_state buf"),
+            prev_state_xfer,
             px_xfer: device.create_transfer_buffer()
                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
                 .with_size(px_size).build().expect("px xfer"),
@@ -782,7 +819,9 @@ pub fn gpu_vectorize_full_pipeline(
         device, &cmd, pipelines,
         &b.px_buf, &b.graph_buf, &b.graph_snapshot,
         &b.pos_buf, &b.nbr_buf, &b.flag_buf,
-        &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf, img_w, img_h,
+        &b.opt_out_buf, &b.orig_pos_buf,
+        &b.prev_state_buf, &b.prev_state_xfer,
+        &b.crossing_t_buf, img_w, img_h,
     );
 
     // Stage 6: Tile-based cell rasterizer (one workgroup per 2×2 source tile).
@@ -1229,13 +1268,25 @@ pub fn gpu_full_pipeline_screenshot(
     let graph_snapshot = device.create_buffer().with_usage(ro).with_size(graph_size.max(4)).build().ok()?;
     let orig_pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
     let crossing_t_buf = device.create_buffer().with_usage(rw).with_size((num_cps * 4).max(4)).build().ok()?;
+    let prev_state_size = (num_cps * 4 * 4).max(4);
+    let prev_state_buf = device.create_buffer().with_usage(rw).with_size(prev_state_size).build().ok()?;
+    let prev_state_xfer = device.create_transfer_buffer()
+        .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
+        .with_size(prev_state_size).build().ok()?;
+    {
+        let mut map = prev_state_xfer.map::<u8>(&device, true);
+        for b in map.mem_mut().iter_mut() { *b = 0; }
+        map.unmap();
+    }
 
     // Stages 1-5b: shared vectorize pipeline dispatch
     dispatch_stages_1_5b(
         &device, &cmd, &pipelines,
         &px_buf, &graph_buf, &graph_snapshot,
         &pos_buf, &nbr_buf, &flag_buf,
-        &opt_out_buf, &orig_pos_buf, &crossing_t_buf, img_w, img_h,
+        &opt_out_buf, &orig_pos_buf,
+        &prev_state_buf, &prev_state_xfer,
+        &crossing_t_buf, img_w, img_h,
     );
 
     // Debug: download positions before and after optimizer
