@@ -61,7 +61,11 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     let num_cps = corners_w * corners_h * 2;
 
     let orig_positions = positions.clone();
-    let positions = optimize_energy(&positions, &orig_positions, &neighbors, &flags, num_cps);
+    let positions = if std::env::var("VBY_CG").is_ok() {
+        optimize_energy_cg(&positions, &orig_positions, &neighbors, &flags, num_cps)
+    } else {
+        optimize_energy(&positions, &orig_positions, &neighbors, &flags, num_cps)
+    };
     let mut positions = positions;
     let mut crossing_t = vec![0.5f32; num_cps];
     update_tjunctions(&mut positions, &mut crossing_t, &neighbors, &flags, num_cps);
@@ -1369,6 +1373,460 @@ fn build_cell_graph(
 // Stage 4: Optimize energy (2D Newton-Raphson)
 // ============================================================================
 
+fn optimize_energy_cg(
+    positions: &[f32],
+    orig_positions: &[f32],
+    neighbors: &[i32],
+    flags: &[u32],
+    num_cps: usize,
+) -> Vec<f32> {
+    let positional_scale: f32 = 2.5;
+    let s4 = positional_scale.powi(4);
+    let n = num_cps * 2;
+
+    let mut p = positions.to_vec();
+
+    let active: Vec<bool> = flags.iter().map(|&f| f != 0 && (f & 1) == 0).collect();
+
+    // True iff CP at index k is a "stem shadow": junction-pinned and the
+    // CP at k-1 is a T-junction main. These mark segments that should
+    // be handled via the T-junction stem loop (chain-rule through ghost).
+    let is_stem_shadow = |k: i32| -> bool {
+        if k <= 0 { return false; }
+        let k = k as usize;
+        if k >= num_cps { return false; }
+        if (flags[k] & 1) == 0 { return false; }
+        (flags[k - 1] & IS_TJUNCTION) != 0
+    };
+    // True iff CP at index i is the second slot of a crossing pair
+    // (slot 1 of an IS_CROSSING; slot 0 is at i-1).
+    let is_xing_slot1 = |i: usize| -> bool {
+        if i == 0 { return false; }
+        (flags[i] & IS_CROSSING) != 0 && (flags[i - 1] & IS_CROSSING) != 0
+    };
+
+    let ghost_weights = |prev_is_end: bool, next_is_end: bool| -> (f32, f32, f32) {
+        match (prev_is_end, next_is_end) {
+            (false, false) => (0.75,  0.125, 0.125),
+            (true,  false) => (0.625, 0.25,  0.125),
+            (false, true ) => (0.625, 0.125, 0.25),
+            (true,  true ) => (0.5,   0.25,  0.25),
+        }
+    };
+
+    let read_pos = |buf: &[f32], i: usize| -> (f32, f32) { (buf[i * 2], buf[i * 2 + 1]) };
+
+    // For stem shadows (junction-pinned CP whose i-1 is a T-junction),
+    // synthesize the ghost position from T's through-pair on-the-fly:
+    //   ghost = sp·T_prev + st·T + sn·T_next
+    // For all other CPs, returns the raw buffer position.
+    let read_neighbor_pos = |buf: &[f32], i: usize| -> (f32, f32) {
+        if i > 0 && (flags[i] & 1) != 0 && (flags[i - 1] & IS_TJUNCTION) != 0 {
+            let t = i - 1;
+            let t_prev = neighbors[t * 4];
+            let t_next = neighbors[t * 4 + 1];
+            if t_prev >= 0 && t_next >= 0 {
+                let pe = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
+                let ne = (flags[t_next as usize] & IS_ENDPOINT) != 0;
+                let (st, sp, sn) = ghost_weights(pe, ne);
+                let pp = (buf[(t_prev as usize) * 2], buf[(t_prev as usize) * 2 + 1]);
+                let pt = (buf[t * 2], buf[t * 2 + 1]);
+                let pn = (buf[(t_next as usize) * 2], buf[(t_next as usize) * 2 + 1]);
+                return (
+                    sp * pp.0 + st * pt.0 + sn * pn.0,
+                    sp * pp.1 + st * pt.1 + sn * pn.1,
+                );
+            }
+        }
+        (buf[i * 2], buf[i * 2 + 1])
+    };
+
+    // Returns (s_idx, so_idx) for the chain CP and its other-side neighbor
+    // attached to the T-junction's stem shadow at slot t+1. Mirrors
+    // Polyak's stem_endpoints.
+    let stem_endpoints = |t: usize| -> Option<(usize, usize)> {
+        if t + 1 >= num_cps { return None; }
+        let s_idx = neighbors[(t + 1) * 4];
+        if s_idx < 0 { return None; }
+        let s = s_idx as usize;
+        let so = if neighbors[s * 4] == (t + 1) as i32 {
+            neighbors[s * 4 + 1]
+        } else {
+            neighbors[s * 4]
+        };
+        if so < 0 { return None; }
+        Some((s, so as usize))
+    };
+
+    // Segment mode: 0=full, 1=left half, 2=right half, 3=skip.
+    // Half-segment exclusion mirrors the per-CP optimizer:
+    //   center corner            → 3 (skip)
+    //   both endpoints corners   → 3 (skip)
+    //   only left  endpoint corner → 2 (right half — drop left half)
+    //   only right endpoint corner → 1 (left half — drop right half)
+    //   neither                  → 0 (full)
+    let seg_mode_for = |center: usize, a: usize, c: usize| -> u8 {
+        let cc = (flags[center] & IS_CORNER) != 0;
+        if cc { return 3; }
+        let lc = (flags[a] & IS_CORNER) != 0;
+        let rc = (flags[c] & IS_CORNER) != 0;
+        match (lc, rc) {
+            (true, true) => 3,
+            (true, false) => 2,
+            (false, true) => 1,
+            (false, false) => 0,
+        }
+    };
+
+    // Compute (J_a, J_b, J_c, θ) for the segment centered at b, with
+    // mode-dependent half-segment substitution.
+    //
+    // FULL:   θ = atan2(va × vb, va · vb)
+    //         J_a = −dva,  J_b = dva − dvb,  J_c = dvb
+    // LEFT:   substitute vb → m = (va+vb)/2.
+    //         θ = atan2(va × m, va · m)
+    //         J_a = −dva − dm/2,  J_b = dva,  J_c = dm/2
+    // RIGHT:  substitute va → m.
+    //         θ = atan2(m × vb, m · vb)
+    //         J_a = dm/2,  J_b = −dvb,  J_c = −dm/2 + dvb
+    //
+    // dva  = −perp(va)/|va|² = ( va.y/|va|², −va.x/|va|²)
+    // dvb  = +perp(vb)/|vb|² = (−vb.y/|vb|²,  vb.x/|vb|²)
+    // dm   = +perp(m)/|m|²   = (−m.y/|m|²,    m.x/|m|²)
+    let segment_jacs = |pa: (f32, f32), pb: (f32, f32), pc: (f32, f32), mode: u8|
+        -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+        let va = (pb.0 - pa.0, pb.1 - pa.1);
+        let vb = (pc.0 - pb.0, pc.1 - pb.1);
+        let inv_lva2 = 1.0 / (va.0 * va.0 + va.1 * va.1).max(1e-20);
+        let inv_lvb2 = 1.0 / (vb.0 * vb.0 + vb.1 * vb.1).max(1e-20);
+        let dva = (va.1 * inv_lva2, -va.0 * inv_lva2);
+        let dvb = (-vb.1 * inv_lvb2, vb.0 * inv_lvb2);
+        match mode {
+            0 => {
+                let cross = va.0 * vb.1 - va.1 * vb.0;
+                let dot = va.0 * vb.0 + va.1 * vb.1;
+                let theta = cross.atan2(dot);
+                let j_a = (-dva.0, -dva.1);
+                let j_b = (dva.0 - dvb.0, dva.1 - dvb.1);
+                let j_c = (dvb.0, dvb.1);
+                (j_a, j_b, j_c, theta)
+            }
+            1 => {
+                let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                let cross = va.0 * m.1 - va.1 * m.0;
+                let dot = va.0 * m.0 + va.1 * m.1;
+                let theta = cross.atan2(dot);
+                let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
+                let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
+                let j_a = (-dva.0 - dm.0 * 0.5, -dva.1 - dm.1 * 0.5);
+                let j_b = (dva.0, dva.1);
+                let j_c = (dm.0 * 0.5, dm.1 * 0.5);
+                (j_a, j_b, j_c, theta)
+            }
+            2 => {
+                let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                let cross = m.0 * vb.1 - m.1 * vb.0;
+                let dot = m.0 * vb.0 + m.1 * vb.1;
+                let theta = cross.atan2(dot);
+                let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
+                let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
+                let j_a = (dm.0 * 0.5, dm.1 * 0.5);
+                let j_b = (-dvb.0, -dvb.1);
+                let j_c = (-dm.0 * 0.5 + dvb.0, -dm.1 * 0.5 + dvb.1);
+                (j_a, j_b, j_c, theta)
+            }
+            _ => ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), 0.0),
+        }
+    };
+
+    // Decide whether segment centered at CP i contributes, returning
+    // (a, b, c, mode). Mode==3 means skip. Stem segments (touching a
+    // junction-pinned shadow) are skipped here and handled in the
+    // T-junction stem loop.
+    let seg_for = |i: usize| -> Option<(usize, usize, usize, u8)> {
+        if !active[i] { return None; }
+        let prev = neighbors[i * 4];
+        let next = neighbors[i * 4 + 1];
+        if prev < 0 || next < 0 { return None; }
+        if is_stem_shadow(prev) || is_stem_shadow(next) { return None; }
+        let a = prev as usize;
+        let c = next as usize;
+        let mode = seg_mode_for(i, a, c);
+        if mode == 3 { return None; }
+        Some((a, i, c, mode))
+    };
+
+    // For each T-junction main slot (IS_TJUNCTION), compute the stem
+    // segment's J and theta. Returns
+    //   (theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s, so)
+    // or None if the T-junction is incomplete.
+    let stem_seg = |t: usize, p: &[f32]| -> Option<(f32, (f32, f32), (f32, f32), (f32, f32), f32, f32, f32, usize, usize, usize, usize)> {
+        if !active[t] { return None; }
+        if (flags[t] & IS_TJUNCTION) == 0 { return None; }
+        let t_prev = neighbors[t * 4];
+        let t_next = neighbors[t * 4 + 1];
+        if t_prev < 0 || t_next < 0 { return None; }
+        let (s, so) = stem_endpoints(t)?;
+        let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
+        let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
+        let (st, sp, sn) = ghost_weights(prev_is_end, next_is_end);
+        let p_t = read_pos(p, t);
+        let p_tp = read_pos(p, t_prev as usize);
+        let p_tn = read_pos(p, t_next as usize);
+        let ghost = (
+            sp * p_tp.0 + st * p_t.0 + sn * p_tn.0,
+            sp * p_tp.1 + st * p_t.1 + sn * p_tn.1,
+        );
+        let p_s = read_pos(p, s);
+        let p_so = read_pos(p, so);
+        let (j_a, j_b, j_c, theta) = segment_jacs(ghost, p_s, p_so, 0);
+        Some((theta, j_a, j_b, j_c, st, sp, sn, t_prev as usize, t_next as usize, s, so))
+    };
+
+    // Compute global gradient at p.
+    let compute_g = |p: &[f32]| -> Vec<f32> {
+        let mut g = vec![0.0f32; n];
+        // Regular segments.
+        for i in 0..num_cps {
+            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
+            let (j_a, j_b, j_c, theta) = segment_jacs(pa, pb, pc, mode);
+            g[a*2]     += theta * j_a.0; g[a*2 + 1] += theta * j_a.1;
+            g[b*2]     += theta * j_b.0; g[b*2 + 1] += theta * j_b.1;
+            g[c*2]     += theta * j_c.0; g[c*2 + 1] += theta * j_c.1;
+        }
+        // T-junction stem segments. The stem segment is (ghost, s, so)
+        // where ghost = sp·T_prev + st·T + sn·T_next. Chain rule
+        // distributes J_a (∂θ/∂ghost) to T, T_prev, T_next.
+        for t in 0..num_cps {
+            let Some((theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s, so)) =
+                stem_seg(t, p) else { continue; };
+            g[s*2]      += theta * j_b.0;        g[s*2 + 1]      += theta * j_b.1;
+            g[so*2]     += theta * j_c.0;        g[so*2 + 1]     += theta * j_c.1;
+            g[t*2]      += theta * st * j_a.0;   g[t*2 + 1]      += theta * st * j_a.1;
+            g[t_prev*2] += theta * sp * j_a.0;   g[t_prev*2 + 1] += theta * sp * j_a.1;
+            g[t_next*2] += theta * sn * j_a.0;   g[t_next*2 + 1] += theta * sn * j_a.1;
+        }
+        // Positional energy gradient.
+        for i in 0..num_cps {
+            if !active[i] { continue; }
+            let p_i = read_pos(p, i);
+            let p_o = read_pos(orig_positions, i);
+            let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
+            let d2 = d.0 * d.0 + d.1 * d.1;
+            g[i*2]     += 4.0 * s4 * d2 * d.0;
+            g[i*2 + 1] += 4.0 * s4 * d2 * d.1;
+        }
+        // Crossing constraint: slot 1's row is summed into slot 0 (they
+        // share a position). Then slot 1 zeroed.
+        for i in 0..num_cps {
+            if is_xing_slot1(i) {
+                g[(i-1)*2]     += g[i*2];
+                g[(i-1)*2 + 1] += g[i*2 + 1];
+                g[i*2] = 0.0;
+                g[i*2 + 1] = 0.0;
+            }
+        }
+        // Zero pinned rows (junction-pinned shadows etc.).
+        for i in 0..num_cps {
+            if !active[i] { g[i*2] = 0.0; g[i*2 + 1] = 0.0; }
+        }
+        g
+    };
+
+    let compute_hs = |p: &[f32], v: &[f32]| -> Vec<f32> {
+        let mut hs = vec![0.0f32; n];
+        // Regular segments.
+        for i in 0..num_cps {
+            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
+            let (j_a, j_b, j_c, _) = segment_jacs(pa, pb, pc, mode);
+            let v_a = read_pos(v, a);
+            let v_b = read_pos(v, b);
+            let v_c = read_pos(v, c);
+            let inner = j_a.0 * v_a.0 + j_a.1 * v_a.1
+                      + j_b.0 * v_b.0 + j_b.1 * v_b.1
+                      + j_c.0 * v_c.0 + j_c.1 * v_c.1;
+            hs[a*2]     += inner * j_a.0; hs[a*2 + 1] += inner * j_a.1;
+            hs[b*2]     += inner * j_b.0; hs[b*2 + 1] += inner * j_b.1;
+            hs[c*2]     += inner * j_c.0; hs[c*2 + 1] += inner * j_c.1;
+        }
+        // T-junction stem segments. Effective Jacobian for the stem is:
+        //   J_eff[T]      = st·J_a    (chain rule via ghost)
+        //   J_eff[T_prev] = sp·J_a
+        //   J_eff[T_next] = sn·J_a
+        //   J_eff[s]      = J_b
+        //   J_eff[so]     = J_c
+        // inner = Σ J_eff · v over all 5 endpoints; then distribute.
+        for t in 0..num_cps {
+            let Some((_theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s_idx, so)) =
+                stem_seg(t, p) else { continue; };
+            let v_t  = read_pos(v, t);
+            let v_tp = read_pos(v, t_prev);
+            let v_tn = read_pos(v, t_next);
+            let v_s  = read_pos(v, s_idx);
+            let v_so = read_pos(v, so);
+            let inner =
+                  j_b.0 * v_s.0 + j_b.1 * v_s.1
+                + j_c.0 * v_so.0 + j_c.1 * v_so.1
+                + st * (j_a.0 * v_t.0 + j_a.1 * v_t.1)
+                + sp * (j_a.0 * v_tp.0 + j_a.1 * v_tp.1)
+                + sn * (j_a.0 * v_tn.0 + j_a.1 * v_tn.1);
+            hs[s_idx*2]      += inner * j_b.0;        hs[s_idx*2 + 1]  += inner * j_b.1;
+            hs[so*2]         += inner * j_c.0;        hs[so*2 + 1]     += inner * j_c.1;
+            hs[t*2]          += inner * st * j_a.0;   hs[t*2 + 1]      += inner * st * j_a.1;
+            hs[t_prev*2]     += inner * sp * j_a.0;   hs[t_prev*2 + 1] += inner * sp * j_a.1;
+            hs[t_next*2]     += inner * sn * j_a.0;   hs[t_next*2 + 1] += inner * sn * j_a.1;
+        }
+        // Positional Hessian.
+        for i in 0..num_cps {
+            if !active[i] { continue; }
+            let p_i = read_pos(p, i);
+            let p_o = read_pos(orig_positions, i);
+            let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
+            let v_i = read_pos(v, i);
+            let d2 = d.0 * d.0 + d.1 * d.1;
+            let d_dot_v = d.0 * v_i.0 + d.1 * v_i.1;
+            hs[i*2]     += 4.0 * s4 * (d2 * v_i.0 + 2.0 * d_dot_v * d.0);
+            hs[i*2 + 1] += 4.0 * s4 * (d2 * v_i.1 + 2.0 * d_dot_v * d.1);
+        }
+        // Crossing constraint: collapse slot 1 into slot 0.
+        for i in 0..num_cps {
+            if is_xing_slot1(i) {
+                hs[(i-1)*2]     += hs[i*2];
+                hs[(i-1)*2 + 1] += hs[i*2 + 1];
+                hs[i*2] = 0.0;
+                hs[i*2 + 1] = 0.0;
+            }
+        }
+        for i in 0..num_cps {
+            if !active[i] { hs[i*2] = 0.0; hs[i*2 + 1] = 0.0; }
+        }
+        hs
+    };
+
+    let compute_e = |p: &[f32]| -> f32 {
+        let mut e = 0.0f32;
+        // Regular segments.
+        for i in 0..num_cps {
+            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
+            let va = (pb.0 - pa.0, pb.1 - pa.1);
+            let vb = (pc.0 - pb.0, pc.1 - pb.1);
+            let theta = match mode {
+                0 => (va.0 * vb.1 - va.1 * vb.0).atan2(va.0 * vb.0 + va.1 * vb.1),
+                1 => {
+                    let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                    (va.0 * m.1 - va.1 * m.0).atan2(va.0 * m.0 + va.1 * m.1)
+                }
+                2 => {
+                    let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                    (m.0 * vb.1 - m.1 * vb.0).atan2(m.0 * vb.0 + m.1 * vb.1)
+                }
+                _ => 0.0,
+            };
+            e += 0.5 * theta * theta;
+        }
+        // T-junction stem segments.
+        for t in 0..num_cps {
+            let Some((theta, _, _, _, _, _, _, _, _, _, _)) = stem_seg(t, p) else { continue; };
+            e += 0.5 * theta * theta;
+        }
+        // Positional energy.
+        for i in 0..num_cps {
+            if !active[i] { continue; }
+            let p_i = read_pos(p, i);
+            let p_o = read_pos(orig_positions, i);
+            let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
+            let d2 = d.0 * d.0 + d.1 * d.1;
+            e += s4 * d2 * d2;
+        }
+        e
+    };
+
+    // Enforce v[slot 1] = v[slot 0] for crossing pairs in any vector.
+    // Required before passing v to compute_hs so the matvec sees a
+    // consistent value at both slots (compute_hs sums slot-1's row
+    // into slot-0 and zeros it, which is correct only when v has the
+    // constraint applied).
+    let enforce_xing_constraint = |buf: &mut [f32]| {
+        for i in 0..num_cps {
+            if is_xing_slot1(i) {
+                buf[i*2]     = buf[(i-1)*2];
+                buf[i*2 + 1] = buf[(i-1)*2 + 1];
+            }
+        }
+    };
+
+    // Initialize: ensure crossings start with slot 1 = slot 0.
+    enforce_xing_constraint(&mut p);
+
+    // CG inner solver. Solves H·δ = −g for δ. Stops when ‖r‖ < tol·‖g‖.
+    const CG_MAX: usize = 50;
+    const CG_TOL: f32 = 1e-3;
+    let solve_cg = |p: &[f32], g: &[f32]| -> Vec<f32> {
+        let mut delta = vec![0.0f32; n];
+        let mut r: Vec<f32> = g.iter().map(|x| -x).collect();
+        let mut s = r.clone();
+        let mut r_dot_r: f32 = r.iter().map(|x| x * x).sum();
+        let initial_r_dot_r = r_dot_r;
+        if initial_r_dot_r < 1e-30 { return delta; }
+        for _ in 0..CG_MAX {
+            if r_dot_r < CG_TOL * CG_TOL * initial_r_dot_r { break; }
+            // Constraint: matvec needs s[xing slot 1] = s[xing slot 0].
+            enforce_xing_constraint(&mut s);
+            let hs = compute_hs(p, &s);
+            let s_dot_hs: f32 = s.iter().zip(&hs).map(|(a, b)| a * b).sum();
+            if s_dot_hs.abs() < 1e-20 { break; }
+            let alpha = r_dot_r / s_dot_hs;
+            for k in 0..n {
+                delta[k] += alpha * s[k];
+                r[k] -= alpha * hs[k];
+            }
+            let r_dot_r_new: f32 = r.iter().map(|x| x * x).sum();
+            let beta = r_dot_r_new / r_dot_r;
+            for k in 0..n { s[k] = r[k] + beta * s[k]; }
+            r_dot_r = r_dot_r_new;
+        }
+        delta
+    };
+
+    // Newton outer with backtracking line search.
+    const N_NEWTON: usize = 15;
+    let debug_cg = std::env::var("VBY_DEBUG_CG").is_ok();
+    for iter in 0..N_NEWTON {
+        let g = compute_g(&p);
+        let g_norm: f32 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if debug_cg {
+            eprintln!("cg iter {}: g_norm={:.6e} e={:.6}", iter, g_norm, compute_e(&p));
+        }
+        if g_norm < 1e-6 { break; }
+        let mut delta = solve_cg(&p, &g);
+        // δ across crossing pairs needs slot 1 = slot 0 so the position
+        // update preserves the coincidence.
+        enforce_xing_constraint(&mut delta);
+        let e_old = compute_e(&p);
+        let mut alpha = 1.0f32;
+        let mut accepted = false;
+        for _ in 0..6 {
+            let p_trial: Vec<f32> = p.iter().zip(&delta).map(|(pi, di)| pi + alpha * di).collect();
+            let e_new = compute_e(&p_trial);
+            if e_new < e_old {
+                p = p_trial;
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if !accepted { break; }
+    }
+    if debug_cg {
+        eprintln!("cg final: e={:.6}", compute_e(&p));
+    }
+    p
+}
+
+
 fn optimize_energy(
     positions: &[f32],
     orig_positions: &[f32],
@@ -1612,7 +2070,14 @@ fn optimize_energy(
             // neighbor moves by a small amount and the resulting tiny det
             // produces a huge Newton step that diverges to NaN over later
             // iterations.
-            const NEWTON_ITERS: i32 = 10;
+            // Matches NEWTON_ITER in vectorscale's optimize-energy.slang.
+            // CPU sweep at OUTER=2 outer iters: NEWTON=1 N=2 e=289.95 vs
+            // NEWTON=2 N=2 e=282.04 (+2.8%); at N=10 NEWTON=1 e=271.55 vs
+            // NEWTON=2 e=271.87 (NEWTON=1 converges to a slightly lower
+            // final energy because a smaller Picard step leaves room for
+            // the gradient correction to debias). Halves picard inner ALU.
+            let newton_iters: i32 = std::env::var("VBY_NEWTON")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(1);
 
             let add_segment = |va: (f32, f32), vb: (f32, f32),
                                s_va: f32, s_vb: f32,
@@ -1807,7 +2272,7 @@ fn optimize_energy(
                 (e, g, h)
             };
 
-            for _ in 0..NEWTON_ITERS {
+            for _ in 0..newton_iters {
                 let (e_old, g, h) = evaluate(p);
                 let h00 = h[0][0];
                 let h11 = h[1][1];
@@ -1840,20 +2305,40 @@ fn optimize_energy(
                 // step-size now adapts to local geometry, avoiding
                 // overshoot in tight regions and allowing big strides in
                 // open ones.
-                let mut accepted = false;
-                let mut scale = 1.0_f32;
-                for _ in 0..6 {
-                    let p_trial = (p.0 + dx * scale, p.1 + dy * scale);
-                    let (e_new, _, _) = evaluate(p_trial);
-                    if e_new < e_old {
-                        p = p_trial;
-                        accepted = true;
-                        break;
+                //
+                // Default: clamped Newton step (no line search). Matches
+                // optimize-energy.slang's MAX_STEP=0.10. The cap is a more
+                // conservative trust region than line search's first-accept
+                // rule — CPU sweep showed it converges to a slightly LOWER
+                // final energy at every N with no per-iter backtrack work.
+                // VBY_LS=1 reverts to the old backtracking line search.
+                let use_ls = std::env::var("VBY_LS").is_ok();
+                if !use_ls {
+                    let cap: f32 = std::env::var("VBY_NOLS_CAP")
+                        .ok().and_then(|s| s.parse().ok()).unwrap_or(0.10);
+                    let len2 = dx * dx + dy * dy;
+                    let (mut sx, mut sy) = (dx, dy);
+                    if len2 > cap * cap {
+                        let s = cap / len2.sqrt();
+                        sx *= s; sy *= s;
                     }
-                    scale *= 0.5;
-                }
-                if !accepted {
-                    break; // gradient direction couldn't find an improvement
+                    p = (p.0 + sx, p.1 + sy);
+                } else {
+                    let mut accepted = false;
+                    let mut scale = 1.0_f32;
+                    for _ in 0..6 {
+                        let p_trial = (p.0 + dx * scale, p.1 + dy * scale);
+                        let (e_new, _, _) = evaluate(p_trial);
+                        if e_new < e_old {
+                            p = p_trial;
+                            accepted = true;
+                            break;
+                        }
+                        scale *= 0.5;
+                    }
+                    if !accepted {
+                        break; // gradient direction couldn't find an improvement
+                    }
                 }
             }
 
@@ -1867,64 +2352,349 @@ fn optimize_energy(
         }
     };
 
-    // Jacobi-style outer iteration with per-CP Anderson(2) acceleration.
-    //
-    //   f_k     = G(x_k) − x_k                    (Picard residual)
-    //   Δx      = x_k − x_{k-1}                   (history of input)
-    //   Δf      = f_k − f_{k-1}                   (history of residual)
-    //   γ       = (Δf · f_k) / (Δf · Δf)          (1-D least squares)
-    //   x_{k+1} = (x_k + f_k) − γ · (Δx + Δf)
-    //
-    // γ is clamped to [0, 1.5]: never anti-accelerate, never extrapolate
-    // more than 50% past the Picard step. At noisy CPs (corners,
-    // T-junctions where the inner Newton's local model is poorly
-    // conditioned) γ blows up when |Δf| is small relative to |f|, and
-    // unclamped Anderson overshoots into the rasterizer's NN-fallback
-    // region. Empirically converges in ~12 outer passes vs 100 for plain
-    // Picard, with no per-CP communication required (each CP carries 4
-    // floats of history: prev_x and prev_f).
-    // Per-CP Anderson(2) outer loop with safeguarded γ. 4 floats of history
-    // per CP (prev_p, prev_f); the 1-D least-squares γ is clamped to
-    // [0, 1.5] to prevent overshoot at noisy CPs (corners, T-junctions
-    // where the inner Newton's local model is poorly conditioned).
-    //
-    // Iteration counts match master / vectorscale (3 outer × 3 inner).
-    const OUTER_PASSES: usize = 3;
-    let mut buf_a = positions.to_vec();
-    let mut buf_b = vec![0.0f32; num_cps * 2];
-    let mut prev_p = vec![0.0f32; num_cps * 2];
-    let mut prev_f = vec![0.0f32; num_cps * 2];
-    let mut have_history = false;
-    for _ in 0..OUTER_PASSES {
-        optimize_one_pass(&buf_a, &mut buf_b);
-        for ci in 0..num_cps {
-            let p_x = buf_a[ci * 2];
-            let p_y = buf_a[ci * 2 + 1];
-            let f_x = buf_b[ci * 2]     - p_x;
-            let f_y = buf_b[ci * 2 + 1] - p_y;
-            if !have_history {
-                buf_b[ci * 2]     = p_x + f_x;
-                buf_b[ci * 2 + 1] = p_y + f_y;
-            } else {
-                let dx_x = p_x - prev_p[ci * 2];
-                let dx_y = p_y - prev_p[ci * 2 + 1];
-                let df_x = f_x - prev_f[ci * 2];
-                let df_y = f_y - prev_f[ci * 2 + 1];
-                let df_dot_df = df_x * df_x + df_y * df_y;
-                let mut gamma = if df_dot_df > 1e-12 {
-                    (df_x * f_x + df_y * f_y) / df_dot_df
-                } else { 0.0 };
-                if gamma < 0.0 { gamma = 0.0; }
-                if gamma > 1.5 { gamma = 1.5; }
-                buf_b[ci * 2]     = (p_x + f_x) - gamma * (dx_x + df_x);
-                buf_b[ci * 2 + 1] = (p_y + f_y) - gamma * (dx_y + df_y);
-            }
-            prev_p[ci * 2]     = p_x;
-            prev_p[ci * 2 + 1] = p_y;
-            prev_f[ci * 2]     = f_x;
-            prev_f[ci * 2 + 1] = f_y;
+
+    // Global energy E(p) = Σ_segments 0.5·θ² + Σ_active s4·d⁴.
+    // Used for ablation logging (VBY_DEBUG_LS=1). Iterates segments by
+    // center CP (each counted once), skips center/both-corner segments
+    // and stem-shadow-bounded segments (those are folded into the
+    // T-junction stem loop via ghost coupling).
+    let is_stem_shadow = |k: i32| -> bool {
+        if k <= 0 { return false; }
+        let k = k as usize;
+        if k >= num_cps { return false; }
+        if (flags[k] & 1) == 0 { return false; }
+        (flags[k - 1] & IS_TJUNCTION) != 0
+    };
+    let compute_e = |p: &[f32]| -> f32 {
+        let mut e = 0.0f32;
+        for b in 0..num_cps {
+            let fb = flags[b];
+            if fb == 0 || (fb & 1) != 0 { continue; }
+            if (fb & IS_CORNER) != 0 { continue; }
+            let prev = neighbors[b * 4];
+            let next = neighbors[b * 4 + 1];
+            if prev < 0 || next < 0 { continue; }
+            if is_stem_shadow(prev) || is_stem_shadow(next) { continue; }
+            let a = prev as usize;
+            let c = next as usize;
+            let lc = (flags[a] & IS_CORNER) != 0;
+            let rc = (flags[c] & IS_CORNER) != 0;
+            let mode: u8 = match (lc, rc) {
+                (true, true) => continue,
+                (true, false) => 2,
+                (false, true) => 1,
+                (false, false) => 0,
+            };
+            let pa = read_neighbor_pos(p, a);
+            let pb = read_pos(p, b);
+            let pc = read_neighbor_pos(p, c);
+            let va = (pb.0 - pa.0, pb.1 - pa.1);
+            let vb = (pc.0 - pb.0, pc.1 - pb.1);
+            let theta = match mode {
+                0 => (va.0 * vb.1 - va.1 * vb.0).atan2(va.0 * vb.0 + va.1 * vb.1),
+                1 => {
+                    let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                    (va.0 * m.1 - va.1 * m.0).atan2(va.0 * m.0 + va.1 * m.1)
+                }
+                2 => {
+                    let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                    (m.0 * vb.1 - m.1 * vb.0).atan2(m.0 * vb.0 + m.1 * vb.1)
+                }
+                _ => 0.0,
+            };
+            e += 0.5 * theta * theta;
         }
-        have_history = true;
+        for t in 0..num_cps {
+            let ft = flags[t];
+            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 { continue; }
+            let t_prev = neighbors[t * 4];
+            let t_next = neighbors[t * 4 + 1];
+            if t_prev < 0 || t_next < 0 { continue; }
+            if t + 1 >= num_cps { continue; }
+            let stem_n = neighbors[(t + 1) * 4];
+            if stem_n < 0 { continue; }
+            let s = stem_n as usize;
+            let so_i = if neighbors[s * 4] == (t + 1) as i32 {
+                neighbors[s * 4 + 1]
+            } else {
+                neighbors[s * 4]
+            };
+            if so_i < 0 { continue; }
+            let so = so_i as usize;
+            let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
+            let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
+            let (sp, st, sn) = match (prev_is_end, next_is_end) {
+                (false, false) => (0.125_f32, 0.75_f32, 0.125_f32),
+                (true,  false) => (0.25, 0.625, 0.125),
+                (false, true ) => (0.125, 0.625, 0.25),
+                (true,  true ) => (0.25, 0.5, 0.25),
+            };
+            let p_t = read_pos(p, t);
+            let p_tp = read_pos(p, t_prev as usize);
+            let p_tn = read_pos(p, t_next as usize);
+            let ghost = (
+                sp * p_tp.0 + st * p_t.0 + sn * p_tn.0,
+                sp * p_tp.1 + st * p_t.1 + sn * p_tn.1,
+            );
+            let p_s = read_pos(p, s);
+            let p_so = read_pos(p, so);
+            let va = (p_s.0 - ghost.0, p_s.1 - ghost.1);
+            let vb = (p_so.0 - p_s.0, p_so.1 - p_s.1);
+            let theta = (va.0 * vb.1 - va.1 * vb.0).atan2(va.0 * vb.0 + va.1 * vb.1);
+            e += 0.5 * theta * theta;
+        }
+        for i in 0..num_cps {
+            let fi = flags[i];
+            if fi == 0 || (fi & 1) != 0 { continue; }
+            let p_i = read_pos(p, i);
+            let p_o = read_pos(orig_positions, i);
+            let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
+            let d2 = d.0 * d.0 + d.1 * d.1;
+            e += s4 * d2 * d2;
+        }
+        e
+    };
+
+    // Global gradient ∇E(p). Unbiased: at ∇E = 0 we are at a true local
+    // minimum (not the IFT iteration's biased fixed point). Mirrors
+    // compute_e structurally — each segment contributes its θ·J terms to
+    // its 3 endpoint CPs, each stem segment distributes through the ghost,
+    // each active CP gets the 4 s4 d²·d positional term.
+    //
+    // Per-segment Jacobians (segment_jacs) for the 3 modes:
+    //   full:  va=pb−pa, vb=pc−pb, θ=atan2(va×vb, va·vb)
+    //          dva=( va.y, −va.x)/|va|²,  dvb=(−vb.y, vb.x)/|vb|²
+    //          J_a=−dva, J_b=dva−dvb, J_c=dvb
+    //   left half (right endpoint is corner): substitute vb → m=(va+vb)/2
+    //          dm=(−m.y, m.x)/|m|²
+    //          J_a=−dva−dm/2, J_b=dva, J_c=dm/2
+    //   right half (left endpoint is corner): substitute va → m
+    //          J_a=dm/2, J_b=−dvb, J_c=−dm/2+dvb
+    let segment_jacs = |pa: (f32, f32), pb: (f32, f32), pc: (f32, f32), mode: u8|
+        -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+        let va = (pb.0 - pa.0, pb.1 - pa.1);
+        let vb = (pc.0 - pb.0, pc.1 - pb.1);
+        let inv_lva2 = 1.0 / (va.0 * va.0 + va.1 * va.1).max(1e-20);
+        let inv_lvb2 = 1.0 / (vb.0 * vb.0 + vb.1 * vb.1).max(1e-20);
+        let dva = (va.1 * inv_lva2, -va.0 * inv_lva2);
+        let dvb = (-vb.1 * inv_lvb2, vb.0 * inv_lvb2);
+        match mode {
+            0 => {
+                let cross = va.0 * vb.1 - va.1 * vb.0;
+                let dot = va.0 * vb.0 + va.1 * vb.1;
+                let theta = cross.atan2(dot);
+                ((-dva.0, -dva.1), (dva.0 - dvb.0, dva.1 - dvb.1), (dvb.0, dvb.1), theta)
+            }
+            1 => {
+                let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                let cross = va.0 * m.1 - va.1 * m.0;
+                let dot = va.0 * m.0 + va.1 * m.1;
+                let theta = cross.atan2(dot);
+                let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
+                let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
+                ((-dva.0 - dm.0 * 0.5, -dva.1 - dm.1 * 0.5),
+                 (dva.0, dva.1),
+                 (dm.0 * 0.5, dm.1 * 0.5),
+                 theta)
+            }
+            2 => {
+                let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
+                let cross = m.0 * vb.1 - m.1 * vb.0;
+                let dot = m.0 * vb.0 + m.1 * vb.1;
+                let theta = cross.atan2(dot);
+                let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
+                let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
+                ((dm.0 * 0.5, dm.1 * 0.5),
+                 (-dvb.0, -dvb.1),
+                 (-dm.0 * 0.5 + dvb.0, -dm.1 * 0.5 + dvb.1),
+                 theta)
+            }
+            _ => ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), 0.0),
+        }
+    };
+    let compute_g = |p: &[f32]| -> Vec<f32> {
+        let mut g = vec![0.0f32; num_cps * 2];
+        // Regular segments (centered at each non-corner CP with valid prev/next,
+        // excluding stem-shadow bounded segments).
+        for b in 0..num_cps {
+            let fb = flags[b];
+            if fb == 0 || (fb & 1) != 0 { continue; }
+            if (fb & IS_CORNER) != 0 { continue; }
+            let prev = neighbors[b * 4];
+            let next = neighbors[b * 4 + 1];
+            if prev < 0 || next < 0 { continue; }
+            if is_stem_shadow(prev) || is_stem_shadow(next) { continue; }
+            let a = prev as usize;
+            let c = next as usize;
+            let lc = (flags[a] & IS_CORNER) != 0;
+            let rc = (flags[c] & IS_CORNER) != 0;
+            let mode: u8 = match (lc, rc) {
+                (true, true) => continue,
+                (true, false) => 2,
+                (false, true) => 1,
+                (false, false) => 0,
+            };
+            let pa = read_neighbor_pos(p, a);
+            let pb = read_pos(p, b);
+            let pc = read_neighbor_pos(p, c);
+            let (j_a, j_b, j_c, theta) = segment_jacs(pa, pb, pc, mode);
+            g[a*2]     += theta * j_a.0; g[a*2 + 1] += theta * j_a.1;
+            g[b*2]     += theta * j_b.0; g[b*2 + 1] += theta * j_b.1;
+            g[c*2]     += theta * j_c.0; g[c*2 + 1] += theta * j_c.1;
+        }
+        // T-junction stem segments. Chain rule routes ∂θ/∂ghost back to
+        // (T, T_prev, T_next) with weights (st, sp, sn).
+        for t in 0..num_cps {
+            let ft = flags[t];
+            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 { continue; }
+            let t_prev = neighbors[t * 4];
+            let t_next = neighbors[t * 4 + 1];
+            if t_prev < 0 || t_next < 0 { continue; }
+            if t + 1 >= num_cps { continue; }
+            let stem_n = neighbors[(t + 1) * 4];
+            if stem_n < 0 { continue; }
+            let s = stem_n as usize;
+            let so_i = if neighbors[s * 4] == (t + 1) as i32 {
+                neighbors[s * 4 + 1]
+            } else {
+                neighbors[s * 4]
+            };
+            if so_i < 0 { continue; }
+            let so = so_i as usize;
+            let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
+            let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
+            let (sp, st, sn) = match (prev_is_end, next_is_end) {
+                (false, false) => (0.125_f32, 0.75_f32, 0.125_f32),
+                (true,  false) => (0.25, 0.625, 0.125),
+                (false, true ) => (0.125, 0.625, 0.25),
+                (true,  true ) => (0.25, 0.5, 0.25),
+            };
+            let p_t = read_pos(p, t);
+            let p_tp = read_pos(p, t_prev as usize);
+            let p_tn = read_pos(p, t_next as usize);
+            let ghost = (
+                sp * p_tp.0 + st * p_t.0 + sn * p_tn.0,
+                sp * p_tp.1 + st * p_t.1 + sn * p_tn.1,
+            );
+            let p_s = read_pos(p, s);
+            let p_so = read_pos(p, so);
+            let (j_a, j_b, j_c, theta) = segment_jacs(ghost, p_s, p_so, 0);
+            g[s*2]                   += theta * j_b.0;       g[s*2 + 1]                   += theta * j_b.1;
+            g[so*2]                  += theta * j_c.0;       g[so*2 + 1]                  += theta * j_c.1;
+            g[t*2]                   += theta * st * j_a.0;  g[t*2 + 1]                   += theta * st * j_a.1;
+            g[(t_prev as usize)*2]   += theta * sp * j_a.0;  g[(t_prev as usize)*2 + 1]   += theta * sp * j_a.1;
+            g[(t_next as usize)*2]   += theta * sn * j_a.0;  g[(t_next as usize)*2 + 1]   += theta * sn * j_a.1;
+        }
+        // Positional energy gradient: ∂(s4·d⁴)/∂p = 4 s4 d² d.
+        for i in 0..num_cps {
+            let fi = flags[i];
+            if fi == 0 || (fi & 1) != 0 { continue; }
+            let p_i = read_pos(p, i);
+            let p_o = read_pos(orig_positions, i);
+            let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
+            let d2 = d.0 * d.0 + d.1 * d.1;
+            g[i*2]     += 4.0 * s4 * d2 * d.0;
+            g[i*2 + 1] += 4.0 * s4 * d2 * d.1;
+        }
+        // Crossing constraint: slot-1 row folded into slot-0 (they share a position).
+        for i in 0..num_cps {
+            if i > 0 && (flags[i] & IS_CROSSING) != 0 && (flags[i - 1] & IS_CROSSING) != 0 {
+                g[(i-1)*2]     += g[i*2];
+                g[(i-1)*2 + 1] += g[i*2 + 1];
+                g[i*2] = 0.0;
+                g[i*2 + 1] = 0.0;
+            }
+        }
+        // Pin inactive CPs (junction-pinned shadows etc.).
+        for i in 0..num_cps {
+            let fi = flags[i];
+            if fi == 0 || (fi & 1) != 0 {
+                g[i*2] = 0.0;
+                g[i*2 + 1] = 0.0;
+            }
+        }
+        g
+    };
+
+    // Outer loop: Picard step + global gradient correction. The Picard
+    // step (per-CP inner Newton) does most of the work cheaply; the
+    // gradient correction is an unbiased descent direction that fixes
+    // the IFT's standing-wave bias along chains. Fixed point is ∇E=0,
+    // i.e. the true local minimum, not the IFT biased fixed point.
+    //
+    // GPU-portable: the gradient pass reads exactly the same neighborhood
+    // (self, prev, next, gprev, gnext via ghost-aware read_neighbor_pos)
+    // as optimize_one_pass — drop-in fragment shader.
+    // Defaults match vectorscale's `vibeboy-vectorize-grad-*.slangp`
+    // presets: 2 outer iters of (Picard with clamped Newton, no line
+    // search) → gradient correction. No IFT pass. CPU sweep at N=100
+    // showed this converges to e=271.79 (0.4% above CG true min) and is
+    // stable at high N. Env vars override for experimentation.
+    let outer_passes: usize = std::env::var("VBY_OUTER")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    let eta: f32 = std::env::var("VBY_ETA").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05);
+    let max_step: f32 = std::env::var("VBY_MAXSTEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.25);
+    // GPU-faithful topology, matching vectorscale's optimize-energy +
+    // gradient-correction chain and vibeboy's wgpu Picard → grad pipeline.
+    //   Pass A (picard, optimize-energy.slang in vectorscale / picard_step.slang in wgpu):
+    //     per-CP Newton on local energy, no line search, |δ| capped to
+    //     MAX_STEP=0.10. Reads buf_a; writes buf_picard.
+    //   Pass B (gradient, gradient-correction.slang):
+    //     reads buf_picard; writes buf_b = buf_picard - η·clip(∇E).
+    let mut buf_a = positions.to_vec();
+    let mut buf_picard = vec![0.0f32; num_cps * 2];
+    let mut buf_b = vec![0.0f32; num_cps * 2];
+    let debug_ls = std::env::var("VBY_DEBUG_LS").is_ok();
+    // VBY_NOPICARD=1 skips the Picard step entirely — pure gradient
+    // descent ablation. Used to characterize how much of the convergence
+    // is doing by the per-CP Newton inner solver vs the outer-loop
+    // gradient correction. Pure gradient descent at η=0.05, MAX_STEP=0.25
+    // converges very slowly because the step is tiny relative to the
+    // Newton step's adaptive scale.
+    let no_picard = std::env::var("VBY_NOPICARD").is_ok();
+    for iter in 0..outer_passes {
+        // Pass A: Picard step. buf_picard = Picard(buf_a).
+        if no_picard {
+            buf_picard.copy_from_slice(&buf_a);
+        } else {
+            optimize_one_pass(&buf_a, &mut buf_picard);
+        }
+
+        // Pass B: Gradient correction. buf_b = buf_picard - η·clip(∇E(buf_picard)).
+        // VBY_NOGRAD=1 skips the gradient pass entirely.
+        // VBY_FUSED=1 evaluates ∇E at the PRE-Picard position (buf_a)
+        // instead of post-Picard, simulating a fused picard+grad shader
+        // where each fragment can only see neighbors' pre-picard positions.
+        let no_grad = std::env::var("VBY_NOGRAD").is_ok();
+        let fused = std::env::var("VBY_FUSED").is_ok();
+        if no_grad {
+            buf_b.copy_from_slice(&buf_picard);
+            if debug_ls {
+                let e_after = compute_e(&buf_b);
+                eprintln!("iter {}: e={:.6} (no grad)", iter, e_after);
+            }
+        } else {
+            let g_input = if fused { &buf_a } else { &buf_picard };
+            let g = compute_g(g_input);
+            for i in 0..num_cps {
+                let mut dx = -eta * g[i*2];
+                let mut dy = -eta * g[i*2 + 1];
+                let len2 = dx*dx + dy*dy;
+                if len2 > max_step * max_step {
+                    let s = max_step / len2.sqrt();
+                    dx *= s; dy *= s;
+                }
+                buf_b[i*2]     = buf_picard[i*2]     + dx;
+                buf_b[i*2 + 1] = buf_picard[i*2 + 1] + dy;
+            }
+            if debug_ls {
+                let e_after = compute_e(&buf_b);
+                let g_norm: f32 = g.iter().map(|x| x*x).sum::<f32>().sqrt();
+                eprintln!("iter {}: e={:.6} g_norm={:.4e}", iter, e_after, g_norm);
+            }
+        }
         std::mem::swap(&mut buf_a, &mut buf_b);
     }
     buf_a

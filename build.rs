@@ -35,6 +35,8 @@ const SHADERS: &[&str] = &[
     "cell_graph",
     "cell_rasterizer",
     "optimize_energy",
+    "picard_step",
+    "gradient_correction",
     "update_tjunction",
     "crossing_pack",
 ];

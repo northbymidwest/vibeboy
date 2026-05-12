@@ -11,14 +11,16 @@ type Texture = ProtocolObject<dyn MTLTexture>;
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
-/// Full GPU vectorize pipeline via Metal compute (7 stages: similarity_graph
-/// → resolve_crossings → cell_graph → optimize_energy → update_tjunction →
-/// crossing_pack → cell_rasterizer).
+/// Full GPU vectorize pipeline via Metal compute (8 stages: similarity_graph
+/// → resolve_crossings → cell_graph → picard_step → gradient_correction
+/// (alternating per outer iter) → update_tjunction → crossing_pack →
+/// cell_rasterizer).
 pub(super) struct MetalVectorizePipeline {
     sim_graph: ComputePipeline,
     resolve: ComputePipeline,
     cell_graph: ComputePipeline,
-    optimizer: ComputePipeline,
+    picard: ComputePipeline,
+    grad: ComputePipeline,
     tjunction: ComputePipeline,
     crossing_pack: ComputePipeline,
     rasterizer: ComputePipeline,
@@ -38,7 +40,15 @@ pub(super) struct MetalVecBufs {
     opt_out_buf: Buffer,
     orig_pos_buf: Buffer,
     crossing_t_buf: Buffer,
+    /// Per-iter intermediate: Picard pass writes here, grad pass reads
+    /// from here. Lives across iters as a fixed buffer (no ping-pong).
+    opt_picard_buf: Buffer,
 }
+
+/// Number of outer (Picard → grad) iterations. 3 lands ~1.7% above the
+/// converged-CG energy on standard pixel-art sprites; visually
+/// indistinguishable from fully-converged.
+const OPT_OUTER_PASSES: u32 = 3;
 
 fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
     let src = std::str::from_utf8(msl).ok()?;
@@ -61,7 +71,8 @@ impl MetalVectorizePipeline {
             sim_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")))?,
             resolve: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")))?,
             cell_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")))?,
-            optimizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/optimize_energy_comp.metal")))?,
+            picard: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.metal")))?,
+            grad: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.metal")))?,
             tjunction: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")))?,
             crossing_pack: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")))?,
             rasterizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")))?,
@@ -98,6 +109,7 @@ impl MetalVectorizePipeline {
                 opt_out_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 orig_pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 crossing_t_buf: mk_buf(device, (num_cps * 4) as usize),
+                opt_picard_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
             });
         }
         let b = self.bufs.as_ref().unwrap();
@@ -132,7 +144,8 @@ impl MetalVectorizePipeline {
         {
             let enc = cmd.blitCommandEncoder().unwrap();
             for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
-                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf] {
+                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf,
+                        &b.crossing_t_buf, &b.opt_picard_buf] {
                 enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
             }
             enc.endEncoding();
@@ -217,26 +230,47 @@ impl MetalVectorizePipeline {
             enc.endEncoding();
         }
 
-        // Stage 4: Optimize energy (2 iterations, ping-pong)
-        for iter in 0..2u32 {
+        // Stage 4: Optimizer — N outer iters of (Picard → grad).
+        //
+        // Per iter, Picard reads `src`, writes opt_picard_buf (per-CP
+        // Newton step). Grad reads opt_picard_buf, writes `dst` (-η · ∇E
+        // debias). Then ping-pong src/dst between pos_buf and opt_out_buf
+        // so the next iter sees the latest result as input.
+        let uni = mk_uni(&[num_cps, 0, 0, 0]);
+        let dispatch = |pipe: &ComputePipeline, in_buf: &Buffer, out_buf: &Buffer| {
+            let enc = cmd.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(pipe);
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(in_buf), 0, 1);
+                enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
+                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
+                enc.setBuffer_offset_atIndex(Some(out_buf), 0, 5);
+                enc.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
+                    MTLSize { width: 256, height: 1, depth: 1 },
+                );
+            }
+            enc.endEncoding();
+        };
+        for iter in 0..OPT_OUTER_PASSES {
             let (src, dst) = if iter % 2 == 0 {
                 (&b.pos_buf, &b.opt_out_buf)
             } else {
                 (&b.opt_out_buf, &b.pos_buf)
             };
-            let uni = mk_uni(&[num_cps, f32::to_bits(0.01), f32::to_bits(0.25), f32::to_bits(2.5)]);
-            let enc = cmd.computeCommandEncoder().unwrap();
-            enc.setComputePipelineState(&self.optimizer);
+            dispatch(&self.picard, src, &b.opt_picard_buf);
+            dispatch(&self.grad, &b.opt_picard_buf, dst);
+        }
+        // For odd OPT_OUTER_PASSES, the final result lands in opt_out_buf;
+        // copy it back into pos_buf so downstream stages can hardcode
+        // pos_buf as the optimizer output.
+        if OPT_OUTER_PASSES % 2 == 1 {
+            let enc = cmd.blitCommandEncoder().unwrap();
             unsafe {
-                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
-                enc.setBuffer_offset_atIndex(Some(src), 0, 1);
-                enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 2);
-                enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
-                enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
-                enc.setBuffer_offset_atIndex(Some(dst), 0, 5);
-                enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
-                    MTLSize { width: 256, height: 1, depth: 1 },
+                enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &b.opt_out_buf, 0, &b.pos_buf, 0, (num_cps * 2 * 4) as usize,
                 );
             }
             enc.endEncoding();
