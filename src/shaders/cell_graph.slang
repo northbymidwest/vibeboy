@@ -43,6 +43,7 @@ RWStructuredBuffer<uint> flags : register(u2, space1);
 RWStructuredBuffer<uint> flags;
 #endif
 
+[ForceInline]
 uint g(int gx, int gy) {
     gx = clamp(gx, 0, int(u.graph_stride) - 1);
     gy = clamp(gy, 0, int(2u * u.img_h));
@@ -50,6 +51,7 @@ uint g(int gx, int gy) {
 }
 
 // Read pixel color from the graph (stored at odd coordinates).
+[ForceInline]
 uint px_color(int px, int py) {
     px = clamp(px, 0, int(u.img_w) - 1);
     py = clamp(py, 0, int(u.img_h) - 1);
@@ -62,6 +64,7 @@ uint px_color(int px, int py) {
 // of an X-shape of diagonal links). Used to snap CP placements to the
 // integer grid corner so a lone single-pixel doesn't get a smeared
 // off-axis B-spline outline.
+[ForceInline]
 bool is_isolated_pixel(int px, int py) {
     if (px <= 0 || py <= 0
         || px >= int(u.img_w) - 1
@@ -83,19 +86,24 @@ bool is_isolated_pixel(int px, int py) {
         && ((diag_bl & 1u) != 0u);
 }
 
-// Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
-void bnd_colors(int cx, int cy, int dir, out uint ca, out uint cb) {
+// Get the two pixel colors separated by a boundary edge at corner (cx,cy)
+// in direction dir, packed into uint2(ca, cb). Returns rvalues (not
+// `out` params) so the caller can keep them in registers — outparams
+// lower to pointer args in MSL, forcing thread-local stack storage.
+[ForceInline]
+uint2 bnd_colors(int cx, int cy, int dir) {
     switch (dir) {
-        case 0: ca = px_color(cx - 1, cy - 1); cb = px_color(cx, cy - 1); break; // N
-        case 1: ca = px_color(cx, cy - 1);      cb = px_color(cx, cy);     break; // E
-        case 2: ca = px_color(cx, cy);           cb = px_color(cx - 1, cy); break; // S
-        case 3: ca = px_color(cx - 1, cy);       cb = px_color(cx - 1, cy - 1); break; // W
-        default: ca = 0u; cb = 0u; break;
+        case 0: return uint2(px_color(cx - 1, cy - 1), px_color(cx, cy - 1)); // N
+        case 1: return uint2(px_color(cx, cy - 1),     px_color(cx, cy));     // E
+        case 2: return uint2(px_color(cx, cy),         px_color(cx - 1, cy)); // S
+        case 3: return uint2(px_color(cx - 1, cy),     px_color(cx - 1, cy - 1)); // W
+        default: return uint2(0u, 0u);
     }
 }
 
 // Classify an edge as shading (similar colors) per paper Section 3.3.
 // YUV Euclidean distance <= 100/255.
+[ForceInline]
 bool is_shading_edge(uint ca, uint cb) {
     if (ca == cb) return true;
     float dr = float(int((ca >> 16u) & 0xFFu) - int((cb >> 16u) & 0xFFu));
@@ -109,39 +117,40 @@ bool is_shading_edge(uint ca, uint cb) {
 }
 
 // Select the through-pair at a 3-way T-junction (paper Section 3.3).
-// dirs must be a 3-element array of the boundary directions present.
-// Returns the two through-pair directions in pair0/pair1.
-void select_tjunction_pair(int cx, int cy, int d0, int d1, int d2,
-                           out int pair0, out int pair1) {
+// d0/d1/d2 are the three boundary directions present. Returns int2
+// holding the two through-pair directions. Rvalue return (not `out`
+// params) so callers can keep the result in registers — outparams
+// lower to pointer args in MSL and force thread-local storage.
+[ForceInline]
+int2 select_tjunction_pair(int cx, int cy, int d0, int d1, int d2) {
     // Step 1: Shading/contour classification.
-    uint ca0, cb0, ca1, cb1, ca2, cb2;
-    bnd_colors(cx, cy, d0, ca0, cb0);
-    bnd_colors(cx, cy, d1, ca1, cb1);
-    bnd_colors(cx, cy, d2, ca2, cb2);
-    bool s0 = is_shading_edge(ca0, cb0);
-    bool s1 = is_shading_edge(ca1, cb1);
-    bool s2 = is_shading_edge(ca2, cb2);
+    uint2 c0 = bnd_colors(cx, cy, d0);
+    uint2 c1 = bnd_colors(cx, cy, d1);
+    uint2 c2 = bnd_colors(cx, cy, d2);
+    bool s0 = is_shading_edge(c0.x, c0.y);
+    bool s1 = is_shading_edge(c1.x, c1.y);
+    bool s2 = is_shading_edge(c2.x, c2.y);
     int shading_count = (s0 ? 1 : 0) + (s1 ? 1 : 0) + (s2 ? 1 : 0);
 
     if (shading_count == 1) {
         // 1 shading + 2 contour: connect the 2 contour edges.
-        if (s0) { pair0 = d1; pair1 = d2; }
-        else if (s1) { pair0 = d0; pair1 = d2; }
-        else { pair0 = d0; pair1 = d1; }
-        return;
+        if (s0) return int2(d1, d2);
+        if (s1) return int2(d0, d2);
+        return int2(d0, d1);
     }
 
     // Step 2: Angle-based fallback — connect the pair closest to 180 degrees.
     // At grid corners, opposite pairs (N-S=0^2, E-W=1^3) are 180 degrees;
     // all other pairs are 90 degrees. With 3 of 4 cardinal directions,
     // there is always exactly one opposite pair.
-    if ((d0 ^ d2) == 2) { pair0 = d0; pair1 = d2; } // d0-d2 opposite
-    else if ((d0 ^ d1) == 2) { pair0 = d0; pair1 = d1; } // d0-d1 opposite
-    else { pair0 = d1; pair1 = d2; } // d1-d2 opposite
+    if ((d0 ^ d2) == 2) return int2(d0, d2);
+    if ((d0 ^ d1) == 2) return int2(d0, d1);
+    return int2(d1, d2);
 }
 
 // Compute the actual CP position at a neighbor grid corner, accounting for
 // which diagonal slot we'd connect to (from_dir determines the slot).
+[ForceInline]
 float2 neighbor_cp_pos(int cx, int cy, int from_dir) {
     float2 base_pos = float2(float(cx), float(cy));
 
@@ -169,6 +178,7 @@ float2 neighbor_cp_pos(int cx, int cy, int from_dir) {
 }
 
 // Corner detection from Kopf-Lischinski reference implementation.
+[ForceInline]
 bool checkForCorner(float2 v1, float2 v2) {
     float len1 = length(v1);
     float len2 = length(v2);
@@ -180,12 +190,14 @@ bool checkForCorner(float2 v1, float2 v2) {
     return false;
 }
 
+[ForceInline]
 int cp_base(int cx, int cy) {
     if (cx < 0 || cy < 0 || cx >= int(u.corners_w) || cy >= int(u.img_h + 1u))
         return -1;
     return (cy * int(u.corners_w) + cx) * 2;
 }
 
+[ForceInline]
 int nbr_cp_idx(int cx, int cy, int from_dir) {
     int base = cp_base(cx, cy);
     if (base < 0) return -1;
@@ -221,10 +233,9 @@ int nbr_cp_idx(int cx, int cy, int from_dir) {
             else if (!t_bnd_e) { d0 = 0; d1 = 2; d2 = 3; }
             else if (!t_bnd_s) { d0 = 0; d1 = 1; d2 = 3; }
             else               { d0 = 0; d1 = 1; d2 = 2; }
-            int pair0, pair1;
-            select_tjunction_pair(cx, cy, d0, d1, d2, pair0, pair1);
+            int2 pair = select_tjunction_pair(cx, cy, d0, d1, d2);
             int target_side = from_dir ^ 2;
-            if (target_side != pair0 && target_side != pair1) return base + 1;
+            if (target_side != pair.x && target_side != pair.y) return base + 1;
         }
         return base;
     }
@@ -243,6 +254,7 @@ int nbr_cp_idx(int cx, int cy, int from_dir) {
     return base + slot;
 }
 
+[ForceInline]
 void write_cp_full(int idx, float2 pos, int prev, int next, uint flag,
                    int prev_dir, int next_dir, int icx, int icy) {
     positions[idx * 2] = pos.x;
@@ -258,6 +270,7 @@ void write_cp_full(int idx, float2 pos, int prev, int next, uint flag,
     flags[idx] = flag;
 }
 
+[ForceInline]
 void write_cp(int idx, float2 pos, int prev, int next, uint flag) {
     positions[idx * 2] = pos.x;
     positions[idx * 2 + 1] = pos.y;
@@ -272,6 +285,7 @@ void write_cp(int idx, float2 pos, int prev, int next, uint flag) {
     flags[idx] = flag;
 }
 
+[ForceInline]
 bool similar(int px0, int py0, int px1, int py1) {
     int dx = px1 - px0;
     int dy = py1 - py0;
@@ -500,9 +514,9 @@ void main(uint3 tid: SV_DispatchThreadID) {
         else if (!bnd_e) { d0 = 0; d1 = 2; d2 = 3; }
         else if (!bnd_s) { d0 = 0; d1 = 1; d2 = 3; }
         else             { d0 = 0; d1 = 1; d2 = 2; }
-        int t_prev_dir, t_next_dir;
-        select_tjunction_pair(int(cx), int(cy), d0, d1, d2,
-                              t_prev_dir, t_next_dir);
+        int2 pair = select_tjunction_pair(int(cx), int(cy), d0, d1, d2);
+        int t_prev_dir = pair.x;
+        int t_next_dir = pair.y;
 
         // Select prev/next index by direction. Inline select tree avoids
         // a 4-int array indexed by a runtime value.
