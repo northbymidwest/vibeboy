@@ -43,6 +43,9 @@ struct VecBufs {
     px_buf: wgpu::Buffer,
     graph_buf: wgpu::Buffer,
     graph_snapshot: wgpu::Buffer,
+    /// 8-bit valence mask per pixel, populated by similarity_graph and
+    /// read by resolve_crossings.
+    valence_buf: wgpu::Buffer,
     /// Ping-pong slot A. Initialized by cell_graph; on iter k it is the
     /// outer-iter input if k is even and the output if k is odd.
     pos_buf: wgpu::Buffer,
@@ -183,6 +186,7 @@ impl WgpuVectorizePipeline {
         let px_buf = mk("pixels", px_size, storage_ro);
         let graph_buf = mk("graph", graph_size, storage_rw);
         let graph_snapshot = mk("graph_snap", graph_size, storage_ro | wgpu::BufferUsages::COPY_SRC);
+        let valence_buf = mk("valence", (img_w * img_h * 4) as u64, storage_rw);
         let pos_buf = mk("positions", pos_size, storage_rw | wgpu::BufferUsages::COPY_DST);
         let nbr_buf = mk("neighbors", nbr_size, storage_rw);
         let flag_buf = mk("flags", flag_size, storage_rw);
@@ -216,11 +220,17 @@ impl WgpuVectorizePipeline {
         // Exception: update_tjunction has uniforms in group 1 and RW+read in group 0.
         let bg_sim = [
             bg(&self.sim_graph, 0, &[wgpu::BindGroupEntry { binding: 0, resource: px_buf.as_entire_binding() }]),
-            bg(&self.sim_graph, 1, &[wgpu::BindGroupEntry { binding: 0, resource: graph_buf.as_entire_binding() }]),
+            bg(&self.sim_graph, 1, &[
+                wgpu::BindGroupEntry { binding: 0, resource: graph_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: valence_buf.as_entire_binding() },
+            ]),
             bg(&self.sim_graph, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_sim.as_entire_binding() }]),
         ];
         let bg_resolve = [
-            bg(&self.resolve, 0, &[wgpu::BindGroupEntry { binding: 0, resource: graph_snapshot.as_entire_binding() }]),
+            bg(&self.resolve, 0, &[
+                wgpu::BindGroupEntry { binding: 0, resource: graph_snapshot.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: valence_buf.as_entire_binding() },
+            ]),
             bg(&self.resolve, 1, &[wgpu::BindGroupEntry { binding: 0, resource: graph_buf.as_entire_binding() }]),
             bg(&self.resolve, 2, &[wgpu::BindGroupEntry { binding: 0, resource: uni_resolve.as_entire_binding() }]),
         ];
@@ -336,7 +346,7 @@ impl WgpuVectorizePipeline {
 
         self.bufs = Some(VecBufs {
             img_w, img_h,
-            px_buf, graph_buf, graph_snapshot, pos_buf, nbr_buf, flag_buf,
+            px_buf, graph_buf, graph_snapshot, valence_buf, pos_buf, nbr_buf, flag_buf,
             opt_out_buf, opt_picard, orig_pos_buf, crossing_t_buf,
             uni_sim, uni_resolve, uni_cell, uni_opt, uni_grad, uni_tjunc, uni_xpack, uni_rast,
             output_tex, output_tex_w: out_w, output_tex_h: out_h,

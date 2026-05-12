@@ -34,6 +34,9 @@ pub(super) struct MetalVecBufs {
     px_buf: Buffer,
     graph_buf: Buffer,
     graph_snapshot: Buffer,
+    /// 8-bit valence mask per pixel, populated by similarity_graph
+    /// and read by resolve_crossings.
+    valence_buf: Buffer,
     pos_buf: Buffer,
     nbr_buf: Buffer,
     flag_buf: Buffer,
@@ -103,6 +106,7 @@ impl MetalVectorizePipeline {
                 px_buf: mk_buf(device, (img_w * img_h * 4) as usize),
                 graph_buf: mk_buf(device, (graph_elems * 4) as usize),
                 graph_snapshot: mk_buf(device, (graph_elems * 4) as usize),
+                valence_buf: mk_buf(device, (img_w * img_h * 4) as usize),
                 pos_buf: mk_buf(device, (num_cps * 2 * 4) as usize),
                 nbr_buf: mk_buf(device, (num_cps * 4 * 4) as usize),
                 flag_buf: mk_buf(device, (num_cps * 4) as usize),
@@ -143,15 +147,16 @@ impl MetalVectorizePipeline {
         let cmd = queue.commandBuffer().unwrap();
         {
             let enc = cmd.blitCommandEncoder().unwrap();
-            for buf in [&b.graph_buf, &b.graph_snapshot, &b.pos_buf, &b.nbr_buf,
-                        &b.flag_buf, &b.opt_out_buf, &b.orig_pos_buf,
-                        &b.crossing_t_buf, &b.opt_picard_buf] {
+            for buf in [&b.graph_buf, &b.graph_snapshot, &b.valence_buf,
+                        &b.pos_buf, &b.nbr_buf, &b.flag_buf,
+                        &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf,
+                        &b.opt_picard_buf] {
                 enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
             }
             enc.endEncoding();
         }
 
-        // Stage 1: Similarity graph
+        // Stage 1: Similarity graph (also writes per-pixel valence mask)
         {
             let uni = mk_uni(&[img_w, img_h, graph_stride, 0]);
             let enc = cmd.computeCommandEncoder().unwrap();
@@ -160,6 +165,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
                 enc.setBuffer_offset_atIndex(Some(&b.px_buf), 0, 1);
                 enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.valence_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize { width: ((img_w + 15) / 16) as usize, height: ((img_h + 15) / 16) as usize, depth: 1 },
                     MTLSize { width: 16, height: 16, depth: 1 },
@@ -187,7 +193,8 @@ impl MetalVectorizePipeline {
             unsafe {
                 enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
                 enc.setBuffer_offset_atIndex(Some(&b.graph_snapshot), 0, 1);
-                enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.valence_buf), 0, 2);
+                enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 3);
             }
             let rw = img_w.saturating_sub(1);
             let rh = img_h.saturating_sub(1);

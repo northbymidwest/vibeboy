@@ -243,7 +243,12 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
             pred_dir = DIR_SW;
         }
 
-        for _ in 0..200 {
+        // Iteration cap of 64 bounds worst-case latency. The vote is the
+        // chain-length DIFFERENCE between the two diagonal candidates, so
+        // both chains clipping to the cap produces a tie that the other
+        // two heuristics (sparse pixels, islands) resolve. On typical
+        // pixel-art content chains are well under 30 cells.
+        for _ in 0..64 {
             let mask = valence_mask(cx, cy);
             if valence_count(mask) != 2 {
                 break;

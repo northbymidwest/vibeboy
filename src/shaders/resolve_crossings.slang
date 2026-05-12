@@ -29,6 +29,12 @@ StructuredBuffer<uint> graph_in : register(t0, space0);
 #else
 StructuredBuffer<uint> graph_in;
 #endif
+[[vk::binding(1, 0)]]
+#ifdef DXIL_TARGET
+StructuredBuffer<uint> valence_in : register(t1, space0);
+#else
+StructuredBuffer<uint> valence_in;
+#endif
 [[vk::binding(0, 1)]]
 #ifdef DXIL_TARGET
 RWStructuredBuffer<uint> graph_out : register(u0, space1);
@@ -49,25 +55,13 @@ static const uint DIR_E  = 32u;
 static const uint DIR_NE = 64u;
 static const uint DIR_N  = 128u;
 
-// Compute 8-connected valence bitmask for pixel (x,y)
+// 8-connected valence bitmask for pixel (x, y), precomputed by
+// similarity_graph and stored in `valence_in[y * img_w + x]`. Bits
+// match the DIR_* constants. Single buffer read instead of 8 reads
+// of g() in the original 3×3 walk.
 uint valence_mask(uint x, uint y) {
-    uint v = 0u;
-    uint gx = 2u * x + 1u;
-    uint gy = 2u * y + 1u;
-    uint gw = u.graph_stride;
-    uint gh = 2u * u.img_h + 1u;
-
-    // Cardinal
-    if (gx >= 2u && g(gx - 1u, gy) != 0u) v |= DIR_W;
-    if (gx + 1u < gw && g(gx + 1u, gy) != 0u) v |= DIR_E;
-    if (gy >= 2u && g(gx, gy - 1u) != 0u) v |= DIR_N;
-    if (gy + 1u < gh && g(gx, gy + 1u) != 0u) v |= DIR_S;
-    // Diagonal
-    if (gx >= 2u && gy >= 2u && (g(gx - 1u, gy - 1u) & 1u) != 0u) v |= DIR_NW;
-    if (gx + 1u < gw && gy >= 2u && (g(gx + 1u, gy - 1u) & 2u) != 0u) v |= DIR_NE;
-    if (gx >= 2u && gy + 1u < gh && (g(gx - 1u, gy + 1u) & 2u) != 0u) v |= DIR_SW;
-    if (gx + 1u < gw && gy + 1u < gh && (g(gx + 1u, gy + 1u) & 1u) != 0u) v |= DIR_SE;
-    return v;
+    if (x >= u.img_w || y >= u.img_h) return 0u;
+    return valence_in[y * u.img_w + x];
 }
 
 // Count bits in valence mask
@@ -92,7 +86,12 @@ uint walk_chain(uint sx, uint sy, uint fx, uint fy) {
     if (idx ==  1 && idy == -1) pred_dir = DIR_NE;
     if (idx == -1 && idy ==  1) pred_dir = DIR_SW;
 
-    for (uint iter = 0u; iter < 200u; iter++) {
+    // Iteration cap of 64 bounds worst-case latency. The vote is the
+    // chain-length DIFFERENCE between the two diagonal candidates, so
+    // both chains clipping to the cap produces a tie that the other
+    // two heuristics (sparse pixels, islands) resolve. On typical
+    // pixel-art content chains are well under 30 cells.
+    for (uint iter = 0u; iter < 64u; iter++) {
         uint mask = valence_mask(cx, cy);
         if (valence_count(mask) != 2u) break;
 

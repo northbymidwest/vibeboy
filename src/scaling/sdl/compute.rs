@@ -472,6 +472,10 @@ struct CellRastBufCache {
     px_buf: gpu::Buffer,
     graph_buf: gpu::Buffer,
     graph_snapshot: gpu::Buffer,
+    /// 8-bit valence mask per pixel, populated by similarity_graph
+    /// and read by resolve_crossings. Replaces the 8-fetch valence
+    /// walk in resolve_crossings's hot loops.
+    valence_buf: gpu::Buffer,
     pos_buf: gpu::Buffer,
     nbr_buf: gpu::Buffer,
     flag_buf: gpu::Buffer,
@@ -540,13 +544,13 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.dxil")),
-        1, 1, 0, (16, 16, 1), "similarity_graph")?;
+        1, 2, 0, (16, 16, 1), "similarity_graph")?;
 
     let resolve = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.dxil")),
-        1, 1, 0, (16, 16, 1), "resolve_crossings")?;
+        2, 1, 0, (16, 16, 1), "resolve_crossings")?;
 
     let cell = make(device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.spv")),
@@ -603,6 +607,7 @@ fn dispatch_stages_1_5b(
     px_buf: &gpu::Buffer,
     graph_buf: &gpu::Buffer,
     graph_snapshot: &gpu::Buffer,
+    valence_buf: &gpu::Buffer,
     pos_buf: &gpu::Buffer,
     nbr_buf: &gpu::Buffer,
     flag_buf: &gpu::Buffer,
@@ -619,10 +624,11 @@ fn dispatch_stages_1_5b(
     let graph_size = (graph_stride * (2 * img_h + 1) * 4).max(4) as u32;
     let pos_size = (num_cps * 2 * 4).max(4) as u32;
 
-    // Stage 1: Similarity graph
+    // Stage 1: Similarity graph (also writes per-pixel valence mask)
     {
         let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false)]).expect("sim pass");
+            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false),
+              gpu::StorageBufferReadWriteBinding::new().with_buffer(valence_buf).with_cycle(false)]).expect("sim pass");
         cp.bind_compute_pipeline(&pipelines.sim_graph);
         cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
@@ -645,7 +651,7 @@ fn dispatch_stages_1_5b(
         let cp = device.begin_compute_pass(cmd, &[],
             &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false)]).expect("resolve pass");
         cp.bind_compute_pipeline(&pipelines.resolve);
-        cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone()]);
+        cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone(), valence_buf.clone()]);
         #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
         cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
         cp.dispatch(img_w.saturating_sub(1).div_ceil(16), img_h.saturating_sub(1).div_ceil(16), 1);
@@ -782,11 +788,13 @@ pub fn gpu_vectorize_full_pipeline(
         let nbr_size = (num_cps * 4 * 4).max(4);
         let flag_size = (num_cps * 4).max(4);
         let crossing_t_size = (num_cps * 4).max(4);
+        let valence_size = (img_w * img_h * 4).max(4);
         pipelines.buf_cache = Some(CellRastBufCache {
             img_w, img_h,
             px_buf: device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf"),
             graph_buf: device.create_buffer().with_usage(rw).with_size(graph_size).build().expect("graph buf"),
             graph_snapshot: device.create_buffer().with_usage(ro).with_size(graph_size).build().expect("graph snapshot"),
+            valence_buf: device.create_buffer().with_usage(rw).with_size(valence_size).build().expect("valence buf"),
             pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("pos buf"),
             nbr_buf: device.create_buffer().with_usage(rw).with_size(nbr_size).build().expect("nbr buf"),
             flag_buf: device.create_buffer().with_usage(rw).with_size(flag_size).build().expect("flag buf"),
@@ -822,7 +830,7 @@ pub fn gpu_vectorize_full_pipeline(
     // Stages 1-5b: vectorize pipeline (shared with screenshot path)
     let optimized_pos = dispatch_stages_1_5b(
         device, &cmd, pipelines,
-        &b.px_buf, &b.graph_buf, &b.graph_snapshot,
+        &b.px_buf, &b.graph_buf, &b.graph_snapshot, &b.valence_buf,
         &b.pos_buf, &b.nbr_buf, &b.flag_buf,
         &b.opt_out_buf, &b.orig_pos_buf,
         &b.opt_picard_buf,
@@ -1271,6 +1279,7 @@ pub fn gpu_full_pipeline_screenshot(
       device.end_copy_pass(cp); }
 
     let graph_snapshot = device.create_buffer().with_usage(ro).with_size(graph_size.max(4)).build().ok()?;
+    let valence_buf = device.create_buffer().with_usage(rw).with_size((img_w * img_h * 4).max(4)).build().ok()?;
     let orig_pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
     let crossing_t_buf = device.create_buffer().with_usage(rw).with_size((num_cps * 4).max(4)).build().ok()?;
     let opt_picard_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
@@ -1278,7 +1287,7 @@ pub fn gpu_full_pipeline_screenshot(
     // Stages 1-5b: shared vectorize pipeline dispatch
     dispatch_stages_1_5b(
         &device, &cmd, &pipelines,
-        &px_buf, &graph_buf, &graph_snapshot,
+        &px_buf, &graph_buf, &graph_snapshot, &valence_buf,
         &pos_buf, &nbr_buf, &flag_buf,
         &opt_out_buf, &orig_pos_buf,
         &opt_picard_buf,
