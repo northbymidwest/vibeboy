@@ -106,7 +106,7 @@ glow = ["dep:glow"]
 
 # sdl3-sys declares #[link(name = "SDL3")] but emits no link search path.
 [package.metadata.system-deps]
-sdl3 = { version = "3.2", feature = "sdl3" }
+sdl3 = { version = "3.4", feature = "sdl3" }
 
 [build-dependencies]
 system-deps = "9.0.0"

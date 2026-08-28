@@ -6,7 +6,7 @@ the build and test commands in [CLAUDE.md](../CLAUDE.md).
 ## All platforms
 
 - **Rust toolchain**, 2024 edition.
-- **SDL3 >= 3.2.** `build.rs` locates it through
+- **SDL3 >= 3.4.** `build.rs` locates it through
   [`system-deps`](https://github.com/gdesmott/system-deps)/pkg-config, so any
   install shipping `sdl3.pc` works. The declaration lives in
   `[package.metadata.system-deps]` in `Cargo.toml`. A missing SDL3 fails the
