@@ -1,5 +1,0 @@
-[env]
-LIBRARY_PATH = "/opt/homebrew/lib"
-
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-L", "native=lib"]

@@ -87,8 +87,6 @@ name = "vibeboy_gtk"
 path = "src/frontends/gtk/main.rs"
 required-features = ["gtk-ui"]
 
-[build-dependencies]
-
 [features]
 default = ["native", "sdl3-gpu-shaders"]
 native = ["sdl3", "clap", "clap_complete", "env_logger", "image", "svg"]
@@ -105,3 +103,10 @@ gdk4-macos = ["dep:gdk4-macos"]
 gdk4-wayland = ["dep:gdk4-wayland"]
 gdk4-x11 = ["dep:gdk4-x11"]
 glow = ["dep:glow"]
+
+# sdl3-sys declares #[link(name = "SDL3")] but emits no link search path.
+[package.metadata.system-deps]
+sdl3 = { version = "3.2", feature = "sdl3" }
+
+[build-dependencies]
+system-deps = "9.0.0"

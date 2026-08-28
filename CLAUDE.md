@@ -11,13 +11,23 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 ### Prerequisites
 
 **macOS:**
-- Rust toolchain, SDL3 (via Homebrew: `brew install sdl3`)
+- Rust toolchain, SDL3 >= 3.2 (`brew install sdl3`, or nix `sdl3.dev`). `build.rs` locates it via `system-deps`/pkg-config, so any install shipping `sdl3.pc` works; see `[package.metadata.system-deps]` in `Cargo.toml`.
 - For GPU shaders: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH)
 
 **Windows:**
 - Rust toolchain (MSVC), Visual Studio Build Tools
 - [Slang](https://github.com/shader-slang/slang/releases) — shader compiler (`slangc`). Optional: `dxc` for DXIL output (Direct3D 12)
-- SDL3 development libraries: download the [SDL3-devel-VC](https://github.com/libsdl-org/SDL/releases) zip, place `SDL3.lib` and `SDL3.dll` in the project's `lib/` directory. The `.cargo/config.toml` already points the linker there. Copy `SDL3.dll` next to the built `.exe` (or add `lib/` to your PATH).
+- SDL3 via [vcpkg](https://vcpkg.io). The build locates SDL3 with pkg-config, and the `SDL3-devel-VC` zip ships no `sdl3.pc`, so install it and pkgconf from vcpkg:
+
+  ```
+  vcpkg install sdl3:x64-windows pkgconf:x64-windows
+  set PKG_CONFIG=%VCPKG_ROOT%\installed\x64-windows\tools\pkgconf\pkgconf.exe
+  set PKG_CONFIG_PATH=%VCPKG_ROOT%\installed\x64-windows\lib\pkgconfig
+  ```
+
+  `SDL3.dll` (in `installed\x64-windows\bin`) must be on PATH or next to the built `.exe`.
+
+  MSYS2/MinGW is an alternative that needs no environment variables, since the official mingw distribution ships `sdl3.pc` and pkgconf is on PATH: `pacman -S mingw-w64-x86_64-SDL3 mingw-w64-x86_64-pkgconf`. It targets `x86_64-pc-windows-gnu` rather than MSVC.
 
 **Linux:**
 - Rust toolchain, SDL3 dev package, [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH)

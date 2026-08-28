@@ -47,6 +47,12 @@ fn main() {
     // Generate boot ROMs
     generate_boot_roms(&out_dir);
 
+    // Emits the SDL3 link search path; see [package.metadata.system-deps].
+    if let Err(err) = system_deps::Config::new().probe() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+
     // Compile shaders when any GPU feature is enabled
     if std::env::var("CARGO_FEATURE_SDL3_GPU_SHADERS").is_err()
         && std::env::var("CARGO_FEATURE_WEB").is_err()
