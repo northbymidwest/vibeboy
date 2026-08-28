@@ -8,7 +8,7 @@ Supports **DMG**, **DMG0**, **MGB**, **SGB**, **SGB2**, **CGB**, and **AGB** (GB
 
 ## Building
 
-Requires Rust 2024 edition and SDL3. For GPU shaders: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH). Per-platform setup is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Requires Rust 1.98+ (2024 edition) and SDL3. For GPU shaders: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on PATH). Per-platform setup is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ```bash
 cargo build --release

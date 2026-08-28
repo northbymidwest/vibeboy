@@ -10,7 +10,7 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 
 ### Prerequisites
 
-Rust 2024 edition, SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup is in
+Rust 1.98+ (2024 edition), SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup is in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ```bash
