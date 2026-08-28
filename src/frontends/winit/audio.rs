@@ -110,7 +110,7 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
     let host = cpal::default_host();
     let device = host.default_output_device()?;
 
-    let err_fn = |err: cpal::StreamError| eprintln!("Audio error: {err}");
+    let err_fn = |err: cpal::Error| eprintln!("Audio error: {err}");
 
     // Try 96kHz with fixed buffer, then default buffer, then device default sample rate
     let configs = [
@@ -134,7 +134,7 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
     for config in &configs {
         let ring = Arc::clone(&ring);
         let result = device.build_output_stream(
-            config,
+            *config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut ring = ring.lock().unwrap();
                 for sample in data.iter_mut() {

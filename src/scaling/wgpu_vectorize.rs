@@ -571,7 +571,7 @@ impl WgpuVectorizePipeline {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().ok()?.ok()?;
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().ok()?;
         let mut result = vec![0u32; (w * h) as usize];
         for y in 0..h as usize {
             let src_offset = y * padded_row as usize;

@@ -95,6 +95,7 @@ impl GpuRenderer {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
+            color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -327,7 +328,7 @@ impl GpuRenderer {
             pass.draw(0..4, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
     }
 
     /// Blit an external wgpu texture to screen using the given encoder.

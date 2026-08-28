@@ -430,7 +430,7 @@ impl App {
                 let fb_view = frame.texture.create_view(&Default::default());
                 gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
                 gpu.queue.submit(std::iter::once(encoder.finish()));
-                frame.present();
+                gpu.queue.present(frame);
                 return; // skip normal render path
             } else if let Some(wgpu_filter) = map_scale_filter(self.scale_filter) {
                 // GPU compute scaling filter
@@ -462,7 +462,7 @@ impl App {
                 let fb_view = frame.texture.create_view(&Default::default());
                 gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
                 gpu.queue.submit(std::iter::once(encoder.finish()));
-                frame.present();
+                gpu.queue.present(frame);
                 return;
             } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
                 scaled = s;

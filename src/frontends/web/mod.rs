@@ -149,6 +149,7 @@ impl WasmEmulator {
             height: h.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
+            color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -518,7 +519,7 @@ impl WasmEmulator {
         }
 
         gpu.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        gpu.queue.present(frame);
         true
     }
 
