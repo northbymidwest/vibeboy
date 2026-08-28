@@ -72,7 +72,7 @@ pub(super) fn acquire_swapchain(
     let mut w = 0u32;
     let mut h = 0u32;
     let got = unsafe {
-        sdl3::sys::gpu::SDL_AcquireGPUSwapchainTexture(
+        sdl3::sys::gpu::SDL_WaitAndAcquireGPUSwapchainTexture(
             cmd.raw(), window.raw(), &mut raw, &mut w, &mut h,
         )
     };
