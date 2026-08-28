@@ -1,4 +1,4 @@
-/target/
+target/
 *.gb
 *.gbc
 *.bin
@@ -13,10 +13,21 @@ profile.json.gz
 *.png
 *.svg
 .claude/worktrees/
-vectorize-tests/
+vectorize-tests*/
 lib/
 pkg/
 web/pkg/
 *.ss
 vibeboy_libretro.dylib
 *.wav
+
+# Xcode GPU frame captures
+*.gputrace/
+
+# Compiled shader binaries
+*.spv
+
+# Vectorizer debug dumps
+sample data/
+screenshot_*.json
+*.pdf
