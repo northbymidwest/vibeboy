@@ -15,8 +15,11 @@ pub(super) fn display_size(window: &sdl3::video::Window, src_w: u32, src_h: u32)
 /// Run a CPU scaling filter and return (pixels, width, height).
 pub(super) fn cpu_scale_frame(
     filter: &scaling::ScaleFilter,
-    src: &[u32], sw: usize, sh: usize,
-    disp_w: usize, disp_h: usize,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    disp_w: usize,
+    disp_h: usize,
 ) -> (Vec<u32>, u32, u32) {
     scaling::cpu_scale(*filter, src, sw, sh, disp_w, disp_h)
         .unwrap_or_else(|| (src.to_vec(), sw as u32, sh as u32))

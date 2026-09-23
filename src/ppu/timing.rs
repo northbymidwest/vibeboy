@@ -1,6 +1,5 @@
 /// PPU timing state machine: step/tick loop, line-start handlers, mode transitions,
 /// STAT IRQ edge detection, OAM scan.
-
 use super::Ppu;
 
 impl Ppu {
@@ -722,11 +721,10 @@ impl Ppu {
     /// CGB-only: STAT IRQ check with Mode 2 source forced on (VBlank entry quirk).
     fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
         let coincidence = self.stat & 0x04 != 0;
-        let signal =
-            (self.stat & 0x08 != 0 && self.mode_for_interrupt == 0) ||
-            (self.stat & 0x10 != 0 && self.mode_for_interrupt == 1) ||
-            (self.stat & 0x20 != 0 && (self.mode_for_interrupt == 2 || force_mode2)) ||
-            (self.stat & 0x40 != 0 && coincidence);
+        let signal = (self.stat & 0x08 != 0 && self.mode_for_interrupt == 0)
+            || (self.stat & 0x10 != 0 && self.mode_for_interrupt == 1)
+            || (self.stat & 0x20 != 0 && (self.mode_for_interrupt == 2 || force_mode2))
+            || (self.stat & 0x40 != 0 && coincidence);
 
         if signal && !self.stat_irq_line {
             self.if_flags |= 0x02;
@@ -741,11 +739,10 @@ impl Ppu {
         let coincidence = self.stat & 0x04 != 0;
         // Full signal: used to update stat_irq_line (prevents spurious
         // rising edges on the next normal PPU tick).
-        let full_signal =
-            (self.stat & 0x08 != 0 && self.mode == 0) ||
-            (self.stat & 0x10 != 0 && self.mode == 1) ||
-            (self.stat & 0x20 != 0 && self.mode == 2) ||
-            (self.stat & 0x40 != 0 && coincidence);
+        let full_signal = (self.stat & 0x08 != 0 && self.mode == 0)
+            || (self.stat & 0x10 != 0 && self.mode == 1)
+            || (self.stat & 0x20 != 0 && self.mode == 2)
+            || (self.stat & 0x40 != 0 && coincidence);
         // Write signal: during mode 2/3, only LYC source can trigger an
         // interrupt from a STAT write. Mode sources are suppressed.
         let write_signal = if self.mode <= 1 {
@@ -793,7 +790,13 @@ impl Ppu {
             let attrs = self.oam_read(i * 4 + 3);
 
             if ly >= sprite_y && ly < sprite_y + sprite_height {
-                self.scanline_sprites.push((self.oam_read(i * 4), sprite_x, tile_idx, attrs, i as u8));
+                self.scanline_sprites.push((
+                    self.oam_read(i * 4),
+                    sprite_x,
+                    tile_idx,
+                    attrs,
+                    i as u8,
+                ));
                 if self.scanline_sprites.len() >= 10 {
                     break;
                 }
@@ -816,7 +819,8 @@ impl Ppu {
         let tile_idx = self.oam_read(i * 4 + 2);
         let attrs = self.oam_read(i * 4 + 3);
         if ly >= sprite_y && ly < sprite_y + sprite_height {
-            self.scanline_sprites.push((self.oam_read(i * 4), sprite_x, tile_idx, attrs, i as u8));
+            self.scanline_sprites
+                .push((self.oam_read(i * 4), sprite_x, tile_idx, attrs, i as u8));
         }
     }
 }

@@ -39,7 +39,11 @@ impl RewindBuffer {
     }
 
     pub fn len(&self) -> usize {
-        if self.head.is_empty() { 0 } else { self.deltas.len() + 1 }
+        if self.head.is_empty() {
+            0
+        } else {
+            self.deltas.len() + 1
+        }
     }
 
     pub fn clear(&mut self) {
@@ -165,8 +169,10 @@ fn encode_reverse_delta(old: &[u8], new: &[u8]) -> Vec<u8> {
 fn apply_delta(base: &mut Vec<u8>, delta: &[u8]) {
     let mut pos = 0;
     while pos + 6 <= delta.len() {
-        let offset = u32::from_le_bytes([delta[pos], delta[pos+1], delta[pos+2], delta[pos+3]]) as usize;
-        let length = u16::from_le_bytes([delta[pos+4], delta[pos+5]]) as usize;
+        let offset =
+            u32::from_le_bytes([delta[pos], delta[pos + 1], delta[pos + 2], delta[pos + 3]])
+                as usize;
+        let length = u16::from_le_bytes([delta[pos + 4], delta[pos + 5]]) as usize;
         pos += 6;
 
         if pos + length > delta.len() {

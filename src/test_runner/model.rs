@@ -1,6 +1,6 @@
-use vibeboy::model::GbModel;
 use std::fs;
 use std::path::Path;
+use vibeboy::model::GbModel;
 
 pub fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -61,11 +61,7 @@ pub fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
     None
 }
 
-pub fn resolve_boot_rom(
-    boot: bool,
-    bootrom: Option<&Path>,
-    model: GbModel,
-) -> Option<Vec<u8>> {
+pub fn resolve_boot_rom(boot: bool, bootrom: Option<&Path>, model: GbModel) -> Option<Vec<u8>> {
     if let Some(p) = bootrom {
         Some(fs::read(p).unwrap_or_else(|e| {
             eprintln!("Failed to read boot ROM '{}': {}", p.display(), e);

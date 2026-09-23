@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use super::Cartridge;
 use crate::clock::Clock;
+use std::sync::Arc;
 
 pub struct Tama5 {
     rom: Arc<[u8]>,
@@ -88,7 +88,10 @@ impl Cartridge for Tama5 {
             0x4000..=0x7FFF => self.rom_bank * 0x4000 + (addr as usize - 0x4000),
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, _addr: u16, _val: u8) {}
@@ -116,12 +119,16 @@ impl Cartridge for Tama5 {
                 0x00 => {
                     // ROM bank low nybble
                     self.rom_bank = (self.rom_bank & 0xF0) | (val as usize);
-                    if self.rom_bank == 0 { self.rom_bank = 1; }
+                    if self.rom_bank == 0 {
+                        self.rom_bank = 1;
+                    }
                 }
                 0x01 => {
                     // ROM bank high nybble
                     self.rom_bank = (self.rom_bank & 0x0F) | ((val as usize) << 4);
-                    if self.rom_bank == 0 { self.rom_bank = 1; }
+                    if self.rom_bank == 0 {
+                        self.rom_bank = 1;
+                    }
                 }
                 0x04 => self.data_in_lo = val,
                 0x05 => self.data_in_hi = val,
@@ -139,7 +146,9 @@ impl Cartridge for Tama5 {
         }
     }
 
-    fn has_battery(&self) -> bool { true }
+    fn has_battery(&self) -> bool {
+        true
+    }
 
     fn save_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
@@ -181,8 +190,10 @@ impl Cartridge for Tama5 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 4 + 32 + 5 + 52 + 4 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        if d.len() < 4 + 32 + 5 + 52 + 4 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
         self.tama_ram.copy_from_slice(&d[4..36]);
         self.reg_select = d[36];
         self.data_in_lo = d[37];
@@ -190,7 +201,7 @@ impl Cartridge for Tama5 {
         self.data_out_lo = d[39];
         self.data_out_hi = d[40];
         self.rtc_regs.copy_from_slice(&d[41..93]);
-        self.rtc_seconds = u32::from_le_bytes([d[93],d[94],d[95],d[96]]);
+        self.rtc_seconds = u32::from_le_bytes([d[93], d[94], d[95], d[96]]);
         self.rtc_last_secs = self.clock.now_secs();
     }
 }

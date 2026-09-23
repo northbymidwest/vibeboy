@@ -38,8 +38,12 @@ fn alike(a: u32, b: u32) -> bool {
 /// Fixed-point blend: `t` in 0..=256 (0 → full `a`, 256 → full `b`).
 #[inline(always)]
 fn blend(a: u32, b: u32, t: u32) -> u32 {
-    if t == 0 { return a; }
-    if t >= 256 { return b; }
+    if t == 0 {
+        return a;
+    }
+    if t >= 256 {
+        return b;
+    }
     let s = 256 - t;
     let r = (((a >> 16) & 0xFF) * s + ((b >> 16) & 0xFF) * t) >> 8;
     let g = (((a >> 8) & 0xFF) * s + ((b >> 8) & 0xFF) * t) >> 8;
@@ -91,8 +95,12 @@ fn analyze(src: &[u32], w: usize, h: usize, sx: isize, sy: isize) -> QuadEval {
         for row in -1..3_isize {
             for col in -1..3_isize {
                 let n = get(src, w, h, sx + col, sy + row);
-                if alike(n, c[0]) { bias += 1; }
-                if alike(n, c[2]) { bias -= 1; }
+                if alike(n, c[0]) {
+                    bias += 1;
+                }
+                if alike(n, c[2]) {
+                    bias -= 1;
+                }
             }
         }
         return if bias < 0 {
@@ -118,14 +126,26 @@ fn analyze(src: &[u32], w: usize, h: usize, sx: isize, sy: isize) -> QuadEval {
 #[inline(always)]
 fn pick_rising(c: &[u32; 4], fx: u32, fy: u32) -> u32 {
     let sum = fx + fy;
-    if sum < 128 { c[0] } else if sum > 384 { c[3] } else { c[2] }
+    if sum < 128 {
+        c[0]
+    } else if sum > 384 {
+        c[3]
+    } else {
+        c[2]
+    }
 }
 
 /// Evaluate a falling (`\`) diagonal.
 #[inline(always)]
 fn pick_falling(c: &[u32; 4], fx: u32, fy: u32) -> u32 {
     let diff = 256 - fx + fy;
-    if diff < 128 { c[1] } else if diff > 384 { c[2] } else { c[0] }
+    if diff < 128 {
+        c[1]
+    } else if diff > 384 {
+        c[2]
+    } else {
+        c[0]
+    }
 }
 
 /// Map a sub-pixel coordinate through a QuadEval to produce a color.
@@ -137,9 +157,7 @@ fn resolve(qe: &QuadEval, fx: u32, fy: u32) -> u32 {
         QuadEval::Edge { axis: 0, colors } => pick_rising(colors, fx, fy),
         QuadEval::Edge { axis: _, colors } => pick_falling(colors, fx, fy),
 
-        QuadEval::Ambiguous(c) => {
-            blend(pick_falling(c, fx, fy), pick_rising(c, fx, fy), 128)
-        }
+        QuadEval::Ambiguous(c) => blend(pick_falling(c, fx, fy), pick_rising(c, fx, fy), 128),
 
         QuadEval::Smooth(c) => {
             // Bilinear blend, then snap to nearest source texel
@@ -154,12 +172,20 @@ fn resolve(qe: &QuadEval, fx: u32, fy: u32) -> u32 {
                 channel_dist(mixed, c[2]),
                 channel_dist(mixed, c[3]),
             ];
-            let min_d = distances[0].min(distances[1]).min(distances[2]).min(distances[3]);
+            let min_d = distances[0]
+                .min(distances[1])
+                .min(distances[2])
+                .min(distances[3]);
             // First match wins (deterministic tie-breaking)
-            if distances[0] == min_d { c[0] }
-            else if distances[1] == min_d { c[1] }
-            else if distances[2] == min_d { c[2] }
-            else { c[3] }
+            if distances[0] == min_d {
+                c[0]
+            } else if distances[1] == min_d {
+                c[1]
+            } else if distances[2] == min_d {
+                c[2]
+            } else {
+                c[3]
+            }
         }
     }
 }
@@ -167,10 +193,7 @@ fn resolve(qe: &QuadEval, fx: u32, fy: u32) -> u32 {
 // ── Public API ─────────────────────────────────────────────────────────
 
 /// Scale to arbitrary output dimensions.
-pub fn scale_to(
-    src: &[u32], src_w: usize, src_h: usize,
-    dst_w: usize, dst_h: usize,
-) -> Vec<u32> {
+pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u32> {
     if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
         return vec![0u32; dst_w * dst_h];
     }
@@ -209,7 +232,13 @@ pub fn scale_to(
 
 /// Scale by an integer factor.
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, factor: u32) -> Vec<u32> {
-    scale_to(src, src_w, src_h, src_w * factor as usize, src_h * factor as usize)
+    scale_to(
+        src,
+        src_w,
+        src_h,
+        src_w * factor as usize,
+        src_h * factor as usize,
+    )
 }
 
 #[cfg(test)]
@@ -222,13 +251,44 @@ mod tests {
         let w = 32;
         let h = 32;
         let mut img = vec![0xFF000000u32; w * h];
-        for y in 0..8 { for x in 0..8 { img[y*w+x] = 0xFF_FF0000; } }
-        for y in 0..8 { for x in 8..16 { img[y*w+x] = 0xFF_00FF00; } }
-        for y in 8..16 { for x in 0..8 { img[y*w+x] = 0xFF_0000FF; } }
-        for y in 8..16 { for x in 8..16 { img[y*w+x] = if (x+y)%2==0 { 0xFF_FFFFFF } else { 0xFF_000000 }; } }
-        for i in 0..16 { img[(16+i)*w+i] = 0xFF_FFFF00; }
-        for y in 16..24 { for x in 16..32 { let v = (x-16)*16; img[y*w+x] = 0xFF000000 | (v as u32) << 16 | (v as u32) << 8 | v as u32; } }
-        for y in 24..32 { for x in 0..16 { img[y*w+x] = 0xFF_808080 + (x as u32); } }
+        for y in 0..8 {
+            for x in 0..8 {
+                img[y * w + x] = 0xFF_FF0000;
+            }
+        }
+        for y in 0..8 {
+            for x in 8..16 {
+                img[y * w + x] = 0xFF_00FF00;
+            }
+        }
+        for y in 8..16 {
+            for x in 0..8 {
+                img[y * w + x] = 0xFF_0000FF;
+            }
+        }
+        for y in 8..16 {
+            for x in 8..16 {
+                img[y * w + x] = if (x + y) % 2 == 0 {
+                    0xFF_FFFFFF
+                } else {
+                    0xFF_000000
+                };
+            }
+        }
+        for i in 0..16 {
+            img[(16 + i) * w + i] = 0xFF_FFFF00;
+        }
+        for y in 16..24 {
+            for x in 16..32 {
+                let v = (x - 16) * 16;
+                img[y * w + x] = 0xFF000000 | (v as u32) << 16 | (v as u32) << 8 | v as u32;
+            }
+        }
+        for y in 24..32 {
+            for x in 0..16 {
+                img[y * w + x] = 0xFF_808080 + (x as u32);
+            }
+        }
         (img, w, h)
     }
 

@@ -10,21 +10,21 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use super::{Cli, SCALE, GB_W, GB_H, SGB_W, SGB_H, AUDIO_SAMPLE_RATE};
-use super::clock;
-use super::emulator::Emulator;
-use super::model::GbModel;
-use super::scaling;
-use super::ui_util::{self, frame_duration};
-use super::printer;
-use super::serial;
-use super::gpu::GpuRenderer;
 use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
+use super::clock;
+use super::emulator::Emulator;
+use super::gpu::GpuRenderer;
 use super::menu::{
-    ID_OPEN, ID_QUIT, ID_PAUSE, ID_RESET, ID_PRINTER, ID_FORCE_CPU,
-    slot_save_id, slot_load_id, filter_id_to_filter, model_id_to_model, build_menu, MODEL_IDS,
+    ID_FORCE_CPU, ID_OPEN, ID_PAUSE, ID_PRINTER, ID_QUIT, ID_RESET, MODEL_IDS, build_menu,
+    filter_id_to_filter, model_id_to_model, slot_load_id, slot_save_id,
 };
+use super::model::GbModel;
+use super::printer;
+use super::scaling;
+use super::serial;
+use super::ui_util::{self, frame_duration};
+use super::{AUDIO_SAMPLE_RATE, Cli, GB_H, GB_W, SCALE, SGB_H, SGB_W};
 
 pub(super) struct App {
     quit_requested: bool,
@@ -59,8 +59,8 @@ pub(super) struct App {
     src_h: u32,
     fps: ui_util::FpsCounter,
     gamepad: Option<ui_util::GamepadPoller>,
-    kb_buttons: u8,  // bitmask of keyboard-pressed buttons
-    gp_buttons: u8,  // bitmask of gamepad-pressed buttons
+    kb_buttons: u8, // bitmask of keyboard-pressed buttons
+    gp_buttons: u8, // bitmask of gamepad-pressed buttons
     fast_forward: bool,
     kb_fast_forward: bool,
     sav_flusher: Option<ui_util::SavFlusher>,
@@ -71,12 +71,16 @@ impl App {
         let model = cli.model.unwrap_or(GbModel::Cgb);
         let forced_model = cli.model;
 
-        let audio_ring = Arc::new(Mutex::new(AudioRing::new(AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2, AUDIO_SAMPLE_RATE))); // ~4 frames stereo
+        let audio_ring = Arc::new(Mutex::new(AudioRing::new(
+            AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
+            AUDIO_SAMPLE_RATE,
+        ))); // ~4 frames stereo
         let (stream, actual_rate) = match start_audio(Arc::clone(&audio_ring)) {
             Some((s, r)) => (Some(s), r),
             None => (None, AUDIO_SAMPLE_RATE),
         };
-        audio_ring.lock().unwrap().downsample_ratio = (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
+        audio_ring.lock().unwrap().downsample_ratio =
+            (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
 
         App {
             quit_requested: false,
@@ -127,21 +131,36 @@ impl App {
             } else {
                 match fs::read(path) {
                     Ok(v) => v.into(),
-                    Err(e) => { eprintln!("Failed to read ROM '{}': {}", path.display(), e); return; }
+                    Err(e) => {
+                        eprintln!("Failed to read ROM '{}': {}", path.display(), e);
+                        return;
+                    }
                 }
             }
         } else {
             match fs::read(path) {
                 Ok(v) => v.into(),
-                Err(e) => { eprintln!("Failed to read ROM '{}': {}", path.display(), e); return; }
+                Err(e) => {
+                    eprintln!("Failed to read ROM '{}': {}", path.display(), e);
+                    return;
+                }
             }
         };
         self.rom = Some(rom.clone());
 
-        self.model = self.forced_model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
+        self.model = self
+            .forced_model
+            .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
-        let mut emu = Emulator::new(rom, boot_rom, self.model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
+        let mut emu = Emulator::new(
+            rom,
+            boot_rom,
+            self.model,
+            None,
+            clock::default_clock(),
+            AUDIO_SAMPLE_RATE,
+        );
         ui_util::load_sav(&mut emu, path);
         let is_sgb = emu.is_sgb();
         self.src_w = if is_sgb { SGB_W } else { GB_W };
@@ -154,9 +173,7 @@ impl App {
 
         // Attach printer if enabled
         if self.printer_item.as_ref().is_some_and(|p| p.is_checked()) {
-            emu.attach_serial_device(
-                Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
-            );
+            emu.attach_serial_device(Box::new(printer::Printer::new(self.model.cpu_clock_rate())));
         }
 
         self.sav_flusher = Some(ui_util::SavFlusher::new(&emu, path));
@@ -214,9 +231,9 @@ impl App {
                     let now_on = item.is_checked();
                     if let Some(ref mut emu) = self.emu {
                         if now_on {
-                            emu.attach_serial_device(
-                                Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
-                            );
+                            emu.attach_serial_device(Box::new(printer::Printer::new(
+                                self.model.cpu_clock_rate(),
+                            )));
                             eprintln!("Game Boy Printer connected");
                         } else {
                             emu.attach_serial_device(Box::new(serial::Disconnected));
@@ -237,7 +254,9 @@ impl App {
                     for item in &self.model_items {
                         item.set_checked(item.id().0 == other);
                     }
-                    let name = new_model.map(|m| format!("{:?}", m)).unwrap_or("Auto".into());
+                    let name = new_model
+                        .map(|m| format!("{:?}", m))
+                        .unwrap_or("Auto".into());
                     eprintln!("Hardware model: {}", name);
                     return;
                 }
@@ -293,7 +312,6 @@ impl App {
     }
 
     fn render_frame_inner(&mut self, skip_step: bool) {
-
         let emu = match self.emu.as_mut() {
             Some(e) => e,
             None => return,
@@ -332,8 +350,12 @@ impl App {
                 // whether to step, synchronizing to the audio device's clock.
                 let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
                 let target_fill = samples_per_frame * 3; // ~50ms
-                let max_fill = samples_per_frame * 8;    // ~133ms
-                let queued = self.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+                let max_fill = samples_per_frame * 8; // ~133ms
+                let queued = self
+                    .audio_ring
+                    .lock()
+                    .map(|r| r.len())
+                    .unwrap_or(target_fill);
 
                 let frames_needed = if queued < target_fill / 2 {
                     2u32
@@ -393,85 +415,120 @@ impl App {
         let disp_h = win_h;
 
         let scaled;
-        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
-            if self.force_cpu {
-                // Force CPU: skip all GPU paths
-                if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
-                    scaled = s;
-                    (&scaled, w as usize, h as usize)
-                } else {
-                    (fb, sw, sh)
-                }
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
-                (fb, sw, sh)
-            } else if matches!(self.scale_filter, scaling::ScaleFilter::Vectorize) {
-                // Use logical pixels for vectorize output, not Retina physical pixels.
-                // The blit sampler upscales to physical resolution.
-                let scale_factor = window.scale_factor();
-                let logical_w = disp_w as f64 / scale_factor;
-                let logical_h = disp_h as f64 / scale_factor;
-                let s = (logical_w / sw as f64).min(logical_h / sh as f64);
-                let ow = (sw as f64 * s).round() as u32;
-                let oh = (sh as f64 * s).round() as u32;
-                if self.wgpu_vectorize.is_none() {
-                    self.wgpu_vectorize = Some(
-                        scaling::wgpu_vectorize::WgpuVectorizePipeline::new(&gpu.device)
-                    );
-                }
-                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("vectorize+blit"),
-                });
-                let pipeline = self.wgpu_vectorize.as_mut().unwrap();
-                let out_tex = pipeline.encode(&gpu.device, &gpu.queue, &mut encoder, fb, sw as u32, sh as u32, ow, oh, s as f32);
-                let frame = match gpu.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    _ => return,
-                };
-                let fb_view = frame.texture.create_view(&Default::default());
-                gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
-                gpu.queue.submit(std::iter::once(encoder.finish()));
-                gpu.queue.present(frame);
-                return; // skip normal render path
-            } else if let Some(wgpu_filter) = map_scale_filter(self.scale_filter) {
-                // GPU compute scaling filter
-                if self.wgpu_scale.is_none() {
-                    self.wgpu_scale = Some(scaling::wgpu_scale::WgpuScalePipeline::new(&gpu.device));
-                }
-                let factor = self.scale_filter.factor();
-                let (ow, oh) = if factor > 0 {
-                    (sw as u32 * factor, sh as u32 * factor)
-                } else {
-                    let scale_factor = window.scale_factor();
-                    let lw = disp_w as f64 / scale_factor;
-                    let lh = disp_h as f64 / scale_factor;
-                    let s = (lw / sw as f64).min(lh / sh as f64);
-                    ((sw as f64 * s).round() as u32, (sh as f64 * s).round() as u32)
-                };
-                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("scale+blit"),
-                });
-                let pipeline = self.wgpu_scale.as_mut().unwrap();
-                let out_tex = pipeline.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    wgpu_filter, fb, sw as u32, sh as u32, ow, oh,
-                );
-                let frame = match gpu.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    _ => return,
-                };
-                let fb_view = frame.texture.create_view(&Default::default());
-                gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
-                gpu.queue.submit(std::iter::once(encoder.finish()));
-                gpu.queue.present(frame);
-                return;
-            } else if let Some((s, w, h)) = scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h) {
+        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) = if self.force_cpu {
+            // Force CPU: skip all GPU paths
+            if let Some((s, w, h)) =
+                scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h)
+            {
                 scaled = s;
                 (&scaled, w as usize, h as usize)
             } else {
                 (fb, sw, sh)
+            }
+        } else if matches!(self.scale_filter, scaling::ScaleFilter::Nearest) {
+            (fb, sw, sh)
+        } else if matches!(self.scale_filter, scaling::ScaleFilter::Vectorize) {
+            // Use logical pixels for vectorize output, not Retina physical pixels.
+            // The blit sampler upscales to physical resolution.
+            let scale_factor = window.scale_factor();
+            let logical_w = disp_w as f64 / scale_factor;
+            let logical_h = disp_h as f64 / scale_factor;
+            let s = (logical_w / sw as f64).min(logical_h / sh as f64);
+            let ow = (sw as f64 * s).round() as u32;
+            let oh = (sh as f64 * s).round() as u32;
+            if self.wgpu_vectorize.is_none() {
+                self.wgpu_vectorize = Some(scaling::wgpu_vectorize::WgpuVectorizePipeline::new(
+                    &gpu.device,
+                ));
+            }
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vectorize+blit"),
+                });
+            let pipeline = self.wgpu_vectorize.as_mut().unwrap();
+            let out_tex = pipeline.encode(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                fb,
+                sw as u32,
+                sh as u32,
+                ow,
+                oh,
+                s as f32,
+            );
+            let frame = match gpu.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                _ => return,
             };
+            let fb_view = frame.texture.create_view(&Default::default());
+            gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+            gpu.queue.present(frame);
+            return; // skip normal render path
+        } else if let Some(wgpu_filter) = map_scale_filter(self.scale_filter) {
+            // GPU compute scaling filter
+            if self.wgpu_scale.is_none() {
+                self.wgpu_scale = Some(scaling::wgpu_scale::WgpuScalePipeline::new(&gpu.device));
+            }
+            let factor = self.scale_filter.factor();
+            let (ow, oh) = if factor > 0 {
+                (sw as u32 * factor, sh as u32 * factor)
+            } else {
+                let scale_factor = window.scale_factor();
+                let lw = disp_w as f64 / scale_factor;
+                let lh = disp_h as f64 / scale_factor;
+                let s = (lw / sw as f64).min(lh / sh as f64);
+                (
+                    (sw as f64 * s).round() as u32,
+                    (sh as f64 * s).round() as u32,
+                )
+            };
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("scale+blit"),
+                });
+            let pipeline = self.wgpu_scale.as_mut().unwrap();
+            let out_tex = pipeline.encode(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                wgpu_filter,
+                fb,
+                sw as u32,
+                sh as u32,
+                ow,
+                oh,
+            );
+            let frame = match gpu.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                _ => return,
+            };
+            let fb_view = frame.texture.create_view(&Default::default());
+            gpu.encode_blit(&mut encoder, out_tex, &fb_view, self.src_w, self.src_h);
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+            gpu.queue.present(frame);
+            return;
+        } else if let Some((s, w, h)) =
+            scaling::cpu_scale(self.scale_filter, fb, sw, sh, disp_w, disp_h)
+        {
+            scaled = s;
+            (&scaled, w as usize, h as usize)
+        } else {
+            (fb, sw, sh)
+        };
 
-        gpu.render(frame_pixels, frame_w as u32, frame_h as u32, self.src_w, self.src_h);
+        gpu.render(
+            frame_pixels,
+            frame_w as u32,
+            frame_h as u32,
+            self.src_w,
+            self.src_h,
+        );
 
         // FPS counter
         let emu_time = self.frame_start.elapsed();
@@ -502,7 +559,8 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
         // Set up menu bar
-        let (menu, filter_items, printer_item, model_items, slot_items, force_cpu_item) = build_menu(self.cli.printer);
+        let (menu, filter_items, printer_item, model_items, slot_items, force_cpu_item) =
+            build_menu(self.cli.printer);
         #[cfg(target_os = "macos")]
         {
             menu.init_for_nsapp();
@@ -549,12 +607,7 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::Poll);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
@@ -592,8 +645,14 @@ impl ApplicationHandler for App {
                         // Apply combined keyboard + gamepad state
                         let combined = self.kb_buttons | self.gp_buttons;
                         let all_btns: &[u8] = &[
-                            Emulator::BTN_RIGHT, Emulator::BTN_LEFT, Emulator::BTN_UP, Emulator::BTN_DOWN,
-                            Emulator::BTN_A, Emulator::BTN_B, Emulator::BTN_SELECT, Emulator::BTN_START,
+                            Emulator::BTN_RIGHT,
+                            Emulator::BTN_LEFT,
+                            Emulator::BTN_UP,
+                            Emulator::BTN_DOWN,
+                            Emulator::BTN_A,
+                            Emulator::BTN_B,
+                            Emulator::BTN_SELECT,
+                            Emulator::BTN_START,
                         ];
                         for &b in all_btns {
                             emu.set_button(b, combined & b != 0);
@@ -621,7 +680,9 @@ impl ApplicationHandler for App {
                                 eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
                             }
                             KeyCode::Period => {
-                                if self.paused { self.step_one_frame = true; }
+                                if self.paused {
+                                    self.step_one_frame = true;
+                                }
                             }
                             KeyCode::F5 => {
                                 if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
@@ -633,16 +694,27 @@ impl ApplicationHandler for App {
                                     ui_util::load_state_from_slot(emu, rp, self.current_slot);
                                 }
                             }
-                            KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3
-                            | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
-                            | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9
+                            KeyCode::Digit1
+                            | KeyCode::Digit2
+                            | KeyCode::Digit3
+                            | KeyCode::Digit4
+                            | KeyCode::Digit5
+                            | KeyCode::Digit6
+                            | KeyCode::Digit7
+                            | KeyCode::Digit8
+                            | KeyCode::Digit9
                             | KeyCode::Digit0 => {
                                 self.current_slot = match key {
-                                    KeyCode::Digit0 => 0, KeyCode::Digit1 => 1,
-                                    KeyCode::Digit2 => 2, KeyCode::Digit3 => 3,
-                                    KeyCode::Digit4 => 4, KeyCode::Digit5 => 5,
-                                    KeyCode::Digit6 => 6, KeyCode::Digit7 => 7,
-                                    KeyCode::Digit8 => 8, KeyCode::Digit9 => 9,
+                                    KeyCode::Digit0 => 0,
+                                    KeyCode::Digit1 => 1,
+                                    KeyCode::Digit2 => 2,
+                                    KeyCode::Digit3 => 3,
+                                    KeyCode::Digit4 => 4,
+                                    KeyCode::Digit5 => 5,
+                                    KeyCode::Digit6 => 6,
+                                    KeyCode::Digit7 => 7,
+                                    KeyCode::Digit8 => 8,
+                                    KeyCode::Digit9 => 9,
                                     _ => unreachable!(),
                                 };
                                 for (i, item) in self.slot_items.iter().enumerate() {

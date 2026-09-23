@@ -30,7 +30,13 @@ const GAP_BRIGHTNESS: f32 = 0.08;
 const HGAP_BRIGHTNESS: f32 = 0.12;
 
 #[inline(always)]
-fn apply_subpixel(r: f32, g: f32, b: f32, col_in_pixel: usize, cols_per_pixel: usize) -> (f32, f32, f32) {
+fn apply_subpixel(
+    r: f32,
+    g: f32,
+    b: f32,
+    col_in_pixel: usize,
+    cols_per_pixel: usize,
+) -> (f32, f32, f32) {
     // Last column is the vertical gap (if we have room for it)
     if cols_per_pixel > 3 && col_in_pixel == cols_per_pixel - 1 {
         return (r * GAP_BRIGHTNESS, g * GAP_BRIGHTNESS, b * GAP_BRIGHTNESS);
@@ -84,7 +90,8 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize, factor: usize) -> Vec<u32>
 
                     let dx = sx * factor + px;
                     let dy = sy * factor + py;
-                    dst[dy * dst_w + dx] = 0xFF000000 | (ri.min(255) << 16) | (gi.min(255) << 8) | bi.min(255);
+                    dst[dy * dst_w + dx] =
+                        0xFF000000 | (ri.min(255) << 16) | (gi.min(255) << 8) | bi.min(255);
                 }
             }
         }

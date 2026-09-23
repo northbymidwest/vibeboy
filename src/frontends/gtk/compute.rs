@@ -4,9 +4,9 @@
 //! compute -> display. The compute output texture is a GL texture in the
 //! same context, which the blit shader can bind directly.
 
+use crate::scaling::ScaleFilter;
 use crate::scaling::wgpu_scale::{WgpuScaleFilter, WgpuScalePipeline};
 use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
-use crate::scaling::ScaleFilter;
 use glow::HasContext;
 
 pub struct GpuCompute {
@@ -26,10 +26,7 @@ impl GpuCompute {
     pub fn new(gl_loader: impl FnMut(&str) -> *const std::ffi::c_void) -> Option<Self> {
         // Create wgpu gles adapter from the current GL context
         let hal_adapter = unsafe {
-            wgpu::hal::gles::Adapter::new_external(
-                gl_loader,
-                wgpu::GlBackendOptions::default(),
-            )?
+            wgpu::hal::gles::Adapter::new_external(gl_loader, wgpu::GlBackendOptions::default())?
         };
 
         // Create a minimal wgpu Instance as container for the external adapter.
@@ -45,14 +42,12 @@ impl GpuCompute {
 
         let adapter = unsafe { instance.create_adapter_from_hal(hal_adapter) };
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("gtk-gl-compute"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("gtk-gl-compute"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
         .ok()?;
 
         let pipeline = WgpuScalePipeline::new(&device);
@@ -135,13 +130,20 @@ impl GpuCompute {
         out_h: u32,
         scale: f32,
     ) -> Option<(glow::Texture, u32, u32)> {
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: None },
-        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         let output_tex = self.vectorize.encode(
-            &self.device, &self.queue, &mut encoder,
-            pixels, src_w, src_h, out_w, out_h, scale,
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            pixels,
+            src_w,
+            src_h,
+            out_w,
+            out_h,
+            scale,
         );
 
         let gl_texture = unsafe {

@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use vibeboy::model::GbModel;
 use crate::harness::{TestHarness, TestResult};
 use crate::test_model::detect_model_with_rom;
 use crate::util::make_emu;
+use vibeboy::model::GbModel;
 
 pub struct MooneyeHarness {
     pub force_model: Option<GbModel>,

@@ -3,34 +3,34 @@
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnesPpuRegs {
-    pub vram: Vec<u8>,        // 64KB (word-addressed, stored as bytes)
+    pub vram: Vec<u8>, // 64KB (word-addressed, stored as bytes)
     #[serde(with = "serde_big_array::BigArray")]
-    pub cgram: [u8; 512],     // 256 colors × 2 bytes (RGB555)
+    pub cgram: [u8; 512], // 256 colors × 2 bytes (RGB555)
     #[serde(with = "serde_big_array::BigArray")]
-    pub oam: [u8; 544],       // 512 + 32 bytes
+    pub oam: [u8; 544], // 512 + 32 bytes
 
     // VRAM access
-    pub vmain: u8,            // $2115: increment mode
-    pub vmadd: u16,           // $2116-17: VRAM word address
-    vram_prefetch: u16,       // Prefetch latch
+    pub vmain: u8,      // $2115: increment mode
+    pub vmadd: u16,     // $2116-17: VRAM word address
+    vram_prefetch: u16, // Prefetch latch
 
     // CGRAM access
-    pub cgadd: u16,           // $2121: CGRAM byte address (9 bits, auto-increments)
-    cg_latch: u8,             // Low byte latch for $2122
-    cg_flipflop: bool,        // false=low byte, true=high byte
+    pub cgadd: u16,    // $2121: CGRAM byte address (9 bits, auto-increments)
+    cg_latch: u8,      // Low byte latch for $2122
+    cg_flipflop: bool, // false=low byte, true=high byte
 
     // OAM access
-    pub oamadd: u16,          // $2102-03: OAM word address
-    oam_latch: u8,            // Low byte latch for $2104
-    oam_addr_internal: u16,   // Internal byte address
+    pub oamadd: u16,        // $2102-03: OAM word address
+    oam_latch: u8,          // Low byte latch for $2104
+    oam_addr_internal: u16, // Internal byte address
 
     // Display registers (stored but not rendered)
-    pub inidisp: u8,          // $2100
-    pub bgmode: u8,           // $2105
-    pub mosaic: u8,           // $2106
-    pub bg_sc: [u8; 4],       // $2107-210A: BG1-4 tilemap base
-    pub bg_chr: [u8; 2],      // $210B-210C: BG1-4 chr base
-    pub setini: u8,           // $2133
+    pub inidisp: u8,     // $2100
+    pub bgmode: u8,      // $2105
+    pub mosaic: u8,      // $2106
+    pub bg_sc: [u8; 4],  // $2107-210A: BG1-4 tilemap base
+    pub bg_chr: [u8; 2], // $210B-210C: BG1-4 chr base
+    pub setini: u8,      // $2133
 }
 
 impl SnesPpuRegs {
@@ -109,7 +109,8 @@ impl SnesPpuRegs {
                 self.oamadd = (self.oamadd & 0xFF) | ((val as u16 & 1) << 8);
                 self.oam_addr_internal = self.oamadd * 2;
             }
-            0x2104 => { // OAMDATA
+            0x2104 => {
+                // OAMDATA
                 let a = self.oam_addr_internal as usize;
                 if a < 512 {
                     if a & 1 == 0 {
@@ -149,7 +150,8 @@ impl SnesPpuRegs {
                 self.vram_prefetch = self.vram[byte_addr] as u16
                     | ((self.vram.get(byte_addr + 1).copied().unwrap_or(0) as u16) << 8);
             }
-            0x2118 => { // VMDATAL — write low byte
+            0x2118 => {
+                // VMDATAL — write low byte
                 let byte_addr = self.vram_byte_addr(self.vmadd);
                 if byte_addr < self.vram.len() {
                     self.vram[byte_addr] = val;
@@ -158,7 +160,8 @@ impl SnesPpuRegs {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_increment());
                 }
             }
-            0x2119 => { // VMDATAH — write high byte
+            0x2119 => {
+                // VMDATAH — write high byte
                 let byte_addr = self.vram_byte_addr(self.vmadd);
                 if byte_addr + 1 < self.vram.len() {
                     self.vram[byte_addr + 1] = val;
@@ -167,11 +170,13 @@ impl SnesPpuRegs {
                     self.vmadd = self.vmadd.wrapping_add(self.vram_increment());
                 }
             }
-            0x2121 => { // CGADD
+            0x2121 => {
+                // CGADD
                 self.cgadd = (val as u16) * 2;
                 self.cg_flipflop = false;
             }
-            0x2122 => { // CGDATA
+            0x2122 => {
+                // CGDATA
                 if !self.cg_flipflop {
                     self.cg_latch = val;
                     self.cg_flipflop = true;
@@ -193,19 +198,22 @@ impl SnesPpuRegs {
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0x2134..=0x2136 => 0, // Multiplication result (stubbed)
-            0x2137 => 0, // SLHV latch
-            0x2138 => { // OAMDATAREAD — stub
+            0x2137 => 0,          // SLHV latch
+            0x2138 => {
+                // OAMDATAREAD — stub
                 0
             }
-            0x2139 => { // VMDATALREAD
+            0x2139 => {
+                // VMDATALREAD
                 self.vram_prefetch as u8
             }
-            0x213A => { // VMDATAHREAD
+            0x213A => {
+                // VMDATAHREAD
                 (self.vram_prefetch >> 8) as u8
             }
-            0x213B => 0, // CGDATAREAD — stub
-            0x213C => 0, // OPHCT
-            0x213D => 0, // OPVCT
+            0x213B => 0,    // CGDATAREAD — stub
+            0x213C => 0,    // OPHCT
+            0x213D => 0,    // OPVCT
             0x213E => 0x01, // STAT77 — version
             0x213F => 0x01, // STAT78 — version
             _ => 0,

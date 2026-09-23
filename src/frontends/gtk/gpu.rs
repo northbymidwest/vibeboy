@@ -55,10 +55,13 @@ impl Default for PendingFrame {
     fn default() -> Self {
         Self {
             pixels: Vec::new(),
-            frame_w: 0, frame_h: 0,
-            src_w: 0, src_h: 0,
+            frame_w: 0,
+            frame_h: 0,
+            src_w: 0,
+            src_h: 0,
             gpu_filter: None,
-            fit_w: 0, fit_h: 0,
+            fit_w: 0,
+            fit_h: 0,
             factor: 0,
             gl_texture: None,
         }
@@ -197,8 +200,7 @@ impl GlRenderer {
             gl.clear(glow::COLOR_BUFFER_BIT);
 
             // Aspect-ratio-correct sub-viewport
-            let scale =
-                (viewport_w as f32 / src_w as f32).min(viewport_h as f32 / src_h as f32);
+            let scale = (viewport_w as f32 / src_w as f32).min(viewport_h as f32 / src_h as f32);
             let vp_w = (src_w as f32 * scale) as i32;
             let vp_h = (src_h as f32 * scale) as i32;
             let vp_x = (viewport_w - vp_w) / 2;
@@ -272,8 +274,7 @@ impl GlRenderer {
             gl.clear(glow::COLOR_BUFFER_BIT);
 
             // Aspect-ratio-correct sub-viewport
-            let scale =
-                (viewport_w as f32 / src_w as f32).min(viewport_h as f32 / src_h as f32);
+            let scale = (viewport_w as f32 / src_w as f32).min(viewport_h as f32 / src_h as f32);
             let vp_w = (src_w as f32 * scale) as i32;
             let vp_h = (src_h as f32 * scale) as i32;
             let vp_x = (viewport_w - vp_w) / 2;
@@ -282,8 +283,16 @@ impl GlRenderer {
 
             // Bind the external texture and set nearest filtering
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
 
             // Draw fullscreen quad
             gl.use_program(Some(self.program));

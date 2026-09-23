@@ -141,7 +141,9 @@ impl Icd2 {
 
     /// Fill a ring buffer slot with a specific tile row.
     fn fill_slot_with(&mut self, slot: usize, tile_row: usize) {
-        if tile_row >= 18 { return; }
+        if tile_row >= 18 {
+            return;
+        }
         let src_base = tile_row * 320;
         let dst_base = slot * 512;
         self.output[dst_base..dst_base + 512].fill(0);
@@ -151,7 +153,9 @@ impl Icd2 {
 
     /// Fill a ring buffer slot with the next available tile row.
     fn fill_slot(&mut self, slot: usize) {
-        if self.next_row >= 18 { return; }
+        if self.next_row >= 18 {
+            return;
+        }
         let src_base = self.next_row * 320;
         let dst_base = slot * 512;
         // Clear the slot first (512 bytes, 320 used + 192 padding)

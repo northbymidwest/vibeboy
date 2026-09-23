@@ -56,29 +56,58 @@ const OPT_OUTER_PASSES: u32 = 3;
 fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
     let src = std::str::from_utf8(msl).ok()?;
     let ns_src = NSString::from_str(src);
-    let lib = device.newLibraryWithSource_options_error(&ns_src, None)
-        .map_err(|e| eprintln!("MSL compile error: {e}")).ok()?;
+    let lib = device
+        .newLibraryWithSource_options_error(&ns_src, None)
+        .map_err(|e| eprintln!("MSL compile error: {e}"))
+        .ok()?;
     let func = lib.newFunctionWithName(ns_string!("main_0"))?;
-    device.newComputePipelineStateWithFunction_error(&func)
-        .map_err(|e| eprintln!("Pipeline error: {e}")).ok()
+    device
+        .newComputePipelineStateWithFunction_error(&func)
+        .map_err(|e| eprintln!("Pipeline error: {e}"))
+        .ok()
 }
 
 fn mk_buf(device: &Device, sz: usize) -> Buffer {
-    device.newBufferWithLength_options(sz.max(4), MTLResourceOptions::StorageModeShared)
+    device
+        .newBufferWithLength_options(sz.max(4), MTLResourceOptions::StorageModeShared)
         .expect("failed to create buffer")
 }
 
 impl MetalVectorizePipeline {
     pub fn new(device: &Device) -> Option<Self> {
         Some(MetalVectorizePipeline {
-            sim_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")))?,
-            resolve: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")))?,
-            cell_graph: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")))?,
-            picard: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.metal")))?,
-            grad: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.metal")))?,
-            tjunction: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")))?,
-            crossing_pack: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")))?,
-            rasterizer: load_msl(device, include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")))?,
+            sim_graph: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")),
+            )?,
+            resolve: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")),
+            )?,
+            cell_graph: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")),
+            )?,
+            picard: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.metal")),
+            )?,
+            grad: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.metal")),
+            )?,
+            tjunction: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
+            )?,
+            crossing_pack: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")),
+            )?,
+            rasterizer: load_msl(
+                device,
+                include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
+            )?,
             bufs: None,
         })
     }
@@ -88,8 +117,10 @@ impl MetalVectorizePipeline {
         device: &Device,
         queue: &CmdQueue,
         pixels: &[u32],
-        img_w: u32, img_h: u32,
-        out_w: u32, out_h: u32,
+        img_w: u32,
+        img_h: u32,
+        out_w: u32,
+        out_h: u32,
         scale: f32,
         out_tex: &Texture,
     ) {
@@ -100,9 +131,14 @@ impl MetalVectorizePipeline {
         let graph_elems = graph_stride * (2 * img_h + 1);
 
         // Allocate/reuse buffers
-        if self.bufs.as_ref().map_or(true, |b| b.img_w != img_w || b.img_h != img_h) {
+        if self
+            .bufs
+            .as_ref()
+            .map_or(true, |b| b.img_w != img_w || b.img_h != img_h)
+        {
             self.bufs = Some(MetalVecBufs {
-                img_w, img_h,
+                img_w,
+                img_h,
                 px_buf: mk_buf(device, (img_w * img_h * 4) as usize),
                 graph_buf: mk_buf(device, (graph_elems * 4) as usize),
                 graph_snapshot: mk_buf(device, (graph_elems * 4) as usize),
@@ -147,10 +183,18 @@ impl MetalVectorizePipeline {
         let cmd = queue.commandBuffer().unwrap();
         {
             let enc = cmd.blitCommandEncoder().unwrap();
-            for buf in [&b.graph_buf, &b.graph_snapshot, &b.valence_buf,
-                        &b.pos_buf, &b.nbr_buf, &b.flag_buf,
-                        &b.opt_out_buf, &b.orig_pos_buf, &b.crossing_t_buf,
-                        &b.opt_picard_buf] {
+            for buf in [
+                &b.graph_buf,
+                &b.graph_snapshot,
+                &b.valence_buf,
+                &b.pos_buf,
+                &b.nbr_buf,
+                &b.flag_buf,
+                &b.opt_out_buf,
+                &b.orig_pos_buf,
+                &b.crossing_t_buf,
+                &b.opt_picard_buf,
+            ] {
                 enc.fillBuffer_range_value(buf, NSRange::new(0, buf.length()), 0);
             }
             enc.endEncoding();
@@ -167,8 +211,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.graph_buf), 0, 2);
                 enc.setBuffer_offset_atIndex(Some(&b.valence_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((img_w + 15) / 16) as usize, height: ((img_h + 15) / 16) as usize, depth: 1 },
-                    MTLSize { width: 16, height: 16, depth: 1 },
+                    MTLSize {
+                        width: ((img_w + 15) / 16) as usize,
+                        height: ((img_h + 15) / 16) as usize,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 16,
+                        height: 16,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -179,7 +231,11 @@ impl MetalVectorizePipeline {
             let enc = cmd.blitCommandEncoder().unwrap();
             unsafe {
                 enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &b.graph_buf, 0, &b.graph_snapshot, 0, (graph_elems * 4) as usize,
+                    &b.graph_buf,
+                    0,
+                    &b.graph_snapshot,
+                    0,
+                    (graph_elems * 4) as usize,
                 );
             }
             enc.endEncoding();
@@ -200,8 +256,16 @@ impl MetalVectorizePipeline {
             let rh = img_h.saturating_sub(1);
             unsafe {
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((rw + 15) / 16) as usize, height: ((rh + 15) / 16) as usize, depth: 1 },
-                    MTLSize { width: 16, height: 16, depth: 1 },
+                    MTLSize {
+                        width: ((rw + 15) / 16) as usize,
+                        height: ((rh + 15) / 16) as usize,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 16,
+                        height: 16,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -219,8 +283,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((corners_w + 15) / 16) as usize, height: ((corners_h + 15) / 16) as usize, depth: 1 },
-                    MTLSize { width: 16, height: 16, depth: 1 },
+                    MTLSize {
+                        width: ((corners_w + 15) / 16) as usize,
+                        height: ((corners_h + 15) / 16) as usize,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 16,
+                        height: 16,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -231,7 +303,11 @@ impl MetalVectorizePipeline {
             let enc = cmd.blitCommandEncoder().unwrap();
             unsafe {
                 enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &b.pos_buf, 0, &b.orig_pos_buf, 0, (num_cps * 2 * 4) as usize,
+                    &b.pos_buf,
+                    0,
+                    &b.orig_pos_buf,
+                    0,
+                    (num_cps * 2 * 4) as usize,
                 );
             }
             enc.endEncoding();
@@ -255,8 +331,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
                 enc.setBuffer_offset_atIndex(Some(out_buf), 0, 5);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
-                    MTLSize { width: 256, height: 1, depth: 1 },
+                    MTLSize {
+                        width: ((num_cps + 255) / 256) as usize,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -277,7 +361,11 @@ impl MetalVectorizePipeline {
             let enc = cmd.blitCommandEncoder().unwrap();
             unsafe {
                 enc.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &b.opt_out_buf, 0, &b.pos_buf, 0, (num_cps * 2 * 4) as usize,
+                    &b.opt_out_buf,
+                    0,
+                    &b.pos_buf,
+                    0,
+                    (num_cps * 2 * 4) as usize,
                 );
             }
             enc.endEncoding();
@@ -296,8 +384,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 2);
                 enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
-                    MTLSize { width: 256, height: 1, depth: 1 },
+                    MTLSize {
+                        width: ((num_cps + 255) / 256) as usize,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -318,8 +414,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
                 enc.setBuffer_offset_atIndex(Some(&b.crossing_t_buf), 0, 4);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: ((num_cps + 255) / 256) as usize, height: 1, depth: 1 },
-                    MTLSize { width: 256, height: 1, depth: 1 },
+                    MTLSize {
+                        width: ((num_cps + 255) / 256) as usize,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();
@@ -327,8 +431,16 @@ impl MetalVectorizePipeline {
 
         // Stage 6: Cell rasterizer
         {
-            let uni = mk_uni(&[img_w, img_h, out_w, out_h,
-                f32::to_bits(scale), corners_w, tiles_w, tiles_h]);
+            let uni = mk_uni(&[
+                img_w,
+                img_h,
+                out_w,
+                out_h,
+                f32::to_bits(scale),
+                corners_w,
+                tiles_w,
+                tiles_h,
+            ]);
             let enc = cmd.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(&self.rasterizer);
             unsafe {
@@ -341,8 +453,16 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.crossing_t_buf), 0, 6);
                 enc.setTexture_atIndex(Some(out_tex), 0);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize { width: (tiles_w * tiles_h) as usize, height: 1, depth: 1 },
-                    MTLSize { width: 256, height: 1, depth: 1 },
+                    MTLSize {
+                        width: (tiles_w * tiles_h) as usize,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
                 );
             }
             enc.endEncoding();

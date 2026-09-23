@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
+use crate::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
+use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu};
 use vibeboy::emulator::Emulator;
 use vibeboy::model::GbModel;
-use crate::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
-use crate::util::{make_emu, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 pub fn cmd_analyze(
     path: &Path,
@@ -46,8 +46,13 @@ pub fn cmd_analyze(
         }) {
             eprintln!(
                 "  LY={:3}: {:08X} {:08X} {:08X} {:08X} {:08X}  SCX={}",
-                y, right_colors[0], right_colors[1], right_colors[2], right_colors[3],
-                right_colors[4], emu.bus().ppu.scx
+                y,
+                right_colors[0],
+                right_colors[1],
+                right_colors[2],
+                right_colors[3],
+                right_colors[4],
+                emu.bus().ppu.scx
             );
         }
     }
@@ -110,11 +115,7 @@ pub fn cmd_trace_timer(
     }
     {
         let tc = emu.bus().timer.counter();
-        eprintln!(
-            "At PC=$0100: timer_counter={:#06X} DIV={:02X}",
-            tc,
-            tc >> 8
-        );
+        eprintln!("At PC=$0100: timer_counter={:#06X} DIV={:02X}", tc, tc >> 8);
     }
     for i in 0..20 {
         let pc = emu.cpu().regs.pc;
@@ -148,7 +149,14 @@ pub fn cmd_calibrate(path: &Path) {
     ];
     for model in &models {
         if let Some(br) = load_boot_rom(*model) {
-            let mut emu = Emulator::new(rom.clone(), Some(br), *model, None, vibeboy::clock::default_clock(), vibeboy::apu::DEFAULT_SAMPLE_RATE);
+            let mut emu = Emulator::new(
+                rom.clone(),
+                Some(br),
+                *model,
+                None,
+                vibeboy::clock::default_clock(),
+                vibeboy::apu::DEFAULT_SAMPLE_RATE,
+            );
             emu.set_headless(true);
             for _ in 0..100_000_000u64 {
                 if emu.cpu().regs.pc == 0x0100 && !emu.bus().boot_rom_active {

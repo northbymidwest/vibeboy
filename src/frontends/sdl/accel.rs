@@ -17,7 +17,10 @@ pub(super) fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
     let sensor_sys = match sdl.sensor() {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("SDL sensor subsystem init failed: {} — accelerometer disabled", e);
+            log::warn!(
+                "SDL sensor subsystem init failed: {} — accelerometer disabled",
+                e
+            );
             return AccelSource::None;
         }
     };
@@ -43,7 +46,10 @@ pub(super) fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
 /// Open a gamepad and enable its accelerometer if present. Logs the result.
 pub(super) fn enable_gamepad_sensors(gp: &sdl3::gamepad::Gamepad) {
     if unsafe { gp.has_sensor(SensorType::Accelerometer) } {
-        if gp.sensor_set_enabled(SensorType::Accelerometer, true).is_ok() {
+        if gp
+            .sensor_set_enabled(SensorType::Accelerometer, true)
+            .is_ok()
+        {
             eprintln!("  Accelerometer enabled");
         }
     }

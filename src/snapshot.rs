@@ -5,14 +5,16 @@
 
 /// Serde helper for WRAM: [[u8; 0x1000]; 8] (8 banks of 4KB).
 mod serde_wram {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &[[u8; 0x1000]; 8], ser: S) -> Result<S::Ok, S::Error> {
         let flat: Vec<u8> = data.iter().flat_map(|bank| bank.iter().copied()).collect();
         flat.serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[[u8; 0x1000]; 8], D::Error> {
         let flat: Vec<u8> = Vec::deserialize(de)?;
-        if flat.len() != 0x1000 * 8 { return Err(serde::de::Error::custom("expected 32768 bytes for WRAM")); }
+        if flat.len() != 0x1000 * 8 {
+            return Err(serde::de::Error::custom("expected 32768 bytes for WRAM"));
+        }
         let mut result = [[0u8; 0x1000]; 8];
         for (i, chunk) in flat.chunks_exact(0x1000).enumerate() {
             result[i].copy_from_slice(chunk);
@@ -23,13 +25,15 @@ mod serde_wram {
 
 /// Serde helper for HRAM: [u8; 0x7F] (127 bytes).
 mod serde_hram {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &[u8; 0x7F], ser: S) -> Result<S::Ok, S::Error> {
         data.as_slice().serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 0x7F], D::Error> {
         let v: Vec<u8> = Vec::deserialize(de)?;
-        if v.len() != 0x7F { return Err(serde::de::Error::custom("expected 127 bytes for HRAM")); }
+        if v.len() != 0x7F {
+            return Err(serde::de::Error::custom("expected 127 bytes for HRAM"));
+        }
         let mut result = [0u8; 0x7F];
         result.copy_from_slice(&v);
         Ok(result)

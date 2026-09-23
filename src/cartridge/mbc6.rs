@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use super::Cartridge;
+use std::sync::Arc;
 
 pub struct Mbc6 {
     rom: Arc<[u8]>,
@@ -44,19 +44,31 @@ impl Cartridge for Mbc6 {
             0x4000..=0x5FFF => {
                 if self.bank_a_is_flash {
                     let idx = self.rom_bank_a * 0x2000 + (addr as usize - 0x4000);
-                    self.flash.get(idx % self.flash.len()).copied().unwrap_or(0xFF)
+                    self.flash
+                        .get(idx % self.flash.len())
+                        .copied()
+                        .unwrap_or(0xFF)
                 } else {
                     let idx = self.rom_bank_a * 0x2000 + (addr as usize - 0x4000);
-                    self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+                    self.rom
+                        .get(idx % self.rom.len().max(1))
+                        .copied()
+                        .unwrap_or(0xFF)
                 }
             }
             0x6000..=0x7FFF => {
                 if self.bank_b_is_flash {
                     let idx = self.rom_bank_b * 0x2000 + (addr as usize - 0x6000);
-                    self.flash.get(idx % self.flash.len()).copied().unwrap_or(0xFF)
+                    self.flash
+                        .get(idx % self.flash.len())
+                        .copied()
+                        .unwrap_or(0xFF)
                 } else {
                     let idx = self.rom_bank_b * 0x2000 + (addr as usize - 0x6000);
-                    self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+                    self.rom
+                        .get(idx % self.rom.len().max(1))
+                        .copied()
+                        .unwrap_or(0xFF)
                 }
             }
             _ => 0xFF,
@@ -82,14 +94,24 @@ impl Cartridge for Mbc6 {
     fn read_ram(&self, addr: u16) -> u8 {
         match addr {
             0xA000..=0xAFFF => {
-                if !self.ram_enabled_a { return 0xFF; }
+                if !self.ram_enabled_a {
+                    return 0xFF;
+                }
                 let idx = self.ram_bank_a * 0x1000 + (addr as usize - 0xA000);
-                self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
+                self.ram
+                    .get(idx % self.ram.len().max(1))
+                    .copied()
+                    .unwrap_or(0xFF)
             }
             0xB000..=0xBFFF => {
-                if !self.ram_enabled_b { return 0xFF; }
+                if !self.ram_enabled_b {
+                    return 0xFF;
+                }
                 let idx = self.ram_bank_b * 0x1000 + (addr as usize - 0xB000);
-                self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
+                self.ram
+                    .get(idx % self.ram.len().max(1))
+                    .copied()
+                    .unwrap_or(0xFF)
             }
             _ => 0xFF,
         }
@@ -98,13 +120,17 @@ impl Cartridge for Mbc6 {
     fn write_ram(&mut self, addr: u16, val: u8) {
         match addr {
             0xA000..=0xAFFF => {
-                if !self.ram_enabled_a { return; }
+                if !self.ram_enabled_a {
+                    return;
+                }
                 let idx = self.ram_bank_a * 0x1000 + (addr as usize - 0xA000);
                 let len = self.ram.len().max(1);
                 self.ram[idx % len] = val;
             }
             0xB000..=0xBFFF => {
-                if !self.ram_enabled_b { return; }
+                if !self.ram_enabled_b {
+                    return;
+                }
                 let idx = self.ram_bank_b * 0x1000 + (addr as usize - 0xB000);
                 let len = self.ram.len().max(1);
                 self.ram[idx % len] = val;
@@ -113,8 +139,12 @@ impl Cartridge for Mbc6 {
         }
     }
 
-    fn has_battery(&self) -> bool { true }
-    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn has_battery(&self) -> bool {
+        true
+    }
+    fn ram_data(&self) -> &[u8] {
+        &self.ram
+    }
 
     fn save_data(&self) -> Vec<u8> {
         let mut data = self.ram.clone();
@@ -148,11 +178,13 @@ impl Cartridge for Mbc6 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 22 { return; }
-        self.rom_bank_a = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
-        self.rom_bank_b = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
-        self.ram_bank_a = u32::from_le_bytes([d[8],d[9],d[10],d[11]]) as usize;
-        self.ram_bank_b = u32::from_le_bytes([d[12],d[13],d[14],d[15]]) as usize;
+        if d.len() < 22 {
+            return;
+        }
+        self.rom_bank_a = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+        self.rom_bank_b = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
+        self.ram_bank_a = u32::from_le_bytes([d[8], d[9], d[10], d[11]]) as usize;
+        self.ram_bank_b = u32::from_le_bytes([d[12], d[13], d[14], d[15]]) as usize;
         self.ram_enabled_a = d[16] != 0;
         self.ram_enabled_b = d[17] != 0;
         self.flash_enabled = d[18] != 0;

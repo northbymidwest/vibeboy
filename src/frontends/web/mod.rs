@@ -7,8 +7,8 @@ use crate::emulator::Emulator;
 use crate::model::GbModel;
 use crate::printer::Printer;
 use crate::scaling;
+use crate::scaling::wgpu_scale::{WgpuScaleFilter, WgpuScalePipeline};
 use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
-use crate::scaling::wgpu_scale::{WgpuScalePipeline, WgpuScaleFilter};
 use crate::ui_util;
 
 const BLIT_SHADER: &str = r#"
@@ -79,15 +79,29 @@ impl WasmEmulator {
         let model = ui_util::auto_detect_model(&rom_arc);
 
         // Derive save key from ROM title (0x134..0x143) + global checksum (0x14E..0x14F)
-        let title: String = rom_arc[0x134..0x143].iter()
+        let title: String = rom_arc[0x134..0x143]
+            .iter()
             .take_while(|&&b| b != 0)
-            .map(|&b| if b.is_ascii_alphanumeric() || b == b' ' { b as char } else { '_' })
+            .map(|&b| {
+                if b.is_ascii_alphanumeric() || b == b' ' {
+                    b as char
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let checksum = ((rom_arc[0x14E] as u16) << 8) | rom_arc[0x14F] as u16;
         let save_key = format!("vibeboy_sav_{}_{:04X}", title.trim(), checksum);
 
         let boot_rom = crate::bootrom::builtin(model).map(|b| b.to_vec());
-        let emu = Emulator::new(rom_arc.clone(), boot_rom, model, None, clock::default_clock(), apu::DEFAULT_SAMPLE_RATE);
+        let emu = Emulator::new(
+            rom_arc.clone(),
+            boot_rom,
+            model,
+            None,
+            clock::default_clock(),
+            apu::DEFAULT_SAMPLE_RATE,
+        );
         let w = if emu.is_sgb() { 256 } else { 160 };
         let h = if emu.is_sgb() { 224 } else { 144 };
 
@@ -116,26 +130,33 @@ impl WasmEmulator {
         });
 
         let surface_target = wgpu::SurfaceTarget::Canvas(canvas.clone());
-        let surface = instance.create_surface(surface_target)
+        let surface = instance
+            .create_surface(surface_target)
             .map_err(|e| JsValue::from_str(&format!("Surface error: {e}")))?;
 
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }).await.map_err(|e| JsValue::from_str(&format!("No WebGPU adapter: {e}")))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| JsValue::from_str(&format!("No WebGPU adapter: {e}")))?;
 
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 ..Default::default()
-            },
-        ).await.map_err(|e| JsValue::from_str(&format!("Device error: {e}")))?;
+            })
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Device error: {e}")))?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter()
+        let format = caps
+            .formats
+            .iter()
             .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
@@ -161,27 +182,28 @@ impl WasmEmulator {
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
         });
 
-        let blit_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        let blit_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -274,13 +296,19 @@ impl WasmEmulator {
 
     /// Attach a Game Boy Printer to the serial port.
     pub fn attach_printer(&mut self) {
-        let clock_rate = if self.emu.is_double_speed() { 8_388_608 } else { 4_194_304 };
-        self.emu.attach_serial_device(Box::new(Printer::new(clock_rate)));
+        let clock_rate = if self.emu.is_double_speed() {
+            8_388_608
+        } else {
+            4_194_304
+        };
+        self.emu
+            .attach_serial_device(Box::new(Printer::new(clock_rate)));
     }
 
     /// Check if the printer has a completed print ready for download.
     pub fn has_print(&self) -> bool {
-        self.emu.serial_device_as_any()
+        self.emu
+            .serial_device_as_any()
             .downcast_ref::<Printer>()
             .is_some_and(|p| p.has_pending_print())
     }
@@ -288,7 +316,11 @@ impl WasmEmulator {
     /// Take the next print as RGBA pixel data. Also stores width/height
     /// for retrieval via print_width()/print_height().
     pub fn take_print_rgba(&mut self) -> Vec<u8> {
-        if let Some(printer) = self.emu.serial_device_as_any_mut().downcast_mut::<Printer>() {
+        if let Some(printer) = self
+            .emu
+            .serial_device_as_any_mut()
+            .downcast_mut::<Printer>()
+        {
             if let Some((rgba, w, h)) = printer.take_print() {
                 self.last_print_w = w;
                 self.last_print_h = h;
@@ -298,8 +330,12 @@ impl WasmEmulator {
         Vec::new()
     }
 
-    pub fn print_width(&self) -> u32 { self.last_print_w }
-    pub fn print_height(&self) -> u32 { self.last_print_h }
+    pub fn print_width(&self) -> u32 {
+        self.last_print_w
+    }
+    pub fn print_height(&self) -> u32 {
+        self.last_print_h
+    }
 
     /// Returns true if the loaded ROM has a camera sensor (Pocket Camera).
     pub fn has_camera(&self) -> bool {
@@ -404,10 +440,19 @@ impl WasmEmulator {
             "agb" => GbModel::Agb,
             _ => return false,
         };
-        let boot_rom = if self.skip_boot { None } else {
+        let boot_rom = if self.skip_boot {
+            None
+        } else {
             crate::bootrom::builtin(model).map(|b| b.to_vec())
         };
-        self.emu = Emulator::new(self.rom.clone(), boot_rom, model, None, clock::default_clock(), apu::DEFAULT_SAMPLE_RATE);
+        self.emu = Emulator::new(
+            self.rom.clone(),
+            boot_rom,
+            model,
+            None,
+            clock::default_clock(),
+            apu::DEFAULT_SAMPLE_RATE,
+        );
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];
@@ -446,18 +491,25 @@ impl WasmEmulator {
         let render_w = (src_w as f32 * scale).round() as u32;
         let render_h = (src_h as f32 * scale).round() as u32;
 
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("filter+blit"),
-        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("filter+blit"),
+            });
 
         let out_tex: &wgpu::Texture = match self.scale_filter {
             // Full 6-stage GPU vectorize pipeline
-            ScaleFilter::Vectorize => {
-                gpu.vectorize.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    &fb, src_w, src_h, render_w, render_h, scale,
-                )
-            }
+            ScaleFilter::Vectorize => gpu.vectorize.encode(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &fb,
+                src_w,
+                src_h,
+                render_w,
+                render_h,
+                scale,
+            ),
             // All other filters: map to WgpuScaleFilter compute pipeline
             other => {
                 let wgpu_filter = match WgpuScaleFilter::from_scale_filter(other) {
@@ -471,14 +523,22 @@ impl WasmEmulator {
                     (render_w, render_h)
                 };
                 gpu.scale.encode(
-                    &gpu.device, &gpu.queue, &mut encoder,
-                    wgpu_filter, &fb, src_w, src_h, ow, oh,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    wgpu_filter,
+                    &fb,
+                    src_w,
+                    src_h,
+                    ow,
+                    oh,
                 )
             }
         };
 
         let frame = match gpu.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => return false,
         };
         let fb_view = frame.texture.create_view(&Default::default());
@@ -540,7 +600,7 @@ impl WasmEmulator {
 
         for (i, &px) in fb.iter().enumerate() {
             let off = i * 4;
-            self.rgba_buf[off]     = ((px >> 16) & 0xFF) as u8;
+            self.rgba_buf[off] = ((px >> 16) & 0xFF) as u8;
             self.rgba_buf[off + 1] = ((px >> 8) & 0xFF) as u8;
             self.rgba_buf[off + 2] = (px & 0xFF) as u8;
             self.rgba_buf[off + 3] = 0xFF;
@@ -567,11 +627,9 @@ impl WasmEmulator {
         let fit_h = (src_h as f64 * scale_fit).round() as usize;
 
         // Try CPU scaling
-        let (pixels, pw, ph) = if let Some((scaled, w, h)) = scaling::cpu_scale(
-            self.scale_filter,
-            &fb, src_w, src_h,
-            fit_w, fit_h,
-        ) {
+        let (pixels, pw, ph) = if let Some((scaled, w, h)) =
+            scaling::cpu_scale(self.scale_filter, &fb, src_w, src_h, fit_w, fit_h)
+        {
             (scaled, w as usize, h as usize)
         } else {
             (fb, src_w, src_h)
@@ -584,7 +642,7 @@ impl WasmEmulator {
         }
         for (i, &px) in pixels.iter().take(pw * ph).enumerate() {
             let off = i * 4;
-            self.rgba_buf[off]     = ((px >> 16) & 0xFF) as u8;
+            self.rgba_buf[off] = ((px >> 16) & 0xFF) as u8;
             self.rgba_buf[off + 1] = ((px >> 8) & 0xFF) as u8;
             self.rgba_buf[off + 2] = (px & 0xFF) as u8;
             self.rgba_buf[off + 3] = 0xFF;
@@ -649,7 +707,7 @@ pub fn wasm_memory() -> JsValue {
 /// Group is "main", "hqx", "xbr", "xbrz", or "edge_detect".
 #[wasm_bindgen]
 pub fn filter_registry_json() -> String {
-    use crate::scaling::{ScaleFilter, FilterMenuGroup};
+    use crate::scaling::{FilterMenuGroup, ScaleFilter};
     let mut entries = Vec::new();
     for (display_name, filter) in ScaleFilter::menu_entries() {
         let group = match filter.menu_group() {
@@ -661,25 +719,43 @@ pub fn filter_registry_json() -> String {
         };
         entries.push(format!(
             r#"{{"cli_name":"{}","display_name":"{}","group":"{}"}}"#,
-            filter.cli_name(), display_name, group,
+            filter.cli_name(),
+            display_name,
+            group,
         ));
     }
     format!("[{}]", entries.join(","))
 }
 
 #[wasm_bindgen]
-pub fn btn_right() -> u8 { Emulator::BTN_RIGHT }
+pub fn btn_right() -> u8 {
+    Emulator::BTN_RIGHT
+}
 #[wasm_bindgen]
-pub fn btn_left() -> u8 { Emulator::BTN_LEFT }
+pub fn btn_left() -> u8 {
+    Emulator::BTN_LEFT
+}
 #[wasm_bindgen]
-pub fn btn_up() -> u8 { Emulator::BTN_UP }
+pub fn btn_up() -> u8 {
+    Emulator::BTN_UP
+}
 #[wasm_bindgen]
-pub fn btn_down() -> u8 { Emulator::BTN_DOWN }
+pub fn btn_down() -> u8 {
+    Emulator::BTN_DOWN
+}
 #[wasm_bindgen]
-pub fn btn_a() -> u8 { Emulator::BTN_A }
+pub fn btn_a() -> u8 {
+    Emulator::BTN_A
+}
 #[wasm_bindgen]
-pub fn btn_b() -> u8 { Emulator::BTN_B }
+pub fn btn_b() -> u8 {
+    Emulator::BTN_B
+}
 #[wasm_bindgen]
-pub fn btn_select() -> u8 { Emulator::BTN_SELECT }
+pub fn btn_select() -> u8 {
+    Emulator::BTN_SELECT
+}
 #[wasm_bindgen]
-pub fn btn_start() -> u8 { Emulator::BTN_START }
+pub fn btn_start() -> u8 {
+    Emulator::BTN_START
+}

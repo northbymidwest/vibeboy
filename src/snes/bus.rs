@@ -12,7 +12,6 @@
 /// | $7E       | $0000-$FFFF | WRAM first 64KB                  |
 /// | $7F       | $0000-$FFFF | WRAM second 64KB                 |
 /// | $80-$FF  | *            | Mirror of $00-$7F                |
-
 use super::dma::DmaController;
 use super::icd2::Icd2;
 use super::ppu_regs::SnesPpuRegs;
@@ -20,38 +19,38 @@ use super::ppu_regs::SnesPpuRegs;
 #[derive(Clone)]
 pub struct SnesBus {
     pub rom: Vec<u8>,
-    pub wram: Vec<u8>,          // 128KB
+    pub wram: Vec<u8>, // 128KB
     pub ppu: SnesPpuRegs,
     pub dma: DmaController,
     pub icd2: Icd2,
 
     // CPU I/O registers
-    pub nmitimen: u8,           // $4200: NMI/IRQ enable
-    pub rdnmi: u8,              // $4210: NMI flag (bit 7) + version
-    pub timeup: u8,             // $4211: IRQ flag
-    pub hvbjoy: u8,             // $4212: H/V blank + joypad busy
-    pub joy1: u16,              // $4218-19: Joypad 1
-    pub joy2: u16,              // $421A-1B: Joypad 2
+    pub nmitimen: u8, // $4200: NMI/IRQ enable
+    pub rdnmi: u8,    // $4210: NMI flag (bit 7) + version
+    pub timeup: u8,   // $4211: IRQ flag
+    pub hvbjoy: u8,   // $4212: H/V blank + joypad busy
+    pub joy1: u16,    // $4218-19: Joypad 1
+    pub joy2: u16,    // $421A-1B: Joypad 2
 
     // Multiply/divide hardware
-    pub wrmpya: u8,             // $4202
-    pub wrmpyb: u8,             // $4203
-    pub wrdiv: u16,             // $4204-05
-    pub wrdivb: u8,             // $4206
-    pub rddiv: u16,             // $4214-15: quotient
-    pub rdmpy: u16,             // $4216-17: product/remainder
+    pub wrmpya: u8, // $4202
+    pub wrmpyb: u8, // $4203
+    pub wrdiv: u16, // $4204-05
+    pub wrdivb: u8, // $4206
+    pub rddiv: u16, // $4214-15: quotient
+    pub rdmpy: u16, // $4216-17: product/remainder
 
     // Memory-mapped I/O latches
-    pub wrio: u8,               // $4201
-    pub htime: u16,             // $4207-08
-    pub vtime: u16,             // $4209-0A
-    pub mdmaen: u8,             // $420B: DMA enable
-    pub hdmaen: u8,             // $420C: HDMA enable
-    pub memsel: u8,             // $420D: ROM speed
+    pub wrio: u8,   // $4201
+    pub htime: u16, // $4207-08
+    pub vtime: u16, // $4209-0A
+    pub mdmaen: u8, // $420B: DMA enable
+    pub hdmaen: u8, // $420C: HDMA enable
+    pub memsel: u8, // $420D: ROM speed
 
     // APU I/O ports ($2140-$2143) — SNES→SPC writes, SPC→SNES reads
-    pub apu_out: [u8; 4],       // What the SNES writes (CPU→APU)
-    pub apu_in: [u8; 4],        // What the SNES reads (APU→CPU)
+    pub apu_out: [u8; 4], // What the SNES writes (CPU→APU)
+    pub apu_in: [u8; 4],  // What the SNES reads (APU→CPU)
     /// SPC700 upload protocol state:
     /// 0 = waiting for handshake ($AA/$BB ready)
     /// 1 = uploading (echoing counter on port 0)
@@ -87,7 +86,7 @@ impl SnesBus {
             dma: DmaController::new(),
             icd2: Icd2::new(),
             nmitimen: 0,
-            rdnmi: 0x02,  // Version 2, NMI not pending
+            rdnmi: 0x02, // Version 2, NMI not pending
             timeup: 0,
             hvbjoy: 0,
             joy1: 0,
@@ -106,7 +105,7 @@ impl SnesBus {
             memsel: 0,
             apu_out: [0; 4],
             apu_in: [0xAA, 0xBB, 0x00, 0x00], // SPC700 IPL ready handshake
-            apu_state: 0, // Waiting for handshake
+            apu_state: 0,                     // Waiting for handshake
             apu_last_counter: 0,
             apu_port1_val: 0,
             apu_echo_pending: false,
@@ -129,13 +128,16 @@ impl SnesBus {
         if self.in_vblank {
             // VBlank phase: scanlines 225-261
             let elapsed = self.current_cpu_cycles.saturating_sub(
-                self.active_display_start.saturating_sub(37 * CYCLES_PER_LINE)
+                self.active_display_start
+                    .saturating_sub(37 * CYCLES_PER_LINE),
             );
             let line = elapsed / CYCLES_PER_LINE;
             (225 + line).min(261) as u16
         } else {
             // Active display: scanlines 0-224
-            let elapsed = self.current_cpu_cycles.saturating_sub(self.active_display_start);
+            let elapsed = self
+                .current_cpu_cycles
+                .saturating_sub(self.active_display_start);
             let line = elapsed / CYCLES_PER_LINE;
             line.min(224) as u16
         }
@@ -174,7 +176,11 @@ impl SnesBus {
             0x2180 if effective_bank <= 0x3F => {
                 // WMDATA read — read WRAM at WMADD, then increment
                 let wram_addr = self.wmadd as usize;
-                let val = if wram_addr < self.wram.len() { self.wram[wram_addr] } else { 0 };
+                let val = if wram_addr < self.wram.len() {
+                    self.wram[wram_addr]
+                } else {
+                    0
+                };
                 self.wmadd = (self.wmadd + 1) & 0x01FFFF;
                 val
             }
@@ -189,7 +195,7 @@ impl SnesBus {
                         // Also resets the OPHCT/OPVCT flipflop
                         0x01
                     }
-                    _ => self.ppu.read(offset)
+                    _ => self.ppu.read(offset),
                 }
             }
             0x4016 if effective_bank <= 0x3F => {
@@ -197,18 +203,10 @@ impl SnesBus {
                 0
             }
             0x4017 if effective_bank <= 0x3F => 0,
-            0x4200..=0x42FF if effective_bank <= 0x3F => {
-                self.read_cpu_io(offset)
-            }
-            0x4300..=0x43FF if effective_bank <= 0x3F => {
-                self.dma.read(offset - 0x4300)
-            }
-            0x6000..=0x7FFF if effective_bank <= 0x3F => {
-                self.icd2.read(offset)
-            }
-            0x8000..=0xFFFF if effective_bank <= 0x7D => {
-                self.read_rom(effective_bank, offset)
-            }
+            0x4200..=0x42FF if effective_bank <= 0x3F => self.read_cpu_io(offset),
+            0x4300..=0x43FF if effective_bank <= 0x3F => self.dma.read(offset - 0x4300),
+            0x6000..=0x7FFF if effective_bank <= 0x3F => self.icd2.read(offset),
+            0x8000..=0xFFFF if effective_bank <= 0x7D => self.read_rom(effective_bank, offset),
             _ => {
                 // Unmapped — open bus
                 0
@@ -265,7 +263,10 @@ impl SnesBus {
                             let is_transition = val != self.apu_last_counter.wrapping_add(1);
                             if is_transition && self.apu_port1_val == 0 {
                                 // Execute command — SPC program starts running
-                                log::debug!("APU: execute command (counter=${:02X}), SPC program running", val);
+                                log::debug!(
+                                    "APU: execute command (counter=${:02X}), SPC program running",
+                                    val
+                                );
                                 self.apu_in[0] = val; // Echo final counter first
                                 self.apu_state = 2;
                                 // After echo is read, the SPC program "initializes"
@@ -375,7 +376,11 @@ impl SnesBus {
                 let old = self.nmitimen;
                 self.nmitimen = val;
                 if val & 0x80 != 0 && old & 0x80 == 0 {
-                    log::debug!("SNES: NMI enabled (NMITIMEN=${:02X}), nmi_fire_count={}", val, self.nmi_fire_count);
+                    log::debug!(
+                        "SNES: NMI enabled (NMITIMEN=${:02X}), nmi_fire_count={}",
+                        val,
+                        self.nmi_fire_count
+                    );
                 }
             }
             0x4201 => self.wrio = val,
@@ -420,7 +425,9 @@ impl SnesBus {
     /// our own bus, so we use a slightly different approach than passing closures.
     fn execute_dma(&mut self, enable: u8) {
         for ch in 0..8u8 {
-            if enable & (1 << ch) == 0 { continue; }
+            if enable & (1 << ch) == 0 {
+                continue;
+            }
             let c = self.dma.channels[ch as usize];
             let direction = c.dmap & 0x80;
             let mode = c.dmap & 0x07;
@@ -455,9 +462,11 @@ impl SnesBus {
 
                 if !fixed {
                     if decrement {
-                        a_addr = (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_sub(1) as u32 & 0xFFFF);
+                        a_addr =
+                            (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_sub(1) as u32 & 0xFFFF);
                     } else {
-                        a_addr = (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_add(1) as u32 & 0xFFFF);
+                        a_addr =
+                            (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_add(1) as u32 & 0xFFFF);
                     }
                 }
 

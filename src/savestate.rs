@@ -24,7 +24,7 @@ const fn fnv1a(data: &[u8]) -> u32 {
 
 const fn layout_hash() -> u32 {
     let desc = concat!(
-        "v3;",  // Bump this when changing serialization format or struct layout
+        "v3;", // Bump this when changing serialization format or struct layout
         "Cpu:regs.a,f,b,c,d,e,h,l,sp,pc,ime,ime_pending,halted,halt_bug,speed_switch;",
         "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites,mgb_mode;",
         "Apu:ch1-4,frame_seq,master,nr50-52,blip;",
@@ -90,18 +90,34 @@ pub fn deserialize(data: &[u8]) -> io::Result<Snapshot> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "too short"));
     }
     if &data[0..8] != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a VibeBoy save state"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a VibeBoy save state",
+        ));
     }
     let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     if version != VERSION {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-            format!("incompatible save state version (expected {:08X}, got {:08X})", VERSION, version)));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "incompatible save state version (expected {:08X}, got {:08X})",
+                VERSION, version
+            ),
+        ));
     }
     let payload_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
     if data.len() < 16 + payload_len {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated save state"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated save state",
+        ));
     }
     bincode::serde::decode_from_slice(&data[16..16 + payload_len], bincode::config::standard())
         .map(|(snap, _)| snap)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize failed: {e}")))
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("deserialize failed: {e}"),
+            )
+        })
 }

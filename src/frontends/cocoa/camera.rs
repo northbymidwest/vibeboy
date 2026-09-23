@@ -8,12 +8,11 @@ pub(super) mod avf_camera {
     use dispatch2::DispatchQueue;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, ProtocolObject, Sel};
-    use objc2::{msg_send, sel, ClassType};
+    use objc2::{ClassType, msg_send, sel};
     use objc2_av_foundation::{
-        AVCaptureDevice, AVCaptureDeviceInput, AVCaptureInput, AVCaptureOutput,
-        AVCaptureSession, AVCaptureVideoDataOutput,
-        AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureSessionPreset640x480,
-        AVMediaTypeVideo,
+        AVCaptureDevice, AVCaptureDeviceInput, AVCaptureInput, AVCaptureOutput, AVCaptureSession,
+        AVCaptureSessionPreset640x480, AVCaptureVideoDataOutput,
+        AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
     };
     use objc2_foundation::{NSNumber, NSString};
 
@@ -61,9 +60,9 @@ pub(super) mod avf_camera {
             let mut builder = ClassBuilder::new(c"VBCameraDelegate", superclass).unwrap();
 
             // Add protocol conformance so the ProtocolObject cast below is valid
-            if let Some(proto) = objc2::runtime::AnyProtocol::get(
-                c"AVCaptureVideoDataOutputSampleBufferDelegate",
-            ) {
+            if let Some(proto) =
+                objc2::runtime::AnyProtocol::get(c"AVCaptureVideoDataOutputSampleBufferDelegate")
+            {
                 builder.add_protocol(proto);
             }
 
@@ -166,8 +165,7 @@ pub(super) mod avf_camera {
         };
         let crop_x = (w as u32 - crop_w) / 2;
         let crop_y = (h as u32 - crop_h) / 2;
-        let cropped =
-            image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
+        let cropped = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
 
         // Convert to grayscale and resize with Lanczos3
         let gray = image::imageops::grayscale(&cropped);
@@ -229,8 +227,7 @@ pub(super) mod avf_camera {
                 // Request BGRA pixel format via NSDictionary
                 let pixel_format_key = get_cv_pixel_format_key();
                 let pixel_format_key_ns: &NSString = &*(pixel_format_key as *const NSString);
-                let bgra_value =
-                    NSNumber::numberWithUnsignedInt(0x42475241); // kCVPixelFormatType_32BGRA
+                let bgra_value = NSNumber::numberWithUnsignedInt(0x42475241); // kCVPixelFormatType_32BGRA
                 // Use msg_send! for NSDictionary creation because the typed
                 // dictionaryWithObject_forKey requires &ProtocolObject<dyn NSCopying>
                 // and the key is a raw CoreVideo extern NSString pointer.
@@ -272,9 +269,7 @@ pub(super) mod avf_camera {
                 let delegate_proto: &ProtocolObject<
                     dyn AVCaptureVideoDataOutputSampleBufferDelegate,
                 > = &*(delegate_ptr
-                    as *const ProtocolObject<
-                        dyn AVCaptureVideoDataOutputSampleBufferDelegate,
-                    >);
+                    as *const ProtocolObject<dyn AVCaptureVideoDataOutputSampleBufferDelegate>);
                 output.setSampleBufferDelegate_queue(Some(delegate_proto), Some(&queue));
 
                 // canAddOutput/addOutput take &AVCaptureOutput; upcast via as_super()

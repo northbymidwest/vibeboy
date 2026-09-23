@@ -114,7 +114,12 @@ fn nedi_diamond_weights(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> 
         let sum: f32 = weights.iter().sum();
         if sum.abs() > 0.01 {
             let inv = 1.0 / sum;
-            [weights[0] * inv, weights[1] * inv, weights[2] * inv, weights[3] * inv]
+            [
+                weights[0] * inv,
+                weights[1] * inv,
+                weights[2] * inv,
+                weights[3] * inv,
+            ]
         } else {
             [0.25, 0.25, 0.25, 0.25]
         }

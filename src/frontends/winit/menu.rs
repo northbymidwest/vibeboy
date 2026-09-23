@@ -53,17 +53,30 @@ pub(super) fn filter_entries() -> Vec<(&'static str, &'static str, scaling::Scal
         .map(|(display, filter)| {
             // Use cli_name as a stable menu ID (prefixed with "filter_")
             // We leak the string to get a &'static str since these are created once
-            let id: &'static str = Box::leak(format!("filter_{}", filter.cli_name()).into_boxed_str());
+            let id: &'static str =
+                Box::leak(format!("filter_{}", filter.cli_name()).into_boxed_str());
             (id, display, filter)
         })
         .collect()
 }
 
 pub(super) fn filter_id_to_filter(id: &str) -> Option<scaling::ScaleFilter> {
-    filter_entries().iter().find(|(mid, _, _)| *mid == id).map(|(_, _, f)| *f)
+    filter_entries()
+        .iter()
+        .find(|(mid, _, _)| *mid == id)
+        .map(|(_, _, f)| *f)
 }
 
-pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling::ScaleFilter)>, CheckMenuItem, Vec<CheckMenuItem>, Vec<CheckMenuItem>, CheckMenuItem) {
+pub(super) fn build_menu(
+    printer_on: bool,
+) -> (
+    Menu,
+    Vec<(CheckMenuItem, scaling::ScaleFilter)>,
+    CheckMenuItem,
+    Vec<CheckMenuItem>,
+    Vec<CheckMenuItem>,
+    CheckMenuItem,
+) {
     let menu = Menu::new();
 
     // File menu
@@ -89,7 +102,11 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
     // Emulation menu
     let emu_menu = Submenu::new("Emulation", true);
     let printer_item = CheckMenuItem::with_id(
-        ID_PRINTER, "Game Boy Printer", true, printer_on, None::<Accelerator>,
+        ID_PRINTER,
+        "Game Boy Printer",
+        true,
+        printer_on,
+        None::<Accelerator>,
     );
     emu_menu
         .append_items(&[
@@ -127,7 +144,11 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
                 slot_save_id(i),
                 format!("Slot {}", i),
                 true,
-                if i == 0 { Some(Accelerator::new(None, Code::F5)) } else { None },
+                if i == 0 {
+                    Some(Accelerator::new(None, Code::F5))
+                } else {
+                    None
+                },
             ))
             .unwrap();
         load_sub
@@ -135,13 +156,15 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
                 slot_load_id(i),
                 format!("Slot {}", i),
                 true,
-                if i == 0 { Some(Accelerator::new(None, Code::F7)) } else { None },
+                if i == 0 {
+                    Some(Accelerator::new(None, Code::F7))
+                } else {
+                    None
+                },
             ))
             .unwrap();
     }
-    state_menu
-        .append_items(&[&save_sub, &load_sub])
-        .unwrap();
+    state_menu.append_items(&[&save_sub, &load_sub]).unwrap();
     state_menu.append(&PredefinedMenuItem::separator()).unwrap();
     let mut slot_items = Vec::new();
     for i in 0..=9usize {
@@ -158,11 +181,12 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
 
     // Filter menu -- use CheckMenuItem for checkmark support
     let filter_menu = Submenu::new("Filter", true);
-    let force_cpu_item = CheckMenuItem::with_id(
-        ID_FORCE_CPU, "Force CPU", true, false, None::<Accelerator>,
-    );
+    let force_cpu_item =
+        CheckMenuItem::with_id(ID_FORCE_CPU, "Force CPU", true, false, None::<Accelerator>);
     filter_menu.append(&force_cpu_item).unwrap();
-    filter_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    filter_menu
+        .append(&PredefinedMenuItem::separator())
+        .unwrap();
     let mut filter_items = Vec::new();
     {
         use scaling::FilterMenuGroup;
@@ -175,14 +199,18 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
             if group == FilterMenuGroup::Main {
                 filter_menu.append(&item).unwrap();
             } else {
-                sub_menus.entry(group.label())
+                sub_menus
+                    .entry(group.label())
                     .or_insert_with(|| Submenu::new(group.label(), true))
-                    .append(&item).unwrap();
+                    .append(&item)
+                    .unwrap();
             }
             filter_items.push((item, filter));
         }
 
-        filter_menu.append(&PredefinedMenuItem::separator()).unwrap();
+        filter_menu
+            .append(&PredefinedMenuItem::separator())
+            .unwrap();
         for (_, sub) in &sub_menus {
             filter_menu.append(sub).unwrap();
         }
@@ -224,5 +252,12 @@ pub(super) fn build_menu(printer_on: bool) -> (Menu, Vec<(CheckMenuItem, scaling
     menu.append_items(&[&file_menu, &emu_menu, &state_menu, &filter_menu, &help_menu])
         .unwrap();
 
-    (menu, filter_items, printer_item, model_items, slot_items, force_cpu_item)
+    (
+        menu,
+        filter_items,
+        printer_item,
+        model_items,
+        slot_items,
+        force_cpu_item,
+    )
 }

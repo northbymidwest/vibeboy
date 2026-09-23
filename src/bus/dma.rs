@@ -1,5 +1,4 @@
 /// OAM DMA, HDMA, and bus tick/timing.
-
 use super::Bus;
 
 impl Bus {
@@ -12,12 +11,12 @@ impl Bus {
         let was_blocking = self.oam_dma.blocking;
         // Schedule DMA: 1 M-cycle delay before blocking starts, then 160 transfers.
         self.oam_dma = super::OamDma {
-            active:       true,
-            source:       (source_page as u16) << 8,
-            progress:     0,
-            delay:        1,
+            active: true,
+            source: (source_page as u16) << 8,
+            progress: 0,
+            delay: 1,
             was_blocking,
-            blocking:     was_blocking,
+            blocking: was_blocking,
             pending_write: None,
             bus_conflict_value: None,
             last_bus_byte: 0xFF,
@@ -40,7 +39,9 @@ impl Bus {
     ///   161 (CGB): teardown — bus blocked, no transfer
     ///   End: DMG at 161, CGB at 162
     pub fn step_oam_dma(&mut self) {
-        if !self.oam_dma.active { return; }
+        if !self.oam_dma.active {
+            return;
+        }
         if self.oam_dma.delay > 0 {
             self.oam_dma.delay -= 1;
             self.oam_dma.bus_conflict_value = None;

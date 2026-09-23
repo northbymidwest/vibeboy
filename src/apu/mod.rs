@@ -11,12 +11,11 @@
 ///   div_divider & 1 == 1 → length counters
 ///   div_divider & 3 == 3 → CH1 sweep
 ///   div_divider & 7 == 7 → volume envelopes
-
 mod channels;
 mod registers;
 mod sequencer;
 
-use channels::{SquareCh, Sweep, WaveCh, NoiseCh};
+use channels::{NoiseCh, SquareCh, Sweep, WaveCh};
 
 use std::sync::Arc;
 
@@ -52,7 +51,8 @@ fn blip_sinc_table() -> Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]> {
         let mut master = vec![0.0_f64; n];
 
         for i in 0..n {
-            let x = (i as f64 - n as f64 / 2.0) * std::f64::consts::PI * 2.0 * lowpass / BLIP_PHASES as f64;
+            let x = (i as f64 - n as f64 / 2.0) * std::f64::consts::PI * 2.0 * lowpass
+                / BLIP_PHASES as f64;
             let sinc = if x.abs() < 1e-12 { 1.0 } else { x.sin() / x };
             let theta = 2.0 * std::f64::consts::PI * i as f64 / (n - 1) as f64;
             let a0 = 7938.0 / 18608.0;
@@ -135,7 +135,6 @@ fn compute_hpf_alpha(cpu_clock_rate: u32, sample_rate: u32) -> f32 {
     BASE_PER_TCYCLE.powf(cycles_per_sample) as f32
 }
 
-
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Apu {
     ch1: SquareCh,
@@ -206,7 +205,6 @@ pub struct Apu {
     // High-pass filter coefficient, computed from sample rate.
     // Models the coupling capacitor with ~0.6 Hz cutoff (matching real hardware).
     hpf_alpha: f32,
-
 }
 
 /// Transient APU filter state not included in serde snapshots.
@@ -326,7 +324,9 @@ impl Apu {
     }
 
     /// Current output sample rate.
-    pub fn sample_rate(&self) -> u32 { self.sample_rate }
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 
     /// Change the output sample rate (used when restoring save states across
     /// frontends that may run at different rates).
@@ -359,9 +359,8 @@ impl Apu {
 
     /// Compute current mixed L/R as integers.
     fn mix_integer(&self) -> (i32, i32) {
-        let dac = |digital: u8, dac_on: bool| -> i32 {
-            if dac_on { digital as i32 * 2 - 15 } else { 0 }
-        };
+        let dac =
+            |digital: u8, dac_on: bool| -> i32 { if dac_on { digital as i32 * 2 - 15 } else { 0 } };
 
         let o1 = dac(self.ch1.output(), self.ch1.dac_on);
         let o2 = dac(self.ch2.output(), self.ch2.dac_on);
@@ -371,14 +370,30 @@ impl Apu {
         let mut left = 0i32;
         let mut right = 0i32;
 
-        if self.nr51 & 0x10 != 0 { left  += o1; }
-        if self.nr51 & 0x20 != 0 { left  += o2; }
-        if self.nr51 & 0x40 != 0 { left  += o3; }
-        if self.nr51 & 0x80 != 0 { left  += o4; }
-        if self.nr51 & 0x01 != 0 { right += o1; }
-        if self.nr51 & 0x02 != 0 { right += o2; }
-        if self.nr51 & 0x04 != 0 { right += o3; }
-        if self.nr51 & 0x08 != 0 { right += o4; }
+        if self.nr51 & 0x10 != 0 {
+            left += o1;
+        }
+        if self.nr51 & 0x20 != 0 {
+            left += o2;
+        }
+        if self.nr51 & 0x40 != 0 {
+            left += o3;
+        }
+        if self.nr51 & 0x80 != 0 {
+            left += o4;
+        }
+        if self.nr51 & 0x01 != 0 {
+            right += o1;
+        }
+        if self.nr51 & 0x02 != 0 {
+            right += o2;
+        }
+        if self.nr51 & 0x04 != 0 {
+            right += o3;
+        }
+        if self.nr51 & 0x08 != 0 {
+            right += o4;
+        }
 
         let lvol = ((self.nr50 >> 4) & 0x07) as i32 + 1;
         let rvol = (self.nr50 & 0x07) as i32 + 1;
@@ -390,8 +405,7 @@ impl Apu {
     #[inline]
     fn current_blip_phase(&self) -> usize {
         let thresh = self.sample_accum_thresh as usize;
-        (self.sample_accum as usize * BLIP_PHASES / thresh)
-            .min(BLIP_PHASES * 2 - 1)
+        (self.sample_accum as usize * BLIP_PHASES / thresh).min(BLIP_PHASES * 2 - 1)
     }
 
     /// Record a mix delta to the BLIP buffer if the mixed output has changed.
@@ -422,7 +436,9 @@ impl Apu {
     }
 
     #[inline]
-    fn record_mix_delta(&mut self) { self.record_mix_delta_inner(false); }
+    fn record_mix_delta(&mut self) {
+        self.record_mix_delta_inner(false);
+    }
 
     /// Emit one sample from the BLIP buffer, then apply HPF.
     fn emit_sample(&mut self) {
@@ -433,7 +449,7 @@ impl Apu {
         let r = r / 648.0;
 
         let alpha = self.hpf_alpha;
-        self.hpf_left  = alpha * (self.hpf_left + l - self.hpf_prev_in_l);
+        self.hpf_left = alpha * (self.hpf_left + l - self.hpf_prev_in_l);
         self.hpf_right = alpha * (self.hpf_right + r - self.hpf_prev_in_r);
         self.hpf_prev_in_l = l;
         self.hpf_prev_in_r = r;
@@ -464,8 +480,12 @@ impl Apu {
             return;
         }
 
-        if self.ch1.enabled { self.ch1.tick_freq(cycles); }
-        if self.ch2.enabled { self.ch2.tick_freq(cycles); }
+        if self.ch1.enabled {
+            self.ch1.tick_freq(cycles);
+        }
+        if self.ch2.enabled {
+            self.ch2.tick_freq(cycles);
+        }
         self.ch3.tick_freq(cycles);
         self.ch4.alignment += cycles;
         self.ch4.tick_counter(cycles);
@@ -500,14 +520,30 @@ impl Apu {
     }
 
     pub fn pcm12(&self) -> u8 {
-        let ch1 = if self.ch1.enabled { self.ch1.output() & 0x0F } else { 0 };
-        let ch2 = if self.ch2.enabled { self.ch2.output() & 0x0F } else { 0 };
+        let ch1 = if self.ch1.enabled {
+            self.ch1.output() & 0x0F
+        } else {
+            0
+        };
+        let ch2 = if self.ch2.enabled {
+            self.ch2.output() & 0x0F
+        } else {
+            0
+        };
         ch1 | (ch2 << 4)
     }
 
     pub fn pcm34(&self) -> u8 {
-        let ch3 = if self.ch3.enabled { self.ch3.output() & 0x0F } else { 0 };
-        let ch4 = if self.ch4.enabled { self.ch4.output() & 0x0F } else { 0 };
+        let ch3 = if self.ch3.enabled {
+            self.ch3.output() & 0x0F
+        } else {
+            0
+        };
+        let ch4 = if self.ch4.enabled {
+            self.ch4.output() & 0x0F
+        } else {
+            0
+        };
         ch3 | (ch4 << 4)
     }
 }

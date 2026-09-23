@@ -8,8 +8,8 @@
 //! This is a pixel-art-friendly variant that combines EDI smoothness
 //! with sharp pixel preservation when color differences are large.
 
-use super::get;
 use super::color_dist;
+use super::get;
 
 /// Edge direction threshold — below this, region is considered flat.
 const FLAT_THRESHOLD: f32 = 500.0;
@@ -37,14 +37,14 @@ fn edge_direction(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> (f32, 
             // Use signed luma gradients so gxy can be negative,
             // allowing the structure tensor to detect all edge orientations
             let luma_c = 0.299 * ((c >> 16) & 0xFF) as f32
-                       + 0.587 * ((c >> 8) & 0xFF) as f32
-                       + 0.114 * (c & 0xFF) as f32;
+                + 0.587 * ((c >> 8) & 0xFF) as f32
+                + 0.114 * (c & 0xFF) as f32;
             let luma_r = 0.299 * ((r >> 16) & 0xFF) as f32
-                       + 0.587 * ((r >> 8) & 0xFF) as f32
-                       + 0.114 * (r & 0xFF) as f32;
+                + 0.587 * ((r >> 8) & 0xFF) as f32
+                + 0.114 * (r & 0xFF) as f32;
             let luma_d = 0.299 * ((d >> 16) & 0xFF) as f32
-                       + 0.587 * ((d >> 8) & 0xFF) as f32
-                       + 0.114 * (d & 0xFF) as f32;
+                + 0.587 * ((d >> 8) & 0xFF) as f32
+                + 0.114 * (d & 0xFF) as f32;
 
             let dx = luma_r - luma_c;
             let dy = luma_d - luma_c;

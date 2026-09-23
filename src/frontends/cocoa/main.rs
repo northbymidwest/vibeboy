@@ -15,31 +15,29 @@ use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
 use std::collections::HashSet;
+use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-use objc2::{msg_send, sel, MainThreadOnly};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSControlStateValueOff,
     NSControlStateValueOn, NSEventMask, NSEventType, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{
-    MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString,
-};
+use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 use objc2_metal::*;
 
 use ui_util::{frame_duration, parse_filter};
 
-use accel::{init_accel, poll_accel, close_accel};
+use accel::{close_accel, init_accel, poll_accel};
 use audio::{AudioRingBuffer, SharedAudioBuffer, setup_audio};
 use camera::CameraCapture;
-use controls::{show_controls_panel, open_rom_dialog};
+use controls::{open_rom_dialog, show_controls_panel};
 use font::tiny_font;
 use gamepad::GamepadState;
 use menu::*;
@@ -92,7 +90,10 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
 use ui_util::auto_detect_model;
 
 #[derive(Parser)]
-#[command(name = "vibeboy_cocoa", about = "Game Boy / Game Boy Color emulator (macOS native)")]
+#[command(
+    name = "vibeboy_cocoa",
+    about = "Game Boy / Game Boy Color emulator (macOS native)"
+)]
 struct Cli {
     rom: Option<PathBuf>,
     #[arg(long)]
@@ -157,7 +158,9 @@ struct FrameTimerInfo {
 /// during menu tracking, keeping audio-driven emulation smooth.
 unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void) {
     let ctx = &mut *(info as *mut FrameTimerInfo);
-    if !ctx.running { return; }
+    if !ctx.running {
+        return;
+    }
     let state = &mut *ctx.state;
     let window = &*ctx.window;
     let frame_start = &mut *ctx.frame_start;
@@ -241,17 +244,28 @@ impl AppState {
         app: &NSApplication,
         window: &NSWindow,
     ) {
-        let title_str = format!("VibeBoy \u{2014} {}",
-            path.file_name().unwrap_or_default().to_string_lossy());
+        let title_str = format!(
+            "VibeBoy \u{2014} {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
         let title = NSString::from_str(&title_str);
         window.setTitle(&title);
         add_recent_rom(&path.to_string_lossy());
         rebuild_recent_menu(mtm, app, &load_recent_roms());
         self.rom = rom_data.into();
         self.rom_path = path;
-        self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
+        self.model = self
+            .forced_model
+            .unwrap_or_else(|| auto_detect_model(&self.rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-        self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
+        self.emu = Emulator::new(
+            self.rom.clone(),
+            boot_rom,
+            self.model,
+            None,
+            clock::default_clock(),
+            AUDIO_SAMPLE_RATE,
+        );
         self.update_src_dims();
         ui_util::load_sav(&mut self.emu, &self.rom_path);
         self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -292,7 +306,14 @@ impl AppState {
 
         if actions.reset {
             let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-            self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
+            self.emu = Emulator::new(
+                self.rom.clone(),
+                boot_rom,
+                self.model,
+                None,
+                clock::default_clock(),
+                AUDIO_SAMPLE_RATE,
+            );
             self.update_src_dims();
             ui_util::load_sav(&mut self.emu, &self.rom_path);
             self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -317,13 +338,28 @@ impl AppState {
         if let Some(tag) = actions.select_model {
             if let Some(new_model) = model_tag_to_model(tag) {
                 self.forced_model = new_model;
-                self.model = self.forced_model.unwrap_or_else(|| auto_detect_model(&self.rom));
+                self.model = self
+                    .forced_model
+                    .unwrap_or_else(|| auto_detect_model(&self.rom));
                 // Use auto-detected boot ROM for the new model (ignore explicit --bootrom)
                 let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-                let model_name = self.forced_model.map(|m| format!("{}", m)).unwrap_or_else(|| "Auto".to_string());
-                eprintln!("Hardware model: {} (boot ROM: {})", model_name,
-                    if boot_rom.is_some() { "loaded" } else { "none" });
-                self.emu = Emulator::new(self.rom.clone(), boot_rom, self.model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
+                let model_name = self
+                    .forced_model
+                    .map(|m| format!("{}", m))
+                    .unwrap_or_else(|| "Auto".to_string());
+                eprintln!(
+                    "Hardware model: {} (boot ROM: {})",
+                    model_name,
+                    if boot_rom.is_some() { "loaded" } else { "none" }
+                );
+                self.emu = Emulator::new(
+                    self.rom.clone(),
+                    boot_rom,
+                    self.model,
+                    None,
+                    clock::default_clock(),
+                    AUDIO_SAMPLE_RATE,
+                );
                 self.update_src_dims();
                 ui_util::load_sav(&mut self.emu, &self.rom_path);
                 self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
@@ -349,19 +385,25 @@ impl AppState {
         if actions.toggle_printer {
             let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
             if is_printer {
-                self.emu.attach_serial_device(Box::new(serial::Disconnected));
+                self.emu
+                    .attach_serial_device(Box::new(serial::Disconnected));
                 eprintln!("Game Boy Printer disconnected");
             } else {
-                self.emu.attach_serial_device(
-                    Box::new(printer::Printer::new(self.model.cpu_clock_rate()))
-                );
+                self.emu
+                    .attach_serial_device(Box::new(printer::Printer::new(
+                        self.model.cpu_clock_rate(),
+                    )));
                 eprintln!("Game Boy Printer connected");
             }
             if let Some(main_menu) = app.mainMenu() {
                 if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
                     if let Some(emu_submenu) = emu_menu_item.submenu() {
                         if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
-                            let state = if !is_printer { NSControlStateValueOn } else { NSControlStateValueOff };
+                            let state = if !is_printer {
+                                NSControlStateValueOn
+                            } else {
+                                NSControlStateValueOff
+                            };
                             printer_menu_item.setState(state);
                         }
                     }
@@ -375,7 +417,11 @@ impl AppState {
                 if let Some(view_menu_item) = main_menu.itemAtIndex(2) {
                     if let Some(view_submenu) = view_menu_item.submenu() {
                         if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
-                            let state = if self.show_fps_overlay { NSControlStateValueOn } else { NSControlStateValueOff };
+                            let state = if self.show_fps_overlay {
+                                NSControlStateValueOn
+                            } else {
+                                NSControlStateValueOff
+                            };
                             fps_item.setState(state);
                         }
                     }
@@ -413,7 +459,8 @@ impl AppState {
         if self.emu.has_rumble() {
             self.gamepad.ensure_haptics_ready();
         }
-        self.gamepad.apply_to_emu(&mut self.emu, &self.key_map, &self.keys_down);
+        self.gamepad
+            .apply_to_emu(&mut self.emu, &self.key_map, &self.keys_down);
 
         // Camera
         if let Some(ref cam) = self.camera {
@@ -495,8 +542,12 @@ impl AppState {
             // clock. Time debt is still consumed for sleep-based pacing.
             let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
             let target_fill = samples_per_frame * 3; // ~50ms
-            let max_fill = samples_per_frame * 8;    // ~133ms
-            let queued = self.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+            let max_fill = samples_per_frame * 8; // ~133ms
+            let queued = self
+                .audio_ring
+                .lock()
+                .map(|r| r.len())
+                .unwrap_or(target_fill);
 
             let frames_needed = if queued < target_fill / 2 {
                 2u32
@@ -539,7 +590,9 @@ impl AppState {
 
     /// Render the current frame. Handles occlusion check, filter dispatch, and Metal rendering.
     unsafe fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
-        let occluded = !window.occlusionState().contains(objc2_app_kit::NSWindowOcclusionState::Visible);
+        let occluded = !window
+            .occlusionState()
+            .contains(objc2_app_kit::NSWindowOcclusionState::Visible);
 
         // Update drawable size on resize (use backing pixels for Retina)
         let (disp_w, disp_h);
@@ -551,7 +604,8 @@ impl AppState {
             if !occluded {
                 self.renderer.layer.setContentsScale(scale);
                 self.renderer.layer.setDrawableSize(NSSize::new(
-                    bounds.size.width * scale, bounds.size.height * scale,
+                    bounds.size.width * scale,
+                    bounds.size.height * scale,
                 ));
             }
         }
@@ -596,7 +650,8 @@ impl AppState {
         // Vectorize: full 6-stage Metal compute pipeline
         if self.scale_filter == scaling::ScaleFilter::Vectorize {
             if self.renderer.vectorize_pipeline.is_none() {
-                self.renderer.vectorize_pipeline = MetalVectorizePipeline::new(&self.renderer.device);
+                self.renderer.vectorize_pipeline =
+                    MetalVectorizePipeline::new(&self.renderer.device);
             }
             if let Some(ref mut vp) = self.renderer.vectorize_pipeline {
                 let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
@@ -608,13 +663,27 @@ impl AppState {
                     desc.setWidth(gw as usize);
                     desc.setHeight(gh as usize);
                     desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-                    self.renderer.compute_out_tex = Some(self.renderer.device.newTextureWithDescriptor(&desc).unwrap());
+                    self.renderer.compute_out_tex = Some(
+                        self.renderer
+                            .device
+                            .newTextureWithDescriptor(&desc)
+                            .unwrap(),
+                    );
                     self.renderer.compute_out_w = gw;
                     self.renderer.compute_out_h = gh;
                 }
                 let out_tex = self.renderer.compute_out_tex.as_ref().unwrap();
-                vp.run(&self.renderer.device, &self.renderer.command_queue, raw_src,
-                    src_w as u32, src_h as u32, gw, gh, s, out_tex);
+                vp.run(
+                    &self.renderer.device,
+                    &self.renderer.command_queue,
+                    raw_src,
+                    src_w as u32,
+                    src_h as u32,
+                    gw,
+                    gh,
+                    s,
+                    out_tex,
+                );
                 self.renderer.tex_w = gw;
                 self.renderer.tex_h = gh;
                 self.renderer.texture = out_tex.clone();
@@ -627,8 +696,12 @@ impl AppState {
         // GPU compute scaling filters (Vectorize handled above)
         if self.scale_filter != scaling::ScaleFilter::Vectorize {
             if let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
-                self.scale_filter, raw_src, src_w as u32, src_h as u32,
-                disp_w as u32, disp_h as u32,
+                self.scale_filter,
+                raw_src,
+                src_w as u32,
+                src_h as u32,
+                disp_w as u32,
+                disp_h as u32,
             ) {
                 self.renderer.tex_w = gw;
                 self.renderer.tex_h = gh;
@@ -657,9 +730,9 @@ impl AppState {
                 let scale = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
                 let fit_w = (src_w as f64 * scale).round() as usize;
                 let fit_h = (src_h as f64 * scale).round() as usize;
-                if let Some((s, w, h)) = scaling::cpu_scale(
-                    self.scale_filter, raw_src, src_w, src_h, fit_w, fit_h,
-                ) {
+                if let Some((s, w, h)) =
+                    scaling::cpu_scale(self.scale_filter, raw_src, src_w, src_h, fit_w, fit_h)
+                {
                     vec_scaled = s;
                     (&vec_scaled, w as usize, h as usize)
                 } else {
@@ -678,7 +751,11 @@ impl AppState {
             tex_desc.setWidth(frame_w as usize);
             tex_desc.setHeight(frame_h as usize);
             tex_desc.setUsage(MTLTextureUsage::ShaderRead);
-            self.renderer.texture = self.renderer.device.newTextureWithDescriptor(&tex_desc).unwrap();
+            self.renderer.texture = self
+                .renderer
+                .device
+                .newTextureWithDescriptor(&tex_desc)
+                .unwrap();
             self.renderer.tex_w = frame_w as u32;
             self.renderer.tex_h = frame_h as u32;
         }
@@ -696,8 +773,15 @@ impl AppState {
             let fg = 0xFF00FF00;
             let bg = 0xC0000000;
             tiny_font::draw_string(
-                &mut self.bgra_buf, frame_w, frame_h,
-                &text, 2 * scale, 2 * scale, fg, bg, scale,
+                &mut self.bgra_buf,
+                frame_w,
+                frame_h,
+                &text,
+                2 * scale,
+                2 * scale,
+                fg,
+                bg,
+                scale,
             );
         }
 
@@ -735,10 +819,12 @@ fn main() {
             open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
 
-        let rom: std::sync::Arc<[u8]> = fs::read(&rom_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
-            std::process::exit(1);
-        }).into();
+        let rom: std::sync::Arc<[u8]> = fs::read(&rom_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
+                std::process::exit(1);
+            })
+            .into();
 
         let forced_model: Option<GbModel> = cli.model;
         let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
@@ -775,7 +861,14 @@ fn main() {
         ui_util::print_controls();
         eprintln!();
 
-        let mut emu = Emulator::new(rom.clone(), boot_rom, model, snes_rom, clock::default_clock(), AUDIO_SAMPLE_RATE);
+        let mut emu = Emulator::new(
+            rom.clone(),
+            boot_rom,
+            model,
+            snes_rom,
+            clock::default_clock(),
+            AUDIO_SAMPLE_RATE,
+        );
         ui_util::load_sav(&mut emu, &rom_path);
         let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
@@ -787,8 +880,7 @@ fn main() {
         rebuild_recent_menu(mtm, &app, &load_recent_roms());
 
         if cli.printer {
-            emu.attach_serial_device(
-                Box::new(printer::Printer::new(model.cpu_clock_rate())));
+            emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
             // Set checkmark on printer menu item
             if let Some(main_menu) = app.mainMenu() {
@@ -836,14 +928,19 @@ fn main() {
 
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win_w as f64, win_h as f64)),
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(win_w as f64, win_h as f64),
+            ),
             style,
             NSBackingStoreType::Buffered,
             false,
         );
 
-        let title_str = format!("VibeBoy \u{2014} {}",
-            rom_path.file_name().unwrap_or_default().to_string_lossy());
+        let title_str = format!(
+            "VibeBoy \u{2014} {}",
+            rom_path.file_name().unwrap_or_default().to_string_lossy()
+        );
         let title = NSString::from_str(&title_str);
         window.setTitle(&title);
         window.center();
@@ -854,10 +951,26 @@ fn main() {
             if AnyClass::get(class_name).is_none() {
                 let superclass = AnyClass::get(c"NSView").unwrap();
                 let mut builder = ClassBuilder::new(class_name, superclass).unwrap();
-                unsafe extern "C" fn accepts_first_responder(_this: *mut AnyObject, _sel: Sel) -> Bool { Bool::YES }
-                unsafe extern "C" fn key_down(_this: *mut AnyObject, _sel: Sel, _event: *mut AnyObject) { /* swallow */ }
-                builder.add_method(sel!(acceptsFirstResponder), accepts_first_responder as unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool);
-                builder.add_method(sel!(keyDown:), key_down as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+                unsafe extern "C" fn accepts_first_responder(
+                    _this: *mut AnyObject,
+                    _sel: Sel,
+                ) -> Bool {
+                    Bool::YES
+                }
+                unsafe extern "C" fn key_down(
+                    _this: *mut AnyObject,
+                    _sel: Sel,
+                    _event: *mut AnyObject,
+                ) { /* swallow */
+                }
+                builder.add_method(
+                    sel!(acceptsFirstResponder),
+                    accepts_first_responder as unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
+                );
+                builder.add_method(
+                    sel!(keyDown:),
+                    key_down as unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+                );
                 let _ = builder.register();
             }
             let game_view_class = AnyClass::get(class_name).unwrap();
@@ -865,13 +978,16 @@ fn main() {
             let game_view: *mut AnyObject = msg_send![game_view_class, alloc];
             let game_view: *mut AnyObject = msg_send![game_view, initWithFrame: content_rect];
             // Cast to NSView for typed setContentView/makeFirstResponder
-            let game_view_ref: &objc2_app_kit::NSView = &*(game_view as *const objc2_app_kit::NSView);
+            let game_view_ref: &objc2_app_kit::NSView =
+                &*(game_view as *const objc2_app_kit::NSView);
             window.setContentView(Some(game_view_ref));
             window.makeFirstResponder(Some(game_view_ref));
         }
 
         // Attach Metal layer to content view
-        let content_view = window.contentView().expect("window must have a content view");
+        let content_view = window
+            .contentView()
+            .expect("window must have a content view");
         content_view.setWantsLayer(true);
 
         // Set the Metal layer
@@ -970,7 +1086,8 @@ fn main() {
                 kCFAllocatorDefault,
                 CFAbsoluteTimeGetCurrent(),
                 frame_dur.as_secs_f64(),
-                0, 0,
+                0,
+                0,
                 frame_timer_callback,
                 &mut ctx,
             );
@@ -985,9 +1102,8 @@ fn main() {
             // Block until the next event or the frame timer fires.
             // NSDate with frame_dur timeout avoids busy-waiting while still
             // allowing the timer to wake us for the next frame.
-            let wait_until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(
-                frame_dur.as_secs_f64(),
-            );
+            let wait_until =
+                objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(frame_dur.as_secs_f64());
             loop {
                 let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                     NSEventMask::Any,
@@ -1019,11 +1135,21 @@ fn main() {
                         state.paused = !state.paused;
                         eprintln!("{}", if state.paused { "Paused" } else { "Resumed" });
                     } else if keycode == K_PERIOD {
-                        if state.paused { state.step_one_frame = true; }
+                        if state.paused {
+                            state.step_one_frame = true;
+                        }
                     } else if keycode == K_F5 {
-                        ui_util::save_state_to_slot(&mut state.emu, &state.rom_path, state.current_slot);
+                        ui_util::save_state_to_slot(
+                            &mut state.emu,
+                            &state.rom_path,
+                            state.current_slot,
+                        );
                     } else if keycode == K_F7 {
-                        ui_util::load_state_from_slot(&mut state.emu, &state.rom_path, state.current_slot);
+                        ui_util::load_state_from_slot(
+                            &mut state.emu,
+                            &state.rom_path,
+                            state.current_slot,
+                        );
                     } else if let Some(slot) = keycode_to_slot(keycode) {
                         state.current_slot = slot;
                         eprintln!("Slot {} selected", state.current_slot);

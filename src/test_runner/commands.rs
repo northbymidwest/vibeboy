@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
+use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu, parse_keys};
 use vibeboy::model::GbModel;
 use vibeboy::scaling;
-use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
-use crate::util::{make_emu, parse_keys, GB_FB_WIDTH, GB_FB_HEIGHT};
 
 fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
     let data = vibeboy::scaling::vectorize::vectorize(pixels, width, height);
@@ -70,15 +70,23 @@ fn gpu_with_cpu_fallback(
 
 /// Rasterize pixels using the specified vectorize format and save to a file.
 fn vectorize_and_save(
-    pixels: &[u32], width: usize, height: usize,
-    out: &str, format: &str, scale: usize, use_gpu: bool,
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    out: &str,
+    format: &str,
+    scale: usize,
+    use_gpu: bool,
 ) {
     if out.ends_with(".svg") {
         let svg = vectorize_to_svg(pixels, width, height);
         fs::write(out, &svg).expect("Failed to write SVG");
         eprintln!(
             "Vectorized {}x{} image -> {} ({} bytes)",
-            width, height, out, svg.len()
+            width,
+            height,
+            out,
+            svg.len()
         );
         return;
     }
@@ -96,9 +104,7 @@ fn vectorize_and_save(
         || {
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
-                vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(
-                    pixels, width, height, scale,
-                )
+                vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(pixels, width, height, scale)
             }
             #[cfg(not(feature = "sdl3-gpu-shaders"))]
             {
@@ -126,18 +132,18 @@ fn try_gpu_filter(
     #[cfg(feature = "sdl3-gpu-shaders")]
     {
         if filter_name == "vectorize" {
-            if let Some((pix, w, h)) = scaling::sdl::gpu_full_pipeline_screenshot(
-                raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, scale,
-            ) {
+            if let Some((pix, w, h)) =
+                scaling::sdl::gpu_full_pipeline_screenshot(raw_fb, GB_FB_WIDTH, GB_FB_HEIGHT, scale)
+            {
                 return Some((pix, w as usize, h as usize));
             }
             eprintln!(
                 "GPU full pipeline screenshot failed for filter '{}', falling back to CPU",
                 filter_name
             );
-        } else if let Some((s, w, h)) = scaling::sdl::gpu_screenshot(
-            raw_fb, GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32, sf,
-        ) {
+        } else if let Some((s, w, h)) =
+            scaling::sdl::gpu_screenshot(raw_fb, GB_FB_WIDTH as u32, GB_FB_HEIGHT as u32, sf)
+        {
             return Some((s, w as usize, h as usize));
         } else {
             eprintln!(
@@ -203,9 +209,7 @@ pub fn cmd_screenshot(
 
         // Try GPU path if requested
         if use_gpu {
-            if let Some((pixels, w, h)) =
-                try_gpu_filter(raw_fb, f, sf, scale)
-            {
+            if let Some((pixels, w, h)) = try_gpu_filter(raw_fb, f, sf, scale) {
                 scaled_buf = pixels;
                 return save_pixels(&scaled_buf, w, h, out, format, frames);
             }
@@ -286,13 +290,23 @@ fn flag_names(flag: u32) -> String {
         2 => names.push("INTERIOR"),
         _ => {}
     }
-    if flag & IS_CORNER != 0 { names.push("CORNER"); }
-    if flag & IS_TJUNCTION != 0 { names.push("TJUNCTION"); }
-    if flag & IS_CROSSING != 0 { names.push("CROSSING"); }
-    if flag & IS_ENDPOINT != 0 { names.push("ENDPOINT"); }
+    if flag & IS_CORNER != 0 {
+        names.push("CORNER");
+    }
+    if flag & IS_TJUNCTION != 0 {
+        names.push("TJUNCTION");
+    }
+    if flag & IS_CROSSING != 0 {
+        names.push("CROSSING");
+    }
+    if flag & IS_ENDPOINT != 0 {
+        names.push("ENDPOINT");
+    }
     let mut s = String::from("[");
     for (i, n) in names.iter().enumerate() {
-        if i > 0 { s.push_str(", "); }
+        if i > 0 {
+            s.push_str(", ");
+        }
         s.push('"');
         s.push_str(n);
         s.push('"');
@@ -303,14 +317,21 @@ fn flag_names(flag: u32) -> String {
 
 /// Format an ARGB u32 as a `"#RRGGBB"` hex string.
 fn argb_hex(c: u32) -> String {
-    format!("\"#{:02X}{:02X}{:02X}\"", (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
+    format!(
+        "\"#{:02X}{:02X}{:02X}\"",
+        (c >> 16) & 0xFF,
+        (c >> 8) & 0xFF,
+        c & 0xFF
+    )
 }
 
 /// Format an edge's (left, right) colors. The two pixels straddle the edge in
 /// the direction the rasterizer uses for `resolve_color` / `build_aa_line`.
 /// Returns `null` if `dir < 0` (inactive edge).
 fn edge_colors_json(pixels: &[u32], w: usize, h: usize, icx: i32, icy: i32, dir: i32) -> String {
-    if dir < 0 { return String::from("null"); }
+    if dir < 0 {
+        return String::from("null");
+    }
     let (l, r) = vibeboy::scaling::vectorize::get_edge_colors(pixels, w, h, icx, icy, dir);
     format!("[{}, {}]", argb_hex(l), argb_hex(r))
 }
@@ -348,16 +369,35 @@ fn dump_cp_data(pixels: &[u32], w: usize, h: usize, path: &str) {
         // both shader and CPU mirror: every 2 CPs share a corner slot).
         let icx = (ci / 2) % corners_w;
         let icy = (ci / 2) / corners_w;
-        let prev_edge = edge_colors_json(pixels, data.img_w, data.img_h, icx as i32, icy as i32, prev_dir);
-        let next_edge = edge_colors_json(pixels, data.img_w, data.img_h, icx as i32, icy as i32, next_dir);
+        let prev_edge = edge_colors_json(
+            pixels, data.img_w, data.img_h, icx as i32, icy as i32, prev_dir,
+        );
+        let next_edge = edge_colors_json(
+            pixels, data.img_w, data.img_h, icx as i32, icy as i32, next_dir,
+        );
         let comma = if ci + 1 == num_cps { "" } else { "," };
         out.push_str(&format!(
             "    {{\"ci\": {}, \"pos\": [{:.6}, {:.6}], \"orig_pos\": [{:.6}, {:.6}], \
              \"prev_ci\": {}, \"next_ci\": {}, \"prev_dir\": {}, \"next_dir\": {}, \
              \"flag\": {}, \"flag_names\": {}, \"crossing_t\": {:.6}, \
              \"icx\": {}, \"icy\": {}, \"prev_edge_colors\": {}, \"next_edge_colors\": {}}}{}\n",
-            ci, px, py, ox, oy, prev_ci, next_ci, prev_dir, next_dir,
-            flag, flag_names(flag), crossing_t, icx, icy, prev_edge, next_edge, comma,
+            ci,
+            px,
+            py,
+            ox,
+            oy,
+            prev_ci,
+            next_ci,
+            prev_dir,
+            next_dir,
+            flag,
+            flag_names(flag),
+            crossing_t,
+            icx,
+            icy,
+            prev_edge,
+            next_edge,
+            comma,
         ));
     }
     out.push_str("  ]\n}\n");
@@ -387,41 +427,71 @@ fn cp_render_geometry(
     ci: usize,
 ) -> Option<((f32, f32), (f32, f32), (f32, f32), (f32, f32), (f32, f32))> {
     let flag = data.flags[ci];
-    if flag == 0 { return None; }
+    if flag == 0 {
+        return None;
+    }
     let prev_ci = data.neighbors[ci * 4];
     let next_ci = data.neighbors[ci * 4 + 1];
-    if prev_ci < 0 && next_ci < 0 { return None; }
+    if prev_ci < 0 && next_ci < 0 {
+        return None;
+    }
     let i_am_endpoint = prev_ci < 0 || next_ci < 0;
     if i_am_endpoint {
         let other = if prev_ci < 0 { next_ci } else { prev_ci };
-        if (data.flags[other as usize] & IS_ENDPOINT) == 0 { return None; }
-        if (ci as i32) > other { return None; }
+        if (data.flags[other as usize] & IS_ENDPOINT) == 0 {
+            return None;
+        }
+        if (ci as i32) > other {
+            return None;
+        }
     }
     let cp = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
     let prev_pos = if prev_ci >= 0 {
-        (data.positions[prev_ci as usize * 2], data.positions[prev_ci as usize * 2 + 1])
-    } else { cp };
+        (
+            data.positions[prev_ci as usize * 2],
+            data.positions[prev_ci as usize * 2 + 1],
+        )
+    } else {
+        cp
+    };
     let next_pos = if next_ci >= 0 {
-        (data.positions[next_ci as usize * 2], data.positions[next_ci as usize * 2 + 1])
-    } else { cp };
+        (
+            data.positions[next_ci as usize * 2],
+            data.positions[next_ci as usize * 2 + 1],
+        )
+    } else {
+        cp
+    };
     let prev_is_end = prev_ci >= 0 && (data.flags[prev_ci as usize] & IS_ENDPOINT) != 0;
     let next_is_end = next_ci >= 0 && (data.flags[next_ci as usize] & IS_ENDPOINT) != 0;
     let pp = if prev_is_end {
         (2.0 * prev_pos.0 - cp.0, 2.0 * prev_pos.1 - cp.1)
-    } else { prev_pos };
+    } else {
+        prev_pos
+    };
     let np = if next_is_end {
         (2.0 * next_pos.0 - cp.0, 2.0 * next_pos.1 - cp.1)
-    } else { next_pos };
+    } else {
+        next_pos
+    };
     Some((cp, pp, np, prev_pos, next_pos))
 }
 
-fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usize, base_out: &str) {
+fn write_curve_overlay(
+    pixels: &[u32],
+    w: usize,
+    h: usize,
+    scale: usize,
+    nn: usize,
+    base_out: &str,
+) {
     let scaled_w = w * scale;
     let scaled_h = h * scale;
     let final_w = scaled_w * nn;
     let final_h = scaled_h * nn;
 
-    let scaled_rgba = std::fs::read(base_out).ok()
+    let scaled_rgba = std::fs::read(base_out)
+        .ok()
         .and_then(|_| image::open(base_out).ok())
         .map(|i| i.to_rgba8())
         .expect("base render not found");
@@ -434,7 +504,10 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
             let sx = fx / nn;
             let p = scaled_rgba.get_pixel(sx as u32, sy as u32);
             let i = (fy * final_w + fx) * 4;
-            buf[i] = p.0[0]; buf[i+1] = p.0[1]; buf[i+2] = p.0[2]; buf[i+3] = 255;
+            buf[i] = p.0[0];
+            buf[i + 1] = p.0[1];
+            buf[i + 2] = p.0[2];
+            buf[i + 3] = 255;
         }
     }
 
@@ -446,50 +519,64 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
     let pps = (scale * nn) as f32;
 
     // Plot a pixel
-    let plot = |buf: &mut [u8], x: i32, y: i32, c: [u8;3]| {
-        if x < 0 || y < 0 || x >= final_w as i32 || y >= final_h as i32 { return; }
+    let plot = |buf: &mut [u8], x: i32, y: i32, c: [u8; 3]| {
+        if x < 0 || y < 0 || x >= final_w as i32 || y >= final_h as i32 {
+            return;
+        }
         let i = (y as usize * final_w + x as usize) * 4;
         // Blend with existing pixel for visibility
         buf[i] = ((c[0] as u16 + buf[i] as u16) / 2) as u8;
-        buf[i+1] = ((c[1] as u16 + buf[i+1] as u16) / 2) as u8;
-        buf[i+2] = ((c[2] as u16 + buf[i+2] as u16) / 2) as u8;
+        buf[i + 1] = ((c[1] as u16 + buf[i + 1] as u16) / 2) as u8;
+        buf[i + 2] = ((c[2] as u16 + buf[i + 2] as u16) / 2) as u8;
     };
 
     // Draw a B-spline span by sampling
-    let draw_span = |buf: &mut [u8], pp: (f32,f32), cp: (f32,f32), np: (f32,f32), color: [u8;3]| {
-        const N: usize = 200;
-        let mut last: Option<(f32,f32)> = None;
-        for i in 0..=N {
-            let t = i as f32 / N as f32;
-            let u = 1.0 - t;
-            let bx = 0.5*u*u*pp.0 + (u*t + 0.5)*cp.0 + 0.5*t*t*np.0;
-            let by = 0.5*u*u*pp.1 + (u*t + 0.5)*cp.1 + 0.5*t*t*np.1;
-            let px = (bx * pps).round() as i32;
-            let py = (by * pps).round() as i32;
-            if let Some((lx, ly)) = last {
-                // Bresenham from (lx,ly) to (px,py)
-                let lxi = lx.round() as i32;
-                let lyi = ly.round() as i32;
-                let dx = (px - lxi).abs();
-                let dy = -(py - lyi).abs();
-                let sx = if lxi < px { 1 } else { -1 };
-                let sy = if lyi < py { 1 } else { -1 };
-                let mut err = dx + dy;
-                let mut x = lxi; let mut y = lyi;
-                loop {
-                    plot(buf, x, y, color);
-                    if x == px && y == py { break; }
-                    let e2 = 2 * err;
-                    if e2 >= dy { err += dy; x += sx; }
-                    if e2 <= dx { err += dx; y += sy; }
+    let draw_span =
+        |buf: &mut [u8], pp: (f32, f32), cp: (f32, f32), np: (f32, f32), color: [u8; 3]| {
+            const N: usize = 200;
+            let mut last: Option<(f32, f32)> = None;
+            for i in 0..=N {
+                let t = i as f32 / N as f32;
+                let u = 1.0 - t;
+                let bx = 0.5 * u * u * pp.0 + (u * t + 0.5) * cp.0 + 0.5 * t * t * np.0;
+                let by = 0.5 * u * u * pp.1 + (u * t + 0.5) * cp.1 + 0.5 * t * t * np.1;
+                let px = (bx * pps).round() as i32;
+                let py = (by * pps).round() as i32;
+                if let Some((lx, ly)) = last {
+                    // Bresenham from (lx,ly) to (px,py)
+                    let lxi = lx.round() as i32;
+                    let lyi = ly.round() as i32;
+                    let dx = (px - lxi).abs();
+                    let dy = -(py - lyi).abs();
+                    let sx = if lxi < px { 1 } else { -1 };
+                    let sy = if lyi < py { 1 } else { -1 };
+                    let mut err = dx + dy;
+                    let mut x = lxi;
+                    let mut y = lyi;
+                    loop {
+                        plot(buf, x, y, color);
+                        if x == px && y == py {
+                            break;
+                        }
+                        let e2 = 2 * err;
+                        if e2 >= dy {
+                            err += dy;
+                            x += sx;
+                        }
+                        if e2 <= dx {
+                            err += dx;
+                            y += sy;
+                        }
+                    }
                 }
+                last = Some((px as f32, py as f32));
             }
-            last = Some((px as f32, py as f32));
-        }
-    };
+        };
 
     for ci in 0..num_cps {
-        let Some((cp, pp, np, _, _)) = cp_render_geometry(&data, ci) else { continue; };
+        let Some((cp, pp, np, _, _)) = cp_render_geometry(&data, ci) else {
+            continue;
+        };
         let prev_ci = data.neighbors[ci * 4];
         let next_ci = data.neighbors[ci * 4 + 1];
         let stem = (prev_ci < 0 || next_ci < 0)
@@ -502,24 +589,28 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
     // Mark pre-optimization CPs with white open squares (outline only)
     for ci in 0..num_cps {
         let flag = data.flags[ci];
-        if flag == 0 { continue; }
-        let op = (data.orig_positions[ci*2], data.orig_positions[ci*2+1]);
+        if flag == 0 {
+            continue;
+        }
+        let op = (data.orig_positions[ci * 2], data.orig_positions[ci * 2 + 1]);
         let px = (op.0 * pps).round() as i32;
         let py = (op.1 * pps).round() as i32;
         let r: i32 = 3;
         for d in -r..=r {
-            plot(&mut buf, px+d, py-r, [255, 255, 255]);
-            plot(&mut buf, px+d, py+r, [255, 255, 255]);
-            plot(&mut buf, px-r, py+d, [255, 255, 255]);
-            plot(&mut buf, px+r, py+d, [255, 255, 255]);
+            plot(&mut buf, px + d, py - r, [255, 255, 255]);
+            plot(&mut buf, px + d, py + r, [255, 255, 255]);
+            plot(&mut buf, px - r, py + d, [255, 255, 255]);
+            plot(&mut buf, px + r, py + d, [255, 255, 255]);
         }
     }
 
     // Mark post-optimization CPs with small filled dots
     for ci in 0..num_cps {
         let flag = data.flags[ci];
-        if flag == 0 { continue; }
-        let cp = (data.positions[ci*2], data.positions[ci*2+1]);
+        if flag == 0 {
+            continue;
+        }
+        let cp = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
         let px = (cp.0 * pps).round() as i32;
         let py = (cp.1 * pps).round() as i32;
         let (color, r): ([u8; 3], i32) = if (flag & IS_CORNER) != 0 {
@@ -533,14 +624,22 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
         } else {
             ([0, 255, 0], 2)
         };
-        for dy in -r..=r { for dx in -r..=r {
-            plot(&mut buf, px+dx, py+dy, color);
-        }}
+        for dy in -r..=r {
+            for dx in -r..=r {
+                plot(&mut buf, px + dx, py + dy, color);
+            }
+        }
     }
 
     let out_path = base_out.replace(".png", "_overlay.png");
-    image::save_buffer(&out_path, &buf, final_w as u32, final_h as u32, image::ColorType::Rgba8)
-        .expect("save overlay");
+    image::save_buffer(
+        &out_path,
+        &buf,
+        final_w as u32,
+        final_h as u32,
+        image::ColorType::Rgba8,
+    )
+    .expect("save overlay");
     eprintln!("Overlay -> {} ({}x{})", out_path, final_w, final_h);
 }
 
@@ -548,11 +647,19 @@ fn write_curve_overlay(pixels: &[u32], w: usize, h: usize, scale: usize, nn: usi
 /// pixels around (cx, cy), upscale by `mag` per output pixel, and draw
 /// curves and CPs at full polynomial precision.
 fn write_focus_overlay(
-    pixels: &[u32], w: usize, h: usize, scale: usize,
-    cx: i32, cy: i32, radius: i32, mag: usize,
+    pixels: &[u32],
+    w: usize,
+    h: usize,
+    scale: usize,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    mag: usize,
     base_out: &str,
 ) {
-    let scaled_rgba = image::open(base_out).expect("base render not found").to_rgba8();
+    let scaled_rgba = image::open(base_out)
+        .expect("base render not found")
+        .to_rgba8();
     let scaled_w = scaled_rgba.width() as i32;
     let scaled_h = scaled_rgba.height() as i32;
 
@@ -578,9 +685,12 @@ fn write_focus_overlay(
             let i = (fy * final_size + fx) * 4;
             if px >= 0 && py >= 0 && px < scaled_w && py < scaled_h {
                 let p = scaled_rgba.get_pixel(px as u32, py as u32);
-                buf[i] = p.0[0]; buf[i+1] = p.0[1]; buf[i+2] = p.0[2]; buf[i+3] = 255;
+                buf[i] = p.0[0];
+                buf[i + 1] = p.0[1];
+                buf[i + 2] = p.0[2];
+                buf[i + 3] = 255;
             } else {
-                buf[i+3] = 255;
+                buf[i + 3] = 255;
             }
         }
     }
@@ -588,45 +698,52 @@ fn write_focus_overlay(
     let data = vibeboy::scaling::vectorize::vectorize(pixels, w, h);
     let num_cps = data.flags.len();
 
-    let to_disp = |sx: f32, sy: f32| -> (f32, f32) {
-        ((sx - src_x0) * pps, (sy - src_y0) * pps)
-    };
+    let to_disp = |sx: f32, sy: f32| -> (f32, f32) { ((sx - src_x0) * pps, (sy - src_y0) * pps) };
 
-    let plot = |buf: &mut [u8], x: i32, y: i32, c: [u8;3], blend: f32| {
-        if x < 0 || y < 0 || x >= final_size as i32 || y >= final_size as i32 { return; }
+    let plot = |buf: &mut [u8], x: i32, y: i32, c: [u8; 3], blend: f32| {
+        if x < 0 || y < 0 || x >= final_size as i32 || y >= final_size as i32 {
+            return;
+        }
         let i = (y as usize * final_size + x as usize) * 4;
         let a = blend.clamp(0.0, 1.0);
-        buf[i]   = ((c[0] as f32 * a) + (buf[i] as f32 * (1.0 - a))) as u8;
-        buf[i+1] = ((c[1] as f32 * a) + (buf[i+1] as f32 * (1.0 - a))) as u8;
-        buf[i+2] = ((c[2] as f32 * a) + (buf[i+2] as f32 * (1.0 - a))) as u8;
+        buf[i] = ((c[0] as f32 * a) + (buf[i] as f32 * (1.0 - a))) as u8;
+        buf[i + 1] = ((c[1] as f32 * a) + (buf[i + 1] as f32 * (1.0 - a))) as u8;
+        buf[i + 2] = ((c[2] as f32 * a) + (buf[i + 2] as f32 * (1.0 - a))) as u8;
     };
 
     // Draw a B-spline span as a thick antialiased line
-    let draw_span = |buf: &mut [u8], pp: (f32,f32), cp: (f32,f32), np: (f32,f32), color: [u8;3]| {
-        const N: usize = 2000;
-        for i in 0..=N {
-            let t = i as f32 / N as f32;
-            let u = 1.0 - t;
-            let bx = 0.5*u*u*pp.0 + (u*t + 0.5)*cp.0 + 0.5*t*t*np.0;
-            let by = 0.5*u*u*pp.1 + (u*t + 0.5)*cp.1 + 0.5*t*t*np.1;
-            let (dx, dy) = to_disp(bx, by);
-            // Draw a 3-pixel wide centered dot
-            for oy in -2..=2 { for ox in -2..=2 {
-                let dist = ((ox*ox + oy*oy) as f32).sqrt();
-                if dist <= 2.5 {
-                    let alpha = (1.0 - dist / 2.5).max(0.0);
-                    plot(buf, dx as i32 + ox, dy as i32 + oy, color, alpha * 0.85);
+    let draw_span =
+        |buf: &mut [u8], pp: (f32, f32), cp: (f32, f32), np: (f32, f32), color: [u8; 3]| {
+            const N: usize = 2000;
+            for i in 0..=N {
+                let t = i as f32 / N as f32;
+                let u = 1.0 - t;
+                let bx = 0.5 * u * u * pp.0 + (u * t + 0.5) * cp.0 + 0.5 * t * t * np.0;
+                let by = 0.5 * u * u * pp.1 + (u * t + 0.5) * cp.1 + 0.5 * t * t * np.1;
+                let (dx, dy) = to_disp(bx, by);
+                // Draw a 3-pixel wide centered dot
+                for oy in -2..=2 {
+                    for ox in -2..=2 {
+                        let dist = ((ox * ox + oy * oy) as f32).sqrt();
+                        if dist <= 2.5 {
+                            let alpha = (1.0 - dist / 2.5).max(0.0);
+                            plot(buf, dx as i32 + ox, dy as i32 + oy, color, alpha * 0.85);
+                        }
+                    }
                 }
-            }}
-        }
-    };
+            }
+        };
 
     // Draw all curves whose bbox enters the visible area
     let view_min = (src_x0 - 0.5, src_y0 - 0.5);
-    let view_max = (src_x0 + span as f32 / scale as f32 + 0.5,
-                    src_y0 + span as f32 / scale as f32 + 0.5);
+    let view_max = (
+        src_x0 + span as f32 / scale as f32 + 0.5,
+        src_y0 + span as f32 / scale as f32 + 0.5,
+    );
     for ci in 0..num_cps {
-        let Some((cp, pp, np, prev_pos, next_pos)) = cp_render_geometry(&data, ci) else { continue; };
+        let Some((cp, pp, np, prev_pos, next_pos)) = cp_render_geometry(&data, ci) else {
+            continue;
+        };
         let prev_ci = data.neighbors[ci * 4];
         let next_ci = data.neighbors[ci * 4 + 1];
         let stem = (prev_ci < 0 || next_ci < 0)
@@ -634,9 +751,16 @@ fn write_focus_overlay(
             || (next_ci >= 0 && (data.flags[next_ci as usize] & IS_ENDPOINT) != 0);
 
         // Cull if entire bbox is outside view
-        let bmin = (prev_pos.0.min(cp.0).min(next_pos.0), prev_pos.1.min(cp.1).min(next_pos.1));
-        let bmax = (prev_pos.0.max(cp.0).max(next_pos.0), prev_pos.1.max(cp.1).max(next_pos.1));
-        if bmax.0 < view_min.0 || bmin.0 > view_max.0 || bmax.1 < view_min.1 || bmin.1 > view_max.1 {
+        let bmin = (
+            prev_pos.0.min(cp.0).min(next_pos.0),
+            prev_pos.1.min(cp.1).min(next_pos.1),
+        );
+        let bmax = (
+            prev_pos.0.max(cp.0).max(next_pos.0),
+            prev_pos.1.max(cp.1).max(next_pos.1),
+        );
+        if bmax.0 < view_min.0 || bmin.0 > view_max.0 || bmax.1 < view_min.1 || bmin.1 > view_max.1
+        {
             continue;
         }
 
@@ -647,22 +771,30 @@ fn write_focus_overlay(
     // Draw CP positions (after curves so they're on top)
     for ci in 0..num_cps {
         let flag = data.flags[ci];
-        if flag == 0 { continue; }
-        let cp = (data.positions[ci*2], data.positions[ci*2+1]);
+        if flag == 0 {
+            continue;
+        }
+        let cp = (data.positions[ci * 2], data.positions[ci * 2 + 1]);
         if cp.0 < view_min.0 || cp.0 > view_max.0 || cp.1 < view_min.1 || cp.1 > view_max.1 {
             continue;
         }
         let (dx, dy) = to_disp(cp.0, cp.1);
         // Stems = yellow filled, regular = green filled. Larger radius for stems.
-        let (color, r2) = if (flag & IS_ENDPOINT) != 0 { ([255u8, 255, 0], 8) } else { ([0u8, 255, 0], 6) };
-        for oy in -10i32..=10 { for ox in -10i32..=10 {
-            let d2 = ox*ox + oy*oy;
-            if d2 <= r2*r2 {
-                plot(&mut buf, dx as i32 + ox, dy as i32 + oy, color, 1.0);
-            } else if d2 <= (r2+1)*(r2+1) {
-                plot(&mut buf, dx as i32 + ox, dy as i32 + oy, [0, 0, 0], 1.0);
+        let (color, r2) = if (flag & IS_ENDPOINT) != 0 {
+            ([255u8, 255, 0], 8)
+        } else {
+            ([0u8, 255, 0], 6)
+        };
+        for oy in -10i32..=10 {
+            for ox in -10i32..=10 {
+                let d2 = ox * ox + oy * oy;
+                if d2 <= r2 * r2 {
+                    plot(&mut buf, dx as i32 + ox, dy as i32 + oy, color, 1.0);
+                } else if d2 <= (r2 + 1) * (r2 + 1) {
+                    plot(&mut buf, dx as i32 + ox, dy as i32 + oy, [0, 0, 0], 1.0);
+                }
             }
-        }}
+        }
     }
 
     // Mark each visible output pixel center with a white +
@@ -671,7 +803,8 @@ fn write_focus_overlay(
             let center_src_x = (px as f32 + 0.5) / scale as f32;
             let center_src_y = (py as f32 + 0.5) / scale as f32;
             let (dx, dy) = to_disp(center_src_x, center_src_y);
-            let dxi = dx as i32; let dyi = dy as i32;
+            let dxi = dx as i32;
+            let dyi = dy as i32;
             // White cross 16 px arms
             for k in -16i32..=16 {
                 plot(&mut buf, dxi + k, dyi, [255, 255, 255], 1.0);
@@ -690,9 +823,18 @@ fn write_focus_overlay(
     }
 
     let out_path = base_out.replace(".png", "_focus.png");
-    image::save_buffer(&out_path, &buf, final_size as u32, final_size as u32, image::ColorType::Rgba8)
-        .expect("save focus");
-    eprintln!("Focus overlay -> {} ({}x{}) at pps={}", out_path, final_size, final_size, pps);
+    image::save_buffer(
+        &out_path,
+        &buf,
+        final_size as u32,
+        final_size as u32,
+        image::ColorType::Rgba8,
+    )
+    .expect("save focus");
+    eprintln!(
+        "Focus overlay -> {} ({}x{}) at pps={}",
+        out_path, final_size, final_size, pps
+    );
 }
 
 pub fn cmd_audio_dump(

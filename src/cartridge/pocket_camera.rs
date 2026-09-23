@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use super::Cartridge;
+use std::sync::Arc;
 
 pub struct PocketCamera {
     rom: Arc<[u8]>,
@@ -8,7 +8,7 @@ pub struct PocketCamera {
     ram_bank: usize,
     camera_regs_mapped: bool,
     camera_regs: [u8; 0x36],
-    image_ready: bool,       // set after capture completes, image can be read
+    image_ready: bool, // set after capture completes, image can be read
     noise_seed: u32,
     camera_image: Option<Box<[u8; 128 * 112]>>,
 }
@@ -30,7 +30,8 @@ impl PocketCamera {
 
     /// Generate a noise value for a pixel coordinate (deterministic hash).
     fn noise(&self, x: u8, y: u8) -> u8 {
-        let value = (x as u32).wrapping_mul(151)
+        let value = (x as u32)
+            .wrapping_mul(151)
             .wrapping_add((y as u32).wrapping_mul(149))
             ^ self.noise_seed;
         let mut hash: u32 = 0;
@@ -62,9 +63,8 @@ impl PocketCamera {
         let gain_idx = (self.camera_regs[4] & 0x1F) as usize;
         #[expect(clippy::excessive_precision)]
         const GAIN: [f64; 32] = [
-            0.881, 0.915, 0.946, 0.974, 1.000, 1.024, 1.047, 1.068,
-            1.088, 1.124, 1.157, 1.187, 1.214, 1.240, 1.274, 1.316,
-            1.353, 1.386, 1.416, 1.443, 1.469, 1.493, 1.515, 1.536,
+            0.881, 0.915, 0.946, 0.974, 1.000, 1.024, 1.047, 1.068, 1.088, 1.124, 1.157, 1.187,
+            1.214, 1.240, 1.274, 1.316, 1.353, 1.386, 1.416, 1.443, 1.469, 1.493, 1.515, 1.536,
             1.555, 1.574, 1.591, 1.608, 1.624, 1.639, 1.653, 1.667,
         ];
         let color = (raw as f64 * GAIN[gain_idx]) as i32;
@@ -120,7 +120,10 @@ impl Cartridge for PocketCamera {
             0x4000..=0x7FFF => self.rom_bank * 0x4000 + (addr as usize - 0x4000),
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
@@ -129,7 +132,9 @@ impl Cartridge for PocketCamera {
             0x2000..=0x3FFF => {
                 // Full 8-bit ROM bank select
                 self.rom_bank = val as usize;
-                if self.rom_bank == 0 { self.rom_bank = 1; }
+                if self.rom_bank == 0 {
+                    self.rom_bank = 1;
+                }
             }
             0x4000..=0x5FFF => {
                 self.ram_bank = val as usize;
@@ -186,7 +191,9 @@ impl Cartridge for PocketCamera {
         }
 
         // Camera busy: forbid RAM writes
-        if self.camera_regs[0] & 1 != 0 { return; }
+        if self.camera_regs[0] & 1 != 0 {
+            return;
+        }
 
         // Normal RAM write (camera bypasses ram_enable)
         let ram_bank = self.ram_bank & 0x0F;
@@ -196,15 +203,23 @@ impl Cartridge for PocketCamera {
         }
     }
 
-    fn has_battery(&self) -> bool { true }
-    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn has_battery(&self) -> bool {
+        true
+    }
+    fn ram_data(&self) -> &[u8] {
+        &self.ram
+    }
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
     }
-    fn has_camera(&self) -> bool { true }
+    fn has_camera(&self) -> bool {
+        true
+    }
     fn set_camera_image(&mut self, grayscale: &[u8; 128 * 112]) {
-        let img = self.camera_image.get_or_insert_with(|| Box::new([0u8; 128 * 112]));
+        let img = self
+            .camera_image
+            .get_or_insert_with(|| Box::new([0u8; 128 * 112]));
         img.copy_from_slice(grayscale);
     }
     fn snapshot_state(&self) -> Vec<u8> {
@@ -219,15 +234,17 @@ impl Cartridge for PocketCamera {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 9 + 0x36 + 1 + 4 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
-        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        if d.len() < 9 + 0x36 + 1 + 4 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
         self.camera_regs_mapped = d[8] != 0;
-        self.camera_regs.copy_from_slice(&d[9..9+0x36]);
+        self.camera_regs.copy_from_slice(&d[9..9 + 0x36]);
         let o = 9 + 0x36;
         self.image_ready = d[o] != 0;
-        self.noise_seed = u32::from_le_bytes([d[o+1],d[o+2],d[o+3],d[o+4]]);
-        let ram = &d[o+5..];
+        self.noise_seed = u32::from_le_bytes([d[o + 1], d[o + 2], d[o + 3], d[o + 4]]);
+        let ram = &d[o + 5..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);
     }

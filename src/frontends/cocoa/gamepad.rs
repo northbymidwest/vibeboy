@@ -5,14 +5,12 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, Message};
 use objc2_core_haptics::{
-    CHHapticEngine, CHHapticEvent, CHHapticEventParameter,
-    CHHapticEventParameterIDHapticIntensity, CHHapticEventParameterIDHapticSharpness,
-    CHHapticEventTypeHapticContinuous, CHHapticPattern, CHHapticPatternPlayer,
+    CHHapticEngine, CHHapticEvent, CHHapticEventParameter, CHHapticEventParameterIDHapticIntensity,
+    CHHapticEventParameterIDHapticSharpness, CHHapticEventTypeHapticContinuous, CHHapticPattern,
+    CHHapticPatternPlayer,
 };
 use objc2_foundation::NSArray;
-use objc2_game_controller::{
-    GCAcceleration, GCController, GCHapticsLocalityDefault,
-};
+use objc2_game_controller::{GCAcceleration, GCController, GCHapticsLocalityDefault};
 
 use super::emulator::Emulator;
 
@@ -52,10 +50,20 @@ pub(super) struct GamepadState {
 impl GamepadState {
     pub fn new() -> Self {
         Self {
-            dpad_up: false, dpad_down: false, dpad_left: false, dpad_right: false,
-            btn_a: false, btn_b: false, btn_start: false, btn_select: false,
-            stick_up: false, stick_down: false, stick_left: false, stick_right: false,
-            l_shoulder: false, r_shoulder: false,
+            dpad_up: false,
+            dpad_down: false,
+            dpad_left: false,
+            dpad_right: false,
+            btn_a: false,
+            btn_b: false,
+            btn_start: false,
+            btn_select: false,
+            stick_up: false,
+            stick_down: false,
+            stick_left: false,
+            stick_right: false,
+            l_shoulder: false,
+            r_shoulder: false,
             accel: None,
             haptic_engine: None,
             haptic_player: None,
@@ -67,8 +75,10 @@ impl GamepadState {
     /// Set up CoreHaptics engine and continuous rumble player for the given controller.
     unsafe fn ensure_haptics(&mut self, controller: &GCController) {
         if let Some(ref hc) = self.haptic_controller {
-            if std::ptr::eq(hc.as_ref() as *const GCController, controller as *const GCController)
-                && self.haptic_engine.is_some()
+            if std::ptr::eq(
+                hc.as_ref() as *const GCController,
+                controller as *const GCController,
+            ) && self.haptic_engine.is_some()
             {
                 return;
             }
@@ -81,7 +91,8 @@ impl GamepadState {
 
         // GCDeviceHaptics::createEngineWithLocality is not available on macOS in the typed
         // bindings (gated behind iOS/tvOS/visionOS cfg). Use msg_send! for this one call.
-        let engine_ptr: *mut AnyObject = msg_send![&*haptics, createEngineWithLocality: &**GCHapticsLocalityDefault];
+        let engine_ptr: *mut AnyObject =
+            msg_send![&*haptics, createEngineWithLocality: &**GCHapticsLocalityDefault];
         if engine_ptr.is_null() {
             return;
         }
@@ -259,29 +270,43 @@ impl GamepadState {
     }
 
     fn clear_buttons(&mut self) {
-        self.dpad_up = false; self.dpad_down = false;
-        self.dpad_left = false; self.dpad_right = false;
-        self.btn_a = false; self.btn_b = false;
-        self.btn_start = false; self.btn_select = false;
-        self.stick_up = false; self.stick_down = false;
-        self.stick_left = false; self.stick_right = false;
-        self.l_shoulder = false; self.r_shoulder = false;
+        self.dpad_up = false;
+        self.dpad_down = false;
+        self.dpad_left = false;
+        self.dpad_right = false;
+        self.btn_a = false;
+        self.btn_b = false;
+        self.btn_start = false;
+        self.btn_select = false;
+        self.stick_up = false;
+        self.stick_down = false;
+        self.stick_left = false;
+        self.stick_right = false;
+        self.l_shoulder = false;
+        self.r_shoulder = false;
         self.accel = None;
     }
 
-    pub fn apply_to_emu(&self, emu: &mut Emulator, key_map: &HashMap<u16, u8>, keys_down: &HashSet<u16>) {
+    pub fn apply_to_emu(
+        &self,
+        emu: &mut Emulator,
+        key_map: &HashMap<u16, u8>,
+        keys_down: &HashSet<u16>,
+    ) {
         let kb_state = |btn: u8| -> bool {
-            key_map.iter().any(|(k, b)| *b == btn && keys_down.contains(k))
+            key_map
+                .iter()
+                .any(|(k, b)| *b == btn && keys_down.contains(k))
         };
 
         let btns: &[(u8, bool)] = &[
-            (Emulator::BTN_UP,     self.dpad_up || self.stick_up),
-            (Emulator::BTN_DOWN,   self.dpad_down || self.stick_down),
-            (Emulator::BTN_LEFT,   self.dpad_left || self.stick_left),
-            (Emulator::BTN_RIGHT,  self.dpad_right || self.stick_right),
-            (Emulator::BTN_A,      self.btn_a),
-            (Emulator::BTN_B,      self.btn_b),
-            (Emulator::BTN_START,  self.btn_start),
+            (Emulator::BTN_UP, self.dpad_up || self.stick_up),
+            (Emulator::BTN_DOWN, self.dpad_down || self.stick_down),
+            (Emulator::BTN_LEFT, self.dpad_left || self.stick_left),
+            (Emulator::BTN_RIGHT, self.dpad_right || self.stick_right),
+            (Emulator::BTN_A, self.btn_a),
+            (Emulator::BTN_B, self.btn_b),
+            (Emulator::BTN_START, self.btn_start),
             (Emulator::BTN_SELECT, self.btn_select),
         ];
 
@@ -293,6 +318,8 @@ impl GamepadState {
 
 impl Drop for GamepadState {
     fn drop(&mut self) {
-        unsafe { self.teardown_haptics(); }
+        unsafe {
+            self.teardown_haptics();
+        }
     }
 }

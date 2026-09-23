@@ -34,13 +34,29 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let (e0, e1, e2, e3, e4, e5, e6, e7, e8) = if b != h && d != f {
                 (
                     if d == b { d } else { e },
-                    if (d == b && e != c) || (b == f && e != a) { b } else { e },
+                    if (d == b && e != c) || (b == f && e != a) {
+                        b
+                    } else {
+                        e
+                    },
                     if b == f { f } else { e },
-                    if (d == b && e != g) || (d == h && e != a) { d } else { e },
+                    if (d == b && e != g) || (d == h && e != a) {
+                        d
+                    } else {
+                        e
+                    },
                     e,
-                    if (b == f && e != i) || (h == f && e != c) { f } else { e },
+                    if (b == f && e != i) || (h == f && e != c) {
+                        f
+                    } else {
+                        e
+                    },
                     if d == h { d } else { e },
-                    if (d == h && e != i) || (h == f && e != g) { h } else { e },
+                    if (d == h && e != i) || (h == f && e != g) {
+                        h
+                    } else {
+                        e
+                    },
                     if h == f { f } else { e },
                 )
             } else {

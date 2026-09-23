@@ -1,5 +1,4 @@
 /// Mode 3 pixel FIFO pipeline: fetcher, sprite fetch, pixel output, color conversion.
-
 use super::{FifoPixel, Ppu};
 
 impl Ppu {
@@ -233,13 +232,13 @@ impl Ppu {
             // Wait to reach end-of-cycle + post-loop advance, expressed as
             // a single per-state constant.
             let total_wait = match self.fetcher.state {
-                super::FetcherState::GetTileT1         => 6,
-                super::FetcherState::GetTileT2         => 5,
-                super::FetcherState::GetTileDataLowT1  => 4,
-                super::FetcherState::GetTileDataLowT2  => 3,
+                super::FetcherState::GetTileT1 => 6,
+                super::FetcherState::GetTileT2 => 5,
+                super::FetcherState::GetTileDataLowT1 => 4,
+                super::FetcherState::GetTileDataLowT2 => 3,
                 super::FetcherState::GetTileDataHighT1 => 2,
                 super::FetcherState::GetTileDataHighT2 => 1,
-                super::FetcherState::Push              => 7,
+                super::FetcherState::Push => 7,
             };
             self.sprite_alignment_delay = total_wait as u8;
         } else {
@@ -264,13 +263,18 @@ impl Ppu {
     fn tick_sprite_fetch(&mut self) {
         self.sprite_fetch_tick += 1;
         // DMG: all steps 2T. CGB: steps 0-1 are 2T, step 2 is 1T.
-        let threshold = if self.cgb_mode && self.sprite_fetch_step == 2 { 1 } else { 2 };
+        let threshold = if self.cgb_mode && self.sprite_fetch_step == 2 {
+            1
+        } else {
+            2
+        };
         if self.sprite_fetch_tick < threshold {
             return;
         }
         self.sprite_fetch_tick = 0;
 
-        let &(raw_y, raw_x, mut tile_idx, attrs, oam_index) = &self.scanline_sprites[self.sprite_fetch_entry];
+        let &(raw_y, raw_x, mut tile_idx, attrs, oam_index) =
+            &self.scanline_sprites[self.sprite_fetch_entry];
         let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
 
         match self.sprite_fetch_step {
@@ -287,12 +291,20 @@ impl Ppu {
                     row = sprite_height as u16 - 1 - row;
                 }
                 let actual_tile = if sprite_height == 16 {
-                    if row < 8 { tile_idx & 0xFE } else { tile_idx | 0x01 }
+                    if row < 8 {
+                        tile_idx & 0xFE
+                    } else {
+                        tile_idx | 0x01
+                    }
                 } else {
                     tile_idx
                 };
                 let row_in_tile = row % 8;
-                let vram_bank_sel = if self.cgb_mode && attrs & 0x08 != 0 { 1usize } else { 0usize };
+                let vram_bank_sel = if self.cgb_mode && attrs & 0x08 != 0 {
+                    1usize
+                } else {
+                    0usize
+                };
                 let byte_addr = (actual_tile as u16 * 16 + row_in_tile * 2) as usize;
                 // Pre-compute and store for next steps
                 self.sprite_tile_data_low = self.vram[vram_bank_sel][byte_addr];
@@ -370,17 +382,20 @@ impl Ppu {
                 }
             }
 
-            self.oam_fifo.replace(fifo_pos, FifoPixel {
-                color_index: color_idx,
-                palette: palette_idx,
-                is_sprite: true,
-                bg_priority: false,
-                sprite_bg_over: bg_over,
-                sprite_dmg_palette: dmg_pal,
-                sprite_oam_index: oam_index,
-                bg_color_index: 0,
-                bg_palette: 0,
-            });
+            self.oam_fifo.replace(
+                fifo_pos,
+                FifoPixel {
+                    color_index: color_idx,
+                    palette: palette_idx,
+                    is_sprite: true,
+                    bg_priority: false,
+                    sprite_bg_over: bg_over,
+                    sprite_dmg_palette: dmg_pal,
+                    sprite_oam_index: oam_index,
+                    bg_color_index: 0,
+                    bg_palette: 0,
+                },
+            );
         }
     }
 
@@ -493,12 +508,20 @@ impl Ppu {
     /// Compute tilemap address for the current fetcher position
     fn fetcher_map_addr(&self) -> usize {
         if self.fetcher.fetching_window {
-            let win_map_base: u16 = if self.lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 };
+            let win_map_base: u16 = if self.lcdc & 0x40 != 0 {
+                0x1C00
+            } else {
+                0x1800
+            };
             let tile_x = self.fetcher.tile_x as u16;
             let tile_y = self.window_line_counter as u16 / 8;
             (win_map_base + tile_y * 32 + (tile_x & 0x1F)) as usize
         } else {
-            let bg_map_base: u16 = if self.lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
+            let bg_map_base: u16 = if self.lcdc & 0x08 != 0 {
+                0x1C00
+            } else {
+                0x1800
+            };
             let scroll_y = self.scy.wrapping_add(self.ly);
             // Read SCX live (not cached) — hardware reads the register each tile fetch
             let tile_x = ((self.scx / 8).wrapping_add(self.fetcher.tile_x)) & 0x1F;
@@ -527,7 +550,11 @@ impl Ppu {
         };
 
         let y_flip = self.cgb_mode && attrs & 0x40 != 0;
-        let bank = if self.cgb_mode && attrs & 0x08 != 0 { 1 } else { 0 };
+        let bank = if self.cgb_mode && attrs & 0x08 != 0 {
+            1
+        } else {
+            0
+        };
 
         // CGB: use latched fetcher_y from T1; DMG: read SCY+LY fresh
         let pixel_y = if self.cgb_mode {
@@ -581,7 +608,11 @@ impl Ppu {
 
         let x_flip = self.cgb_mode && attrs & 0x20 != 0;
         let bg_prio = self.cgb_mode && attrs & 0x80 != 0;
-        let palette = if self.cgb_mode && !self.dmg_compat { attrs & 0x07 } else { 0 };
+        let palette = if self.cgb_mode && !self.dmg_compat {
+            attrs & 0x07
+        } else {
+            0
+        };
 
         for px in 0..8u8 {
             let bit = if x_flip { px } else { 7 - px };
@@ -639,7 +670,11 @@ impl Ppu {
                 self.gbc_obj_color(oam_px.palette as usize, oam_px.color_index as usize)
             } else {
                 // Use rendering palette (respects T3 write timing)
-                let pal = if oam_px.sprite_dmg_palette == 1 { self.obp1_rendering } else { self.obp0_rendering };
+                let pal = if oam_px.sprite_dmg_palette == 1 {
+                    self.obp1_rendering
+                } else {
+                    self.obp0_rendering
+                };
                 self.dmg_color(pal, oam_px.color_index)
             }
         } else {
@@ -668,7 +703,11 @@ impl Ppu {
         if self.sgb_mode {
             let (pal_reg, cidx) = if draw_sprite {
                 let oam_px = oam.unwrap();
-                let pal = if oam_px.sprite_dmg_palette == 1 { self.obp1_rendering } else { self.obp0_rendering };
+                let pal = if oam_px.sprite_dmg_palette == 1 {
+                    self.obp1_rendering
+                } else {
+                    self.obp0_rendering
+                };
                 (pal, oam_px.color_index)
             } else {
                 (self.bgp_rendering, bg.color_index)

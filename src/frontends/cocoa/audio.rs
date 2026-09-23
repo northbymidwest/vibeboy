@@ -229,7 +229,8 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHa
             0,
             &stream_desc as *const _ as *const _,
             std::mem::size_of::<core_audio::AudioStreamBasicDescription>() as u32,
-        ) != 0 {
+        ) != 0
+        {
             eprintln!("Failed to set audio stream format");
             core_audio::AudioComponentInstanceDispose(audio_unit);
             return None;
@@ -247,7 +248,8 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHa
             0,
             &callback_struct as *const _ as *const _,
             std::mem::size_of::<core_audio::AURenderCallbackStruct>() as u32,
-        ) != 0 {
+        ) != 0
+        {
             eprintln!("Failed to set audio render callback");
             core_audio::AudioComponentInstanceDispose(audio_unit);
             return None;

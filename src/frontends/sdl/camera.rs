@@ -156,7 +156,9 @@ unsafe fn process_camera_frame(
     for y in 0..src_h {
         let src_row = unsafe { pixels.add(y * pitch) };
         let dst_off = y * src_w * 4;
-        unsafe { std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_row, rgba.as_mut_ptr().add(dst_off), src_w * 4)
+        };
     }
 
     let img = image::RgbaImage::from_raw(src_w as u32, src_h as u32, rgba)
@@ -174,13 +176,11 @@ unsafe fn process_camera_frame(
     };
     let crop_x = (src_w as u32 - crop_w) / 2;
     let crop_y = (src_h as u32 - crop_h) / 2;
-    let cropped =
-        image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
+    let cropped = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
 
     // Convert to grayscale and resize with Lanczos3
     let gray = image::imageops::grayscale(&cropped);
-    let resized =
-        image::imageops::resize(&gray, 128, 112, image::imageops::FilterType::Lanczos3);
+    let resized = image::imageops::resize(&gray, 128, 112, image::imageops::FilterType::Lanczos3);
 
     // Write to shared buffer (lock held only for memcpy)
     {

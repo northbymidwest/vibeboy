@@ -50,14 +50,14 @@ pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: us
                 let c01 = ((p01 >> shift) & 0xFF) as f64;
                 let c11 = ((p11 >> shift) & 0xFF) as f64;
                 let c = c00 * (1.0 - fx) * (1.0 - fy)
-                      + c10 * fx * (1.0 - fy)
-                      + c01 * (1.0 - fx) * fy
-                      + c11 * fx * fy;
+                    + c10 * fx * (1.0 - fy)
+                    + c01 * (1.0 - fx) * fy
+                    + c11 * fx * fy;
                 let v = c.round().clamp(0.0, 255.0) as u32;
                 match shift {
-                    0  => b = v,
-                    8  => g = v,
-                    _  => r = v,
+                    0 => b = v,
+                    8 => g = v,
+                    _ => r = v,
                 }
             }
             dst[oy * dst_w + ox] = 0xFF000000 | (r << 16) | (g << 8) | b;

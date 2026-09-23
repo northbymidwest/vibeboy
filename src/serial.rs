@@ -23,10 +23,16 @@ pub struct Disconnected;
 
 impl SerialDevice for Disconnected {
     fn bit_start(&mut self, _bit: bool) {}
-    fn bit_end(&mut self) -> bool { true }
+    fn bit_end(&mut self) -> bool {
+        true
+    }
     fn tick(&mut self, _ticks: u32) {}
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 pub struct Serial {
@@ -151,7 +157,11 @@ impl Serial {
         }
 
         self.sc = val;
-        self.serial_mask = if self.cgb_mode && (val & 0x02) != 0 { 0x04 } else { 0x80 };
+        self.serial_mask = if self.cgb_mode && (val & 0x02) != 0 {
+            0x04
+        } else {
+            0x80
+        };
 
         // If transfer starting with internal clock, send first bit to device
         if (val & 0x80) != 0 && (val & 0x01) != 0 {

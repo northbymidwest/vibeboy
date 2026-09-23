@@ -6,8 +6,8 @@
 // Re-export pure utility functions for backwards compatibility.
 // New code should use `vibeboy::util::*` directly.
 pub use crate::util::{
-    frame_duration, parse_model, auto_detect_model,
-    reverse_audio, fade_frame_boundaries, downsample_audio,
+    auto_detect_model, downsample_audio, fade_frame_boundaries, frame_duration, parse_model,
+    reverse_audio,
 };
 
 use crate::model::GbModel;
@@ -42,7 +42,11 @@ pub fn boot_rom_path(model: GbModel) -> &'static str {
 
 /// Load a boot ROM: explicit path > file on disk > built-in > None.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_boot_rom(model: GbModel, bootrom_path: Option<&Path>, no_boot: bool) -> Option<Vec<u8>> {
+pub fn load_boot_rom(
+    model: GbModel,
+    bootrom_path: Option<&Path>,
+    no_boot: bool,
+) -> Option<Vec<u8>> {
     if no_boot {
         return None;
     }
@@ -89,7 +93,11 @@ pub struct FpsCounter {
 
 impl FpsCounter {
     pub fn new() -> Self {
-        Self { timer: Instant::now(), count: 0, emu_total: Duration::ZERO }
+        Self {
+            timer: Instant::now(),
+            count: 0,
+            emu_total: Duration::ZERO,
+        }
     }
 
     /// Record frames and emulation time. Prints and resets every second.
@@ -118,11 +126,7 @@ impl FpsCounter {
 
 /// Save/load emulator state to/from numbered `.ss` files on disk.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save_state_to_slot(
-    emu: &mut crate::emulator::Emulator,
-    rom_path: &Path,
-    slot: usize,
-) {
+pub fn save_state_to_slot(emu: &mut crate::emulator::Emulator, rom_path: &Path, slot: usize) {
     emu.save_state(slot);
     if let Some(data) = emu.save_state_to_bytes(slot) {
         let path = rom_path.with_extension(format!("{}.ss", slot));
@@ -135,11 +139,7 @@ pub fn save_state_to_slot(
 
 /// Load state from slot: tries in-memory first, then disk.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_state_from_slot(
-    emu: &mut crate::emulator::Emulator,
-    rom_path: &Path,
-    slot: usize,
-) {
+pub fn load_state_from_slot(emu: &mut crate::emulator::Emulator, rom_path: &Path, slot: usize) {
     if emu.load_state(slot) {
         eprintln!("State loaded from slot {}", slot);
     } else {
@@ -194,8 +194,8 @@ impl GamepadPoller {
 
     /// Drain events and read current state. Returns the gamepad state.
     pub fn poll(&mut self) -> GamepadState {
-        use gilrs::{Button as B, Axis as A};
         use crate::emulator::Emulator;
+        use gilrs::{Axis as A, Button as B};
 
         // Drain events
         while let Some(ev) = self.gilrs.next_event() {
@@ -221,7 +221,13 @@ impl GamepadPoller {
 
         let gp_id = match self.active_gamepad {
             Some(id) => id,
-            None => return GamepadState { buttons: 0, rewind: false, fast_forward: false },
+            None => {
+                return GamepadState {
+                    buttons: 0,
+                    rewind: false,
+                    fast_forward: false,
+                };
+            }
         };
 
         let gp = self.gilrs.gamepad(gp_id);
@@ -232,22 +238,32 @@ impl GamepadPoller {
 
         let mut bits: u8 = 0;
         let map: &[(B, u8)] = &[
-            (B::East,      Emulator::BTN_A),
-            (B::South,     Emulator::BTN_B),
-            (B::Start,     Emulator::BTN_START),
-            (B::Select,    Emulator::BTN_SELECT),
-            (B::DPadUp,    Emulator::BTN_UP),
-            (B::DPadDown,  Emulator::BTN_DOWN),
-            (B::DPadLeft,  Emulator::BTN_LEFT),
+            (B::East, Emulator::BTN_A),
+            (B::South, Emulator::BTN_B),
+            (B::Start, Emulator::BTN_START),
+            (B::Select, Emulator::BTN_SELECT),
+            (B::DPadUp, Emulator::BTN_UP),
+            (B::DPadDown, Emulator::BTN_DOWN),
+            (B::DPadLeft, Emulator::BTN_LEFT),
             (B::DPadRight, Emulator::BTN_RIGHT),
         ];
         for &(gb, btn) in map {
-            if gp.is_pressed(gb) { bits |= btn; }
+            if gp.is_pressed(gb) {
+                bits |= btn;
+            }
         }
-        if lx < -DEADZONE { bits |= Emulator::BTN_LEFT; }
-        if lx > DEADZONE  { bits |= Emulator::BTN_RIGHT; }
-        if ly < -DEADZONE { bits |= Emulator::BTN_DOWN; }
-        if ly > DEADZONE  { bits |= Emulator::BTN_UP; }
+        if lx < -DEADZONE {
+            bits |= Emulator::BTN_LEFT;
+        }
+        if lx > DEADZONE {
+            bits |= Emulator::BTN_RIGHT;
+        }
+        if ly < -DEADZONE {
+            bits |= Emulator::BTN_DOWN;
+        }
+        if ly > DEADZONE {
+            bits |= Emulator::BTN_UP;
+        }
 
         GamepadState {
             buttons: bits,
@@ -259,7 +275,7 @@ impl GamepadPoller {
     /// Set up a rumble effect for the active gamepad (if force-feedback is supported).
     /// Call once when a rumble-capable cart is loaded.
     pub fn ensure_rumble(&mut self) {
-        use gilrs::ff::{EffectBuilder, BaseEffect, BaseEffectType, Replay, Repeat, Ticks};
+        use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Repeat, Replay, Ticks};
 
         let gp_id = match self.active_gamepad {
             Some(id) => id,
@@ -332,7 +348,9 @@ pub fn check_and_save_prints(emu: &mut crate::emulator::Emulator) {
             let mut idx = 0u32;
             let path = loop {
                 let p = dir.join(format!("print_{:04}.png", idx));
-                if !p.exists() { break p; }
+                if !p.exists() {
+                    break p;
+                }
                 idx += 1;
             };
             match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
@@ -393,7 +411,11 @@ impl SavFlusher {
     pub fn new(emu: &crate::emulator::Emulator, rom_path: &Path) -> Self {
         Self {
             rom_path: rom_path.to_path_buf(),
-            last_flushed: if emu.has_battery() { emu.save_data() } else { Vec::new() },
+            last_flushed: if emu.has_battery() {
+                emu.save_data()
+            } else {
+                Vec::new()
+            },
             dirty_since: None,
         }
     }

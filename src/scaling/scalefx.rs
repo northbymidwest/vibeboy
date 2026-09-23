@@ -69,7 +69,7 @@ fn compute_metrics(src: &[u32], w: usize, h: usize) -> Vec<[f32; 4]> {
             let center = get(src, w, h, ix, iy);
             metrics[py * w + px] = [
                 color_distance(center, get(src, w, h, ix - 1, iy - 1)), // top-left
-                color_distance(center, get(src, w, h, ix,     iy - 1)), // top
+                color_distance(center, get(src, w, h, ix, iy - 1)),     // top
                 color_distance(center, get(src, w, h, ix + 1, iy - 1)), // top-right
                 color_distance(center, get(src, w, h, ix + 1, iy)),     // right
             ];
@@ -97,9 +97,12 @@ fn corner_weight(edge_dist: f32, primary: [f32; 2], secondary: [f32; 2]) -> f32 
 
     // Directional confidence: prefer the direction with stronger contrast
     let bias = primary[0] - primary[1];
-    let stronger_axis = if primary[0].min(secondary[0]) + primary[0]
-                         > primary[1].min(secondary[1]) + primary[1]
-    { bias } else { -bias };
+    let stronger_axis =
+        if primary[0].min(secondary[0]) + primary[0] > primary[1].min(secondary[1]) + primary[1] {
+            bias
+        } else {
+            -bias
+        };
     let direction = (1.0 - edge_dist + stronger_axis).clamp(0.0, 1.0);
 
     // Anti-aliasing gate: always interpolate (SFX_SAA=1 default)
@@ -122,12 +125,12 @@ fn compute_corner_weights(metrics: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32;
             let iy = py as isize;
 
             let tl = sample(metrics, w, h, ix - 1, iy - 1);
-            let t  = sample(metrics, w, h, ix,     iy - 1);
-            let l  = sample(metrics, w, h, ix - 1, iy);
-            let c  = sample(metrics, w, h, ix,     iy);
-            let r  = sample(metrics, w, h, ix + 1, iy);
+            let t = sample(metrics, w, h, ix, iy - 1);
+            let l = sample(metrics, w, h, ix - 1, iy);
+            let c = sample(metrics, w, h, ix, iy);
+            let r = sample(metrics, w, h, ix + 1, iy);
             let bl = sample(metrics, w, h, ix - 1, iy + 1);
-            let b  = sample(metrics, w, h, ix,     iy + 1);
+            let b = sample(metrics, w, h, ix, iy + 1);
             let br = sample(metrics, w, h, ix + 1, iy + 1);
 
             // Corner 0 (top-left): edge across D-E diagonal
@@ -154,10 +157,22 @@ fn compute_corner_weights(metrics: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32;
 // Matching GPU step()-based semantics:
 // Branchless comparison helpers matching GPU step()-based semantics.
 // GPU's vec_ge/scalar_ge use 1-step(a,b) which is strict >, not >=.
-#[inline(always)] fn gt(a: f32, b: f32) -> f32 { if a > b { 1.0 } else { 0.0 } }
-#[inline(always)] fn lt(a: f32, b: f32) -> f32 { if a < b { 1.0 } else { 0.0 } }
-#[inline(always)] fn leq(a: f32, b: f32) -> f32 { if a <= b { 1.0 } else { 0.0 } }
-#[inline(always)] fn inv(x: f32) -> f32 { 1.0 - x }
+#[inline(always)]
+fn gt(a: f32, b: f32) -> f32 {
+    if a > b { 1.0 } else { 0.0 }
+}
+#[inline(always)]
+fn lt(a: f32, b: f32) -> f32 {
+    if a < b { 1.0 } else { 0.0 }
+}
+#[inline(always)]
+fn leq(a: f32, b: f32) -> f32 {
+    if a <= b { 1.0 } else { 0.0 }
+}
+#[inline(always)]
+fn inv(x: f32) -> f32 {
+    1.0 - x
+}
 
 /// Dominance of a corner at a junction: how much stronger it is than its neighbors.
 /// Each junction has 4 contributing corners from 4 adjacent pixels.
@@ -177,7 +192,11 @@ fn dominance(a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) -> [f32; 4] {
 fn junction_condition(diagonal: [f32; 2], orth_a: [f32; 2], orth_b: [f32; 2]) -> f32 {
     if diagonal[0] >= orth_a[0].min(orth_a[1]).max(orth_b[0].min(orth_b[1]))
         && diagonal[1] >= orth_a[0].min(orth_b[1]).max(orth_b[0].min(orth_a[1]))
-    { 1.0 } else { 0.0 }
+    {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Majority vote to resolve competing corners at a junction.
@@ -203,7 +222,8 @@ fn majority_vote(dom: [f32; 4]) -> [f32; 4] {
 fn arbitrate_junctions(
     metrics: &[[f32; 4]],
     weights: &[[f32; 4]],
-    w: usize, h: usize,
+    w: usize,
+    h: usize,
 ) -> Vec<[f32; 4]> {
     let mut result = vec![[0.0f32; 4]; w * h];
     for py in 0..h {
@@ -213,23 +233,23 @@ fn arbitrate_junctions(
 
             // Metric neighborhood (3×3)
             let m_tl = sample(metrics, w, h, ix - 1, iy - 1);
-            let m_t  = sample(metrics, w, h, ix,     iy - 1);
-            let m_l  = sample(metrics, w, h, ix - 1, iy);
-            let m_c  = sample(metrics, w, h, ix,     iy);
-            let m_r  = sample(metrics, w, h, ix + 1, iy);
+            let m_t = sample(metrics, w, h, ix, iy - 1);
+            let m_l = sample(metrics, w, h, ix - 1, iy);
+            let m_c = sample(metrics, w, h, ix, iy);
+            let m_r = sample(metrics, w, h, ix + 1, iy);
             let m_bl = sample(metrics, w, h, ix - 1, iy + 1);
-            let m_b  = sample(metrics, w, h, ix,     iy + 1);
+            let m_b = sample(metrics, w, h, ix, iy + 1);
             let m_br = sample(metrics, w, h, ix + 1, iy + 1);
 
             // Weight neighborhood (3×3 + diagonals)
             let s_tl = sample(weights, w, h, ix - 1, iy - 1);
-            let s_t  = sample(weights, w, h, ix,     iy - 1);
+            let s_t = sample(weights, w, h, ix, iy - 1);
             let s_tr = sample(weights, w, h, ix + 1, iy - 1);
-            let s_l  = sample(weights, w, h, ix - 1, iy);
-            let s_c  = sample(weights, w, h, ix,     iy);
-            let s_r  = sample(weights, w, h, ix + 1, iy);
+            let s_l = sample(weights, w, h, ix - 1, iy);
+            let s_c = sample(weights, w, h, ix, iy);
+            let s_r = sample(weights, w, h, ix + 1, iy);
             let s_bl = sample(weights, w, h, ix - 1, iy + 1);
-            let s_b  = sample(weights, w, h, ix,     iy + 1);
+            let s_b = sample(weights, w, h, ix, iy + 1);
             let s_br = sample(weights, w, h, ix + 1, iy + 1);
 
             // Four junctions around center pixel, each receiving one corner
@@ -279,8 +299,12 @@ fn arbitrate_junctions(
                 let left = (ci + 1) & 3;
                 let right = (ci + 3) & 3;
                 let opposite = (ci + 2) & 3;
-                (vote[ci] + inv(vote[left]) * inv(vote[right]) * gt(stren[ci], 0.0)
-                    * (vote[opposite] + gt(stren[opposite] + stren[ci], stren[left] + stren[right])))
+                (vote[ci]
+                    + inv(vote[left])
+                        * inv(vote[right])
+                        * gt(stren[ci], 0.0)
+                        * (vote[opposite]
+                            + gt(stren[opposite] + stren[ci], stren[left] + stren[right])))
                 .min(1.0)
             };
 
@@ -351,14 +375,33 @@ struct JunctionFlags {
 }
 
 fn decode_flags(val: [f32; 4]) -> JunctionFlags {
-    let bit = |v: f32, scale: f32, offset: f32| -> bool {
-        (v * scale + offset).floor() as i32 & 1 != 0
-    };
+    let bit =
+        |v: f32, scale: f32, offset: f32| -> bool { (v * scale + offset).floor() as i32 & 1 != 0 };
     JunctionFlags {
-        corner: [bit(val[0], 15.0, 0.5), bit(val[1], 15.0, 0.5), bit(val[2], 15.0, 0.5), bit(val[3], 15.0, 0.5)],
-        horiz:  [bit(val[0], 7.5, 0.25), bit(val[1], 7.5, 0.25), bit(val[2], 7.5, 0.25), bit(val[3], 7.5, 0.25)],
-        vert:   [bit(val[0], 3.75, 0.125), bit(val[1], 3.75, 0.125), bit(val[2], 3.75, 0.125), bit(val[3], 3.75, 0.125)],
-        orient: [bit(val[0], 1.875, 0.0625), bit(val[1], 1.875, 0.0625), bit(val[2], 1.875, 0.0625), bit(val[3], 1.875, 0.0625)],
+        corner: [
+            bit(val[0], 15.0, 0.5),
+            bit(val[1], 15.0, 0.5),
+            bit(val[2], 15.0, 0.5),
+            bit(val[3], 15.0, 0.5),
+        ],
+        horiz: [
+            bit(val[0], 7.5, 0.25),
+            bit(val[1], 7.5, 0.25),
+            bit(val[2], 7.5, 0.25),
+            bit(val[3], 7.5, 0.25),
+        ],
+        vert: [
+            bit(val[0], 3.75, 0.125),
+            bit(val[1], 3.75, 0.125),
+            bit(val[2], 3.75, 0.125),
+            bit(val[3], 3.75, 0.125),
+        ],
+        orient: [
+            bit(val[0], 1.875, 0.0625),
+            bit(val[1], 1.875, 0.0625),
+            bit(val[2], 1.875, 0.0625),
+            bit(val[3], 1.875, 0.0625),
+        ],
     }
 }
 
@@ -387,7 +430,7 @@ fn trace_edges(junctions: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
             let iy = py as isize;
 
             // Decode flags for center and all cardinal neighbors out to distance 3
-            let e  = decode_flags(sample(junctions, w, h, ix, iy));
+            let e = decode_flags(sample(junctions, w, h, ix, iy));
             let dl = decode_flags(sample(junctions, w, h, ix - 1, iy));
             let dl2 = decode_flags(sample(junctions, w, h, ix - 2, iy));
             let dl3 = decode_flags(sample(junctions, w, h, ix - 3, iy));
@@ -402,63 +445,162 @@ fn trace_edges(junctions: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
             let dd3 = decode_flags(sample(junctions, w, h, ix, iy + 3));
 
             // Level 1: corner exists (SFX_SCN=1, so adjacent support always satisfied)
-            let l1 = [
-                e.corner[0],
-                e.corner[1],
-                e.corner[2],
-                e.corner[3],
-            ];
+            let l1 = [e.corner[0], e.corner[1], e.corner[2], e.corner[3]];
 
             // Level 2: mid-edge between two corners (horizontal or vertical)
             let l2 = [
-                [e.corner[0] && e.horiz[1] && dl.corner[2], e.corner[1] && e.horiz[0] && dr.corner[3]],
-                [e.corner[1] && e.vert[2] && du.corner[3],  e.corner[2] && e.vert[1] && dd.corner[0]],
-                [e.corner[3] && e.horiz[2] && dl.corner[1], e.corner[2] && e.horiz[3] && dr.corner[0]],
-                [e.corner[0] && e.vert[3] && du.corner[2],  e.corner[3] && e.vert[0] && dd.corner[1]],
+                [
+                    e.corner[0] && e.horiz[1] && dl.corner[2],
+                    e.corner[1] && e.horiz[0] && dr.corner[3],
+                ],
+                [
+                    e.corner[1] && e.vert[2] && du.corner[3],
+                    e.corner[2] && e.vert[1] && dd.corner[0],
+                ],
+                [
+                    e.corner[3] && e.horiz[2] && dl.corner[1],
+                    e.corner[2] && e.horiz[3] && dr.corner[0],
+                ],
+                [
+                    e.corner[0] && e.vert[3] && du.corner[2],
+                    e.corner[3] && e.vert[0] && dd.corner[1],
+                ],
             ];
 
             // Level 3: extended corner — level 2 confirmed by edge continuity
             let l3 = [
-                [l2[0][1] && dl.horiz[1] && dl.horiz[0] && dr.horiz[2],
-                 l2[3][1] && du.vert[3] && du.vert[0] && dd.vert[2]],
-                [l2[0][0] && dr.horiz[0] && dr.horiz[1] && dl.horiz[3],
-                 l2[1][1] && du.vert[2] && du.vert[1] && dd.vert[3]],
-                [l2[2][0] && dr.horiz[3] && dr.horiz[2] && dl.horiz[0],
-                 l2[1][0] && dd.vert[1] && dd.vert[2] && du.vert[0]],
-                [l2[2][1] && dl.horiz[2] && dl.horiz[3] && dr.horiz[1],
-                 l2[3][0] && dd.vert[0] && dd.vert[3] && du.vert[1]],
+                [
+                    l2[0][1] && dl.horiz[1] && dl.horiz[0] && dr.horiz[2],
+                    l2[3][1] && du.vert[3] && du.vert[0] && dd.vert[2],
+                ],
+                [
+                    l2[0][0] && dr.horiz[0] && dr.horiz[1] && dl.horiz[3],
+                    l2[1][1] && du.vert[2] && du.vert[1] && dd.vert[3],
+                ],
+                [
+                    l2[2][0] && dr.horiz[3] && dr.horiz[2] && dl.horiz[0],
+                    l2[1][0] && dd.vert[1] && dd.vert[2] && du.vert[0],
+                ],
+                [
+                    l2[2][1] && dl.horiz[2] && dl.horiz[3] && dr.horiz[1],
+                    l2[3][0] && dd.vert[0] && dd.vert[3] && du.vert[1],
+                ],
             ];
 
             // Level 4: 4-pixel run — corner + full edge chain + 2-away corner
             let l4 = [
-                [dl.corner[0] && dl.horiz[1] && e.horiz[0] && e.horiz[1] && dr.horiz[0] && dr.horiz[1] && dl2.corner[2] && dl2.horiz[3],
-                 du.corner[0] && du.vert[3] && e.vert[0] && e.vert[3] && dd.vert[0] && dd.vert[3] && du2.corner[2] && du2.vert[1]],
-                [dr.corner[1] && dr.horiz[0] && e.horiz[1] && e.horiz[0] && dl.horiz[1] && dl.horiz[0] && dr2.corner[3] && dr2.horiz[2],
-                 du.corner[1] && du.vert[2] && e.vert[1] && e.vert[2] && dd.vert[1] && dd.vert[2] && du2.corner[3] && du2.vert[0]],
-                [dr.corner[2] && dr.horiz[3] && e.horiz[2] && e.horiz[3] && dl.horiz[2] && dl.horiz[3] && dr2.corner[0] && dr2.horiz[1],
-                 dd.corner[2] && dd.vert[1] && e.vert[2] && e.vert[1] && du.vert[2] && du.vert[1] && dd2.corner[0] && dd2.vert[3]],
-                [dl.corner[3] && dl.horiz[2] && e.horiz[3] && e.horiz[2] && dr.horiz[3] && dr.horiz[2] && dl2.corner[1] && dl2.horiz[0],
-                 dd.corner[3] && dd.vert[0] && e.vert[3] && e.vert[0] && du.vert[3] && du.vert[0] && dd2.corner[1] && dd2.vert[2]],
+                [
+                    dl.corner[0]
+                        && dl.horiz[1]
+                        && e.horiz[0]
+                        && e.horiz[1]
+                        && dr.horiz[0]
+                        && dr.horiz[1]
+                        && dl2.corner[2]
+                        && dl2.horiz[3],
+                    du.corner[0]
+                        && du.vert[3]
+                        && e.vert[0]
+                        && e.vert[3]
+                        && dd.vert[0]
+                        && dd.vert[3]
+                        && du2.corner[2]
+                        && du2.vert[1],
+                ],
+                [
+                    dr.corner[1]
+                        && dr.horiz[0]
+                        && e.horiz[1]
+                        && e.horiz[0]
+                        && dl.horiz[1]
+                        && dl.horiz[0]
+                        && dr2.corner[3]
+                        && dr2.horiz[2],
+                    du.corner[1]
+                        && du.vert[2]
+                        && e.vert[1]
+                        && e.vert[2]
+                        && dd.vert[1]
+                        && dd.vert[2]
+                        && du2.corner[3]
+                        && du2.vert[0],
+                ],
+                [
+                    dr.corner[2]
+                        && dr.horiz[3]
+                        && e.horiz[2]
+                        && e.horiz[3]
+                        && dl.horiz[2]
+                        && dl.horiz[3]
+                        && dr2.corner[0]
+                        && dr2.horiz[1],
+                    dd.corner[2]
+                        && dd.vert[1]
+                        && e.vert[2]
+                        && e.vert[1]
+                        && du.vert[2]
+                        && du.vert[1]
+                        && dd2.corner[0]
+                        && dd2.vert[3],
+                ],
+                [
+                    dl.corner[3]
+                        && dl.horiz[2]
+                        && e.horiz[3]
+                        && e.horiz[2]
+                        && dr.horiz[3]
+                        && dr.horiz[2]
+                        && dl2.corner[1]
+                        && dl2.horiz[0],
+                    dd.corner[3]
+                        && dd.vert[0]
+                        && e.vert[3]
+                        && e.vert[0]
+                        && du.vert[3]
+                        && du.vert[0]
+                        && dd2.corner[1]
+                        && dd2.vert[2],
+                ],
             ];
 
             // Level 5: mid of 4-pixel run — level 4 extended with 3-pixel-out checks
             let l5 = [
-                [l4[0][0] && dr2.horiz[0] && dr2.horiz[1] && dl3.horiz[2] && dl3.horiz[3],
-                 l4[1][0] && dl2.horiz[1] && dl2.horiz[0] && dr3.horiz[3] && dr3.horiz[2]],
-                [l4[1][1] && dd2.vert[1] && dd2.vert[2] && du3.vert[3] && du3.vert[0],
-                 l4[2][1] && du2.vert[2] && du2.vert[1] && dd3.vert[0] && dd3.vert[3]],
-                [l4[3][0] && dr2.horiz[3] && dr2.horiz[2] && dl3.horiz[1] && dl3.horiz[0],
-                 l4[2][0] && dl2.horiz[2] && dl2.horiz[3] && dr3.horiz[0] && dr3.horiz[1]],
-                [l4[0][1] && dd2.vert[0] && dd2.vert[3] && du3.vert[2] && du3.vert[1],
-                 l4[3][1] && du2.vert[3] && du2.vert[0] && dd3.vert[1] && dd3.vert[2]],
+                [
+                    l4[0][0] && dr2.horiz[0] && dr2.horiz[1] && dl3.horiz[2] && dl3.horiz[3],
+                    l4[1][0] && dl2.horiz[1] && dl2.horiz[0] && dr3.horiz[3] && dr3.horiz[2],
+                ],
+                [
+                    l4[1][1] && dd2.vert[1] && dd2.vert[2] && du3.vert[3] && du3.vert[0],
+                    l4[2][1] && du2.vert[2] && du2.vert[1] && dd3.vert[0] && dd3.vert[3],
+                ],
+                [
+                    l4[3][0] && dr2.horiz[3] && dr2.horiz[2] && dl3.horiz[1] && dl3.horiz[0],
+                    l4[2][0] && dl2.horiz[2] && dl2.horiz[3] && dr3.horiz[0] && dr3.horiz[1],
+                ],
+                [
+                    l4[0][1] && dd2.vert[0] && dd2.vert[3] && du3.vert[2] && du3.vert[1],
+                    l4[3][1] && du2.vert[3] && du2.vert[0] && dd3.vert[1] && dd3.vert[2],
+                ],
             ];
 
             // Level 6: 6-pixel run
             let l6 = [
-                [l5[0][1] && dl3.horiz[1] && dl3.horiz[0], l5[3][1] && du3.vert[3] && du3.vert[0]],
-                [l5[0][0] && dr3.horiz[0] && dr3.horiz[1], l5[1][1] && du3.vert[2] && du3.vert[1]],
-                [l5[2][0] && dr3.horiz[3] && dr3.horiz[2], l5[1][0] && dd3.vert[1] && dd3.vert[2]],
-                [l5[2][1] && dl3.horiz[2] && dl3.horiz[3], l5[3][0] && dd3.vert[0] && dd3.vert[3]],
+                [
+                    l5[0][1] && dl3.horiz[1] && dl3.horiz[0],
+                    l5[3][1] && du3.vert[3] && du3.vert[0],
+                ],
+                [
+                    l5[0][0] && dr3.horiz[0] && dr3.horiz[1],
+                    l5[1][1] && du3.vert[2] && du3.vert[1],
+                ],
+                [
+                    l5[2][0] && dr3.horiz[3] && dr3.horiz[2],
+                    l5[1][0] && dd3.vert[1] && dd3.vert[2],
+                ],
+                [
+                    l5[2][1] && dl3.horiz[2] && dl3.horiz[3],
+                    l5[3][0] && dd3.vert[0] && dd3.vert[3],
+                ],
             ];
 
             // Assign corner subpixel tags based on highest detected level
@@ -469,26 +611,122 @@ fn trace_edges(junctions: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
                 let uo = du.orient;
                 let ddo = dd.orient;
                 match i {
-                    0 => if (l1[0] && eo[0]) || (l3[0][0] && eo[1]) || (l4[0][0] && lo[0]) || (l6[0][0] && ro[1]) { UP }
-                         else if l1[0] || (l3[0][1] && !eo[3]) || (l4[0][1] && !uo[0]) || (l6[0][1] && !ddo[3]) { LEFT }
-                         else if l3[0][0] { RIGHT } else if l3[0][1] { DOWN }
-                         else if l4[0][0] { LEFT2 } else if l4[0][1] { UP2 }
-                         else if l6[0][0] { RIGHT2 } else if l6[0][1] { DOWN2 } else { CENTER },
-                    1 => if (l1[1] && eo[1]) || (l3[1][0] && eo[0]) || (l4[1][0] && ro[1]) || (l6[1][0] && lo[0]) { UP }
-                         else if l1[1] || (l3[1][1] && !eo[2]) || (l4[1][1] && !uo[1]) || (l6[1][1] && !ddo[2]) { RIGHT }
-                         else if l3[1][0] { LEFT } else if l3[1][1] { DOWN }
-                         else if l4[1][0] { RIGHT2 } else if l4[1][1] { UP2 }
-                         else if l6[1][0] { LEFT2 } else if l6[1][1] { DOWN2 } else { CENTER },
-                    2 => if (l1[2] && eo[2]) || (l3[2][0] && eo[3]) || (l4[2][0] && ro[2]) || (l6[2][0] && lo[3]) { DOWN }
-                         else if l1[2] || (l3[2][1] && !eo[1]) || (l4[2][1] && !ddo[2]) || (l6[2][1] && !uo[1]) { RIGHT }
-                         else if l3[2][0] { LEFT } else if l3[2][1] { UP }
-                         else if l4[2][0] { RIGHT2 } else if l4[2][1] { DOWN2 }
-                         else if l6[2][0] { LEFT2 } else if l6[2][1] { UP2 } else { CENTER },
-                    3 => if (l1[3] && eo[3]) || (l3[3][0] && eo[2]) || (l4[3][0] && lo[3]) || (l6[3][0] && ro[2]) { DOWN }
-                         else if l1[3] || (l3[3][1] && !eo[0]) || (l4[3][1] && !ddo[3]) || (l6[3][1] && !uo[0]) { LEFT }
-                         else if l3[3][0] { RIGHT } else if l3[3][1] { UP }
-                         else if l4[3][0] { LEFT2 } else if l4[3][1] { DOWN2 }
-                         else if l6[3][0] { RIGHT2 } else if l6[3][1] { UP2 } else { CENTER },
+                    0 => {
+                        if (l1[0] && eo[0])
+                            || (l3[0][0] && eo[1])
+                            || (l4[0][0] && lo[0])
+                            || (l6[0][0] && ro[1])
+                        {
+                            UP
+                        } else if l1[0]
+                            || (l3[0][1] && !eo[3])
+                            || (l4[0][1] && !uo[0])
+                            || (l6[0][1] && !ddo[3])
+                        {
+                            LEFT
+                        } else if l3[0][0] {
+                            RIGHT
+                        } else if l3[0][1] {
+                            DOWN
+                        } else if l4[0][0] {
+                            LEFT2
+                        } else if l4[0][1] {
+                            UP2
+                        } else if l6[0][0] {
+                            RIGHT2
+                        } else if l6[0][1] {
+                            DOWN2
+                        } else {
+                            CENTER
+                        }
+                    }
+                    1 => {
+                        if (l1[1] && eo[1])
+                            || (l3[1][0] && eo[0])
+                            || (l4[1][0] && ro[1])
+                            || (l6[1][0] && lo[0])
+                        {
+                            UP
+                        } else if l1[1]
+                            || (l3[1][1] && !eo[2])
+                            || (l4[1][1] && !uo[1])
+                            || (l6[1][1] && !ddo[2])
+                        {
+                            RIGHT
+                        } else if l3[1][0] {
+                            LEFT
+                        } else if l3[1][1] {
+                            DOWN
+                        } else if l4[1][0] {
+                            RIGHT2
+                        } else if l4[1][1] {
+                            UP2
+                        } else if l6[1][0] {
+                            LEFT2
+                        } else if l6[1][1] {
+                            DOWN2
+                        } else {
+                            CENTER
+                        }
+                    }
+                    2 => {
+                        if (l1[2] && eo[2])
+                            || (l3[2][0] && eo[3])
+                            || (l4[2][0] && ro[2])
+                            || (l6[2][0] && lo[3])
+                        {
+                            DOWN
+                        } else if l1[2]
+                            || (l3[2][1] && !eo[1])
+                            || (l4[2][1] && !ddo[2])
+                            || (l6[2][1] && !uo[1])
+                        {
+                            RIGHT
+                        } else if l3[2][0] {
+                            LEFT
+                        } else if l3[2][1] {
+                            UP
+                        } else if l4[2][0] {
+                            RIGHT2
+                        } else if l4[2][1] {
+                            DOWN2
+                        } else if l6[2][0] {
+                            LEFT2
+                        } else if l6[2][1] {
+                            UP2
+                        } else {
+                            CENTER
+                        }
+                    }
+                    3 => {
+                        if (l1[3] && eo[3])
+                            || (l3[3][0] && eo[2])
+                            || (l4[3][0] && lo[3])
+                            || (l6[3][0] && ro[2])
+                        {
+                            DOWN
+                        } else if l1[3]
+                            || (l3[3][1] && !eo[0])
+                            || (l4[3][1] && !ddo[3])
+                            || (l6[3][1] && !uo[0])
+                        {
+                            LEFT
+                        } else if l3[3][0] {
+                            RIGHT
+                        } else if l3[3][1] {
+                            UP
+                        } else if l4[3][0] {
+                            LEFT2
+                        } else if l4[3][1] {
+                            DOWN2
+                        } else if l6[3][0] {
+                            RIGHT2
+                        } else if l6[3][1] {
+                            UP2
+                        } else {
+                            CENTER
+                        }
+                    }
                     _ => CENTER,
                 }
             };
@@ -501,30 +739,106 @@ fn trace_edges(junctions: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
                 let uo = du.orient;
                 let ddo = dd.orient;
                 match i {
-                    0 => if (l2[0][0] && eo[0]) || (l2[0][1] && eo[1]) || (l5[0][0] && lo[0]) || (l5[0][1] && ro[1]) { UP }
-                         else if l2[0][0] { LEFT } else if l2[0][1] { RIGHT }
-                         else if l5[0][0] { LEFT2 } else if l5[0][1] { RIGHT2 }
-                         else if e.corner[0] && dl.corner[2] && e.corner[1] && dr.corner[3] {
-                             if eo[0] { if eo[1] { UP } else { RIGHT } } else { LEFT }
-                         } else { CENTER },
-                    1 => if (l2[1][0] && !eo[1]) || (l2[1][1] && !eo[2]) || (l5[1][0] && !uo[1]) || (l5[1][1] && !ddo[2]) { RIGHT }
-                         else if l2[1][0] { UP } else if l2[1][1] { DOWN }
-                         else if l5[1][0] { UP2 } else if l5[1][1] { DOWN2 }
-                         else if e.corner[1] && du.corner[3] && e.corner[2] && dd.corner[0] {
-                             if !eo[1] { if !eo[2] { RIGHT } else { DOWN } } else { UP }
-                         } else { CENTER },
-                    2 => if (l2[2][0] && eo[3]) || (l2[2][1] && eo[2]) || (l5[2][0] && lo[3]) || (l5[2][1] && ro[2]) { DOWN }
-                         else if l2[2][0] { LEFT } else if l2[2][1] { RIGHT }
-                         else if l5[2][0] { LEFT2 } else if l5[2][1] { RIGHT2 }
-                         else if e.corner[2] && dr.corner[0] && e.corner[3] && dl.corner[1] {
-                             if eo[2] { if eo[3] { DOWN } else { LEFT } } else { RIGHT }
-                         } else { CENTER },
-                    3 => if (l2[3][0] && !eo[0]) || (l2[3][1] && !eo[3]) || (l5[3][0] && !uo[0]) || (l5[3][1] && !ddo[3]) { LEFT }
-                         else if l2[3][0] { UP } else if l2[3][1] { DOWN }
-                         else if l5[3][0] { UP2 } else if l5[3][1] { DOWN2 }
-                         else if e.corner[3] && dd.corner[1] && e.corner[0] && du.corner[2] {
-                             if !eo[3] { if !eo[0] { LEFT } else { UP } } else { DOWN }
-                         } else { CENTER },
+                    0 => {
+                        if (l2[0][0] && eo[0])
+                            || (l2[0][1] && eo[1])
+                            || (l5[0][0] && lo[0])
+                            || (l5[0][1] && ro[1])
+                        {
+                            UP
+                        } else if l2[0][0] {
+                            LEFT
+                        } else if l2[0][1] {
+                            RIGHT
+                        } else if l5[0][0] {
+                            LEFT2
+                        } else if l5[0][1] {
+                            RIGHT2
+                        } else if e.corner[0] && dl.corner[2] && e.corner[1] && dr.corner[3] {
+                            if eo[0] {
+                                if eo[1] { UP } else { RIGHT }
+                            } else {
+                                LEFT
+                            }
+                        } else {
+                            CENTER
+                        }
+                    }
+                    1 => {
+                        if (l2[1][0] && !eo[1])
+                            || (l2[1][1] && !eo[2])
+                            || (l5[1][0] && !uo[1])
+                            || (l5[1][1] && !ddo[2])
+                        {
+                            RIGHT
+                        } else if l2[1][0] {
+                            UP
+                        } else if l2[1][1] {
+                            DOWN
+                        } else if l5[1][0] {
+                            UP2
+                        } else if l5[1][1] {
+                            DOWN2
+                        } else if e.corner[1] && du.corner[3] && e.corner[2] && dd.corner[0] {
+                            if !eo[1] {
+                                if !eo[2] { RIGHT } else { DOWN }
+                            } else {
+                                UP
+                            }
+                        } else {
+                            CENTER
+                        }
+                    }
+                    2 => {
+                        if (l2[2][0] && eo[3])
+                            || (l2[2][1] && eo[2])
+                            || (l5[2][0] && lo[3])
+                            || (l5[2][1] && ro[2])
+                        {
+                            DOWN
+                        } else if l2[2][0] {
+                            LEFT
+                        } else if l2[2][1] {
+                            RIGHT
+                        } else if l5[2][0] {
+                            LEFT2
+                        } else if l5[2][1] {
+                            RIGHT2
+                        } else if e.corner[2] && dr.corner[0] && e.corner[3] && dl.corner[1] {
+                            if eo[2] {
+                                if eo[3] { DOWN } else { LEFT }
+                            } else {
+                                RIGHT
+                            }
+                        } else {
+                            CENTER
+                        }
+                    }
+                    3 => {
+                        if (l2[3][0] && !eo[0])
+                            || (l2[3][1] && !eo[3])
+                            || (l5[3][0] && !uo[0])
+                            || (l5[3][1] && !ddo[3])
+                        {
+                            LEFT
+                        } else if l2[3][0] {
+                            UP
+                        } else if l2[3][1] {
+                            DOWN
+                        } else if l5[3][0] {
+                            UP2
+                        } else if l5[3][1] {
+                            DOWN2
+                        } else if e.corner[3] && dd.corner[1] && e.corner[0] && du.corner[2] {
+                            if !eo[3] {
+                                if !eo[0] { LEFT } else { UP }
+                            } else {
+                                DOWN
+                            }
+                        } else {
+                            CENTER
+                        }
+                    }
                     _ => CENTER,
                 }
             };
@@ -563,15 +877,15 @@ fn unpack_mid_tag(v: f32) -> u8 {
 #[inline(always)]
 fn neighbor_offset(tag: u8) -> (isize, isize) {
     match tag {
-        1 => (-1,  0), // left
-        2 => (-2,  0), // left ×2
-        3 => ( 1,  0), // right
-        4 => ( 2,  0), // right ×2
-        5 => ( 0, -1), // up
-        6 => ( 0, -2), // up ×2
-        7 => ( 0,  1), // down
-        8 => ( 0,  2), // down ×2
-        _ => ( 0,  0), // center
+        1 => (-1, 0), // left
+        2 => (-2, 0), // left ×2
+        3 => (1, 0),  // right
+        4 => (2, 0),  // right ×2
+        5 => (0, -1), // up
+        6 => (0, -2), // up ×2
+        7 => (0, 1),  // down
+        8 => (0, 2),  // down ×2
+        _ => (0, 0),  // center
     }
 }
 
@@ -585,12 +899,16 @@ fn assemble_3x(edge_tags: &[[f32; 4]], src: &[u32], w: usize, h: usize) -> Vec<u
         for sx in 0..w {
             let packed = edge_tags[sy * w + sx];
             let ct = [
-                unpack_corner_tag(packed[0]), unpack_corner_tag(packed[1]),
-                unpack_corner_tag(packed[2]), unpack_corner_tag(packed[3]),
+                unpack_corner_tag(packed[0]),
+                unpack_corner_tag(packed[1]),
+                unpack_corner_tag(packed[2]),
+                unpack_corner_tag(packed[3]),
             ];
             let mt = [
-                unpack_mid_tag(packed[0]), unpack_mid_tag(packed[1]),
-                unpack_mid_tag(packed[2]), unpack_mid_tag(packed[3]),
+                unpack_mid_tag(packed[0]),
+                unpack_mid_tag(packed[1]),
+                unpack_mid_tag(packed[2]),
+                unpack_mid_tag(packed[3]),
             ];
 
             let ox = sx * 3;
@@ -600,9 +918,15 @@ fn assemble_3x(edge_tags: &[[f32; 4]], src: &[u32], w: usize, h: usize) -> Vec<u
 
             // 3×3 block: corners at even positions, mids at odd, center at (1,1)
             let block: [(usize, usize, u8); 9] = [
-                (0, 0, ct[0]), (1, 0, mt[0]), (2, 0, ct[1]),
-                (0, 1, mt[3]), (1, 1, 0),     (2, 1, mt[1]),
-                (0, 2, ct[3]), (1, 2, mt[2]), (2, 2, ct[2]),
+                (0, 0, ct[0]),
+                (1, 0, mt[0]),
+                (2, 0, ct[1]),
+                (0, 1, mt[3]),
+                (1, 1, 0),
+                (2, 1, mt[1]),
+                (0, 2, ct[3]),
+                (1, 2, mt[2]),
+                (2, 2, ct[2]),
             ];
 
             for &(bx, by, tag) in &block {

@@ -1,5 +1,4 @@
 /// PPU I/O register read/write, VRAM/OAM access, palette sync.
-
 use super::Ppu;
 
 impl Ppu {
@@ -22,13 +21,19 @@ impl Ppu {
             0xFF4F => self.vram_bank as u8 | 0xFE,
             0xFF68 => self.bcps | 0x40,
             0xFF69 => {
-                if self.cgb_palettes_blocked { 0xFF }
-                else { self.bcpd[(self.bcps & 0x3F) as usize] }
+                if self.cgb_palettes_blocked {
+                    0xFF
+                } else {
+                    self.bcpd[(self.bcps & 0x3F) as usize]
+                }
             }
             0xFF6A => self.ocps | 0x40,
             0xFF6B => {
-                if self.cgb_palettes_blocked { 0xFF }
-                else { self.ocpd[(self.ocps & 0x3F) as usize] }
+                if self.cgb_palettes_blocked {
+                    0xFF
+                } else {
+                    self.ocpd[(self.ocps & 0x3F) as usize]
+                }
             }
             _ => 0xFF,
         }
@@ -57,7 +62,9 @@ impl Ppu {
         }
     }
 
-    pub fn fetcher_is_window(&self) -> bool { self.fetcher.fetching_window }
+    pub fn fetcher_is_window(&self) -> bool {
+        self.fetcher.fetching_window
+    }
 
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
@@ -95,9 +102,13 @@ impl Ppu {
                 // defer reactivation to the next step boundary
                 // Window re-enabled during mode 3: check if trigger point
                 // was just passed (off-by-1 from mid-M-cycle write timing)
-                if !win_was_on && win_now_on && self.mode == 3
-                    && !self.window_active && !self.window_trigger_pending
-                    && self.wy_triggered && self.position_in_line >= 0
+                if !win_was_on
+                    && win_now_on
+                    && self.mode == 3
+                    && !self.window_active
+                    && !self.window_trigger_pending
+                    && self.wy_triggered
+                    && self.position_in_line >= 0
                 {
                     let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
                     let tolerance = if self.double_speed { 0 } else { 1 };
@@ -108,9 +119,8 @@ impl Ppu {
                     }
                 }
 
-
                 if lcd_was_on && !lcd_now_on {
-// LCD off: reset LY, dot, mode; preserve coincidence bit
+                    // LCD off: reset LY, dot, mode; preserve coincidence bit
                     // Do NOT reset stat_irq_line — hardware preserves the IRQ signal state
                     self.ly = 0;
                     self.visible_ly = 0;
@@ -136,7 +146,7 @@ impl Ppu {
                         }
                     }
                 } else if !lcd_was_on && lcd_now_on {
-// LCD on: start at line 0, let normal line-start state machine run.
+                    // LCD on: start at line 0, let normal line-start state machine run.
                     // The first line uses a shortened mode 2 (early transition to
                     // mode 3 at dot 78 CGB / 79 DMG), with total line = 448T CGB / 449T DMG.
                     // Running the line-start sequence ensures mode_for_interrupt
@@ -187,13 +197,11 @@ impl Ppu {
                         // temporarily set — any mode match or LYC coincidence
                         // produces a rising edge. Then re-evaluate with the
                         // real written value to set stat_irq_line correctly.
-                        if (self.mode == 0 || self.mode == 1)
-                            && !self.stat_irq_line
-                        {
+                        if (self.mode == 0 || self.mode == 1) && !self.stat_irq_line {
                             // With $FF: all mode enables set. Check if
                             // mode_for_interrupt matches ANY mode source.
-                            let mode_match = self.mode_for_interrupt >= 0
-                                && self.mode_for_interrupt <= 2;
+                            let mode_match =
+                                self.mode_for_interrupt >= 0 && self.mode_for_interrupt <= 2;
                             // With $FF: LYC enable (bit 6) set. Check
                             // coincidence flag (STAT bit 2, read-only).
                             let lyc_match = self.stat & 0x04 != 0;
@@ -217,10 +225,10 @@ impl Ppu {
                     // After LY=0 in line_153: defer so dot 12 coincidence
                     // uses the old LYC value.
                     self.pending_lyc = Some(val);
-                } else if self.cgb_mode && (
-                    self.line_153_phase > 0 ||
-                    ((self.mode == 0 || self.mode == 1) && self.dot >= 452)
-                ) {
+                } else if self.cgb_mode
+                    && (self.line_153_phase > 0
+                        || ((self.mode == 0 || self.mode == 1) && self.dot >= 452))
+                {
                     // During line_153_phase (before dot 8) or near line end:
                     // apply value but suppress STAT IRQ (display_state 15/16
                     // skip behavior).
@@ -243,17 +251,23 @@ impl Ppu {
             0xFF47 => {
                 self.bgp = val;
                 self.bgp_rendering = val;
-                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, false, 0); }
+                if self.dmg_compat {
+                    self.sync_dmg_palette_to_cgb(val, false, 0);
+                }
             }
             0xFF48 => {
                 self.obp0 = val;
                 self.obp0_rendering = val;
-                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 0); }
+                if self.dmg_compat {
+                    self.sync_dmg_palette_to_cgb(val, true, 0);
+                }
             }
             0xFF49 => {
                 self.obp1 = val;
                 self.obp1_rendering = val;
-                if self.dmg_compat { self.sync_dmg_palette_to_cgb(val, true, 1); }
+                if self.dmg_compat {
+                    self.sync_dmg_palette_to_cgb(val, true, 1);
+                }
             }
             0xFF4A => {
                 self.wy = val;
@@ -267,8 +281,12 @@ impl Ppu {
             }
             0xFF4B => {
                 self.wx = val;
-                if self.mode == 3 && !self.window_active && !self.window_trigger_pending
-                    && self.lcdc & 0x20 != 0 && self.wy_triggered && self.position_in_line >= 0
+                if self.mode == 3
+                    && !self.window_active
+                    && !self.window_trigger_pending
+                    && self.lcdc & 0x20 != 0
+                    && self.wy_triggered
+                    && self.position_in_line >= 0
                 {
                     let wx_screen = if val >= 7 { val - 7 } else { 0 };
                     let tolerance = if self.double_speed { 0 } else { 1 };

@@ -106,10 +106,18 @@ pub fn scale_2xsai(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                     product = interp(a, b);
                     product1 = interp(a, c);
 
-                    if a == g || a == e { r += 1; }
-                    if a == i || a == _m { r += 1; }
-                    if b == k || b == f { r -= 1; }
-                    if b == j || b == l { r -= 1; }
+                    if a == g || a == e {
+                        r += 1;
+                    }
+                    if a == i || a == _m {
+                        r += 1;
+                    }
+                    if b == k || b == f {
+                        r -= 1;
+                    }
+                    if b == j || b == l {
+                        r -= 1;
+                    }
 
                     product2 = if r > 0 {
                         a
@@ -179,11 +187,25 @@ pub fn scale_super2xsai(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                     product3 = a;
                 } else {
                     let mut r: i32 = 0;
-                    if a == e || a == g { r += 1; }
-                    if a == i || a == _m { r += 1; }
-                    if b == f || b == k { r -= 1; }
-                    if b == j || b == l { r -= 1; }
-                    product3 = if r > 0 { a } else if r < 0 { b } else { qinterp(a, b, c, d) };
+                    if a == e || a == g {
+                        r += 1;
+                    }
+                    if a == i || a == _m {
+                        r += 1;
+                    }
+                    if b == f || b == k {
+                        r -= 1;
+                    }
+                    if b == j || b == l {
+                        r -= 1;
+                    }
+                    product3 = if r > 0 {
+                        a
+                    } else if r < 0 {
+                        b
+                    } else {
+                        qinterp(a, b, c, d)
+                    };
                 }
             } else {
                 product3 = qinterp(a, b, c, d);
@@ -254,11 +276,23 @@ pub fn scale_super2xsai(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 fn get_result(a: u32, b: u32, c: u32, d: u32) -> i32 {
     let mut x = 0i32;
     let mut y = 0i32;
-    if a == c { x += 1; } else if b == c { y += 1; }
-    if a == d { x += 1; } else if b == d { y += 1; }
+    if a == c {
+        x += 1;
+    } else if b == c {
+        y += 1;
+    }
+    if a == d {
+        x += 1;
+    } else if b == d {
+        y += 1;
+    }
     let mut r = 0i32;
-    if x <= 1 { r += 1; }
-    if y <= 1 { r -= 1; }
+    if x <= 1 {
+        r += 1;
+    }
+    if y <= 1 {
+        r -= 1;
+    }
     r
 }
 
@@ -284,13 +318,13 @@ pub fn scale_super_eagle(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             // Map to Kreed naming
             let color_b1 = p[0];
             let color_b2 = p[1];
-            let color4  = p[4];
-            let color5  = p[5];  // center (top-left of 2x2 block)
-            let color6  = p[6];  // right
+            let color4 = p[4];
+            let color5 = p[5]; // center (top-left of 2x2 block)
+            let color6 = p[6]; // right
             let color_s2 = p[7];
-            let color1  = p[8];
-            let color2  = p[9];  // below
-            let color3  = p[10]; // below-right (diagonal)
+            let color1 = p[8];
+            let color2 = p[9]; // below
+            let color3 = p[10]; // below-right (diagonal)
             let color_s1 = p[11];
             let color_a1 = p[13];
             let color_a2 = p[14];

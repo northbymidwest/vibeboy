@@ -2,41 +2,70 @@ use std::collections::HashMap;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{
-    NSMutableArray, NSMutableDictionary, NSNumber, NSString, NSUserDefaults,
-};
+use objc2_foundation::{NSMutableArray, NSMutableDictionary, NSNumber, NSString, NSUserDefaults};
 
 use super::emulator::Emulator;
 
 pub(super) fn default_key_map() -> HashMap<u16, u8> {
     let mut m = HashMap::new();
-    m.insert(6, Emulator::BTN_B);       // Z
-    m.insert(7, Emulator::BTN_A);       // X
-    m.insert(36, Emulator::BTN_START);   // Return
-    m.insert(60, Emulator::BTN_SELECT);  // Right Shift
-    m.insert(124, Emulator::BTN_RIGHT);  // Right arrow
-    m.insert(123, Emulator::BTN_LEFT);   // Left arrow
-    m.insert(126, Emulator::BTN_UP);     // Up arrow
-    m.insert(125, Emulator::BTN_DOWN);   // Down arrow
+    m.insert(6, Emulator::BTN_B); // Z
+    m.insert(7, Emulator::BTN_A); // X
+    m.insert(36, Emulator::BTN_START); // Return
+    m.insert(60, Emulator::BTN_SELECT); // Right Shift
+    m.insert(124, Emulator::BTN_RIGHT); // Right arrow
+    m.insert(123, Emulator::BTN_LEFT); // Left arrow
+    m.insert(126, Emulator::BTN_UP); // Up arrow
+    m.insert(125, Emulator::BTN_DOWN); // Down arrow
     m
 }
 
-
 pub(super) fn keycode_name(code: u16) -> &'static str {
     match code {
-        0 => "A", 1 => "S", 2 => "D", 3 => "F", 4 => "H", 5 => "G",
-        6 => "Z", 7 => "X", 8 => "C", 9 => "V", 11 => "B", 12 => "Q",
-        13 => "W", 14 => "E", 15 => "R", 16 => "Y", 17 => "T",
-        31 => "O", 32 => "U", 34 => "I", 35 => "P", 37 => "L",
-        38 => "J", 40 => "K", 41 => ";", 45 => "N", 46 => "M",
-        36 => "Return", 48 => "Tab", 49 => "Space", 51 => "Delete",
-        53 => "Escape", 56 => "LShift", 60 => "RShift",
-        123 => "Left", 124 => "Right", 125 => "Down", 126 => "Up",
-        96 => "F5", 97 => "F6", 98 => "F7", 99 => "F3",
+        0 => "A",
+        1 => "S",
+        2 => "D",
+        3 => "F",
+        4 => "H",
+        5 => "G",
+        6 => "Z",
+        7 => "X",
+        8 => "C",
+        9 => "V",
+        11 => "B",
+        12 => "Q",
+        13 => "W",
+        14 => "E",
+        15 => "R",
+        16 => "Y",
+        17 => "T",
+        31 => "O",
+        32 => "U",
+        34 => "I",
+        35 => "P",
+        37 => "L",
+        38 => "J",
+        40 => "K",
+        41 => ";",
+        45 => "N",
+        46 => "M",
+        36 => "Return",
+        48 => "Tab",
+        49 => "Space",
+        51 => "Delete",
+        53 => "Escape",
+        56 => "LShift",
+        60 => "RShift",
+        123 => "Left",
+        124 => "Right",
+        125 => "Down",
+        126 => "Up",
+        96 => "F5",
+        97 => "F6",
+        98 => "F7",
+        99 => "F3",
         _ => "?",
     }
 }
-
 
 pub(super) fn load_key_map() -> HashMap<u16, u8> {
     let defaults = NSUserDefaults::standardUserDefaults();
@@ -57,7 +86,11 @@ pub(super) fn load_key_map() -> HashMap<u16, u8> {
             }
         }
     }
-    if map.is_empty() { default_key_map() } else { map }
+    if map.is_empty() {
+        default_key_map()
+    } else {
+        map
+    }
 }
 
 pub(super) fn save_key_map(map: &HashMap<u16, u8>) {
@@ -66,10 +99,7 @@ pub(super) fn save_key_map(map: &HashMap<u16, u8>) {
         let k = NSString::from_str(&keycode.to_string());
         let v = NSNumber::numberWithInteger(btn as isize);
         unsafe {
-            dict.setObject_forKey(
-                &v,
-                ProtocolObject::from_ref(&*k),
-            );
+            dict.setObject_forKey(&v, ProtocolObject::from_ref(&*k));
         }
     }
     let defaults = NSUserDefaults::standardUserDefaults();

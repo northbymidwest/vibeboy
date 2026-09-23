@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use super::Cartridge;
 use crate::clock::Clock;
+use std::sync::Arc;
 
 pub struct Mbc3 {
     rom: Arc<[u8]>,
@@ -19,11 +19,21 @@ pub struct Mbc3 {
 }
 
 impl Mbc3 {
-    pub(super) fn new(rom: Arc<[u8]>, ram_size: usize, battery: bool, has_rtc: bool, clock: Arc<dyn Clock>) -> Self {
+    pub(super) fn new(
+        rom: Arc<[u8]>,
+        ram_size: usize,
+        battery: bool,
+        has_rtc: bool,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         // MBC30 detection: ROM > 2MB or RAM > 32KB (only Pokemon Crystal JP)
         let mbc30 = rom.len() > 0x200000 || ram_size > 0x8000;
         if mbc30 {
-            log::info!("MBC30 detected (ROM={}KB, RAM={}KB)", rom.len() / 1024, ram_size / 1024);
+            log::info!(
+                "MBC30 detected (ROM={}KB, RAM={}KB)",
+                rom.len() / 1024,
+                ram_size / 1024
+            );
         }
         let rtc_last_secs = clock.now_secs();
         Mbc3 {
@@ -46,12 +56,16 @@ impl Mbc3 {
     /// Advance RTC registers by elapsed wall-clock time since last update.
     fn advance_rtc(&mut self) {
         // Don't advance if halted (DH bit 6)
-        if self.rtc_regs[4] & 0x40 != 0 { return; }
+        if self.rtc_regs[4] & 0x40 != 0 {
+            return;
+        }
 
         let now = self.clock.now_secs();
         let elapsed = now.saturating_sub(self.rtc_last_secs);
         self.rtc_last_secs = now;
-        if elapsed == 0 { return; }
+        if elapsed == 0 {
+            return;
+        }
 
         self.add_seconds_to_rtc(elapsed);
     }
@@ -85,7 +99,10 @@ impl Cartridge for Mbc3 {
             0x4000..=0x7FFF => self.rom_bank * 0x4000 + (addr as usize - 0x4000),
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
@@ -119,12 +136,17 @@ impl Cartridge for Mbc3 {
     }
 
     fn read_ram(&self, addr: u16) -> u8 {
-        if !self.ram_enabled { return 0xFF; }
+        if !self.ram_enabled {
+            return 0xFF;
+        }
         let max_ram_bank = if self.mbc30 { 0x07 } else { 0x03 };
         match self.ram_bank {
             b if b <= max_ram_bank => {
                 let idx = b * 0x2000 + (addr as usize - 0xA000);
-                self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
+                self.ram
+                    .get(idx % self.ram.len().max(1))
+                    .copied()
+                    .unwrap_or(0xFF)
             }
             0x08..=0x0C if self.has_rtc => self.rtc_latched[self.ram_bank - 0x08],
             _ => 0xFF,
@@ -132,7 +154,9 @@ impl Cartridge for Mbc3 {
     }
 
     fn write_ram(&mut self, addr: u16, val: u8) {
-        if !self.ram_enabled { return; }
+        if !self.ram_enabled {
+            return;
+        }
         let max_ram_bank = if self.mbc30 { 0x07 } else { 0x03 };
         match self.ram_bank {
             b if b <= max_ram_bank => {
@@ -154,9 +178,13 @@ impl Cartridge for Mbc3 {
         }
     }
 
-    fn has_battery(&self) -> bool { self.battery }
+    fn has_battery(&self) -> bool {
+        self.battery
+    }
 
-    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn ram_data(&self) -> &[u8] {
+        &self.ram
+    }
 
     fn save_data(&self) -> Vec<u8> {
         let mut data = self.ram.clone();
@@ -211,9 +239,11 @@ impl Cartridge for Mbc3 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 20 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
-        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        if d.len() < 20 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
         self.ram_enabled = d[8] != 0;
         self.rtc_latch_ready = d[9] != 0;
         self.rtc_regs.copy_from_slice(&d[10..15]);

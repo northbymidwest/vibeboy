@@ -47,15 +47,15 @@ pub fn build(mgb: bool) -> Vec<u8> {
     a.ldh_n_a(0x80); // outer counter in HRAM
 
     a.label("logo_byte");
-    a.ld_a_de_ind();   // read source byte
+    a.ld_a_de_ind(); // read source byte
     a.inc_de();
-    a.push_de();       // save source ptr
-    a.push_af();       // save source byte
-    a.call("expand");  // expand high nibble → 4 VRAM bytes
-    a.pop_af();        // restore source byte
-    a.swap_a();        // low nibble → high position
-    a.call("expand");  // expand low nibble → 4 VRAM bytes
-    a.pop_de();        // restore source ptr
+    a.push_de(); // save source ptr
+    a.push_af(); // save source byte
+    a.call("expand"); // expand high nibble → 4 VRAM bytes
+    a.pop_af(); // restore source byte
+    a.swap_a(); // low nibble → high position
+    a.call("expand"); // expand low nibble → 4 VRAM bytes
+    a.pop_de(); // restore source ptr
     a.ldh_a_n(0x80);
     a.dec_a();
     a.ldh_n_a(0x80);
@@ -69,23 +69,23 @@ pub fn build(mgb: bool) -> Vec<u8> {
     // Output: 4 bytes written (lo, hi, lo, hi = repeated color-3 row)
     // Clobbers: A, B, C
     a.label("expand");
-    a.ld_c_a();    // source → C
-    a.ld_b(4);     // 4 bits
-    a.xor_a();     // clear result + carry
+    a.ld_c_a(); // source → C
+    a.ld_b(4); // 4 bits
+    a.xor_a(); // clear result + carry
     a.label("exp_bit");
-    a.push_bc();   // save C (source state) and B (counter)
-    a.rl_c();      // source.bit7 → carry (C shifted left)
-    a.rla();       // carry → A.bit0
-    a.pop_bc();    // restore C to pre-shift state
-    a.rl_c();      // same bit → carry again
-    a.rla();       // duplicate bit into A
+    a.push_bc(); // save C (source state) and B (counter)
+    a.rl_c(); // source.bit7 → carry (C shifted left)
+    a.rla(); // carry → A.bit0
+    a.pop_bc(); // restore C to pre-shift state
+    a.rl_c(); // same bit → carry again
+    a.rla(); // duplicate bit into A
     a.dec_b();
     a.jr_nz("exp_bit");
     // A = expanded byte: each source bit doubled
-    a.ld_hli_a();  // lo plane
-    a.ld_hli_a();  // hi plane (= color 3)
-    a.ld_hli_a();  // lo plane (row repeat)
-    a.ld_hli_a();  // hi plane (row repeat)
+    a.ld_hli_a(); // lo plane
+    a.ld_hli_a(); // hi plane (= color 3)
+    a.ld_hli_a(); // lo plane (row repeat)
+    a.ld_hli_a(); // hi plane (row repeat)
     a.ret();
 
     a.label("after_expand");
@@ -121,9 +121,12 @@ pub fn build(mgb: bool) -> Vec<u8> {
     a.ldh_n_a(0x40); // LCDC on
 
     // Enable sound system (but don't trigger a note)
-    a.ld_a(0x80); a.ldh_n_a(0x26); // NR52: sound on
-    a.ld_a(0xF3); a.ldh_n_a(0x25); // NR51: output routing
-    a.ld_a(0x77); a.ldh_n_a(0x24); // NR50: volume
+    a.ld_a(0x80);
+    a.ldh_n_a(0x26); // NR52: sound on
+    a.ld_a(0xF3);
+    a.ldh_n_a(0x25); // NR51: output routing
+    a.ld_a(0x77);
+    a.ldh_n_a(0x24); // NR50: volume
 
     // ================================================================
     // Horizontal scroll: SCX 0→128 (logo slides from right to center)
@@ -181,7 +184,7 @@ pub fn build(mgb: bool) -> Vec<u8> {
     a.xor_a();
     a.label("hdr_ck");
     a.sub_hl_ind(); // A -= (HL)
-    a.dec_a();      // A -= 1
+    a.dec_a(); // A -= 1
     a.inc_hl();
     a.dec_b();
     a.jr_nz("hdr_ck");

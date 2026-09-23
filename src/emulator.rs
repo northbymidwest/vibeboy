@@ -1,9 +1,7 @@
 use crate::bus::Bus;
 use crate::clock::Clock;
 use crate::cpu::{Cpu, McycleOp, Registers};
-use crate::joypad::{
-    BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
-};
+use crate::joypad::{BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP};
 use crate::model::GbModel;
 use crate::rewind::RewindBuffer;
 use crate::sgb::Sgb;
@@ -175,7 +173,9 @@ impl Emulator {
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
                 cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 4 { break; }
+                if cycles >= CYCLES_PER_FRAME * 4 {
+                    break;
+                }
             }
             // SGB: apply palettes so the ahead frame has correct colors
             if self.model.is_sgb() && self.snes.is_none() {
@@ -248,7 +248,11 @@ impl Emulator {
             self.restore_snapshot(&snap);
             self.bus.apu.restore_filter_state(&filter_state);
             // Re-allocate output buffers (cleared before serialization to save space)
-            let (w, h) = if self.bus.ppu.sgb_mode { (256, 224) } else { (160, 144) };
+            let (w, h) = if self.bus.ppu.sgb_mode {
+                (256, 224)
+            } else {
+                (160, 144)
+            };
             if self.bus.ppu.frame_buffer.len() != w * h {
                 self.bus.ppu.frame_buffer.resize(w * h, 0);
             }
@@ -262,7 +266,9 @@ impl Emulator {
             let mut cycles = 0u32;
             while !self.bus.frame_ready() {
                 cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 4 { break; }
+                if cycles >= CYCLES_PER_FRAME * 4 {
+                    break;
+                }
             }
             // SGB post-processing: apply palettes to the regenerated frame.
             if self.model.is_sgb() && self.snes.is_none() {
@@ -393,8 +399,10 @@ impl Emulator {
         // hardware behavior where the CPU checks IE & IF before fetching
         // the next opcode. This must happen before mcycle() so the CPU
         // enters interrupt dispatch instead of opcode fetch.
-        if !self.cpu.in_interrupt && !self.cpu.halted
-            && self.cpu.ime && self.cpu.speed_switch_remaining == 0
+        if !self.cpu.in_interrupt
+            && !self.cpu.halted
+            && self.cpu.ime
+            && self.cpu.speed_switch_remaining == 0
             && self.cpu.phase == 0
         {
             self.bus.flush_ppu_deferred();
@@ -407,8 +415,7 @@ impl Emulator {
         let mut total = 0u32;
         loop {
             let op = self.cpu.mcycle();
-            let is_done = op == McycleOp::Done
-                || op == McycleOp::HaltNop;
+            let is_done = op == McycleOp::Done || op == McycleOp::HaltNop;
 
             // Handle OAM bugs from this mcycle() call BEFORE ticking.
             // This matches the old model where trigger_oam_bug runs between
@@ -496,8 +503,12 @@ impl Emulator {
             if is_done {
                 // Undefined opcodes: CPU locks (halted + IME=false + IE=0)
                 // Must be checked BEFORE halt_bug detection so IE is cleared first.
-                if self.cpu.halted && !self.cpu.ime && matches!(self.cpu.opcode,
-                    0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD)
+                if self.cpu.halted
+                    && !self.cpu.ime
+                    && matches!(
+                        self.cpu.opcode,
+                        0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD
+                    )
                 {
                     self.bus.ie = 0;
                 }
@@ -554,14 +565,26 @@ impl Emulator {
         loop {
             iter_count += 1;
             if iter_count == 1_000_000 {
-                eprintln!("1M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
-                    self.cpu.regs.pc, cycles, self.cpu.halted, self.cpu.ime,
-                    self.cpu.phase, self.cpu.in_interrupt);
+                eprintln!(
+                    "1M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
+                    self.cpu.regs.pc,
+                    cycles,
+                    self.cpu.halted,
+                    self.cpu.ime,
+                    self.cpu.phase,
+                    self.cpu.in_interrupt
+                );
             }
             if iter_count == 10_000_000 {
-                eprintln!("10M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
-                    self.cpu.regs.pc, cycles, self.cpu.halted, self.cpu.ime,
-                    self.cpu.phase, self.cpu.in_interrupt);
+                eprintln!(
+                    "10M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
+                    self.cpu.regs.pc,
+                    cycles,
+                    self.cpu.halted,
+                    self.cpu.ime,
+                    self.cpu.phase,
+                    self.cpu.in_interrupt
+                );
             }
             // Check for Mooneye breakpoints before executing:
             // - LD B,B ($40): modern mooneye-test-suite
@@ -598,10 +621,14 @@ impl Emulator {
                 let serial = String::from_utf8_lossy(&self.bus.serial.serial_output).into_owned();
                 let result = self.bus.read_byte(0xA000);
                 if result == 0 {
-                    if serial.is_empty() { return "Passed".to_string(); }
+                    if serial.is_empty() {
+                        return "Passed".to_string();
+                    }
                     return format!("Passed\n{}", serial);
                 } else {
-                    if serial.is_empty() { return format!("Failed #{}", result); }
+                    if serial.is_empty() {
+                        return format!("Failed #{}", result);
+                    }
                     return format!("Failed #{}\n{}", result, serial);
                 }
             }
@@ -690,14 +717,14 @@ impl Emulator {
     }
 
     // Expose button constants for main.rs
-    pub const BTN_RIGHT:  u8 = BTN_RIGHT;
-    pub const BTN_LEFT:   u8 = BTN_LEFT;
-    pub const BTN_UP:     u8 = BTN_UP;
-    pub const BTN_DOWN:   u8 = BTN_DOWN;
-    pub const BTN_A:      u8 = BTN_A;
-    pub const BTN_B:      u8 = BTN_B;
+    pub const BTN_RIGHT: u8 = BTN_RIGHT;
+    pub const BTN_LEFT: u8 = BTN_LEFT;
+    pub const BTN_UP: u8 = BTN_UP;
+    pub const BTN_DOWN: u8 = BTN_DOWN;
+    pub const BTN_A: u8 = BTN_A;
+    pub const BTN_B: u8 = BTN_B;
     pub const BTN_SELECT: u8 = BTN_SELECT;
-    pub const BTN_START:  u8 = BTN_START;
+    pub const BTN_START: u8 = BTN_START;
 
     // ── Audio ─────────────────────────────────────────────────────────────────
 
@@ -730,33 +757,65 @@ impl Emulator {
 
     // ── Cartridge queries ─────────────────────────────────────────────────────
 
-    pub fn has_camera(&self) -> bool { self.bus.cart.has_camera() }
-    pub fn has_accelerometer(&self) -> bool { self.bus.cart.has_accelerometer() }
-    pub fn has_rumble(&self) -> bool { self.bus.cart.has_rumble() }
-    pub fn rumble_active(&self) -> bool { self.bus.cart.rumble_active() }
+    pub fn has_camera(&self) -> bool {
+        self.bus.cart.has_camera()
+    }
+    pub fn has_accelerometer(&self) -> bool {
+        self.bus.cart.has_accelerometer()
+    }
+    pub fn has_rumble(&self) -> bool {
+        self.bus.cart.has_rumble()
+    }
+    pub fn rumble_active(&self) -> bool {
+        self.bus.cart.rumble_active()
+    }
     /// Returns true if rumble was active at any point since the last call, then clears.
-    pub fn drain_rumble(&mut self) -> bool { self.bus.cart.drain_rumble() }
-    pub fn has_battery(&self) -> bool { self.bus.cart.has_battery() }
+    pub fn drain_rumble(&mut self) -> bool {
+        self.bus.cart.drain_rumble()
+    }
+    pub fn has_battery(&self) -> bool {
+        self.bus.cart.has_battery()
+    }
 
-    pub fn set_camera_image(&mut self, data: &[u8; 128 * 112]) { self.bus.cart.set_camera_image(data); }
-    pub fn set_accelerometer(&mut self, x: u16, y: u16) { self.bus.cart.set_accelerometer(x, y); }
+    pub fn set_camera_image(&mut self, data: &[u8; 128 * 112]) {
+        self.bus.cart.set_camera_image(data);
+    }
+    pub fn set_accelerometer(&mut self, x: u16, y: u16) {
+        self.bus.cart.set_accelerometer(x, y);
+    }
 
-    pub fn save_data(&self) -> Vec<u8> { self.bus.cart.save_data() }
-    pub fn load_ram(&mut self, data: &[u8]) { self.bus.cart.load_ram(data); }
+    pub fn save_data(&self) -> Vec<u8> {
+        self.bus.cart.save_data()
+    }
+    pub fn load_ram(&mut self, data: &[u8]) {
+        self.bus.cart.load_ram(data);
+    }
 
     // ── Bus state queries ─────────────────────────────────────────────────────
 
-    pub fn is_double_speed(&self) -> bool { self.bus.double_speed }
+    pub fn is_double_speed(&self) -> bool {
+        self.bus.double_speed
+    }
 
     // ── Direct access (for debuggers and test harnesses) ──────────────────────
 
-    pub fn cpu(&self) -> &Cpu { &self.cpu }
-    pub fn cpu_mut(&mut self) -> &mut Cpu { &mut self.cpu }
-    pub fn bus(&self) -> &Bus { &self.bus }
-    pub fn bus_mut(&mut self) -> &mut Bus { &mut self.bus }
+    pub fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
+    pub fn cpu_mut(&mut self) -> &mut Cpu {
+        &mut self.cpu
+    }
+    pub fn bus(&self) -> &Bus {
+        &self.bus
+    }
+    pub fn bus_mut(&mut self) -> &mut Bus {
+        &mut self.bus
+    }
 
     /// Execute one CPU instruction, advancing bus subsystems accordingly.
-    pub fn cpu_step(&mut self) { self.step(); }
+    pub fn cpu_step(&mut self) {
+        self.step();
+    }
 
     /// Enable headless mode: disables audio accumulation and rewind snapshots.
     /// Used by test runner and calibration tools.
@@ -767,7 +826,13 @@ impl Emulator {
 
     // ── Rewind state ──────────────────────────────────────────────────────────
 
-    pub fn set_rewinding(&mut self, active: bool) { self.rewinding = active; }
-    pub fn is_rewinding(&self) -> bool { self.rewinding }
-    pub fn rewind_memory_usage(&self) -> usize { self.rewind_buffer.memory_usage() }
+    pub fn set_rewinding(&mut self, active: bool) {
+        self.rewinding = active;
+    }
+    pub fn is_rewinding(&self) -> bool {
+        self.rewinding
+    }
+    pub fn rewind_memory_usage(&self) -> usize {
+        self.rewind_buffer.memory_usage()
+    }
 }

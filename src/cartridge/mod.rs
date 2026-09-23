@@ -1,7 +1,5 @@
-/// Cartridge abstraction — all known Game Boy mappers.
-
-mod rom_only;
-mod rom_ram;
+mod huc1;
+mod huc3;
 mod mbc1;
 mod mbc2;
 mod mbc3;
@@ -9,13 +7,14 @@ mod mbc5;
 mod mbc6;
 mod mbc7;
 mod mmm01;
-mod huc1;
-mod huc3;
-mod tama5;
 mod pocket_camera;
+/// Cartridge abstraction — all known Game Boy mappers.
+mod rom_only;
+mod rom_ram;
+mod tama5;
 
-use rom_only::RomOnly;
-use rom_ram::RomRam;
+use huc1::HuC1;
+use huc3::HuC3;
 use mbc1::Mbc1;
 use mbc2::Mbc2;
 use mbc3::Mbc3;
@@ -23,10 +22,10 @@ use mbc5::Mbc5;
 use mbc6::Mbc6;
 use mbc7::Mbc7;
 use mmm01::Mmm01;
-use huc1::HuC1;
-use huc3::HuC3;
-use tama5::Tama5;
 use pocket_camera::PocketCamera;
+use rom_only::RomOnly;
+use rom_ram::RomRam;
+use tama5::Tama5;
 
 use std::sync::Arc;
 
@@ -37,28 +36,46 @@ pub trait Cartridge: Send {
     fn write_rom(&mut self, addr: u16, val: u8);
     fn read_ram(&self, addr: u16) -> u8;
     fn write_ram(&mut self, addr: u16, val: u8);
-    fn has_battery(&self) -> bool { false }
-    fn ram_data(&self) -> &[u8] { &[] }
+    fn has_battery(&self) -> bool {
+        false
+    }
+    fn ram_data(&self) -> &[u8] {
+        &[]
+    }
     /// Returns save data (may include extra metadata like RTC state).
-    fn save_data(&self) -> Vec<u8> { self.ram_data().to_vec() }
+    fn save_data(&self) -> Vec<u8> {
+        self.ram_data().to_vec()
+    }
     fn load_ram(&mut self, _data: &[u8]) {}
     /// Returns true if this cartridge has a camera sensor (Pocket Camera).
-    fn has_camera(&self) -> bool { false }
+    fn has_camera(&self) -> bool {
+        false
+    }
     /// Feed a 128×112 grayscale image from a webcam into the camera sensor.
     fn set_camera_image(&mut self, _grayscale: &[u8; 128 * 112]) {}
     /// Returns true if this cartridge has a rumble motor (MBC5+Rumble).
-    fn has_rumble(&self) -> bool { false }
+    fn has_rumble(&self) -> bool {
+        false
+    }
     /// Returns true if the rumble motor is currently on.
-    fn rumble_active(&self) -> bool { false }
+    fn rumble_active(&self) -> bool {
+        false
+    }
     /// Returns true if rumble was active at any point since the last call, then clears
     /// the latch. Call once per frame to check for rumble pulses.
-    fn drain_rumble(&mut self) -> bool { false }
+    fn drain_rumble(&mut self) -> bool {
+        false
+    }
     /// Returns true if this cartridge has an accelerometer (MBC7).
-    fn has_accelerometer(&self) -> bool { false }
+    fn has_accelerometer(&self) -> bool {
+        false
+    }
     /// Feed accelerometer values in MBC7 u16 format (center = 0x81D0).
     fn set_accelerometer(&mut self, _x: u16, _y: u16) {}
     /// Snapshot mutable cartridge state (registers + RAM, not ROM) for save states / rewind.
-    fn snapshot_state(&self) -> Vec<u8> { Vec::new() }
+    fn snapshot_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
     /// Restore mutable cartridge state from a previous snapshot.
     fn restore_state(&mut self, _data: &[u8]) {}
 }
@@ -72,7 +89,7 @@ pub fn make_cartridge(rom: Arc<[u8]>, clock: Arc<dyn Clock>) -> Box<dyn Cartridg
         0x03 => 0x8000,
         0x04 => 0x20000,
         0x05 => 0x10000,
-        _    => 0,
+        _ => 0,
     };
 
     log::info!(

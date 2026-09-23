@@ -10,13 +10,15 @@ const DEFAULT_PALETTE: [u16; 4] = [0x67BF, 0x265B, 0x10B5, 0x2866];
 
 /// Serde helpers for large boxed arrays that exceed serde's default array limit.
 mod serde_boxed_u16_2048 {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &Box<[u16; 2048]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u16; 2048]>, D::Error> {
         let v: Vec<u16> = Vec::deserialize(de)?;
-        if v.len() != 2048 { return Err(serde::de::Error::custom("expected 2048 u16")); }
+        if v.len() != 2048 {
+            return Err(serde::de::Error::custom("expected 2048 u16"));
+        }
         let mut arr = Box::new([0u16; 2048]);
         arr.copy_from_slice(&v);
         Ok(arr)
@@ -24,14 +26,16 @@ mod serde_boxed_u16_2048 {
 }
 
 mod serde_boxed_attr_files {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &Box<[[u8; 90]; 45]>, ser: S) -> Result<S::Ok, S::Error> {
         let flat: Vec<u8> = data.iter().flat_map(|a| a.iter().copied()).collect();
         flat.serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[[u8; 90]; 45]>, D::Error> {
         let flat: Vec<u8> = Vec::deserialize(de)?;
-        if flat.len() != 90 * 45 { return Err(serde::de::Error::custom("expected 4050 bytes")); }
+        if flat.len() != 90 * 45 {
+            return Err(serde::de::Error::custom("expected 4050 bytes"));
+        }
         let mut arr = Box::new([[0u8; 90]; 45]);
         for (i, chunk) in flat.chunks_exact(90).enumerate() {
             arr[i].copy_from_slice(chunk);
@@ -41,13 +45,15 @@ mod serde_boxed_attr_files {
 }
 
 mod serde_boxed_u8_8192 {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &Box<[u8; 8192]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u8; 8192]>, D::Error> {
         let v: Vec<u8> = Vec::deserialize(de)?;
-        if v.len() != 8192 { return Err(serde::de::Error::custom("expected 8192 bytes")); }
+        if v.len() != 8192 {
+            return Err(serde::de::Error::custom("expected 8192 bytes"));
+        }
         let mut arr = Box::new([0u8; 8192]);
         arr.copy_from_slice(&v);
         Ok(arr)
@@ -55,13 +61,15 @@ mod serde_boxed_u8_8192 {
 }
 
 mod serde_boxed_u16_896 {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(data: &Box<[u16; 896]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Box<[u16; 896]>, D::Error> {
         let v: Vec<u16> = Vec::deserialize(de)?;
-        if v.len() != 896 { return Err(serde::de::Error::custom("expected 896 u16")); }
+        if v.len() != 896 {
+            return Err(serde::de::Error::custom("expected 896 u16"));
+        }
         let mut arr = Box::new([0u16; 896]);
         arr.copy_from_slice(&v);
         Ok(arr)
@@ -335,7 +343,12 @@ impl Sgb {
             return;
         }
         let cmd = (self.packet_buf[0] >> 3) & 0x1F;
-        log::debug!("SGB command 0x{:02X} ({} packets, {} bytes)", cmd, self.expected_packets, self.packet_buf.len());
+        log::debug!(
+            "SGB command 0x{:02X} ({} packets, {} bytes)",
+            cmd,
+            self.expected_packets,
+            self.packet_buf.len()
+        );
 
         if cmd > 0x17 {
             // Invalid command — likely false positive from joypad polling
@@ -376,7 +389,9 @@ impl Sgb {
     // ── Palette commands ──
 
     fn read_color(&self, offset: usize) -> u16 {
-        if offset + 1 >= self.packet_buf.len() { return 0; }
+        if offset + 1 >= self.packet_buf.len() {
+            return 0;
+        }
         self.packet_buf[offset] as u16 | ((self.packet_buf[offset + 1] as u16) << 8)
     }
 
@@ -449,7 +464,9 @@ impl Sgb {
         let count = self.packet_buf[1] as usize;
         for i in 0..count {
             let base = 2 + i * 6;
-            if base + 5 >= self.packet_buf.len() { break; }
+            if base + 5 >= self.packet_buf.len() {
+                break;
+            }
 
             let ctrl = self.packet_buf[base];
             let pal_data = self.packet_buf[base + 1];
@@ -511,7 +528,9 @@ impl Sgb {
         let count = self.packet_buf[1] as usize;
         for i in 0..count {
             let idx = 2 + i;
-            if idx >= self.packet_buf.len() { break; }
+            if idx >= self.packet_buf.len() {
+                break;
+            }
 
             let data = self.packet_buf[idx];
             let line = (data & 0x1F) as usize;
@@ -573,19 +592,29 @@ impl Sgb {
 
         // Data starts at byte 6, packed 2 bits per tile (4 tiles per byte)
         for i in 0..count as usize {
-            if ty >= 18 || tx >= 20 { break; }
+            if ty >= 18 || tx >= 20 {
+                break;
+            }
             let byte_idx = 6 + i / 4;
-            if byte_idx >= self.packet_buf.len() { break; }
+            if byte_idx >= self.packet_buf.len() {
+                break;
+            }
             let shift = (3 - (i % 4)) * 2;
             let pal = (self.packet_buf[byte_idx] >> shift) & 0x03;
             self.attr_map[ty][tx] = pal;
 
             if horizontal {
                 tx += 1;
-                if tx >= 20 { tx = 0; ty += 1; }
+                if tx >= 20 {
+                    tx = 0;
+                    ty += 1;
+                }
             } else {
                 ty += 1;
-                if ty >= 18 { ty = 0; tx += 1; }
+                if ty >= 18 {
+                    ty = 0;
+                    tx += 1;
+                }
             }
         }
     }
@@ -593,8 +622,8 @@ impl Sgb {
     /// PAL_SET: Select system palettes + optional attribute file
     fn cmd_pal_set(&mut self) {
         for i in 0..4 {
-            let idx = self.packet_buf[1 + i * 2] as usize
-                | ((self.packet_buf[2 + i * 2] as usize) << 8);
+            let idx =
+                self.packet_buf[1 + i * 2] as usize | ((self.packet_buf[2 + i * 2] as usize) << 8);
             let pal_idx = idx & 0x1FF;
             let base = pal_idx * 4;
             for c in 0..4 {
@@ -602,10 +631,15 @@ impl Sgb {
                     self.palettes[i][c] = self.sys_palettes[base + c];
                 }
             }
-            log::debug!("SGB PAL_SET: pal[{}] = sys[{}] = [{:04X},{:04X},{:04X},{:04X}]",
-                i, pal_idx,
-                self.palettes[i][0], self.palettes[i][1],
-                self.palettes[i][2], self.palettes[i][3]);
+            log::debug!(
+                "SGB PAL_SET: pal[{}] = sys[{}] = [{:04X},{:04X},{:04X},{:04X}]",
+                i,
+                pal_idx,
+                self.palettes[i][0],
+                self.palettes[i][1],
+                self.palettes[i][2],
+                self.palettes[i][3]
+            );
         }
         // Byte 9 bit 7: also apply attribute file
         let attr_byte = self.packet_buf[9];
@@ -664,7 +698,11 @@ impl Sgb {
     fn cmd_attr_set(&mut self) {
         let file_idx = (self.packet_buf[1] & 0x3F) as usize;
         let cancel_mask = self.packet_buf[1] & 0x40 != 0;
-        log::debug!("SGB ATTR_SET: file={} cancel_mask={}", file_idx, cancel_mask);
+        log::debug!(
+            "SGB ATTR_SET: file={} cancel_mask={}",
+            file_idx,
+            cancel_mask
+        );
         self.apply_attr_file(file_idx);
         if cancel_mask {
             self.mask_mode = 0;
@@ -701,7 +739,9 @@ impl Sgb {
     // ── Attribute file helpers ──
 
     fn apply_attr_file(&mut self, file_idx: usize) {
-        if file_idx >= 45 { return; }
+        if file_idx >= 45 {
+            return;
+        }
         let file = self.attr_files[file_idx];
         for i in 0..360 {
             let byte_idx = i / 4;
@@ -731,8 +771,8 @@ impl Sgb {
                 // PAL_TRN: 512 palettes × 4 colors × 2 bytes = 4096 bytes
                 for i in 0..2048 {
                     if i * 2 + 1 < vram_data.len() {
-                        self.sys_palettes[i] = vram_data[i * 2] as u16
-                            | ((vram_data[i * 2 + 1] as u16) << 8);
+                        self.sys_palettes[i] =
+                            vram_data[i * 2] as u16 | ((vram_data[i * 2 + 1] as u16) << 8);
                     }
                 }
                 log::debug!("SGB PAL_TRN: loaded system palettes");
@@ -752,8 +792,8 @@ impl Sgb {
                 // Tilemap at offset 0
                 for i in 0..896 {
                     if i * 2 + 1 < vram_data.len() {
-                        self.border_map[i] = vram_data[i * 2] as u16
-                            | ((vram_data[i * 2 + 1] as u16) << 8);
+                        self.border_map[i] =
+                            vram_data[i * 2] as u16 | ((vram_data[i * 2 + 1] as u16) << 8);
                     }
                 }
                 // Palettes at offset 0x800 (2048)
@@ -761,8 +801,8 @@ impl Sgb {
                     for col in 0..16 {
                         let off = 0x800 + pal * 32 + col * 2;
                         if off + 1 < vram_data.len() {
-                            self.border_palettes[pal][col] = vram_data[off] as u16
-                                | ((vram_data[off + 1] as u16) << 8);
+                            self.border_palettes[pal][col] =
+                                vram_data[off] as u16 | ((vram_data[off + 1] as u16) << 8);
                         }
                     }
                 }
@@ -874,10 +914,26 @@ impl Sgb {
                     let row = if y_flip { 7 - ty } else { ty };
                     let tile_base = tile_idx * 32;
                     // SNES 4bpp planar: bytes 0-15 = low 2 planes, bytes 16-31 = high 2 planes
-                    let bp0 = self.border_tiles.get(tile_base + row * 2).copied().unwrap_or(0);
-                    let bp1 = self.border_tiles.get(tile_base + row * 2 + 1).copied().unwrap_or(0);
-                    let bp2 = self.border_tiles.get(tile_base + 16 + row * 2).copied().unwrap_or(0);
-                    let bp3 = self.border_tiles.get(tile_base + 16 + row * 2 + 1).copied().unwrap_or(0);
+                    let bp0 = self
+                        .border_tiles
+                        .get(tile_base + row * 2)
+                        .copied()
+                        .unwrap_or(0);
+                    let bp1 = self
+                        .border_tiles
+                        .get(tile_base + row * 2 + 1)
+                        .copied()
+                        .unwrap_or(0);
+                    let bp2 = self
+                        .border_tiles
+                        .get(tile_base + 16 + row * 2)
+                        .copied()
+                        .unwrap_or(0);
+                    let bp3 = self
+                        .border_tiles
+                        .get(tile_base + 16 + row * 2 + 1)
+                        .copied()
+                        .unwrap_or(0);
 
                     for tx_px in 0..8usize {
                         let bit = if x_flip { tx_px } else { 7 - tx_px };

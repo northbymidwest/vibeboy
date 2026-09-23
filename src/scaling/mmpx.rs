@@ -63,12 +63,12 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 
             // 3x3 neighborhood
             let a = get(src, src_w, src_h, ix - 1, iy - 1);
-            let b = get(src, src_w, src_h, ix,     iy - 1);
+            let b = get(src, src_w, src_h, ix, iy - 1);
             let c = get(src, src_w, src_h, ix + 1, iy - 1);
             let d = get(src, src_w, src_h, ix - 1, iy);
             let f = get(src, src_w, src_h, ix + 1, iy);
             let g = get(src, src_w, src_h, ix - 1, iy + 1);
-            let h = get(src, src_w, src_h, ix,     iy + 1);
+            let h = get(src, src_w, src_h, ix, iy + 1);
             let i = get(src, src_w, src_h, ix + 1, iy + 1);
 
             // Default: nearest neighbor
@@ -78,14 +78,13 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let mut m = e;
 
             // Early exit if neighborhood is uniform
-            if ((a ^ e) | (b ^ e) | (c ^ e) | (d ^ e) |
-                (f ^ e) | (g ^ e) | (h ^ e) | (i ^ e)) != 0
+            if ((a ^ e) | (b ^ e) | (c ^ e) | (d ^ e) | (f ^ e) | (g ^ e) | (h ^ e) | (i ^ e)) != 0
             {
                 // Diamond points
-                let p = get(src, src_w, src_h, ix,     iy - 2);
+                let p = get(src, src_w, src_h, ix, iy - 2);
                 let q = get(src, src_w, src_h, ix - 2, iy);
                 let r = get(src, src_w, src_h, ix + 2, iy);
-                let s = get(src, src_w, src_h, ix,     iy + 2);
+                let s = get(src, src_w, src_h, ix, iy + 2);
 
                 // Luma values for tie-breaking
                 let bl = luma(b);
@@ -97,7 +96,9 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                 // ── 1:1 slope rules ──
 
                 // J (top-left)
-                if d == b && d != h && d != f
+                if d == b
+                    && d != h
+                    && d != f
                     && (el >= dl || e == a)
                     && any_eq3(e, a, c, g)
                     && (el < dl || a != d || e != p || e != q)
@@ -106,7 +107,9 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                 }
 
                 // K (top-right)
-                if b == f && b != d && b != h
+                if b == f
+                    && b != d
+                    && b != h
                     && (el >= bl || e == c)
                     && any_eq3(e, a, c, i)
                     && (el < bl || c != b || e != p || e != r)
@@ -115,7 +118,9 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                 }
 
                 // L (bottom-left)
-                if h == d && h != f && h != b
+                if h == d
+                    && h != f
+                    && h != b
                     && (el >= hl || e == g)
                     && any_eq3(e, a, g, i)
                     && (el < hl || g != h || e != s || e != q)
@@ -124,7 +129,9 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
                 }
 
                 // M (bottom-right)
-                if f == h && f != b && f != d
+                if f == h
+                    && f != b
+                    && f != d
                     && (el >= fl || e == i)
                     && any_eq3(e, c, g, i)
                     && (el < fl || i != h || e != r || e != s)
@@ -134,46 +141,62 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 
                 // ── Intersection rules (structural) ──
 
-                if e != f && all_eq4(e, c, i, d, q) && all_eq2(f, b, h)
+                if e != f
+                    && all_eq4(e, c, i, d, q)
+                    && all_eq2(f, b, h)
                     && f != get(src, src_w, src_h, ix + 3, iy)
                 {
-                    k = f; m = f;
+                    k = f;
+                    m = f;
                 }
 
-                if e != d && all_eq4(e, a, g, f, r) && all_eq2(d, b, h)
+                if e != d
+                    && all_eq4(e, a, g, f, r)
+                    && all_eq2(d, b, h)
                     && d != get(src, src_w, src_h, ix - 3, iy)
                 {
-                    j = d; l = d;
+                    j = d;
+                    l = d;
                 }
 
-                if e != h && all_eq4(e, g, i, b, p) && all_eq2(h, d, f)
+                if e != h
+                    && all_eq4(e, g, i, b, p)
+                    && all_eq2(h, d, f)
                     && h != get(src, src_w, src_h, ix, iy + 3)
                 {
-                    l = h; m = h;
+                    l = h;
+                    m = h;
                 }
 
-                if e != b && all_eq4(e, a, c, h, s) && all_eq2(b, d, f)
+                if e != b
+                    && all_eq4(e, a, c, h, s)
+                    && all_eq2(b, d, f)
                     && b != get(src, src_w, src_h, ix, iy - 3)
                 {
-                    j = b; k = b;
+                    j = b;
+                    k = b;
                 }
 
                 // ── Intersection rules (triangle tip) ──
 
                 if bl < el && all_eq4(e, g, h, i, s) && none_eq4(e, a, d, c, f) {
-                    j = b; k = b;
+                    j = b;
+                    k = b;
                 }
 
                 if hl < el && all_eq4(e, a, b, c, p) && none_eq4(e, d, g, i, f) {
-                    l = h; m = h;
+                    l = h;
+                    m = h;
                 }
 
                 if fl < el && all_eq4(e, a, d, g, q) && none_eq4(e, b, c, i, h) {
-                    k = f; m = f;
+                    k = f;
+                    m = f;
                 }
 
                 if dl < el && all_eq4(e, c, f, i, r) && none_eq4(e, b, a, g, h) {
-                    j = d; l = d;
+                    j = d;
+                    l = d;
                 }
 
                 // ── 2:1 slope rules ──

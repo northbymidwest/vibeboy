@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use super::Cartridge;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq)]
 enum EepromState {
@@ -177,7 +177,10 @@ impl Cartridge for Mbc7 {
             0x4000..=0x7FFF => self.rom_bank * 0x4000 + (addr as usize - 0x4000),
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
@@ -185,7 +188,9 @@ impl Cartridge for Mbc7 {
             0x0000..=0x1FFF => self.enable_a = val == 0x0A,
             0x2000..=0x3FFF => {
                 self.rom_bank = (val as usize) & 0xFF;
-                if self.rom_bank == 0 { self.rom_bank = 1; }
+                if self.rom_bank == 0 {
+                    self.rom_bank = 1;
+                }
             }
             0x4000..=0x5FFF => self.enable_b = val == 0x40,
             _ => {}
@@ -193,7 +198,9 @@ impl Cartridge for Mbc7 {
     }
 
     fn read_ram(&self, addr: u16) -> u8 {
-        if !self.enable_a || !self.enable_b { return 0xFF; }
+        if !self.enable_a || !self.enable_b {
+            return 0xFF;
+        }
         match (addr >> 4) & 0x0F {
             0x0 | 0x1 => 0, // write-only
             0x2 => self.accel_x as u8,
@@ -202,14 +209,20 @@ impl Cartridge for Mbc7 {
             0x5 => (self.accel_y >> 8) as u8,
             0x6 => 0x00,
             0x7 => 0xFF,
-            0x8 => (self.eeprom_do as u8) | ((self.eeprom_di as u8) << 1) |
-                   ((self.eeprom_clk as u8) << 6) | ((self.eeprom_cs as u8) << 7),
+            0x8 => {
+                (self.eeprom_do as u8)
+                    | ((self.eeprom_di as u8) << 1)
+                    | ((self.eeprom_clk as u8) << 6)
+                    | ((self.eeprom_cs as u8) << 7)
+            }
             _ => 0xFF,
         }
     }
 
     fn write_ram(&mut self, addr: u16, val: u8) {
-        if !self.enable_a || !self.enable_b { return; }
+        if !self.enable_a || !self.enable_b {
+            return;
+        }
         match (addr >> 4) & 0x0F {
             0x0 => {
                 if val == 0x55 {
@@ -247,8 +260,12 @@ impl Cartridge for Mbc7 {
         }
     }
 
-    fn has_battery(&self) -> bool { true }
-    fn has_accelerometer(&self) -> bool { true }
+    fn has_battery(&self) -> bool {
+        true
+    }
+    fn has_accelerometer(&self) -> bool {
+        true
+    }
     fn set_accelerometer(&mut self, x: u16, y: u16) {
         self.sensor_x = x;
         self.sensor_y = y;
@@ -295,16 +312,18 @@ impl Cartridge for Mbc7 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 7 + 256 + 10 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
+        if d.len() < 7 + 256 + 10 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
         self.enable_a = d[4] != 0;
         self.enable_b = d[5] != 0;
         self.accel_latched = d[6] != 0;
-        self.accel_x = u16::from_le_bytes([d[7],d[8]]);
-        self.accel_y = u16::from_le_bytes([d[9],d[10]]);
+        self.accel_x = u16::from_le_bytes([d[7], d[8]]);
+        self.accel_y = u16::from_le_bytes([d[9], d[10]]);
         let ee = &d[11..];
         for i in 0..128 {
-            self.eeprom[i] = u16::from_le_bytes([ee[i*2], ee[i*2+1]]);
+            self.eeprom[i] = u16::from_le_bytes([ee[i * 2], ee[i * 2 + 1]]);
         }
         let r = &ee[256..];
         if r.len() >= 10 {
@@ -321,9 +340,11 @@ impl Cartridge for Mbc7 {
             };
             self.eeprom_cmd = r[5];
             self.eeprom_addr = r[6];
-            self.eeprom_shift = u16::from_le_bytes([r[7],r[8]]);
+            self.eeprom_shift = u16::from_le_bytes([r[7], r[8]]);
             self.eeprom_bit_count = r[9];
-            if r.len() > 10 { self.eeprom_write_enable = r[10] != 0; }
+            if r.len() > 10 {
+                self.eeprom_write_enable = r[10] != 0;
+            }
         }
     }
 }

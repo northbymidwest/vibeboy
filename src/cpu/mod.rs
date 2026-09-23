@@ -1,6 +1,6 @@
 mod registers;
-pub use registers::Registers;
 use crate::bus::Bus;
+pub use registers::Registers;
 
 /// One M-cycle operation returned by `Cpu::mcycle()`.
 /// The emulator loop services each op using the bus, then calls `mcycle()` again.
@@ -35,7 +35,6 @@ pub struct Cpu {
     pub speed_switch_toggle_at: u32,
 
     // ── M-cycle state machine fields ──────────────────────────────────────────
-
     /// Current opcode being executed.
     #[serde(default)]
     pub(crate) opcode: u8,
@@ -184,14 +183,20 @@ impl Cpu {
                 self.regs.sp = self.regs.sp.wrapping_sub(1);
                 let val = (self.regs.pc >> 8) as u8;
                 self.interrupt_phase = 3;
-                McycleOp::Write { addr: self.regs.sp, val }
+                McycleOp::Write {
+                    addr: self.regs.sp,
+                    val,
+                }
             }
             3 => {
                 // Push PC low byte
                 self.regs.sp = self.regs.sp.wrapping_sub(1);
                 let val = (self.regs.pc & 0xFF) as u8;
                 self.interrupt_phase = 4;
-                McycleOp::Write { addr: self.regs.sp, val }
+                McycleOp::Write {
+                    addr: self.regs.sp,
+                    val,
+                }
             }
             4 => {
                 // Vector fetch (internal) — emulator has set tmp16 to the vector address
@@ -400,7 +405,10 @@ impl Cpu {
             3 => self.regs.e = val,
             4 => self.regs.h = val,
             5 => self.regs.l = val,
-            6 => { bus.write_byte(self.regs.hl(), val); bus.tick_mcycle(); }
+            6 => {
+                bus.write_byte(self.regs.hl(), val);
+                bus.tick_mcycle();
+            }
             7 => self.regs.a = val,
             _ => unreachable!(),
         }
@@ -479,8 +487,12 @@ impl Cpu {
         let z = result == 0;
         let h = (val & 0xF) == 0xF;
         self.regs.f &= 0x10;
-        if z { self.regs.f |= 0x80; }
-        if h { self.regs.f |= 0x20; }
+        if z {
+            self.regs.f |= 0x80;
+        }
+        if h {
+            self.regs.f |= 0x20;
+        }
         result
     }
 
@@ -490,8 +502,12 @@ impl Cpu {
         let h = (val & 0xF) == 0x0;
         self.regs.f &= 0x10;
         self.regs.f |= 0x40;
-        if z { self.regs.f |= 0x80; }
-        if h { self.regs.f |= 0x20; }
+        if z {
+            self.regs.f |= 0x80;
+        }
+        if h {
+            self.regs.f |= 0x20;
+        }
         result
     }
 
@@ -502,8 +518,12 @@ impl Cpu {
         let h = (hl & 0xFFF) + (v & 0xFFF) > 0xFFF;
         let c = result > 0xFFFF;
         self.regs.f &= 0x80;
-        if h { self.regs.f |= 0x20; }
-        if c { self.regs.f |= 0x10; }
+        if h {
+            self.regs.f |= 0x20;
+        }
+        if c {
+            self.regs.f |= 0x10;
+        }
         self.regs.set_hl(result as u16);
     }
 
@@ -578,9 +598,9 @@ impl Cpu {
     fn check_condition(&self, cc: u8) -> bool {
         match cc {
             0 => !self.regs.flag_z(), // NZ
-            1 => self.regs.flag_z(),   // Z
+            1 => self.regs.flag_z(),  // Z
             2 => !self.regs.flag_c(), // NC
-            3 => self.regs.flag_c(),   // C
+            3 => self.regs.flag_c(),  // C
             _ => unreachable!(),
         }
     }
@@ -633,53 +653,55 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             0x02 => {
                 // LD (BC), A
-                self.finish_with(McycleOp::Write { addr: self.regs.bc(), val: self.regs.a })
+                self.finish_with(McycleOp::Write {
+                    addr: self.regs.bc(),
+                    val: self.regs.a,
+                })
             }
             0x12 => {
                 // LD (DE), A
-                self.finish_with(McycleOp::Write { addr: self.regs.de(), val: self.regs.a })
+                self.finish_with(McycleOp::Write {
+                    addr: self.regs.de(),
+                    val: self.regs.a,
+                })
             }
 
             // ══════════════════════════════════════════════════════════════════
             // INC r16 / DEC r16 — 2 M-cycles: fetch, internal
             // 0x03/0x13/0x23/0x33 = INC, 0x0B/0x1B/0x2B/0x3B = DEC
             // ══════════════════════════════════════════════════════════════════
-            0x03 | 0x13 | 0x23 | 0x33 => {
-                match self.phase {
-                    2 => {
-                        let rp = (op >> 4) & 0x03;
-                        let v = self.r16(rp);
-                        self.oam_bug_addr = Some(v);
-                        self.tmp16 = v.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => {
-                        let rp = (op >> 4) & 0x03;
-                        self.set_r16(rp, self.tmp16);
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0x03 | 0x13 | 0x23 | 0x33 => match self.phase {
+                2 => {
+                    let rp = (op >> 4) & 0x03;
+                    let v = self.r16(rp);
+                    self.oam_bug_addr = Some(v);
+                    self.tmp16 = v.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Internal
                 }
-            }
-            0x0B | 0x1B | 0x2B | 0x3B => {
-                match self.phase {
-                    2 => {
-                        let rp = (op >> 4) & 0x03;
-                        let v = self.r16(rp);
-                        self.oam_bug_addr = Some(v);
-                        self.tmp16 = v.wrapping_sub(1);
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => {
-                        let rp = (op >> 4) & 0x03;
-                        self.set_r16(rp, self.tmp16);
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+                3 => {
+                    let rp = (op >> 4) & 0x03;
+                    self.set_r16(rp, self.tmp16);
+                    self.finish_instruction()
                 }
-            }
+                _ => unreachable!(),
+            },
+            0x0B | 0x1B | 0x2B | 0x3B => match self.phase {
+                2 => {
+                    let rp = (op >> 4) & 0x03;
+                    let v = self.r16(rp);
+                    self.oam_bug_addr = Some(v);
+                    self.tmp16 = v.wrapping_sub(1);
+                    self.phase = 3;
+                    McycleOp::Internal
+                }
+                3 => {
+                    let rp = (op >> 4) & 0x03;
+                    self.set_r16(rp, self.tmp16);
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // INC r8 / DEC r8 — 1 M-cycle for registers, 3 for (HL)
@@ -692,12 +714,17 @@ impl Cpu {
                     match self.phase {
                         2 => {
                             self.phase = 3;
-                            McycleOp::Read { addr: self.regs.hl() }
+                            McycleOp::Read {
+                                addr: self.regs.hl(),
+                            }
                         }
                         3 => {
                             let r = self.inc8(self.data_latch);
                             self.phase = 4;
-                            McycleOp::Write { addr: self.regs.hl(), val: r }
+                            McycleOp::Write {
+                                addr: self.regs.hl(),
+                                val: r,
+                            }
                         }
                         4 => self.finish_instruction(),
                         _ => unreachable!(),
@@ -716,12 +743,17 @@ impl Cpu {
                     match self.phase {
                         2 => {
                             self.phase = 3;
-                            McycleOp::Read { addr: self.regs.hl() }
+                            McycleOp::Read {
+                                addr: self.regs.hl(),
+                            }
                         }
                         3 => {
                             let r = self.dec8(self.data_latch);
                             self.phase = 4;
-                            McycleOp::Write { addr: self.regs.hl(), val: r }
+                            McycleOp::Write {
+                                addr: self.regs.hl(),
+                                val: r,
+                            }
                         }
                         4 => self.finish_instruction(),
                         _ => unreachable!(),
@@ -740,12 +772,17 @@ impl Cpu {
                 match self.phase {
                     2 => {
                         self.phase = 3;
-                        McycleOp::Read { addr: self.regs.hl() }
+                        McycleOp::Read {
+                            addr: self.regs.hl(),
+                        }
                     }
                     3 => {
                         let r = self.inc8(self.data_latch);
                         self.phase = 4;
-                        McycleOp::Write { addr: self.regs.hl(), val: r }
+                        McycleOp::Write {
+                            addr: self.regs.hl(),
+                            val: r,
+                        }
                     }
                     4 => self.finish_instruction(),
                     _ => unreachable!(),
@@ -756,12 +793,17 @@ impl Cpu {
                 match self.phase {
                     2 => {
                         self.phase = 3;
-                        McycleOp::Read { addr: self.regs.hl() }
+                        McycleOp::Read {
+                            addr: self.regs.hl(),
+                        }
                     }
                     3 => {
                         let r = self.dec8(self.data_latch);
                         self.phase = 4;
-                        McycleOp::Write { addr: self.regs.hl(), val: r }
+                        McycleOp::Write {
+                            addr: self.regs.hl(),
+                            val: r,
+                        }
                     }
                     4 => self.finish_instruction(),
                     _ => unreachable!(),
@@ -803,7 +845,10 @@ impl Cpu {
                     3 => {
                         self.tmp8 = self.data_latch;
                         self.phase = 4;
-                        McycleOp::Write { addr: self.regs.hl(), val: self.tmp8 }
+                        McycleOp::Write {
+                            addr: self.regs.hl(),
+                            val: self.tmp8,
+                        }
                     }
                     4 => self.finish_instruction(),
                     _ => unreachable!(),
@@ -865,11 +910,17 @@ impl Cpu {
                     4 => {
                         self.tmp16 = (self.data_latch as u16) << 8 | self.tmp8 as u16;
                         self.phase = 5;
-                        McycleOp::Write { addr: self.tmp16, val: (self.regs.sp & 0xFF) as u8 }
+                        McycleOp::Write {
+                            addr: self.tmp16,
+                            val: (self.regs.sp & 0xFF) as u8,
+                        }
                     }
                     5 => {
                         self.phase = 6;
-                        McycleOp::Write { addr: self.tmp16.wrapping_add(1), val: (self.regs.sp >> 8) as u8 }
+                        McycleOp::Write {
+                            addr: self.tmp16.wrapping_add(1),
+                            val: (self.regs.sp >> 8) as u8,
+                        }
                     }
                     6 => self.finish_instruction(),
                     _ => unreachable!(),
@@ -879,49 +930,47 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // ADD HL, r16 — 2 M-cycles: fetch, internal
             // ══════════════════════════════════════════════════════════════════
-            0x09 | 0x19 | 0x29 | 0x39 => {
-                match self.phase {
-                    2 => {
-                        let rp = (op >> 4) & 0x03;
-                        let v = self.r16(rp);
-                        self.add_hl(v);
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0x09 | 0x19 | 0x29 | 0x39 => match self.phase {
+                2 => {
+                    let rp = (op >> 4) & 0x03;
+                    let v = self.r16(rp);
+                    self.add_hl(v);
+                    self.phase = 3;
+                    McycleOp::Internal
                 }
-            }
+                3 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LD A, (BC) / LD A, (DE) — 2 M-cycles: fetch, read
             // ══════════════════════════════════════════════════════════════════
-            0x0A => {
-                match self.phase {
-                    2 => {
-                        self.phase = 3;
-                        McycleOp::Read { addr: self.regs.bc() }
+            0x0A => match self.phase {
+                2 => {
+                    self.phase = 3;
+                    McycleOp::Read {
+                        addr: self.regs.bc(),
                     }
-                    3 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
                 }
-            }
-            0x1A => {
-                match self.phase {
-                    2 => {
-                        self.phase = 3;
-                        McycleOp::Read { addr: self.regs.de() }
-                    }
-                    3 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+                3 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
                 }
-            }
+                _ => unreachable!(),
+            },
+            0x1A => match self.phase {
+                2 => {
+                    self.phase = 3;
+                    McycleOp::Read {
+                        addr: self.regs.de(),
+                    }
+                }
+                3 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // STOP — 2 M-cycles: fetch, read 0x00 arg
@@ -950,25 +999,23 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // JR e8 (unconditional) — 3 M-cycles: fetch, read offset, internal
             // ══════════════════════════════════════════════════════════════════
-            0x18 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.oam_bug_addr = Some(self.regs.pc);
-                        self.regs.pc = self.regs.pc.wrapping_add(self.tmp8 as i8 as u16);
-                        self.phase = 4;
-                        McycleOp::Internal
-                    }
-                    4 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0x18 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.oam_bug_addr = Some(self.regs.pc);
+                    self.regs.pc = self.regs.pc.wrapping_add(self.tmp8 as i8 as u16);
+                    self.phase = 4;
+                    McycleOp::Internal
+                }
+                4 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // JR cc, e8 — 2 M-cycles if not taken, 3 if taken
@@ -1005,55 +1052,60 @@ impl Cpu {
                 // LD (HL+), A
                 let hl = self.regs.hl();
                 self.regs.set_hl(hl.wrapping_add(1));
-                self.finish_with(McycleOp::Write { addr: hl, val: self.regs.a })
+                self.finish_with(McycleOp::Write {
+                    addr: hl,
+                    val: self.regs.a,
+                })
             }
             0x32 => {
                 // LD (HL-), A
                 let hl = self.regs.hl();
                 self.regs.set_hl(hl.wrapping_sub(1));
-                self.finish_with(McycleOp::Write { addr: hl, val: self.regs.a })
+                self.finish_with(McycleOp::Write {
+                    addr: hl,
+                    val: self.regs.a,
+                })
             }
 
             // ══════════════════════════════════════════════════════════════════
             // LD A, (HL+) / LD A, (HL-) — 2 M-cycles: fetch, read
             // ══════════════════════════════════════════════════════════════════
-            0x2A => {
-                match self.phase {
-                    2 => {
-                        let hl = self.regs.hl();
-                        self.oam_bug_read_addr = Some(hl);
-                        self.regs.set_hl(hl.wrapping_add(1));
-                        self.phase = 3;
-                        McycleOp::Read { addr: hl }
-                    }
-                    3 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0x2A => match self.phase {
+                2 => {
+                    let hl = self.regs.hl();
+                    self.oam_bug_read_addr = Some(hl);
+                    self.regs.set_hl(hl.wrapping_add(1));
+                    self.phase = 3;
+                    McycleOp::Read { addr: hl }
                 }
-            }
-            0x3A => {
-                match self.phase {
-                    2 => {
-                        let hl = self.regs.hl();
-                        self.oam_bug_read_addr = Some(hl);
-                        self.regs.set_hl(hl.wrapping_sub(1));
-                        self.phase = 3;
-                        McycleOp::Read { addr: hl }
-                    }
-                    3 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+                3 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
                 }
-            }
+                _ => unreachable!(),
+            },
+            0x3A => match self.phase {
+                2 => {
+                    let hl = self.regs.hl();
+                    self.oam_bug_read_addr = Some(hl);
+                    self.regs.set_hl(hl.wrapping_sub(1));
+                    self.phase = 3;
+                    McycleOp::Read { addr: hl }
+                }
+                3 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // DAA, CPL, SCF, CCF — 1 M-cycle (fetch only)
             // ══════════════════════════════════════════════════════════════════
-            0x27 => { self.daa(); self.finish_instruction() }
+            0x27 => {
+                self.daa();
+                self.finish_instruction()
+            }
             0x2F => {
                 self.regs.a = !self.regs.a;
                 self.regs.f |= 0x60;
@@ -1083,7 +1135,9 @@ impl Cpu {
                     match self.phase {
                         2 => {
                             self.phase = 3;
-                            McycleOp::Read { addr: self.regs.hl() }
+                            McycleOp::Read {
+                                addr: self.regs.hl(),
+                            }
                         }
                         3 => {
                             self.set_reg(dst, self.data_latch);
@@ -1097,7 +1151,10 @@ impl Cpu {
                         2 => {
                             let val = self.get_reg(src);
                             self.phase = 3;
-                            McycleOp::Write { addr: self.regs.hl(), val }
+                            McycleOp::Write {
+                                addr: self.regs.hl(),
+                                val,
+                            }
                         }
                         3 => self.finish_instruction(),
                         _ => unreachable!(),
@@ -1147,7 +1204,9 @@ impl Cpu {
                     match self.phase {
                         2 => {
                             self.phase = 3;
-                            McycleOp::Read { addr: self.regs.hl() }
+                            McycleOp::Read {
+                                addr: self.regs.hl(),
+                            }
                         }
                         3 => {
                             self.do_alu(alu_op, self.data_latch);
@@ -1277,31 +1336,29 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // JP a16 — 4 M-cycles: fetch, read lo, read hi, internal
             // ══════════════════════════════════════════════════════════════════
-            0xC3 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 4;
-                        McycleOp::Read { addr }
-                    }
-                    4 => {
-                        let hi = self.data_latch;
-                        self.regs.pc = (hi as u16) << 8 | self.tmp8 as u16;
-                        self.phase = 5;
-                        McycleOp::Internal
-                    }
-                    5 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xC3 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 4;
+                    McycleOp::Read { addr }
+                }
+                4 => {
+                    let hi = self.data_latch;
+                    self.regs.pc = (hi as u16) << 8 | self.tmp8 as u16;
+                    self.phase = 5;
+                    McycleOp::Internal
+                }
+                5 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // CALL cc, a16 — 3 M-cycles if not taken, 6 if taken
@@ -1338,14 +1395,20 @@ impl Cpu {
                         self.regs.sp = self.regs.sp.wrapping_sub(1);
                         let val = (self.regs.pc >> 8) as u8;
                         self.phase = 6;
-                        McycleOp::Write { addr: self.regs.sp, val }
+                        McycleOp::Write {
+                            addr: self.regs.sp,
+                            val,
+                        }
                     }
                     6 => {
                         // Push PC low byte
                         self.regs.sp = self.regs.sp.wrapping_sub(1);
                         let val = (self.regs.pc & 0xFF) as u8;
                         self.phase = 7;
-                        McycleOp::Write { addr: self.regs.sp, val }
+                        McycleOp::Write {
+                            addr: self.regs.sp,
+                            val,
+                        }
                     }
                     7 => {
                         self.regs.pc = self.tmp16;
@@ -1358,88 +1421,94 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // PUSH r16 — 4 M-cycles: fetch, internal, write hi, write lo
             // ══════════════════════════════════════════════════════════════════
-            0xC5 | 0xD5 | 0xE5 | 0xF5 => {
-                match self.phase {
-                    2 => {
-                        self.oam_bug_addr = Some(self.regs.sp);
-                        let rp = (op >> 4) & 0x03;
-                        self.tmp16 = match rp {
-                            0 => self.regs.bc(),
-                            1 => self.regs.de(),
-                            2 => self.regs.hl(),
-                            3 => self.regs.af(),
-                            _ => unreachable!(),
-                        };
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.tmp16 >> 8) as u8;
-                        self.phase = 4;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    4 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.tmp16 & 0xFF) as u8;
-                        self.phase = 5;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    5 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xC5 | 0xD5 | 0xE5 | 0xF5 => match self.phase {
+                2 => {
+                    self.oam_bug_addr = Some(self.regs.sp);
+                    let rp = (op >> 4) & 0x03;
+                    self.tmp16 = match rp {
+                        0 => self.regs.bc(),
+                        1 => self.regs.de(),
+                        2 => self.regs.hl(),
+                        3 => self.regs.af(),
+                        _ => unreachable!(),
+                    };
+                    self.phase = 3;
+                    McycleOp::Internal
                 }
-            }
+                3 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.tmp16 >> 8) as u8;
+                    self.phase = 4;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                4 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.tmp16 & 0xFF) as u8;
+                    self.phase = 5;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                5 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // ALU A, imm8 — 2 M-cycles: fetch, read imm
             // ══════════════════════════════════════════════════════════════════
-            0xC6 | 0xCE | 0xD6 | 0xDE | 0xE6 | 0xEE | 0xF6 | 0xFE => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        let alu_op = (op >> 3) & 0x07;
-                        self.do_alu(alu_op, self.data_latch);
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xC6 | 0xCE | 0xD6 | 0xDE | 0xE6 | 0xEE | 0xF6 | 0xFE => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    let alu_op = (op >> 3) & 0x07;
+                    self.do_alu(alu_op, self.data_latch);
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // RST vec — 4 M-cycles: fetch, internal, write hi, write lo
             // ══════════════════════════════════════════════════════════════════
-            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
-                match self.phase {
-                    2 => {
-                        self.oam_bug_addr = Some(self.regs.sp);
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.regs.pc >> 8) as u8;
-                        self.phase = 4;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    4 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.regs.pc & 0xFF) as u8;
-                        self.phase = 5;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    5 => {
-                        let vec = (op & 0x38) as u16;
-                        self.regs.pc = vec;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => match self.phase {
+                2 => {
+                    self.oam_bug_addr = Some(self.regs.sp);
+                    self.phase = 3;
+                    McycleOp::Internal
                 }
-            }
+                3 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.regs.pc >> 8) as u8;
+                    self.phase = 4;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                4 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.regs.pc & 0xFF) as u8;
+                    self.phase = 5;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                5 => {
+                    let vec = (op & 0x38) as u16;
+                    self.regs.pc = vec;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // RET — 4 M-cycles: fetch, read lo, read hi, internal
@@ -1476,35 +1545,33 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // RETI — 4 M-cycles (same as RET but enables IME)
             // ══════════════════════════════════════════════════════════════════
-            0xD9 => {
-                match self.phase {
-                    2 => {
-                        self.oam_bug_read_addr = Some(self.regs.sp);
-                        self.phase = 3;
-                        McycleOp::Read { addr: self.regs.sp }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.regs.sp = self.regs.sp.wrapping_add(1);
-                        self.oam_bug_read_addr = Some(self.regs.sp);
-                        self.phase = 4;
-                        McycleOp::Read { addr: self.regs.sp }
-                    }
-                    4 => {
-                        let hi = self.data_latch;
-                        self.regs.sp = self.regs.sp.wrapping_add(1);
-                        self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
-                        self.phase = 5;
-                        McycleOp::Internal
-                    }
-                    5 => {
-                        self.regs.pc = self.tmp16;
-                        self.ime = true;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xD9 => match self.phase {
+                2 => {
+                    self.oam_bug_read_addr = Some(self.regs.sp);
+                    self.phase = 3;
+                    McycleOp::Read { addr: self.regs.sp }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.regs.sp = self.regs.sp.wrapping_add(1);
+                    self.oam_bug_read_addr = Some(self.regs.sp);
+                    self.phase = 4;
+                    McycleOp::Read { addr: self.regs.sp }
+                }
+                4 => {
+                    let hi = self.data_latch;
+                    self.regs.sp = self.regs.sp.wrapping_add(1);
+                    self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
+                    self.phase = 5;
+                    McycleOp::Internal
+                }
+                5 => {
+                    self.regs.pc = self.tmp16;
+                    self.ime = true;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // CB prefix — multi-phase
@@ -1526,7 +1593,9 @@ impl Cpu {
                         if reg == 6 {
                             // Need to read (HL) first
                             self.phase = 4;
-                            McycleOp::Read { addr: self.regs.hl() }
+                            McycleOp::Read {
+                                addr: self.regs.hl(),
+                            }
                         } else {
                             // Direct register — execute and done
                             let val = self.get_reg(reg);
@@ -1549,7 +1618,10 @@ impl Cpu {
                         } else {
                             // Write result back to (HL)
                             self.phase = 5;
-                            McycleOp::Write { addr: self.regs.hl(), val: result }
+                            McycleOp::Write {
+                                addr: self.regs.hl(),
+                                val: result,
+                            }
                         }
                     }
                     5 => self.finish_instruction(),
@@ -1560,101 +1632,105 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // CALL a16 — 6 M-cycles: fetch, read lo, read hi, internal, push hi, push lo
             // ══════════════════════════════════════════════════════════════════
-            0xCD => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 4;
-                        McycleOp::Read { addr }
-                    }
-                    4 => {
-                        let hi = self.data_latch;
-                        self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
-                        self.oam_bug_addr = Some(self.regs.sp);
-                        self.phase = 5;
-                        McycleOp::Internal
-                    }
-                    5 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.regs.pc >> 8) as u8;
-                        self.phase = 6;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    6 => {
-                        self.regs.sp = self.regs.sp.wrapping_sub(1);
-                        let val = (self.regs.pc & 0xFF) as u8;
-                        self.phase = 7;
-                        McycleOp::Write { addr: self.regs.sp, val }
-                    }
-                    7 => {
-                        self.regs.pc = self.tmp16;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xCD => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 4;
+                    McycleOp::Read { addr }
+                }
+                4 => {
+                    let hi = self.data_latch;
+                    self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
+                    self.oam_bug_addr = Some(self.regs.sp);
+                    self.phase = 5;
+                    McycleOp::Internal
+                }
+                5 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.regs.pc >> 8) as u8;
+                    self.phase = 6;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                6 => {
+                    self.regs.sp = self.regs.sp.wrapping_sub(1);
+                    let val = (self.regs.pc & 0xFF) as u8;
+                    self.phase = 7;
+                    McycleOp::Write {
+                        addr: self.regs.sp,
+                        val,
+                    }
+                }
+                7 => {
+                    self.regs.pc = self.tmp16;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LDH (a8), A — 3 M-cycles: fetch, read imm, write
             // ══════════════════════════════════════════════════════════════════
-            0xE0 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.phase = 4;
-                        McycleOp::Write { addr: 0xFF00 | self.tmp8 as u16, val: self.regs.a }
-                    }
-                    4 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xE0 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.phase = 4;
+                    McycleOp::Write {
+                        addr: 0xFF00 | self.tmp8 as u16,
+                        val: self.regs.a,
+                    }
+                }
+                4 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LD (C), A — 2 M-cycles: fetch, write
             // ══════════════════════════════════════════════════════════════════
-            0xE2 => {
-                self.finish_with(McycleOp::Write { addr: 0xFF00 | self.regs.c as u16, val: self.regs.a })
-            }
+            0xE2 => self.finish_with(McycleOp::Write {
+                addr: 0xFF00 | self.regs.c as u16,
+                val: self.regs.a,
+            }),
 
             // ══════════════════════════════════════════════════════════════════
             // ADD SP, e8 — 4 M-cycles: fetch, read imm, internal, internal
             // ══════════════════════════════════════════════════════════════════
-            0xE8 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.phase = 4;
-                        McycleOp::Internal
-                    }
-                    4 => {
-                        self.regs.sp = self.add_sp_signed(self.tmp8);
-                        self.phase = 5;
-                        McycleOp::Internal
-                    }
-                    5 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xE8 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.phase = 4;
+                    McycleOp::Internal
+                }
+                4 => {
+                    self.regs.sp = self.add_sp_signed(self.tmp8);
+                    self.phase = 5;
+                    McycleOp::Internal
+                }
+                5 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // JP HL — 1 M-cycle (fetch only)
@@ -1667,72 +1743,73 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // LD (a16), A — 4 M-cycles: fetch, read lo, read hi, write
             // ══════════════════════════════════════════════════════════════════
-            0xEA => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 4;
-                        McycleOp::Read { addr }
-                    }
-                    4 => {
-                        let hi = self.data_latch;
-                        self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
-                        self.phase = 5;
-                        McycleOp::Write { addr: self.tmp16, val: self.regs.a }
-                    }
-                    5 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xEA => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 4;
+                    McycleOp::Read { addr }
+                }
+                4 => {
+                    let hi = self.data_latch;
+                    self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
+                    self.phase = 5;
+                    McycleOp::Write {
+                        addr: self.tmp16,
+                        val: self.regs.a,
+                    }
+                }
+                5 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LDH A, (a8) — 3 M-cycles: fetch, read imm, read from FF00+n
             // ══════════════════════════════════════════════════════════════════
-            0xF0 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.phase = 4;
-                        McycleOp::Read { addr: 0xFF00 | self.tmp8 as u16 }
-                    }
-                    4 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xF0 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.phase = 4;
+                    McycleOp::Read {
+                        addr: 0xFF00 | self.tmp8 as u16,
+                    }
+                }
+                4 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LD A, (C) — 2 M-cycles: fetch, read from FF00+C
             // ══════════════════════════════════════════════════════════════════
-            0xF2 => {
-                match self.phase {
-                    2 => {
-                        self.phase = 3;
-                        McycleOp::Read { addr: 0xFF00 | self.regs.c as u16 }
+            0xF2 => match self.phase {
+                2 => {
+                    self.phase = 3;
+                    McycleOp::Read {
+                        addr: 0xFF00 | self.regs.c as u16,
                     }
-                    3 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
                 }
-            }
+                3 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // DI — 1 M-cycle
@@ -1746,75 +1823,69 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             // LD HL, SP+e8 — 3 M-cycles: fetch, read imm, internal
             // ══════════════════════════════════════════════════════════════════
-            0xF8 => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        self.phase = 4;
-                        McycleOp::Internal
-                    }
-                    4 => {
-                        let v = self.add_sp_signed(self.tmp8);
-                        self.regs.set_hl(v);
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xF8 => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    self.phase = 4;
+                    McycleOp::Internal
+                }
+                4 => {
+                    let v = self.add_sp_signed(self.tmp8);
+                    self.regs.set_hl(v);
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LD SP, HL — 2 M-cycles: fetch, internal
             // ══════════════════════════════════════════════════════════════════
-            0xF9 => {
-                match self.phase {
-                    2 => {
-                        self.regs.sp = self.regs.hl();
-                        self.oam_bug_addr = Some(self.regs.hl());
-                        self.phase = 3;
-                        McycleOp::Internal
-                    }
-                    3 => self.finish_instruction(),
-                    _ => unreachable!(),
+            0xF9 => match self.phase {
+                2 => {
+                    self.regs.sp = self.regs.hl();
+                    self.oam_bug_addr = Some(self.regs.hl());
+                    self.phase = 3;
+                    McycleOp::Internal
                 }
-            }
+                3 => self.finish_instruction(),
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // LD A, (a16) — 4 M-cycles: fetch, read lo, read hi, read from addr
             // ══════════════════════════════════════════════════════════════════
-            0xFA => {
-                match self.phase {
-                    2 => {
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 3;
-                        McycleOp::Read { addr }
-                    }
-                    3 => {
-                        self.tmp8 = self.data_latch;
-                        let addr = self.regs.pc;
-                        self.regs.pc = self.regs.pc.wrapping_add(1);
-                        self.phase = 4;
-                        McycleOp::Read { addr }
-                    }
-                    4 => {
-                        let hi = self.data_latch;
-                        self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
-                        self.phase = 5;
-                        McycleOp::Read { addr: self.tmp16 }
-                    }
-                    5 => {
-                        self.regs.a = self.data_latch;
-                        self.finish_instruction()
-                    }
-                    _ => unreachable!(),
+            0xFA => match self.phase {
+                2 => {
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 3;
+                    McycleOp::Read { addr }
                 }
-            }
+                3 => {
+                    self.tmp8 = self.data_latch;
+                    let addr = self.regs.pc;
+                    self.regs.pc = self.regs.pc.wrapping_add(1);
+                    self.phase = 4;
+                    McycleOp::Read { addr }
+                }
+                4 => {
+                    let hi = self.data_latch;
+                    self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
+                    self.phase = 5;
+                    McycleOp::Read { addr: self.tmp16 }
+                }
+                5 => {
+                    self.regs.a = self.data_latch;
+                    self.finish_instruction()
+                }
+                _ => unreachable!(),
+            },
 
             // ══════════════════════════════════════════════════════════════════
             // EI — 1 M-cycle
@@ -1930,21 +2001,28 @@ impl Cpu {
     /// Dispatch ALU operation by 3-bit operation ID.
     fn do_alu(&mut self, alu_op: u8, val: u8) {
         match alu_op {
-            0 => self.alu_add(val, false),           // ADD
-            1 => {                                     // ADC
+            0 => self.alu_add(val, false), // ADD
+            1 => {
+                // ADC
                 let c = self.regs.flag_c();
                 self.alu_add(val, c);
             }
-            2 => { let r = self.alu_sub(val, false); self.regs.a = r; } // SUB
-            3 => {                                     // SBC
+            2 => {
+                let r = self.alu_sub(val, false);
+                self.regs.a = r;
+            } // SUB
+            3 => {
+                // SBC
                 let c = self.regs.flag_c();
                 let r = self.alu_sub(val, c);
                 self.regs.a = r;
             }
-            4 => self.alu_and(val),                   // AND
-            5 => self.alu_xor(val),                   // XOR
-            6 => self.alu_or(val),                    // OR
-            7 => { self.alu_sub(val, false); }        // CP (discard result)
+            4 => self.alu_and(val), // AND
+            5 => self.alu_xor(val), // XOR
+            6 => self.alu_or(val),  // OR
+            7 => {
+                self.alu_sub(val, false);
+            } // CP (discard result)
             _ => unreachable!(),
         }
     }
@@ -2462,13 +2540,25 @@ impl Cpu {
                 let cycles = if src == 6 { 8 } else { 4 };
                 match (op >> 3) & 0x07 {
                     0 => self.alu_add(val, false),
-                    1 => { let c = self.regs.flag_c(); self.alu_add(val, c); }
-                    2 => { let r = self.alu_sub(val, false); self.regs.a = r; }
-                    3 => { let c = self.regs.flag_c(); let r = self.alu_sub(val, c); self.regs.a = r; }
+                    1 => {
+                        let c = self.regs.flag_c();
+                        self.alu_add(val, c);
+                    }
+                    2 => {
+                        let r = self.alu_sub(val, false);
+                        self.regs.a = r;
+                    }
+                    3 => {
+                        let c = self.regs.flag_c();
+                        let r = self.alu_sub(val, c);
+                        self.regs.a = r;
+                    }
                     4 => self.alu_and(val),
                     5 => self.alu_xor(val),
                     6 => self.alu_or(val),
-                    7 => { self.alu_sub(val, false); }
+                    7 => {
+                        self.alu_sub(val, false);
+                    }
                     _ => unreachable!(),
                 }
                 cycles
@@ -2565,9 +2655,7 @@ impl Cpu {
                     12
                 }
             }
-            0xCB => {
-                self.execute_cb(bus)
-            }
+            0xCB => self.execute_cb(bus),
             0xCC => {
                 let addr = self.fetch_word(bus);
                 if self.regs.flag_z() {

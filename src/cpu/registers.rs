@@ -46,9 +46,9 @@ impl Registers {
     pub fn post_boot_with_rom(model: GbModel, rom: Option<&[u8]>) -> Self {
         let (a, f, b, c, d, e, h, l) = match model {
             GbModel::Dmg0 => (0x01, 0x00, 0xFF, 0x13, 0x00, 0xC1, 0x84, 0x03),
-            GbModel::Dmg  => (0x01, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
-            GbModel::Mgb  => (0xFF, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
-            GbModel::Sgb  => (0x01, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
+            GbModel::Dmg => (0x01, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
+            GbModel::Mgb => (0xFF, 0xB0, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D),
+            GbModel::Sgb => (0x01, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
             GbModel::Sgb2 => (0xFF, 0x00, 0x00, 0x14, 0x00, 0x00, 0xC0, 0x60),
             GbModel::Cgb0 | GbModel::Cgb | GbModel::Agb => {
                 let cgb_flag = rom.and_then(|r| r.get(0x0143)).copied().unwrap_or(0xC0);
@@ -67,47 +67,95 @@ impl Registers {
                 }
             }
         };
-        Registers { a, f, b, c, d, e, h, l, sp: 0xFFFE, pc: 0x0100 }
+        Registers {
+            a,
+            f,
+            b,
+            c,
+            d,
+            e,
+            h,
+            l,
+            sp: 0xFFFE,
+            pc: 0x0100,
+        }
     }
 
     /// Hardware reset state: all registers zeroed, PC starts at 0x0000.
     /// Used when executing an actual boot ROM.
     pub fn reset() -> Self {
         Registers {
-            a: 0x00, f: 0x00,
-            b: 0x00, c: 0x00,
-            d: 0x00, e: 0x00,
-            h: 0x00, l: 0x00,
+            a: 0x00,
+            f: 0x00,
+            b: 0x00,
+            c: 0x00,
+            d: 0x00,
+            e: 0x00,
+            h: 0x00,
+            l: 0x00,
             sp: 0x0000,
             pc: 0x0000,
         }
     }
 
     // 16-bit pair accessors
-    pub fn af(&self) -> u16 { ((self.a as u16) << 8) | (self.f as u16) }
-    pub fn bc(&self) -> u16 { ((self.b as u16) << 8) | (self.c as u16) }
-    pub fn de(&self) -> u16 { ((self.d as u16) << 8) | (self.e as u16) }
-    pub fn hl(&self) -> u16 { ((self.h as u16) << 8) | (self.l as u16) }
+    pub fn af(&self) -> u16 {
+        ((self.a as u16) << 8) | (self.f as u16)
+    }
+    pub fn bc(&self) -> u16 {
+        ((self.b as u16) << 8) | (self.c as u16)
+    }
+    pub fn de(&self) -> u16 {
+        ((self.d as u16) << 8) | (self.e as u16)
+    }
+    pub fn hl(&self) -> u16 {
+        ((self.h as u16) << 8) | (self.l as u16)
+    }
 
     pub fn set_af(&mut self, v: u16) {
         self.a = (v >> 8) as u8;
         self.f = (v & 0xF0) as u8; // lower nibble forced 0
     }
-    pub fn set_bc(&mut self, v: u16) { self.b = (v >> 8) as u8; self.c = v as u8; }
-    pub fn set_de(&mut self, v: u16) { self.d = (v >> 8) as u8; self.e = v as u8; }
-    pub fn set_hl(&mut self, v: u16) { self.h = (v >> 8) as u8; self.l = v as u8; }
+    pub fn set_bc(&mut self, v: u16) {
+        self.b = (v >> 8) as u8;
+        self.c = v as u8;
+    }
+    pub fn set_de(&mut self, v: u16) {
+        self.d = (v >> 8) as u8;
+        self.e = v as u8;
+    }
+    pub fn set_hl(&mut self, v: u16) {
+        self.h = (v >> 8) as u8;
+        self.l = v as u8;
+    }
 
     // Flag accessors
-    pub fn flag_z(&self) -> bool { self.f & 0x80 != 0 }
-    pub fn flag_n(&self) -> bool { self.f & 0x40 != 0 }
-    pub fn flag_h(&self) -> bool { self.f & 0x20 != 0 }
-    pub fn flag_c(&self) -> bool { self.f & 0x10 != 0 }
+    pub fn flag_z(&self) -> bool {
+        self.f & 0x80 != 0
+    }
+    pub fn flag_n(&self) -> bool {
+        self.f & 0x40 != 0
+    }
+    pub fn flag_h(&self) -> bool {
+        self.f & 0x20 != 0
+    }
+    pub fn flag_c(&self) -> bool {
+        self.f & 0x10 != 0
+    }
 
     pub fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
         self.f = 0;
-        if z { self.f |= 0x80; }
-        if n { self.f |= 0x40; }
-        if h { self.f |= 0x20; }
-        if c { self.f |= 0x10; }
+        if z {
+            self.f |= 0x80;
+        }
+        if n {
+            self.f |= 0x40;
+        }
+        if h {
+            self.f |= 0x20;
+        }
+        if c {
+            self.f |= 0x10;
+        }
     }
 }

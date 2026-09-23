@@ -5,9 +5,9 @@
 //! diagonal edges via weighted neighborhood comparison, Level 2 refines
 //! steep/shallow line angles for smoother curves.
 
-use super::get;
-use super::color_dist;
 use super::blend_argb;
+use super::color_dist;
+use super::get;
 
 /// xBR scaling factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,23 +83,59 @@ struct CornerParams {
 
 // BR: F=right(13), H=below(17), I=bottom-right(18)
 const CORNER_BR: CornerParams = CornerParams {
-    f: 13, h: 17, i: 18, c: 8, g: 16, b: 7, d: 11,
-    f4: 14, h5: 22, i4: 19, i5: 23,
+    f: 13,
+    h: 17,
+    i: 18,
+    c: 8,
+    g: 16,
+    b: 7,
+    d: 11,
+    f4: 14,
+    h5: 22,
+    i4: 19,
+    i5: 23,
 };
 // BL: F=left(11), H=below(17), I=bottom-left(16)
 const CORNER_BL: CornerParams = CornerParams {
-    f: 11, h: 17, i: 16, c: 6, g: 18, b: 7, d: 13,
-    f4: 10, h5: 22, i4: 15, i5: 21,
+    f: 11,
+    h: 17,
+    i: 16,
+    c: 6,
+    g: 18,
+    b: 7,
+    d: 13,
+    f4: 10,
+    h5: 22,
+    i4: 15,
+    i5: 21,
 };
 // TR: F=right(13), H=above(7), I=top-right(8)
 const CORNER_TR: CornerParams = CornerParams {
-    f: 13, h: 7, i: 8, c: 18, g: 6, b: 17, d: 11,
-    f4: 14, h5: 2, i4: 9, i5: 3,
+    f: 13,
+    h: 7,
+    i: 8,
+    c: 18,
+    g: 6,
+    b: 17,
+    d: 11,
+    f4: 14,
+    h5: 2,
+    i4: 9,
+    i5: 3,
 };
 // TL: F=left(11), H=above(7), I=top-left(6)
 const CORNER_TL: CornerParams = CornerParams {
-    f: 11, h: 7, i: 6, c: 16, g: 8, b: 17, d: 13,
-    f4: 10, h5: 2, i4: 5, i5: 1,
+    f: 11,
+    h: 7,
+    i: 6,
+    c: 16,
+    g: 8,
+    b: 17,
+    d: 13,
+    f4: 10,
+    h5: 2,
+    i4: 5,
+    i5: 1,
 };
 
 // ── Edge detection ────────────────────────────────────────────────────────
@@ -393,13 +429,49 @@ struct Out4x {
 
 const OUT4X: [Out4x; 4] = [
     // BR: default orientation
-    Out4x { n15: 15, n14: 14, n13: 13, n12: 12, n11: 11, n10: 10, n7: 7, n3: 3 },
+    Out4x {
+        n15: 15,
+        n14: 14,
+        n13: 13,
+        n12: 12,
+        n11: 11,
+        n10: 10,
+        n7: 7,
+        n3: 3,
+    },
     // BL: horizontal mirror
-    Out4x { n15: 12, n14: 13, n13: 14, n12: 15, n11: 8, n10: 9, n7: 4, n3: 0 },
+    Out4x {
+        n15: 12,
+        n14: 13,
+        n13: 14,
+        n12: 15,
+        n11: 8,
+        n10: 9,
+        n7: 4,
+        n3: 0,
+    },
     // TR: vertical mirror
-    Out4x { n15: 3, n14: 2, n13: 1, n12: 0, n11: 7, n10: 6, n7: 11, n3: 15 },
+    Out4x {
+        n15: 3,
+        n14: 2,
+        n13: 1,
+        n12: 0,
+        n11: 7,
+        n10: 6,
+        n7: 11,
+        n3: 15,
+    },
     // TL: both mirrors
-    Out4x { n15: 0, n14: 1, n13: 2, n12: 3, n11: 4, n10: 5, n7: 8, n3: 12 },
+    Out4x {
+        n15: 0,
+        n14: 1,
+        n13: 2,
+        n12: 3,
+        n11: 4,
+        n10: 5,
+        n7: 8,
+        n3: 12,
+    },
 ];
 
 pub fn scale4x(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {

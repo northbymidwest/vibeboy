@@ -70,9 +70,9 @@ fn camera_thread_main(
     has_new_frame: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) {
+    use nokhwa::Camera;
     use nokhwa::pixel_format::RgbFormat;
     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
-    use nokhwa::Camera;
 
     let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::HighestResolution(
         Resolution::new(640, 480),
@@ -129,12 +129,8 @@ fn camera_thread_main(
 
                 // Convert to grayscale and resize
                 let gray = image::imageops::grayscale(&cropped);
-                let resized = image::imageops::resize(
-                    &gray,
-                    128,
-                    112,
-                    image::imageops::FilterType::Lanczos3,
-                );
+                let resized =
+                    image::imageops::resize(&gray, 128, 112, image::imageops::FilterType::Lanczos3);
 
                 {
                     let mut lock = buffer.lock().unwrap();

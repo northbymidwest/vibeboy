@@ -1,10 +1,10 @@
 use vibeboy::*;
 
-mod gpu;
+mod app;
 mod audio;
 mod camera;
+mod gpu;
 mod menu;
-mod app;
 
 use clap::Parser;
 use model::GbModel;
@@ -19,7 +19,10 @@ pub(crate) const SGB_H: u32 = 224;
 pub(crate) const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
 #[derive(Parser)]
-#[command(name = "vibeboy", about = "Game Boy / Game Boy Color emulator (winit frontend)")]
+#[command(
+    name = "vibeboy",
+    about = "Game Boy / Game Boy Color emulator (winit frontend)"
+)]
 pub(crate) struct Cli {
     /// Path to ROM file (.gb / .gbc). If omitted, a file dialog will open.
     pub rom: Option<PathBuf>,

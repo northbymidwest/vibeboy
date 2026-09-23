@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use vibeboy::model::GbModel;
 use crate::harness::{TestHarness, TestResult};
 use crate::util::make_emu;
+use vibeboy::model::GbModel;
 
 pub struct GbMicrotestHarness {
     pub force_model: Option<GbModel>,
@@ -23,7 +23,11 @@ impl TestHarness for GbMicrotestHarness {
         // Most tests complete within 2 frames, but some need more:
         // - is_if_set_during_ime0 needs ~380ms (~23 frames)
         // - Tests with long delay loops may need 4+ frames
-        let frames = if filename == "is_if_set_during_ime0.gb" { 30 } else { 4 };
+        let frames = if filename == "is_if_set_during_ime0.gb" {
+            30
+        } else {
+            4
+        };
 
         let model = self.force_model.unwrap_or(GbModel::Dmg);
         let rom_copy = rom.clone();
@@ -85,11 +89,11 @@ impl GbMicrotestHarness {
     fn find_expected_value(&self, rom: &[u8]) -> Option<u8> {
         // Look for pattern: FE xx 28 (CP xx; JR Z) near EA 00 80 (LD ($8000),A)
         for i in 0..rom.len().saturating_sub(6) {
-            if rom[i] == 0xEA && rom.get(i+1) == Some(&0x00) && rom.get(i+2) == Some(&0x80) {
+            if rom[i] == 0xEA && rom.get(i + 1) == Some(&0x00) && rom.get(i + 2) == Some(&0x80) {
                 // Found LD ($8000),A. Search backwards for the CP instruction.
                 for j in (i.saturating_sub(20)..i).rev() {
-                    if rom[j] == 0xFE && j + 2 < rom.len() && rom[j+2] == 0x28 {
-                        return Some(rom[j+1]);
+                    if rom[j] == 0xFE && j + 2 < rom.len() && rom[j + 2] == 0x28 {
+                        return Some(rom[j + 1]);
                     }
                 }
             }

@@ -17,8 +17,8 @@
 //! determine whether the local gradient runs diagonally or cardinally, then
 //! blend between cubic-filtered candidates accordingly.
 
-use super::get;
 use super::channels;
+use super::get;
 use super::pack_channels;
 
 // ── Neighborhood ────────────────────────────────────────────────────────────
@@ -51,14 +51,25 @@ impl Neighborhood {
         }
         Self { px: pixels, lum }
     }
-
 }
 
 // Named position constants for the 4x4 grid.
-const CTL: usize = 0;  const TL: usize = 1;  const TR: usize = 2;  const CTR: usize = 3;
-const LT: usize = 4;   const ITL: usize = 5;  const ITR: usize = 6;  const RT: usize = 7;
-const LB: usize = 8;   const IBL: usize = 9;  const IBR: usize = 10; const RB: usize = 11;
-const CBL: usize = 12;  const BL: usize = 13;  const BR: usize = 14;  const CBR: usize = 15;
+const CTL: usize = 0;
+const TL: usize = 1;
+const TR: usize = 2;
+const CTR: usize = 3;
+const LT: usize = 4;
+const ITL: usize = 5;
+const ITR: usize = 6;
+const RT: usize = 7;
+const LB: usize = 8;
+const IBL: usize = 9;
+const IBR: usize = 10;
+const RB: usize = 11;
+const CBL: usize = 12;
+const BL: usize = 13;
+const BR: usize = 14;
+const CBR: usize = 15;
 
 // ── Color math ──────────────────────────────────────────────────────────────
 
@@ -115,16 +126,28 @@ struct GradientProfile {
 
 /// Profiles for each processing stage.
 const DIAGONAL_PROFILE: GradientProfile = GradientProfile {
-    adjacent: 2.0, parallel: 1.0, cross_near: -1.0,
-    core: 4.0, cross_far: -1.0, outer: 1.0,
+    adjacent: 2.0,
+    parallel: 1.0,
+    cross_near: -1.0,
+    core: 4.0,
+    cross_far: -1.0,
+    outer: 1.0,
 };
 const CARDINAL_PROFILE: GradientProfile = GradientProfile {
-    adjacent: 1.0, parallel: 0.0, cross_near: 0.0,
-    core: 0.0, cross_far: 0.0, outer: 0.0,
+    adjacent: 1.0,
+    parallel: 0.0,
+    cross_near: 0.0,
+    core: 0.0,
+    cross_far: 0.0,
+    outer: 0.0,
 };
 const POLISH_PROFILE: GradientProfile = GradientProfile {
-    adjacent: 0.0, parallel: 0.0, cross_near: 0.0,
-    core: 1.0, cross_far: 0.0, outer: 0.0,
+    adjacent: 0.0,
+    parallel: 0.0,
+    cross_near: 0.0,
+    core: 1.0,
+    cross_far: 0.0,
+    outer: 0.0,
 };
 
 /// Measure diagonal gradient strength from 14 luma values arranged around
@@ -137,20 +160,31 @@ const POLISH_PROFILE: GradientProfile = GradientProfile {
 fn diagonal_gradient(
     gp: &GradientProfile,
     // Outer corner pair
-    outer_a: f32, outer_b: f32,
+    outer_a: f32,
+    outer_b: f32,
     // Near-axis triple (center flanked by two neighbors)
-    axis_left: f32, axis_center: f32, axis_right: f32,
+    axis_left: f32,
+    axis_center: f32,
+    axis_right: f32,
     // Core pair straddling the diagonal
-    core_a: f32, core_b: f32,
+    core_a: f32,
+    core_b: f32,
     // Far-axis pair
-    far_a: f32, far_b: f32,
+    far_a: f32,
+    far_b: f32,
     // Parallel support samples
-    par_near_a: f32, par_near_b: f32, par_far_a: f32,
+    par_near_a: f32,
+    par_near_b: f32,
+    par_far_a: f32,
     // Cross-axis samples
-    cross_a: f32, cross_b: f32,
+    cross_a: f32,
+    cross_b: f32,
 ) -> f32 {
-    gp.adjacent * (ld(axis_center, axis_right) + ld(axis_center, axis_left)
-                   + ld(par_near_b, par_near_a) + ld(par_near_b, par_far_a))
+    gp.adjacent
+        * (ld(axis_center, axis_right)
+            + ld(axis_center, axis_left)
+            + ld(par_near_b, par_near_a)
+            + ld(par_near_b, par_far_a))
         + gp.parallel * (ld(far_a, far_b) + ld(core_a, core_b))
         + gp.cross_near * (ld(core_b, far_b) + ld(core_a, far_a))
         + gp.core * ld(core_b, far_a)
@@ -160,16 +194,18 @@ fn diagonal_gradient(
 
 /// Measure cardinal (horizontal/vertical) gradient strength from 8 luma values.
 #[inline]
-fn cardinal_gradient(
-    gp: &GradientProfile,
-    inner: [f32; 4],
-    extended: [f32; 4],
-) -> f32 {
+fn cardinal_gradient(gp: &GradientProfile, inner: [f32; 4], extended: [f32; 4]) -> f32 {
     gp.core * (ld(inner[0], inner[1]) + ld(inner[2], inner[3]))
-        + gp.adjacent * (ld(inner[0], extended[0]) + ld(inner[1], extended[1])
-                         + ld(inner[2], extended[2]) + ld(inner[3], extended[3]))
-        + gp.cross_near * (ld(inner[0], extended[1]) + ld(inner[2], extended[3])
-                           + ld(extended[0], inner[1]) + ld(extended[2], inner[3]))
+        + gp.adjacent
+            * (ld(inner[0], extended[0])
+                + ld(inner[1], extended[1])
+                + ld(inner[2], extended[2])
+                + ld(inner[3], extended[3]))
+        + gp.cross_near
+            * (ld(inner[0], extended[1])
+                + ld(inner[2], extended[3])
+                + ld(extended[0], inner[1])
+                + ld(extended[2], inner[3]))
 }
 
 /// Absolute luma difference.
@@ -203,21 +239,19 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
     // ── Diagonal gradient analysis ──
     // Measure variation along the backslash (\) diagonal axis.
     let grad_bs = diagonal_gradient(
-        gp,
-        l[LT], l[TL],   // outer pair
-        l[LB], l[ITL], l[TR],  // near-axis triple
-        l[CBL], l[IBL], l[ITR], l[CTR],  // core + far
-        l[BL], l[IBR], l[RT],  // parallel support
-        l[BR], l[RB],   // cross pair
+        gp, l[LT], l[TL], // outer pair
+        l[LB], l[ITL], l[TR], // near-axis triple
+        l[CBL], l[IBL], l[ITR], l[CTR], // core + far
+        l[BL], l[IBR], l[RT], // parallel support
+        l[BR], l[RB], // cross pair
     );
     // Measure variation along the slash (/) diagonal axis.
     let grad_sl = diagonal_gradient(
-        gp,
-        l[TR], l[RT],   // outer pair
-        l[TL], l[ITR], l[RB],  // near-axis triple
-        l[CTL], l[ITL], l[IBR], l[CBR],  // core + far
-        l[LT], l[IBL], l[BR],  // parallel support
-        l[LB], l[BL],   // cross pair
+        gp, l[TR], l[RT], // outer pair
+        l[TL], l[ITR], l[RB], // near-axis triple
+        l[CTL], l[ITL], l[IBR], l[CBR], // core + far
+        l[LT], l[IBL], l[BR], // parallel support
+        l[LB], l[BL], // cross pair
     );
 
     // Positive = backslash has more variation → prefer slash interpolation.
@@ -275,9 +309,17 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
 
     // ── Blend ──
     // Select the better diagonal candidate based on gradient direction.
-    let diag_pick = if diag_bias >= 0.0 { backslash_color } else { slash_color };
+    let diag_pick = if diag_bias >= 0.0 {
+        backslash_color
+    } else {
+        slash_color
+    };
     // Select the better cardinal candidate.
-    let card_pick = if cardinal_bias >= 0.0 { vert_color } else { horiz_color };
+    let card_pick = if cardinal_bias >= 0.0 {
+        vert_color
+    } else {
+        horiz_color
+    };
 
     // Mix diagonal and cardinal: high confidence → favor diagonal,
     // low confidence → favor cardinal (smoother in flat regions).
@@ -308,7 +350,9 @@ fn edge_directed_interp(nb: &Neighborhood, gp: &GradientProfile) -> u32 {
 /// The center is the midpoint of the inner 2x2 starting at (cx, cy).
 #[inline]
 fn neighborhood_from(
-    buf: &[u32], w: usize, h: usize,
+    buf: &[u32],
+    w: usize,
+    h: usize,
     offsets: [(isize, isize); 16],
 ) -> Neighborhood {
     let mut px = [0u32; 16];
@@ -341,14 +385,25 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let x = sx as isize;
             let y = sy as isize;
             let offsets = [
-                (x-1, y-1), (x, y-1), (x+1, y-1), (x+2, y-1),
-                (x-1, y  ), (x, y  ), (x+1, y  ), (x+2, y  ),
-                (x-1, y+1), (x, y+1), (x+1, y+1), (x+2, y+1),
-                (x-1, y+2), (x, y+2), (x+1, y+2), (x+2, y+2),
+                (x - 1, y - 1),
+                (x, y - 1),
+                (x + 1, y - 1),
+                (x + 2, y - 1),
+                (x - 1, y),
+                (x, y),
+                (x + 1, y),
+                (x + 2, y),
+                (x - 1, y + 1),
+                (x, y + 1),
+                (x + 1, y + 1),
+                (x + 2, y + 1),
+                (x - 1, y + 2),
+                (x, y + 2),
+                (x + 1, y + 2),
+                (x + 2, y + 2),
             ];
             let nb = neighborhood_from(src, src_w, src_h, offsets);
-            buf[(sy * 2 + 1) * out_w + sx * 2 + 1] =
-                edge_directed_interp(&nb, &DIAGONAL_PROFILE);
+            buf[(sy * 2 + 1) * out_w + sx * 2 + 1] = edge_directed_interp(&nb, &DIAGONAL_PROFILE);
         }
     }
 
@@ -363,14 +418,25 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let ox = (sx * 2 + 1) as isize;
             let oy = (sy * 2) as isize;
             let offsets = [
-                (ox-3, oy  ), (ox-2, oy-1), (ox-1, oy-2), (ox,   oy-3),
-                (ox-2, oy+1), (ox-1, oy  ), (ox,   oy-1), (ox+1, oy-2),
-                (ox-1, oy+2), (ox,   oy+1), (ox+1, oy  ), (ox+2, oy-1),
-                (ox,   oy+3), (ox+1, oy+2), (ox+2, oy+1), (ox+3, oy  ),
+                (ox - 3, oy),
+                (ox - 2, oy - 1),
+                (ox - 1, oy - 2),
+                (ox, oy - 3),
+                (ox - 2, oy + 1),
+                (ox - 1, oy),
+                (ox, oy - 1),
+                (ox + 1, oy - 2),
+                (ox - 1, oy + 2),
+                (ox, oy + 1),
+                (ox + 1, oy),
+                (ox + 2, oy - 1),
+                (ox, oy + 3),
+                (ox + 1, oy + 2),
+                (ox + 2, oy + 1),
+                (ox + 3, oy),
             ];
             let nb = neighborhood_from(&buf, out_w, out_h, offsets);
-            buf[sy * 2 * out_w + sx * 2 + 1] =
-                edge_directed_interp(&nb, &CARDINAL_PROFILE);
+            buf[sy * 2 * out_w + sx * 2 + 1] = edge_directed_interp(&nb, &CARDINAL_PROFILE);
         }
     }
 
@@ -380,14 +446,25 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let ox = (sx * 2) as isize;
             let oy = (sy * 2 + 1) as isize;
             let offsets = [
-                (ox,   oy-3), (ox-1, oy-2), (ox-2, oy-1), (ox-3, oy  ),
-                (ox+1, oy-2), (ox,   oy-1), (ox-1, oy  ), (ox-2, oy+1),
-                (ox+2, oy-1), (ox+1, oy  ), (ox,   oy+1), (ox-1, oy+2),
-                (ox+3, oy  ), (ox+2, oy+1), (ox+1, oy+2), (ox,   oy+3),
+                (ox, oy - 3),
+                (ox - 1, oy - 2),
+                (ox - 2, oy - 1),
+                (ox - 3, oy),
+                (ox + 1, oy - 2),
+                (ox, oy - 1),
+                (ox - 1, oy),
+                (ox - 2, oy + 1),
+                (ox + 2, oy - 1),
+                (ox + 1, oy),
+                (ox, oy + 1),
+                (ox - 1, oy + 2),
+                (ox + 3, oy),
+                (ox + 2, oy + 1),
+                (ox + 1, oy + 2),
+                (ox, oy + 3),
             ];
             let nb = neighborhood_from(&buf, out_w, out_h, offsets);
-            buf[(sy * 2 + 1) * out_w + sx * 2] =
-                edge_directed_interp(&nb, &CARDINAL_PROFILE);
+            buf[(sy * 2 + 1) * out_w + sx * 2] = edge_directed_interp(&nb, &CARDINAL_PROFILE);
         }
     }
 
@@ -400,10 +477,22 @@ pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
             let ix = x as isize;
             let iy = y as isize;
             let offsets = [
-                (ix-2, iy-2), (ix-1, iy-2), (ix, iy-2), (ix+1, iy-2),
-                (ix-2, iy-1), (ix-1, iy-1), (ix, iy-1), (ix+1, iy-1),
-                (ix-2, iy  ), (ix-1, iy  ), (ix, iy  ), (ix+1, iy  ),
-                (ix-2, iy+1), (ix-1, iy+1), (ix, iy+1), (ix+1, iy+1),
+                (ix - 2, iy - 2),
+                (ix - 1, iy - 2),
+                (ix, iy - 2),
+                (ix + 1, iy - 2),
+                (ix - 2, iy - 1),
+                (ix - 1, iy - 1),
+                (ix, iy - 1),
+                (ix + 1, iy - 1),
+                (ix - 2, iy),
+                (ix - 1, iy),
+                (ix, iy),
+                (ix + 1, iy),
+                (ix - 2, iy + 1),
+                (ix - 1, iy + 1),
+                (ix, iy + 1),
+                (ix + 1, iy + 1),
             ];
             let nb = neighborhood_from(&frozen, out_w, out_h, offsets);
             buf[y * out_w + x] = edge_directed_interp(&nb, &POLISH_PROFILE);

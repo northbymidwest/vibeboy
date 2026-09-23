@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSControl, NSEventMask,
-    NSEventType, NSFont, NSModalResponseOK, NSOpenPanel, NSPanel, NSTextField, NSView, NSWindow,
+    NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSControl, NSEventMask, NSEventType,
+    NSFont, NSModalResponseOK, NSOpenPanel, NSPanel, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -13,9 +13,9 @@ use objc2_foundation::{
     NSSize, NSString,
 };
 
+use super::K_ESCAPE;
 use super::emulator::Emulator;
 use super::persistence::{default_key_map, keycode_name, save_key_map};
-use super::K_ESCAPE;
 
 pub(super) fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
@@ -54,8 +54,9 @@ pub(super) fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
         (Emulator::BTN_SELECT, "Select"),
     ];
 
-    let header_str =
-        NSString::from_str("Click a key binding, then press a new key to reassign.\nPress Escape to cancel.");
+    let header_str = NSString::from_str(
+        "Click a key binding, then press a new key to reassign.\nPress Escape to cancel.",
+    );
     let header_frame = NSRect::new(NSPoint::new(20.0, 290.0), NSSize::new(320.0, 40.0));
     let header_label = NSTextField::initWithFrame(NSTextField::alloc(mtm), header_frame);
     header_label.setStringValue(&header_str);

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use super::Cartridge;
+use std::sync::Arc;
 
 pub struct Mbc1 {
     rom: Arc<[u8]>,
@@ -23,7 +23,10 @@ impl Mbc1 {
             && rom.len() >= 0x40134
             && rom[0x104..0x134] == rom[0x40104..0x40134];
         if multicart {
-            log::info!("MBC1M multicart detected (ROM size: {}KB)", rom.len() / 1024);
+            log::info!(
+                "MBC1M multicart detected (ROM size: {}KB)",
+                rom.len() / 1024
+            );
         }
         Mbc1 {
             rom,
@@ -61,7 +64,10 @@ impl Cartridge for Mbc1 {
             }
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
@@ -90,21 +96,32 @@ impl Cartridge for Mbc1 {
     }
 
     fn read_ram(&self, addr: u16) -> u8 {
-        if !self.ram_enabled { return 0xFF; }
+        if !self.ram_enabled {
+            return 0xFF;
+        }
         let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
-        self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
+        self.ram
+            .get(idx % self.ram.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_ram(&mut self, addr: u16, val: u8) {
-        if !self.ram_enabled { return; }
+        if !self.ram_enabled {
+            return;
+        }
         let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
         let len = self.ram.len().max(1);
         let i = idx % len;
         self.ram[i] = val;
     }
 
-    fn has_battery(&self) -> bool { self.battery }
-    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn has_battery(&self) -> bool {
+        self.battery
+    }
+    fn ram_data(&self) -> &[u8] {
+        &self.ram
+    }
     fn load_ram(&mut self, data: &[u8]) {
         let len = self.ram.len().min(data.len());
         self.ram[..len].copy_from_slice(&data[..len]);
@@ -119,9 +136,11 @@ impl Cartridge for Mbc1 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 10 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
-        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        if d.len() < 10 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
         self.ram_enabled = d[8] != 0;
         self.banking_mode = d[9];
         let ram = &d[10..];

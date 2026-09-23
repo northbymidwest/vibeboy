@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
     NSMenuItem,
@@ -171,11 +171,7 @@ pub(super) fn update_model_checkmarks(app: &NSApplication, selected_tag: isize) 
     }
 }
 
-pub(super) fn rebuild_recent_menu(
-    mtm: MainThreadMarker,
-    app: &NSApplication,
-    recents: &[String],
-) {
+pub(super) fn rebuild_recent_menu(mtm: MainThreadMarker, app: &NSApplication, recents: &[String]) {
     let Some(main_menu) = app.mainMenu() else {
         return;
     };
@@ -226,7 +222,7 @@ pub(super) struct MenuActions {
     pub save_state: bool,
     pub load_state: bool,
     pub select_slot: Option<usize>,
-    pub select_model: Option<isize>, // tag of selected model
+    pub select_model: Option<isize>,  // tag of selected model
     pub select_filter: Option<isize>, // tag of selected filter
     pub toggle_fps: bool,
     pub toggle_printer: bool,
@@ -577,7 +573,11 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
 
     emu_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let printer_item = menu_item_with_tag(
-        mtm, "Game Boy Printer", sel!(menuAction:), "", MENU_TAG_PRINTER,
+        mtm,
+        "Game Boy Printer",
+        sel!(menuAction:),
+        "",
+        MENU_TAG_PRINTER,
     );
     emu_menu.addItem(&printer_item);
 
@@ -600,9 +600,8 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     filter_menu.setTitle(&NSString::from_str("Filter"));
 
     // Force CPU toggle at top of filter menu
-    let force_cpu_item = menu_item_with_tag(
-        mtm, "Force CPU", sel!(menuAction:), "", MENU_TAG_FORCE_CPU,
-    );
+    let force_cpu_item =
+        menu_item_with_tag(mtm, "Force CPU", sel!(menuAction:), "", MENU_TAG_FORCE_CPU);
     filter_menu.addItem(&force_cpu_item);
     filter_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
@@ -617,7 +616,8 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
         if group == scaling::FilterMenuGroup::Main {
             filter_menu.addItem(&item);
         } else {
-            sub_menus.entry(group.label())
+            sub_menus
+                .entry(group.label())
                 .or_insert_with(|| {
                     let m = NSMenu::new(mtm);
                     m.setTitle(&NSString::from_str(group.label()));

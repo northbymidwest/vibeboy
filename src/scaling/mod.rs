@@ -1,6 +1,5 @@
 //! Pixel-art scaling algorithms.
 
-pub mod nearest_aa;
 pub mod bicubic;
 pub mod bilinear;
 pub mod dcci;
@@ -10,22 +9,23 @@ pub mod epx;
 pub mod hqx;
 pub mod lcd_grid;
 pub mod mmpx;
+pub mod nearest_aa;
 pub mod nedi;
 pub mod omniscale;
 pub mod omniscale_legacy;
 pub mod sai;
 pub mod scale3x;
-pub mod super_xbr;
-pub mod vectorize;
-pub mod xbr;
-pub mod xbrz;
 pub mod scalefx;
 #[cfg(feature = "sdl3-gpu-shaders")]
 pub mod sdl;
-#[cfg(feature = "gpu")]
-pub mod wgpu_vectorize;
+pub mod super_xbr;
+pub mod vectorize;
 #[cfg(feature = "gpu")]
 pub mod wgpu_scale;
+#[cfg(feature = "gpu")]
+pub mod wgpu_vectorize;
+pub mod xbr;
+pub mod xbrz;
 
 /// Sample a pixel with clamped coordinates.
 #[inline(always)]
@@ -63,8 +63,12 @@ fn color_dist(a: u32, b: u32) -> f32 {
 /// Blend two ARGB colors with weight alpha (0.0 = all a, 1.0 = all b).
 #[inline(always)]
 fn blend_argb(a: u32, b: u32, alpha: f32) -> u32 {
-    if alpha <= 0.0 { return a; }
-    if alpha >= 1.0 { return b; }
+    if alpha <= 0.0 {
+        return a;
+    }
+    if alpha >= 1.0 {
+        return b;
+    }
     let inv = 1.0 - alpha;
     let r = (((a >> 16) & 0xFF) as f32 * inv + ((b >> 16) & 0xFF) as f32 * alpha).round() as u32;
     let g = (((a >> 8) & 0xFF) as f32 * inv + ((b >> 8) & 0xFF) as f32 * alpha).round() as u32;
@@ -95,7 +99,9 @@ fn pack_channels(ch: [f32; 3]) -> u32 {
 /// Used by xBRZ; also suitable for any perceptual color comparison.
 #[inline(always)]
 fn color_dist_bt2020(a: u32, b: u32) -> f32 {
-    if a == b { return 0.0; }
+    if a == b {
+        return 0.0;
+    }
     let dr = ((a >> 16) & 0xFF) as f32 - ((b >> 16) & 0xFF) as f32;
     let dg = ((a >> 8) & 0xFF) as f32 - ((b >> 8) & 0xFF) as f32;
     let db = (a & 0xFF) as f32 - (b & 0xFF) as f32;
@@ -177,49 +183,222 @@ pub struct FilterInfo {
     pub filter: ScaleFilter,
     pub cli_name: &'static str,
     pub display_name: &'static str,
-    pub factor: u32,  // 0 = adaptive
+    pub factor: u32, // 0 = adaptive
 }
 
 const REGISTRY: &[FilterInfo] = &[
-    FilterInfo { filter: ScaleFilter::Sai2x,            cli_name: "2xsai",        display_name: "2xSaI",                    factor: 2 },
-    FilterInfo { filter: ScaleFilter::Bicubic,          cli_name: "bicubic",      display_name: "Bicubic",                  factor: 0 },
-    FilterInfo { filter: ScaleFilter::Bilinear,         cli_name: "bilinear",     display_name: "Bilinear",                 factor: 0 },
-    FilterInfo { filter: ScaleFilter::Dcci,             cli_name: "dcci",         display_name: "DCCI",                     factor: 2 },
-    FilterInfo { filter: ScaleFilter::Eagle,            cli_name: "eagle",        display_name: "Eagle",                    factor: 2 },
-    FilterInfo { filter: ScaleFilter::Edi,              cli_name: "edi",          display_name: "EDI",                      factor: 2 },
-    FilterInfo { filter: ScaleFilter::Epx,              cli_name: "epx",          display_name: "EPX / Scale2x",            factor: 2 },
-    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq2x), cli_name: "hq2x",    display_name: "HQ2x",                    factor: 2 },
-    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq3x), cli_name: "hq3x",    display_name: "HQ3x",                    factor: 3 },
-    FilterInfo { filter: ScaleFilter::Hqx(HqxScale::Hq4x), cli_name: "hq4x",    display_name: "HQ4x",                    factor: 4 },
-    FilterInfo { filter: ScaleFilter::LcdGrid,          cli_name: "lcd-grid",     display_name: "LCD Grid",                factor: 4 },
-    FilterInfo { filter: ScaleFilter::Mmpx,             cli_name: "mmpx",         display_name: "MMPX",                    factor: 2 },
-    FilterInfo { filter: ScaleFilter::Nearest,          cli_name: "nearest",      display_name: "Nearest",                  factor: 0 },
-    FilterInfo { filter: ScaleFilter::NearestAa,        cli_name: "nearest-aa",   display_name: "Nearest AA",              factor: 0 },
-    FilterInfo { filter: ScaleFilter::Nedi,             cli_name: "nedi",         display_name: "NEDI",                     factor: 2 },
-    FilterInfo { filter: ScaleFilter::OmniScale,        cli_name: "omniscale",    display_name: "OmniScale",                factor: 0 },
-    FilterInfo { filter: ScaleFilter::OmniScaleLegacy,  cli_name: "omniscale-legacy", display_name: "OmniScale Legacy",    factor: 0 },
-    FilterInfo { filter: ScaleFilter::Scale2x,          cli_name: "scale2x",      display_name: "Scale2x",                  factor: 2 },
-    FilterInfo { filter: ScaleFilter::Scale3x,          cli_name: "scale3x",      display_name: "Scale3x",                  factor: 3 },
-    FilterInfo { filter: ScaleFilter::Scale4x,          cli_name: "scale4x",      display_name: "Scale4x",                  factor: 4 },
-    FilterInfo { filter: ScaleFilter::ScaleFx,          cli_name: "scalefx",      display_name: "ScaleFX",                  factor: 3 },
-    FilterInfo { filter: ScaleFilter::ScaleFx9x,        cli_name: "scalefx-9x",   display_name: "ScaleFX 9x",              factor: 9 },
-    FilterInfo { filter: ScaleFilter::Super2xSai,       cli_name: "super-2xsai",  display_name: "Super 2xSaI",             factor: 2 },
-    FilterInfo { filter: ScaleFilter::SuperEagle,       cli_name: "super-eagle",  display_name: "Super Eagle",              factor: 2 },
-    FilterInfo { filter: ScaleFilter::SuperXbr,         cli_name: "super-xbr",    display_name: "Super xBR",                factor: 2 },
-    FilterInfo { filter: ScaleFilter::Vectorize,     cli_name: "vectorize", display_name: "Vectorize",               factor: 0 },
-    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr2x), cli_name: "xbr2x",  display_name: "xBR 2x",                  factor: 2 },
-    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr3x), cli_name: "xbr3x",  display_name: "xBR 3x",                  factor: 3 },
-    FilterInfo { filter: ScaleFilter::Xbr(XbrScale::Xbr4x), cli_name: "xbr4x",  display_name: "xBR 4x",                  factor: 4 },
-    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz2x), cli_name: "xbrz2x", display_name: "xBRZ 2x",              factor: 2 },
-    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz3x), cli_name: "xbrz3x", display_name: "xBRZ 3x",              factor: 3 },
-    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz4x), cli_name: "xbrz4x", display_name: "xBRZ 4x",              factor: 4 },
-    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz5x), cli_name: "xbrz5x", display_name: "xBRZ 5x",              factor: 5 },
-    FilterInfo { filter: ScaleFilter::Xbrz(XbrzScale::Xbrz6x), cli_name: "xbrz6x", display_name: "xBRZ 6x",              factor: 6 },
+    FilterInfo {
+        filter: ScaleFilter::Sai2x,
+        cli_name: "2xsai",
+        display_name: "2xSaI",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Bicubic,
+        cli_name: "bicubic",
+        display_name: "Bicubic",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Bilinear,
+        cli_name: "bilinear",
+        display_name: "Bilinear",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Dcci,
+        cli_name: "dcci",
+        display_name: "DCCI",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Eagle,
+        cli_name: "eagle",
+        display_name: "Eagle",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Edi,
+        cli_name: "edi",
+        display_name: "EDI",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Epx,
+        cli_name: "epx",
+        display_name: "EPX / Scale2x",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Hqx(HqxScale::Hq2x),
+        cli_name: "hq2x",
+        display_name: "HQ2x",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Hqx(HqxScale::Hq3x),
+        cli_name: "hq3x",
+        display_name: "HQ3x",
+        factor: 3,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Hqx(HqxScale::Hq4x),
+        cli_name: "hq4x",
+        display_name: "HQ4x",
+        factor: 4,
+    },
+    FilterInfo {
+        filter: ScaleFilter::LcdGrid,
+        cli_name: "lcd-grid",
+        display_name: "LCD Grid",
+        factor: 4,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Mmpx,
+        cli_name: "mmpx",
+        display_name: "MMPX",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Nearest,
+        cli_name: "nearest",
+        display_name: "Nearest",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::NearestAa,
+        cli_name: "nearest-aa",
+        display_name: "Nearest AA",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Nedi,
+        cli_name: "nedi",
+        display_name: "NEDI",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::OmniScale,
+        cli_name: "omniscale",
+        display_name: "OmniScale",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::OmniScaleLegacy,
+        cli_name: "omniscale-legacy",
+        display_name: "OmniScale Legacy",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Scale2x,
+        cli_name: "scale2x",
+        display_name: "Scale2x",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Scale3x,
+        cli_name: "scale3x",
+        display_name: "Scale3x",
+        factor: 3,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Scale4x,
+        cli_name: "scale4x",
+        display_name: "Scale4x",
+        factor: 4,
+    },
+    FilterInfo {
+        filter: ScaleFilter::ScaleFx,
+        cli_name: "scalefx",
+        display_name: "ScaleFX",
+        factor: 3,
+    },
+    FilterInfo {
+        filter: ScaleFilter::ScaleFx9x,
+        cli_name: "scalefx-9x",
+        display_name: "ScaleFX 9x",
+        factor: 9,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Super2xSai,
+        cli_name: "super-2xsai",
+        display_name: "Super 2xSaI",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::SuperEagle,
+        cli_name: "super-eagle",
+        display_name: "Super Eagle",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::SuperXbr,
+        cli_name: "super-xbr",
+        display_name: "Super xBR",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Vectorize,
+        cli_name: "vectorize",
+        display_name: "Vectorize",
+        factor: 0,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbr(XbrScale::Xbr2x),
+        cli_name: "xbr2x",
+        display_name: "xBR 2x",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbr(XbrScale::Xbr3x),
+        cli_name: "xbr3x",
+        display_name: "xBR 3x",
+        factor: 3,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbr(XbrScale::Xbr4x),
+        cli_name: "xbr4x",
+        display_name: "xBR 4x",
+        factor: 4,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbrz(XbrzScale::Xbrz2x),
+        cli_name: "xbrz2x",
+        display_name: "xBRZ 2x",
+        factor: 2,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbrz(XbrzScale::Xbrz3x),
+        cli_name: "xbrz3x",
+        display_name: "xBRZ 3x",
+        factor: 3,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbrz(XbrzScale::Xbrz4x),
+        cli_name: "xbrz4x",
+        display_name: "xBRZ 4x",
+        factor: 4,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbrz(XbrzScale::Xbrz5x),
+        cli_name: "xbrz5x",
+        display_name: "xBRZ 5x",
+        factor: 5,
+    },
+    FilterInfo {
+        filter: ScaleFilter::Xbrz(XbrzScale::Xbrz6x),
+        cli_name: "xbrz6x",
+        display_name: "xBRZ 6x",
+        factor: 6,
+    },
 ];
 
 impl ScaleFilter {
     fn info(self) -> &'static FilterInfo {
-        REGISTRY.iter().find(|e| e.filter == self).expect("filter not in registry")
+        REGISTRY
+            .iter()
+            .find(|e| e.filter == self)
+            .expect("filter not in registry")
     }
 
     pub fn all_names() -> Vec<&'static str> {
@@ -230,7 +409,9 @@ impl ScaleFilter {
 
     /// Parse a CLI name into a ScaleFilter. Returns None for unrecognized names.
     pub fn from_name(s: &str) -> Option<ScaleFilter> {
-        if s == "none" { return Some(ScaleFilter::Nearest); }
+        if s == "none" {
+            return Some(ScaleFilter::Nearest);
+        }
         REGISTRY.iter().find(|e| e.cli_name == s).map(|e| e.filter)
     }
 
@@ -284,7 +465,8 @@ impl ScaleFilter {
     /// Iterator over (display_name, ScaleFilter) pairs for menu building.
     /// Excludes Scale2x (alias for EPX).
     pub fn menu_entries() -> impl Iterator<Item = (&'static str, ScaleFilter)> {
-        REGISTRY.iter()
+        REGISTRY
+            .iter()
             .filter(|e| e.filter != ScaleFilter::Scale2x)
             .map(|e| (e.display_name, e.filter))
     }
@@ -334,8 +516,11 @@ impl FilterMenuGroup {
 /// Returns `None` for Nearest (which should use GPU blit instead).
 pub fn cpu_scale(
     filter: ScaleFilter,
-    src: &[u32], sw: usize, sh: usize,
-    disp_w: usize, disp_h: usize,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    disp_w: usize,
+    disp_h: usize,
 ) -> Option<(Vec<u32>, u32, u32)> {
     Some(match filter {
         ScaleFilter::Hqx(mode) => {

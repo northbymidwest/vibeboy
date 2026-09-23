@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use vibeboy::model::GbModel;
 use crate::harness::{TestHarness, TestResult};
-use crate::util::{make_emu, GB_FB_WIDTH, GB_FB_HEIGHT};
+use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu};
+use vibeboy::model::GbModel;
 
 pub struct TearoomHarness {
     pub force_model: Option<GbModel>,
@@ -48,9 +48,11 @@ impl TestHarness for TearoomHarness {
 
         // Determine model: -C suffix = CGB, otherwise DMG
         let is_cgb_test = stem.ends_with("-C");
-        let model = self
-            .force_model
-            .unwrap_or(if is_cgb_test { GbModel::Cgb } else { GbModel::Dmg });
+        let model = self.force_model.unwrap_or(if is_cgb_test {
+            GbModel::Cgb
+        } else {
+            GbModel::Dmg
+        });
 
         // Find reference image: try {stem}_dmg_blob.png, {stem}_dmg_b.png, etc.
         let ref_path = if is_cgb_test {

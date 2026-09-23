@@ -1,15 +1,15 @@
 mod commands;
 mod debug_commands;
+mod gpu_svg;
 mod harness;
 mod harnesses;
 #[path = "model.rs"]
 mod test_model;
-mod gpu_svg;
 mod util;
 
 use clap::{Parser, Subcommand};
-use vibeboy::model::GbModel;
 use std::path::PathBuf;
+use vibeboy::model::GbModel;
 
 use harness::run_tests;
 use harnesses::blargg::BlarggHarness;
@@ -198,8 +198,11 @@ fn main() {
     match cli.command {
         Command::Test { subcommand } => {
             let args = match &subcommand {
-                TestCommand::Mooneye(a) | TestCommand::Blargg(a) | TestCommand::Gambatte(a)
-                | TestCommand::Gbmicrotest(a) | TestCommand::Tearoom(a) => a,
+                TestCommand::Mooneye(a)
+                | TestCommand::Blargg(a)
+                | TestCommand::Gambatte(a)
+                | TestCommand::Gbmicrotest(a)
+                | TestCommand::Tearoom(a) => a,
             };
             let model = args.model;
             let verbose = args.verbose;
@@ -212,7 +215,10 @@ fn main() {
                         args.bootrom.as_deref(),
                         model.unwrap_or(GbModel::Dmg),
                     );
-                    Box::new(MooneyeHarness { force_model: model, boot_rom: br })
+                    Box::new(MooneyeHarness {
+                        force_model: model,
+                        boot_rom: br,
+                    })
                 }
                 TestCommand::Blargg(_) => Box::new(BlarggHarness { force_model: model }),
                 TestCommand::Gambatte(_) => Box::new(GambatteHarness { force_model: model }),
@@ -262,7 +268,14 @@ fn main() {
                 gpu,
             );
         }
-        Command::Vectorize { path, out, scale, gpu, cpu_filter, dump_cps } => {
+        Command::Vectorize {
+            path,
+            out,
+            scale,
+            gpu,
+            cpu_filter,
+            dump_cps,
+        } => {
             commands::cmd_vectorize(&path, &out, scale, gpu && !cpu_filter, dump_cps.as_deref());
         }
         Command::Analyze {
@@ -285,7 +298,13 @@ fn main() {
         Command::Calibrate { path } => {
             debug_commands::cmd_calibrate(&path);
         }
-        Command::AudioDump { path, frames, out, model, sample_rate } => {
+        Command::AudioDump {
+            path,
+            frames,
+            out,
+            model,
+            sample_rate,
+        } => {
             commands::cmd_audio_dump(&path, model, frames, &out, sample_rate);
         }
     }

@@ -20,7 +20,11 @@ use super::get;
 /// Unpack ARGB channels as i32 for arithmetic.
 #[inline(always)]
 fn rgb(c: u32) -> (i32, i32, i32) {
-    (((c >> 16) & 0xFF) as i32, ((c >> 8) & 0xFF) as i32, (c & 0xFF) as i32)
+    (
+        ((c >> 16) & 0xFF) as i32,
+        ((c >> 8) & 0xFF) as i32,
+        (c & 0xFF) as i32,
+    )
 }
 
 /// Perceptual difference test in a YCbCr-like integer space.
@@ -31,7 +35,9 @@ fn rgb(c: u32) -> (i32, i32, i32) {
 ///   Cr·8 = −ΔR + 2·ΔG − ΔB     threshold 10
 #[inline(always)]
 fn colors_differ(a: u32, b: u32) -> bool {
-    if a == b { return false; }
+    if a == b {
+        return false;
+    }
     let (ra, ga, ba) = rgb(a);
     let (rb, gb, bb) = rgb(b);
     let (dr, dg, db) = (ra - rb, ga - gb, ba - bb);
@@ -45,8 +51,12 @@ fn colors_differ(a: u32, b: u32) -> bool {
 /// Blend two ARGB colors. `t` in 0..=256 (0→a, 256→b).
 #[inline(always)]
 fn mix(a: u32, b: u32, t: u32) -> u32 {
-    if t == 0 { return a; }
-    if t >= 256 { return b; }
+    if t == 0 {
+        return a;
+    }
+    if t >= 256 {
+        return b;
+    }
     let s = 256 - t;
     let r = (((a >> 16) & 0xFF) * s + ((b >> 16) & 0xFF) * t) >> 8;
     let g = (((a >> 8) & 0xFF) * s + ((b >> 8) & 0xFF) * t) >> 8;
@@ -63,8 +73,12 @@ fn mixf(a: u32, b: u32, f: f32) -> u32 {
 /// Three-way weighted blend (weights should sum to 1).
 #[inline(always)]
 fn mix3(a: u32, b: u32, c: u32, wa: f32, wb: f32, wc: f32) -> u32 {
-    let r = (((a >> 16) & 0xFF) as f32 * wa + ((b >> 16) & 0xFF) as f32 * wb + ((c >> 16) & 0xFF) as f32 * wc) as u32;
-    let g = (((a >> 8) & 0xFF) as f32 * wa + ((b >> 8) & 0xFF) as f32 * wb + ((c >> 8) & 0xFF) as f32 * wc) as u32;
+    let r = (((a >> 16) & 0xFF) as f32 * wa
+        + ((b >> 16) & 0xFF) as f32 * wb
+        + ((c >> 16) & 0xFF) as f32 * wc) as u32;
+    let g = (((a >> 8) & 0xFF) as f32 * wa
+        + ((b >> 8) & 0xFF) as f32 * wb
+        + ((c >> 8) & 0xFF) as f32 * wc) as u32;
     let bl = ((a & 0xFF) as f32 * wa + (b & 0xFF) as f32 * wb + (c & 0xFF) as f32 * wc) as u32;
     0xFF000000 | (r.min(255) << 16) | (g.min(255) << 8) | bl.min(255)
 }
@@ -136,71 +150,346 @@ struct Rule {
 
 const RULES: &[Rule] = &[
     // ── Strong cardinal edges ──
-    Rule { mask: 0xBF, value: 0x37, cond: Cond::TopNeRight, action: Action::SlideX },
-    Rule { mask: 0xDB, value: 0x13, cond: Cond::TopNeRight, action: Action::SlideX },
-    Rule { mask: 0xDB, value: 0x49, cond: Cond::BotNeLeft,  action: Action::SlideY },
-    Rule { mask: 0xEF, value: 0x6D, cond: Cond::BotNeLeft,  action: Action::SlideY },
+    Rule {
+        mask: 0xBF,
+        value: 0x37,
+        cond: Cond::TopNeRight,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0xDB,
+        value: 0x13,
+        cond: Cond::TopNeRight,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0xDB,
+        value: 0x49,
+        cond: Cond::BotNeLeft,
+        action: Action::SlideY,
+    },
+    Rule {
+        mask: 0xEF,
+        value: 0x6D,
+        cond: Cond::BotNeLeft,
+        action: Action::SlideY,
+    },
     // ── Isolated corner ──
-    Rule { mask: 0x0B, value: 0x0B, cond: Cond::LeftNeTop, action: Action::Solid },
-    Rule { mask: 0xFE, value: 0x4A, cond: Cond::LeftNeTop, action: Action::Solid },
-    Rule { mask: 0xFE, value: 0x1A, cond: Cond::LeftNeTop, action: Action::Solid },
+    Rule {
+        mask: 0x0B,
+        value: 0x0B,
+        cond: Cond::LeftNeTop,
+        action: Action::Solid,
+    },
+    Rule {
+        mask: 0xFE,
+        value: 0x4A,
+        cond: Cond::LeftNeTop,
+        action: Action::Solid,
+    },
+    Rule {
+        mask: 0xFE,
+        value: 0x1A,
+        cond: Cond::LeftNeTop,
+        action: Action::Solid,
+    },
     // ── Gentle corners ──
-    Rule { mask: 0x6F, value: 0x2A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0x5B, value: 0x0A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xBF, value: 0x3A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xDF, value: 0x5A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0x9F, value: 0x8A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xCF, value: 0x8A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xEF, value: 0x4E, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0x3F, value: 0x0E, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xFB, value: 0x5A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xBB, value: 0x8A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0x7F, value: 0x5A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xAF, value: 0x8A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
-    Rule { mask: 0xEB, value: 0x8A, cond: Cond::LeftNeTop, action: Action::GentleCorner },
+    Rule {
+        mask: 0x6F,
+        value: 0x2A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0x5B,
+        value: 0x0A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xBF,
+        value: 0x3A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xDF,
+        value: 0x5A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0x9F,
+        value: 0x8A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xCF,
+        value: 0x8A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xEF,
+        value: 0x4E,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0x3F,
+        value: 0x0E,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xFB,
+        value: 0x5A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xBB,
+        value: 0x8A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0x7F,
+        value: 0x5A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xAF,
+        value: 0x8A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
+    Rule {
+        mask: 0xEB,
+        value: 0x8A,
+        cond: Cond::LeftNeTop,
+        action: Action::GentleCorner,
+    },
     // ── Partial corners ──
-    Rule { mask: 0x0B, value: 0x08, cond: Cond::None, action: Action::PartialCornerTop },
-    Rule { mask: 0x0B, value: 0x02, cond: Cond::None, action: Action::PartialCornerLeft },
+    Rule {
+        mask: 0x0B,
+        value: 0x08,
+        cond: Cond::None,
+        action: Action::PartialCornerTop,
+    },
+    Rule {
+        mask: 0x0B,
+        value: 0x02,
+        cond: Cond::None,
+        action: Action::PartialCornerLeft,
+    },
     // ── Full 45° diagonal ──
-    Rule { mask: 0x2F, value: 0x2F, cond: Cond::None, action: Action::CircularDiag },
+    Rule {
+        mask: 0x2F,
+        value: 0x2F,
+        cond: Cond::None,
+        action: Action::CircularDiag,
+    },
     // ── Steep 2:1 diagonals ──
-    Rule { mask: 0xBF, value: 0x37, cond: Cond::None, action: Action::SteepH },
-    Rule { mask: 0xDB, value: 0x13, cond: Cond::None, action: Action::SteepH },
-    Rule { mask: 0xDB, value: 0x49, cond: Cond::None, action: Action::SteepV },
-    Rule { mask: 0xEF, value: 0x6D, cond: Cond::None, action: Action::SteepV },
+    Rule {
+        mask: 0xBF,
+        value: 0x37,
+        cond: Cond::None,
+        action: Action::SteepH,
+    },
+    Rule {
+        mask: 0xDB,
+        value: 0x13,
+        cond: Cond::None,
+        action: Action::SteepH,
+    },
+    Rule {
+        mask: 0xDB,
+        value: 0x49,
+        cond: Cond::None,
+        action: Action::SteepV,
+    },
+    Rule {
+        mask: 0xEF,
+        value: 0x6D,
+        cond: Cond::None,
+        action: Action::SteepV,
+    },
     // ── Reverse-slope diagonals ──
-    Rule { mask: 0xBF, value: 0x8F, cond: Cond::None, action: Action::ReverseH },
-    Rule { mask: 0x7E, value: 0x0E, cond: Cond::None, action: Action::ReverseH },
-    Rule { mask: 0x7E, value: 0x2A, cond: Cond::None, action: Action::ReverseV },
-    Rule { mask: 0xEF, value: 0xAB, cond: Cond::None, action: Action::ReverseV },
+    Rule {
+        mask: 0xBF,
+        value: 0x8F,
+        cond: Cond::None,
+        action: Action::ReverseH,
+    },
+    Rule {
+        mask: 0x7E,
+        value: 0x0E,
+        cond: Cond::None,
+        action: Action::ReverseH,
+    },
+    Rule {
+        mask: 0x7E,
+        value: 0x2A,
+        cond: Cond::None,
+        action: Action::ReverseV,
+    },
+    Rule {
+        mask: 0xEF,
+        value: 0xAB,
+        cond: Cond::None,
+        action: Action::ReverseV,
+    },
     // ── Cardinal slides ──
-    Rule { mask: 0x1B, value: 0x03, cond: Cond::None, action: Action::SlideX },
-    Rule { mask: 0x4F, value: 0x43, cond: Cond::None, action: Action::SlideX },
-    Rule { mask: 0x8B, value: 0x83, cond: Cond::None, action: Action::SlideX },
-    Rule { mask: 0x6B, value: 0x43, cond: Cond::None, action: Action::SlideX },
-    Rule { mask: 0x4B, value: 0x09, cond: Cond::None, action: Action::SlideY },
-    Rule { mask: 0x8B, value: 0x89, cond: Cond::None, action: Action::SlideY },
-    Rule { mask: 0x1F, value: 0x19, cond: Cond::None, action: Action::SlideY },
-    Rule { mask: 0x3B, value: 0x19, cond: Cond::None, action: Action::SlideY },
+    Rule {
+        mask: 0x1B,
+        value: 0x03,
+        cond: Cond::None,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0x4F,
+        value: 0x43,
+        cond: Cond::None,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0x8B,
+        value: 0x83,
+        cond: Cond::None,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0x6B,
+        value: 0x43,
+        cond: Cond::None,
+        action: Action::SlideX,
+    },
+    Rule {
+        mask: 0x4B,
+        value: 0x09,
+        cond: Cond::None,
+        action: Action::SlideY,
+    },
+    Rule {
+        mask: 0x8B,
+        value: 0x89,
+        cond: Cond::None,
+        action: Action::SlideY,
+    },
+    Rule {
+        mask: 0x1F,
+        value: 0x19,
+        cond: Cond::None,
+        action: Action::SlideY,
+    },
+    Rule {
+        mask: 0x3B,
+        value: 0x19,
+        cond: Cond::None,
+        action: Action::SlideY,
+    },
     // ── Smooth linear corners ──
-    Rule { mask: 0xFB, value: 0x6A, cond: Cond::None, action: Action::LinearCorner },
-    Rule { mask: 0x6F, value: 0x6E, cond: Cond::None, action: Action::LinearCorner },
-    Rule { mask: 0x3F, value: 0x3E, cond: Cond::None, action: Action::LinearCorner },
-    Rule { mask: 0xFB, value: 0xFA, cond: Cond::None, action: Action::LinearCorner },
-    Rule { mask: 0xDF, value: 0xDE, cond: Cond::None, action: Action::LinearCorner },
-    Rule { mask: 0xDF, value: 0x1E, cond: Cond::None, action: Action::LinearCorner },
+    Rule {
+        mask: 0xFB,
+        value: 0x6A,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
+    Rule {
+        mask: 0x6F,
+        value: 0x6E,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
+    Rule {
+        mask: 0x3F,
+        value: 0x3E,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
+    Rule {
+        mask: 0xFB,
+        value: 0xFA,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
+    Rule {
+        mask: 0xDF,
+        value: 0xDE,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
+    Rule {
+        mask: 0xDF,
+        value: 0x1E,
+        cond: Cond::None,
+        action: Action::LinearCorner,
+    },
     // ── AA diagonals ──
-    Rule { mask: 0x4F, value: 0x4B, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0x9F, value: 0x1B, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0x2F, value: 0x0B, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0xBE, value: 0x0A, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0xEE, value: 0x0A, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0x7E, value: 0x0A, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0xEB, value: 0x4B, cond: Cond::None, action: Action::AaDiag },
-    Rule { mask: 0x3B, value: 0x1B, cond: Cond::None, action: Action::AaDiag },
+    Rule {
+        mask: 0x4F,
+        value: 0x4B,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0x9F,
+        value: 0x1B,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0x2F,
+        value: 0x0B,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0xBE,
+        value: 0x0A,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0xEE,
+        value: 0x0A,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0x7E,
+        value: 0x0A,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0xEB,
+        value: 0x4B,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
+    Rule {
+        mask: 0x3B,
+        value: 0x1B,
+        cond: Cond::None,
+        action: Action::AaDiag,
+    },
     // ── Bilinear fallbacks ──
-    Rule { mask: 0x0B, value: 0x01, cond: Cond::None, action: Action::BilinearMid },
-    Rule { mask: 0x0B, value: 0x00, cond: Cond::None, action: Action::BilinearFull },
+    Rule {
+        mask: 0x0B,
+        value: 0x01,
+        cond: Cond::None,
+        action: Action::BilinearMid,
+    },
+    Rule {
+        mask: 0x0B,
+        value: 0x00,
+        cond: Cond::None,
+        action: Action::BilinearFull,
+    },
 ];
 
 /// Compute the corner blend used by several diagonal rules. When the
@@ -211,7 +500,11 @@ fn corner_blend(w0: u32, w1: u32, w3: u32, px: f32, py: f32) -> u32 {
     if colors_differ(w0, w1) || colors_differ(w0, w3) {
         mixf(w1, w3, py - px + 0.5)
     } else {
-        mixf(mixf(mix3(w1, w0, w3, 0.375, 0.25, 0.375), w3, py * 2.0), w1, px * 2.0)
+        mixf(
+            mixf(mix3(w1, w0, w3, 0.375, 0.25, 0.375), w3, py * 2.0),
+            w1,
+            px * 2.0,
+        )
     }
 }
 
@@ -231,33 +524,43 @@ fn aa_band(d: f32, hw: f32) -> f32 {
 /// position in [0, 0.5].
 #[inline(always)]
 fn evaluate(
-    w: &[u32; 9], pat: u32,
-    src: &[u32], sw: usize, sh: usize,
-    cx: isize, cy: isize, ox: isize, oy: isize,
-    px: f32, py: f32, pixel_size: f32,
+    w: &[u32; 9],
+    pat: u32,
+    src: &[u32],
+    sw: usize,
+    sh: usize,
+    cx: isize,
+    cy: isize,
+    ox: isize,
+    oy: isize,
+    px: f32,
+    py: f32,
+    pixel_size: f32,
 ) -> u32 {
     let center = w[4];
 
     // Walk the rule table looking for the first match.
     for rule in RULES {
-        if (pat & rule.mask) != rule.value { continue; }
+        if (pat & rule.mask) != rule.value {
+            continue;
+        }
 
         let cond_ok = match rule.cond {
             Cond::None => true,
             Cond::TopNeRight => colors_differ(w[1], w[5]),
-            Cond::BotNeLeft  => colors_differ(w[7], w[3]),
-            Cond::LeftNeTop  => colors_differ(w[3], w[1]),
+            Cond::BotNeLeft => colors_differ(w[7], w[3]),
+            Cond::LeftNeTop => colors_differ(w[3], w[1]),
         };
-        if !cond_ok { continue; }
+        if !cond_ok {
+            continue;
+        }
 
         return match rule.action {
             Action::SlideX => mixf(center, w[3], 0.5 - px),
             Action::SlideY => mixf(center, w[1], 0.5 - py),
-            Action::Solid  => center,
+            Action::Solid => center,
 
-            Action::GentleCorner => {
-                mixf(center, mixf(center, w[0], 0.5 - px), 0.5 - py)
-            }
+            Action::GentleCorner => mixf(center, mixf(center, w[0], 0.5 - px), 0.5 - py),
 
             Action::PartialCornerTop => {
                 let tip = mix3(w[0], w[1], center, 0.375, 0.25, 0.375);
@@ -275,86 +578,108 @@ fn evaluate(
                 let dy = 0.5 - py;
                 let d2 = dx * dx + dy * dy;
                 let inner = 0.5 - pixel_size / 2.0;
-                if d2 < inner * inner { center }
-                else {
+                if d2 < inner * inner {
+                    center
+                } else {
                     let outer_color = corner_blend(w[0], w[1], w[3], px, py);
                     let outer = 0.5 + pixel_size / 2.0;
-                    if d2 > outer * outer { outer_color }
-                    else { mixf(center, outer_color, (d2.sqrt() - 0.5 + pixel_size / 2.0) / pixel_size) }
+                    if d2 > outer * outer {
+                        outer_color
+                    } else {
+                        mixf(
+                            center,
+                            outer_color,
+                            (d2.sqrt() - 0.5 + pixel_size / 2.0) / pixel_size,
+                        )
+                    }
                 }
             }
 
             Action::SteepH => {
                 let d = px - 2.0 * py;
                 let hw = pixel_size * 2.236 / 2.0;
-                if d > hw { w[1] }
-                else {
+                if d > hw {
+                    w[1]
+                } else {
                     let base = mixf(w[3], center, px + 0.5);
-                    if d < -hw { base }
-                    else { mixf(base, w[1], aa_band(d, hw)) }
+                    if d < -hw {
+                        base
+                    } else {
+                        mixf(base, w[1], aa_band(d, hw))
+                    }
                 }
             }
             Action::SteepV => {
                 let d = py - 2.0 * px;
                 let hw = pixel_size * 2.236 / 2.0;
-                if d > hw { w[3] }
-                else {
+                if d > hw {
+                    w[3]
+                } else {
                     let base = mixf(w[1], center, px + 0.5);
-                    if d < -hw { base }
-                    else { mixf(base, w[3], aa_band(d, hw)) }
+                    if d < -hw {
+                        base
+                    } else {
+                        mixf(base, w[3], aa_band(d, hw))
+                    }
                 }
             }
 
             Action::ReverseH => {
                 let d = px + 2.0 * py;
                 let hw = pixel_size * 2.236 / 2.0;
-                if d > 1.0 + hw { center }
-                else {
+                if d > 1.0 + hw {
+                    center
+                } else {
                     let edge_color = corner_blend(w[0], w[1], w[3], px, py);
-                    if d < 1.0 - hw { edge_color }
-                    else { mixf(edge_color, center, aa_band(d - 1.0, hw)) }
+                    if d < 1.0 - hw {
+                        edge_color
+                    } else {
+                        mixf(edge_color, center, aa_band(d - 1.0, hw))
+                    }
                 }
             }
             Action::ReverseV => {
                 let d = py + 2.0 * px;
                 let hw = pixel_size * 2.236 / 2.0;
-                if d > 1.0 + hw { center }
-                else {
+                if d > 1.0 + hw {
+                    center
+                } else {
                     let edge_color = corner_blend(w[0], w[1], w[3], px, py);
-                    if d < 1.0 - hw { edge_color }
-                    else { mixf(edge_color, center, aa_band(d - 1.0, hw)) }
+                    if d < 1.0 - hw {
+                        edge_color
+                    } else {
+                        mixf(edge_color, center, aa_band(d - 1.0, hw))
+                    }
                 }
             }
 
-            Action::LinearCorner => {
-                mixf(center, w[0], (1.0 - px - py) / 2.0)
-            }
+            Action::LinearCorner => mixf(center, w[0], (1.0 - px - py) / 2.0),
 
             Action::AaDiag => {
                 let d = px + py;
                 let hw = pixel_size / 2.0;
-                if d > 0.5 + hw { center }
-                else {
+                if d > 0.5 + hw {
+                    center
+                } else {
                     let edge_color = corner_blend(w[0], w[1], w[3], px, py);
-                    if d < 0.5 - hw { edge_color }
-                    else { mixf(edge_color, center, aa_band(d - 0.5, hw)) }
+                    if d < 0.5 - hw {
+                        edge_color
+                    } else {
+                        mixf(edge_color, center, aa_band(d - 0.5, hw))
+                    }
                 }
             }
 
-            Action::BilinearMid => {
-                mixf(
-                    mixf(center, w[3], 0.5 - px),
-                    mixf(w[1], mixf(w[1], w[3], 0.5), 0.5 - px),
-                    0.5 - py,
-                )
-            }
-            Action::BilinearFull => {
-                mixf(
-                    mixf(center, w[3], 0.5 - px),
-                    mixf(w[1], w[0], 0.5 - px),
-                    0.5 - py,
-                )
-            }
+            Action::BilinearMid => mixf(
+                mixf(center, w[3], 0.5 - px),
+                mixf(w[1], mixf(w[1], w[3], 0.5), 0.5 - px),
+                0.5 - py,
+            ),
+            Action::BilinearFull => mixf(
+                mixf(center, w[3], 0.5 - px),
+                mixf(w[1], w[0], 0.5 - px),
+                0.5 - py,
+            ),
         };
     }
 
@@ -371,9 +696,9 @@ fn evaluate(
     // 3×3 window, in the direction of the top-left corner.
     let extras = [
         get(src, sw, sh, cx - ox * 2, cy - oy * 2),
-        get(src, sw, sh, cx - ox,     cy - oy * 2),
-        get(src, sw, sh, cx,          cy - oy * 2),
-        get(src, sw, sh, cx + ox,     cy - oy * 2),
+        get(src, sw, sh, cx - ox, cy - oy * 2),
+        get(src, sw, sh, cx, cy - oy * 2),
+        get(src, sw, sh, cx + ox, cy - oy * 2),
         get(src, sw, sh, cx - ox * 2, cy - oy),
         get(src, sw, sh, cx - ox * 2, cy),
         get(src, sw, sh, cx - ox * 2, cy + oy),
@@ -390,8 +715,11 @@ fn evaluate(
     // this is a diagonal edge — blend along it.
     if extended.count_ones() as i32 <= 7 {
         let edge = mixf(w[1], w[3], py - px + 0.5);
-        if d < 0.5 - pixel_size / 2.0 { edge }
-        else { mixf(edge, center, (d + pixel_size / 2.0 - 0.5) / pixel_size) }
+        if d < 0.5 - pixel_size / 2.0 {
+            edge
+        } else {
+            mixf(edge, center, (d + pixel_size / 2.0 - 0.5) / pixel_size)
+        }
     } else {
         center
     }
@@ -400,17 +728,14 @@ fn evaluate(
 // ── Public API ─────────────────────────────────────────────────────────
 
 /// Scale to arbitrary output dimensions.
-pub fn scale_to(
-    src: &[u32], src_w: usize, src_h: usize,
-    dst_w: usize, dst_h: usize,
-) -> Vec<u32> {
+pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u32> {
     if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
         return vec![0u32; dst_w * dst_h];
     }
 
     let mut dst = vec![0u32; dst_w * dst_h];
-    let pixel_size = ((src_w as f32 / dst_w as f32).powi(2)
-        + (src_h as f32 / dst_h as f32).powi(2)).sqrt();
+    let pixel_size =
+        ((src_w as f32 / dst_w as f32).powi(2) + (src_h as f32 / dst_h as f32).powi(2)).sqrt();
 
     // Precompute which source pixels have a completely uniform 3×3 window.
     let mut uniform = vec![false; src_w * src_h];
@@ -421,10 +746,14 @@ pub fn scale_to(
             let c = src[y * src_w + x];
             let xa = x.saturating_sub(1);
             let xb = (x + 1).min(src_w - 1);
-            uniform[y * src_w + x] =
-                src[ya * src_w + xa] == c && src[ya * src_w + x] == c && src[ya * src_w + xb] == c &&
-                src[y * src_w + xa] == c && src[y * src_w + xb] == c &&
-                src[yb * src_w + xa] == c && src[yb * src_w + x] == c && src[yb * src_w + xb] == c;
+            uniform[y * src_w + x] = src[ya * src_w + xa] == c
+                && src[ya * src_w + x] == c
+                && src[ya * src_w + xb] == c
+                && src[y * src_w + xa] == c
+                && src[y * src_w + xb] == c
+                && src[yb * src_w + xa] == c
+                && src[yb * src_w + x] == c
+                && src[yb * src_w + xb] == c;
         }
     }
 
@@ -454,8 +783,16 @@ pub fn scale_to(
             let fx = sxf - sxi as f32;
 
             // Reflect into top-left quadrant
-            let (px, ox) = if fx > 0.5 { (1.0 - fx, -1isize) } else { (fx, 1isize) };
-            let (py, oy) = if fy > 0.5 { (1.0 - fy, -1isize) } else { (fy, 1isize) };
+            let (px, ox) = if fx > 0.5 {
+                (1.0 - fx, -1isize)
+            } else {
+                (fx, 1isize)
+            };
+            let (py, oy) = if fy > 0.5 {
+                (1.0 - fy, -1isize)
+            } else {
+                (fy, 1isize)
+            };
 
             let cx = sxi as isize;
             let cy = syi as isize;
@@ -464,9 +801,15 @@ pub fn scale_to(
             if key != last {
                 // Sample the oriented 3×3 window and build the pattern.
                 let offsets: [(isize, isize); 9] = [
-                    (-ox, -oy), (0, -oy), (ox, -oy),
-                    (-ox,   0), (0,   0), (ox,   0),
-                    (-ox,  oy), (0,  oy), (ox,  oy),
+                    (-ox, -oy),
+                    (0, -oy),
+                    (ox, -oy),
+                    (-ox, 0),
+                    (0, 0),
+                    (ox, 0),
+                    (-ox, oy),
+                    (0, oy),
+                    (ox, oy),
                 ];
                 for (i, &(dx, dy)) in offsets.iter().enumerate() {
                     nb_colors[i] = get(src, src_w, src_h, cx + dx, cy + dy);
@@ -484,9 +827,7 @@ pub fn scale_to(
             }
 
             dst[dy * dst_w + dx] = evaluate(
-                &nb_colors, nb_pat,
-                src, src_w, src_h, cx, cy, ox, oy,
-                px, py, pixel_size,
+                &nb_colors, nb_pat, src, src_w, src_h, cx, cy, ox, oy, px, py, pixel_size,
             );
         }
     }
@@ -496,7 +837,13 @@ pub fn scale_to(
 
 /// Scale by an integer factor.
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, factor: u32) -> Vec<u32> {
-    scale_to(src, src_w, src_h, src_w * factor as usize, src_h * factor as usize)
+    scale_to(
+        src,
+        src_w,
+        src_h,
+        src_w * factor as usize,
+        src_h * factor as usize,
+    )
 }
 
 #[cfg(test)]
@@ -510,17 +857,48 @@ mod tests {
         let h = 32;
         let mut img = vec![0xFF000000u32; w * h];
         // Solid regions
-        for y in 0..8 { for x in 0..8 { img[y*w+x] = 0xFF_FF0000; } }
-        for y in 0..8 { for x in 8..16 { img[y*w+x] = 0xFF_00FF00; } }
-        for y in 8..16 { for x in 0..8 { img[y*w+x] = 0xFF_0000FF; } }
+        for y in 0..8 {
+            for x in 0..8 {
+                img[y * w + x] = 0xFF_FF0000;
+            }
+        }
+        for y in 0..8 {
+            for x in 8..16 {
+                img[y * w + x] = 0xFF_00FF00;
+            }
+        }
+        for y in 8..16 {
+            for x in 0..8 {
+                img[y * w + x] = 0xFF_0000FF;
+            }
+        }
         // Checkerboard
-        for y in 8..16 { for x in 8..16 { img[y*w+x] = if (x+y)%2==0 { 0xFF_FFFFFF } else { 0xFF_000000 }; } }
+        for y in 8..16 {
+            for x in 8..16 {
+                img[y * w + x] = if (x + y) % 2 == 0 {
+                    0xFF_FFFFFF
+                } else {
+                    0xFF_000000
+                };
+            }
+        }
         // Diagonal line
-        for i in 0..16 { img[(16+i)*w+i] = 0xFF_FFFF00; }
+        for i in 0..16 {
+            img[(16 + i) * w + i] = 0xFF_FFFF00;
+        }
         // Gradient
-        for y in 16..24 { for x in 16..32 { let v = (x-16)*16; img[y*w+x] = 0xFF000000 | (v as u32) << 16 | (v as u32) << 8 | v as u32; } }
+        for y in 16..24 {
+            for x in 16..32 {
+                let v = (x - 16) * 16;
+                img[y * w + x] = 0xFF000000 | (v as u32) << 16 | (v as u32) << 8 | v as u32;
+            }
+        }
         // Subtle color differences
-        for y in 24..32 { for x in 0..16 { img[y*w+x] = 0xFF_808080 + (x as u32); } }
+        for y in 24..32 {
+            for x in 0..16 {
+                img[y * w + x] = 0xFF_808080 + (x as u32);
+            }
+        }
         (img, w, h)
     }
 

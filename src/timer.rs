@@ -137,10 +137,10 @@ impl Timer {
     /// Returns the counter bit that drives TIMA based on TAC clock select.
     fn timer_bit(&self) -> u16 {
         match self.tac & 0x03 {
-            0 => 9,  // 4096 Hz   (every 1024 T-cycles)
-            1 => 3,  // 262144 Hz (every 16 T-cycles)
-            2 => 5,  // 65536 Hz  (every 64 T-cycles)
-            3 => 7,  // 16384 Hz  (every 256 T-cycles)
+            0 => 9, // 4096 Hz   (every 1024 T-cycles)
+            1 => 3, // 262144 Hz (every 16 T-cycles)
+            2 => 5, // 65536 Hz  (every 64 T-cycles)
+            3 => 7, // 16384 Hz  (every 256 T-cycles)
             _ => unreachable!(),
         }
     }

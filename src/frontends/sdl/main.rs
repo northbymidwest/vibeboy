@@ -1,8 +1,8 @@
 use vibeboy::*;
 
-mod input;
-mod camera;
 mod accel;
+mod camera;
+mod input;
 mod render;
 
 use clap::Parser;
@@ -11,15 +11,15 @@ use model::GbModel;
 use sdl3::audio::{AudioFormat, AudioSpec};
 use sdl3::dialog::{self, DialogFileFilter};
 use sdl3::event::Event;
-use sdl3::keyboard::{Keycode, Scancode};
-use sdl3::sys::camera::{
-    SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras,
-    SDL_OpenCamera, SDL_ReleaseCameraFrame,
-};
-use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
 use sdl3::gamepad::{Axis as GpAxis, Button as GpButton};
+use sdl3::keyboard::{Keycode, Scancode};
 use sdl3::sensor::{SensorData, SensorType};
+use sdl3::sys::camera::{
+    SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras, SDL_OpenCamera,
+    SDL_ReleaseCameraFrame,
+};
 use sdl3::sys::joystick::SDL_JoystickID;
+use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
 use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
 use std::fs;
@@ -29,10 +29,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use input::handle_input;
+use accel::{enable_gamepad_sensors, init_accel};
 use camera::CameraThread;
-use accel::{init_accel, enable_gamepad_sensors};
-use render::{display_size, cpu_scale_frame};
+use input::handle_input;
+use render::{cpu_scale_frame, display_size};
 
 use ui_util::frame_duration;
 use ui_util::parse_model;
@@ -179,7 +179,9 @@ fn main() {
     });
 
     // Resolve hardware model
-    let model = cli.model.unwrap_or_else(|| ui_util::auto_detect_model(&rom));
+    let model = cli
+        .model
+        .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
 
     let frame_dur = frame_duration(model);
 
@@ -215,8 +217,8 @@ fn main() {
     }
 
     // Parse scaling filter (name already validated and lowercased by parse_filter)
-    let scale_filter = scaling::ScaleFilter::from_name(&cli.filter)
-        .expect("filter validated by parse_filter");
+    let scale_filter =
+        scaling::ScaleFilter::from_name(&cli.filter).expect("filter validated by parse_filter");
 
     ui_util::print_controls();
     if scale_filter != scaling::ScaleFilter::Nearest {
@@ -224,7 +226,14 @@ fn main() {
     }
     eprintln!();
 
-    let mut emu = Emulator::new(rom, boot_rom, model, snes_rom, clock::default_clock(), AUDIO_SAMPLE_RATE);
+    let mut emu = Emulator::new(
+        rom,
+        boot_rom,
+        model,
+        snes_rom,
+        clock::default_clock(),
+        AUDIO_SAMPLE_RATE,
+    );
     ui_util::load_sav(&mut emu, &rom_path);
     let mut sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
@@ -241,7 +250,11 @@ fn main() {
     let tex_h = src_h * filter_factor;
     // Resizable filters start at SCALE * src size (factor=1); fixed-factor
     // filters compute window size from their native output dimensions.
-    let win_scale = if filter_factor > 1 { SCALE / filter_factor } else { SCALE };
+    let win_scale = if filter_factor > 1 {
+        SCALE / filter_factor
+    } else {
+        SCALE
+    };
     let win_scale = win_scale.max(1);
     let win_w = tex_w * win_scale;
     let win_h = tex_h * win_scale;
@@ -272,9 +285,9 @@ fn main() {
     let texture_creator = canvas.texture_creator();
     #[cfg(not(feature = "sdl3-gpu-shaders"))]
     let mut sdl_texture = {
-        let mut tex = texture_creator.create_texture_streaming(
-            sdl3::pixels::PixelFormat::ARGB8888, tex_w, tex_h,
-        ).unwrap();
+        let mut tex = texture_creator
+            .create_texture_streaming(sdl3::pixels::PixelFormat::ARGB8888, tex_w, tex_h)
+            .unwrap();
         tex.set_scale_mode(sdl3::render::ScaleMode::Nearest);
         tex
     };
@@ -303,9 +316,9 @@ fn main() {
     // ── Audio ─────────────────────────────────────────────────────────────────
     sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "2048");
     let emu_audio_spec = AudioSpec {
-        freq:     Some(AUDIO_SAMPLE_RATE as i32),
+        freq: Some(AUDIO_SAMPLE_RATE as i32),
         channels: Some(2),
-        format:   Some(AudioFormat::F32LE),
+        format: Some(AudioFormat::F32LE),
     };
     let audio_device = audio.open_playback_device(&emu_audio_spec).unwrap();
     let audio_stream = audio.new_playback_stream(&emu_audio_spec, None).unwrap();
@@ -331,7 +344,11 @@ fn main() {
     let mut rumble_was_on = false;
     let runahead = cli.runahead.unwrap_or(0);
     if runahead > 0 {
-        eprintln!("  Run-ahead: {} frame{}", runahead, if runahead > 1 { "s" } else { "" });
+        eprintln!(
+            "  Run-ahead: {} frame{}",
+            runahead,
+            if runahead > 1 { "s" } else { "" }
+        );
     }
 
     let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
@@ -347,13 +364,26 @@ fn main() {
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
-                | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => break 'running,
-                Event::KeyDown { keycode: Some(Keycode::F5), .. } => {
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::F5),
+                    ..
+                } => {
                     ui_util::save_state_to_slot(&mut emu, &rom_path, current_slot);
                 }
-                Event::KeyDown { keycode: Some(Keycode::F9), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::F9),
+                    ..
+                } => {
                     // Screenshot: save raw PPU output and scaled GPU output
-                    let raw: &[u32] = if is_sgb { emu.sgb_composited_frame() } else { emu.frame_buffer() };
+                    let raw: &[u32] = if is_sgb {
+                        emu.sgb_composited_frame()
+                    } else {
+                        emu.frame_buffer()
+                    };
                     let sw = src_w as usize;
                     let sh = src_h as usize;
 
@@ -361,11 +391,19 @@ fn main() {
                     let raw_path = "screenshot_raw.png";
                     let mut rgb = vec![0u8; sw * sh * 3];
                     for (i, &c) in raw.iter().take(sw * sh).enumerate() {
-                        rgb[i*3]   = ((c >> 16) & 0xff) as u8;
-                        rgb[i*3+1] = ((c >> 8) & 0xff) as u8;
-                        rgb[i*3+2] = (c & 0xff) as u8;
+                        rgb[i * 3] = ((c >> 16) & 0xff) as u8;
+                        rgb[i * 3 + 1] = ((c >> 8) & 0xff) as u8;
+                        rgb[i * 3 + 2] = (c & 0xff) as u8;
                     }
-                    if image::save_buffer(raw_path, &rgb, sw as u32, sh as u32, image::ColorType::Rgb8).is_ok() {
+                    if image::save_buffer(
+                        raw_path,
+                        &rgb,
+                        sw as u32,
+                        sh as u32,
+                        image::ColorType::Rgb8,
+                    )
+                    .is_ok()
+                    {
                         eprintln!("Raw screenshot saved to {}", raw_path);
                     }
 
@@ -376,21 +414,31 @@ fn main() {
                         let oh = gpu.tex_h;
                         if ow > 0 && oh > 0 {
                             let dl_size = ow * oh * 4;
-                            if let Ok(dl_buf) = gpu.device.create_transfer_buffer()
+                            if let Ok(dl_buf) = gpu
+                                .device
+                                .create_transfer_buffer()
                                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-                                .with_size(dl_size).build()
+                                .with_size(dl_size)
+                                .build()
                             {
                                 if let Ok(cmd) = gpu.device.acquire_command_buffer() {
                                     if let Ok(cp) = gpu.device.begin_copy_pass(&cmd) {
                                         unsafe {
-                                            let mut src = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+                                            let mut src =
+                                                sdl3::sys::gpu::SDL_GPUTextureRegion::default();
                                             src.texture = gpu.tex.raw();
                                             src.w = ow;
                                             src.h = oh;
                                             src.d = 1;
-                                            let mut dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+                                            let mut dst =
+                                                sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default(
+                                                );
                                             dst.transfer_buffer = dl_buf.raw();
-                                            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src, &dst);
+                                            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(
+                                                cp.raw(),
+                                                &src,
+                                                &dst,
+                                            );
                                         }
                                         gpu.device.end_copy_pass(cp);
                                         if let Ok(f) = cmd.submit_and_acquire_fence(&gpu.device) {
@@ -398,15 +446,28 @@ fn main() {
                                             let map = dl_buf.map::<u32>(&gpu.device, false);
                                             let px = map.mem();
                                             let mut rgb2 = vec![0u8; (ow * oh) as usize * 3];
-                                            for (i, &c) in px.iter().take((ow * oh) as usize).enumerate() {
-                                                rgb2[i*3]   = ((c >> 16) & 0xff) as u8;
-                                                rgb2[i*3+1] = ((c >> 8) & 0xff) as u8;
-                                                rgb2[i*3+2] = (c & 0xff) as u8;
+                                            for (i, &c) in
+                                                px.iter().take((ow * oh) as usize).enumerate()
+                                            {
+                                                rgb2[i * 3] = ((c >> 16) & 0xff) as u8;
+                                                rgb2[i * 3 + 1] = ((c >> 8) & 0xff) as u8;
+                                                rgb2[i * 3 + 2] = (c & 0xff) as u8;
                                             }
                                             drop(map);
                                             let scaled_path = "screenshot_scaled.png";
-                                            if image::save_buffer(scaled_path, &rgb2, ow, oh, image::ColorType::Rgb8).is_ok() {
-                                                eprintln!("Scaled screenshot saved to {} ({}x{})", scaled_path, ow, oh);
+                                            if image::save_buffer(
+                                                scaled_path,
+                                                &rgb2,
+                                                ow,
+                                                oh,
+                                                image::ColorType::Rgb8,
+                                            )
+                                            .is_ok()
+                                            {
+                                                eprintln!(
+                                                    "Scaled screenshot saved to {} ({}x{})",
+                                                    scaled_path, ow, oh
+                                                );
                                             }
                                         }
                                     }
@@ -415,10 +476,16 @@ fn main() {
                         }
                     }
                 }
-                Event::KeyDown { keycode: Some(Keycode::F7), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::F7),
+                    ..
+                } => {
                     ui_util::load_state_from_slot(&mut emu, &rom_path, current_slot);
                 }
-                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::Space),
+                    ..
+                } => {
                     paused = !paused;
                     if paused {
                         eprintln!("Paused");
@@ -427,12 +494,17 @@ fn main() {
                         emu_time_debt = Duration::ZERO;
                     }
                 }
-                Event::KeyDown { keycode: Some(Keycode::Period), .. } => {
+                Event::KeyDown {
+                    keycode: Some(Keycode::Period),
+                    ..
+                } => {
                     if paused {
                         step_one_frame = true;
                     }
                 }
-                Event::KeyDown { keycode: Some(k), .. } => {
+                Event::KeyDown {
+                    keycode: Some(k), ..
+                } => {
                     let slot = match k {
                         Keycode::_0 => Some(0),
                         Keycode::_1 => Some(1),
@@ -461,14 +533,20 @@ fn main() {
                     }
                 }
                 Event::ControllerDeviceRemoved { which, .. } => {
-                    if gamepad.as_ref().is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which))) {
+                    if gamepad
+                        .as_ref()
+                        .is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which)))
+                    {
                         eprintln!("Gamepad disconnected");
                         gamepad = None;
                         // Try to pick up another connected gamepad
                         if let Ok(ids) = gamepad_sys.gamepads() {
                             for id in ids {
                                 if let Ok(gp) = gamepad_sys.open(id) {
-                                    eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                                    eprintln!(
+                                        "Gamepad connected: {}",
+                                        gp.name().unwrap_or_default()
+                                    );
                                     enable_gamepad_sensors(&gp);
                                     gamepad = Some(gp);
                                     break;
@@ -502,7 +580,10 @@ fn main() {
             // Gamepad accelerometer takes priority (e.g. DualSense, Switch Pro)
             if let Some(ref gp) = gamepad {
                 let mut data = [0.0f32; 3];
-                if gp.sensor_get_data(SensorType::Accelerometer, &mut data).is_ok() {
+                if gp
+                    .sensor_get_data(SensorType::Accelerometer, &mut data)
+                    .is_ok()
+                {
                     gx = data[0] / 9.81_f32;
                     gy = data[1] / 9.81_f32;
                     got = true;
@@ -570,7 +651,9 @@ fn main() {
         frame_start = Instant::now();
         emu_time_debt += elapsed;
         let max_debt = frame_dur * 4;
-        if emu_time_debt > max_debt { emu_time_debt = max_debt; }
+        if emu_time_debt > max_debt {
+            emu_time_debt = max_debt;
+        }
 
         let emu_start = Instant::now();
         let mut frames_stepped: u32 = 0;
@@ -611,7 +694,11 @@ fn main() {
             let queued = audio_stream.queued_bytes().unwrap_or(audio_target_bytes);
             let frames_needed = if queued < audio_target_bytes {
                 // Below target: step 1–2 frames to catch up
-                if queued < audio_target_bytes / 2 { 2u32 } else { 1 }
+                if queued < audio_target_bytes / 2 {
+                    2u32
+                } else {
+                    1
+                }
             } else if queued > audio_max_bytes {
                 // Way over target: skip stepping to let the queue drain
                 0
@@ -666,11 +753,11 @@ fn main() {
 
         // ── Render ────────────────────────────────────────────────────────────
         #[cfg(feature = "sdl3-gpu-shaders")]
-        let occluded = window.window_flags()
-            & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
+        let occluded = window.window_flags() & sdl3::sys::video::SDL_WINDOW_OCCLUDED
+            != sdl3::sys::video::SDL_WindowFlags(0);
         #[cfg(not(feature = "sdl3-gpu-shaders"))]
-        let occluded = canvas.window().window_flags()
-            & sdl3::sys::video::SDL_WINDOW_OCCLUDED != sdl3::sys::video::SDL_WindowFlags(0);
+        let occluded = canvas.window().window_flags() & sdl3::sys::video::SDL_WINDOW_OCCLUDED
+            != sdl3::sys::video::SDL_WindowFlags(0);
         if !occluded {
             let raw_src: &[u32] = if is_sgb {
                 emu.sgb_composited_frame()
@@ -692,15 +779,25 @@ fn main() {
                         let out_w = (sw as f64 * scale).round() as u32;
                         let out_h = (sh as f64 * scale).round() as u32;
                         gpu.render_full_vectorize_to_window(
-                            &window, raw_src, sw as u32, sh as u32,
-                            out_w, out_h, scale as f32,
+                            &window,
+                            raw_src,
+                            sw as u32,
+                            sh as u32,
+                            out_w,
+                            out_h,
+                            scale as f32,
                         );
                     }
                     GpuRenderMode::ScaleCompute => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
                         gpu.render_scale_compute(
-                            scale_filter, &window, raw_src,
-                            src_w, src_h, disp_w as u32, disp_h as u32,
+                            scale_filter,
+                            &window,
+                            raw_src,
+                            src_w,
+                            src_h,
+                            disp_w as u32,
+                            disp_h as u32,
                         );
                     }
                     GpuRenderMode::Native => {
@@ -708,9 +805,8 @@ fn main() {
                     }
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);
-                        let (scaled, fw, fh) = cpu_scale_frame(
-                            &scale_filter, raw_src, sw, sh, disp_w, disp_h,
-                        );
+                        let (scaled, fw, fh) =
+                            cpu_scale_frame(&scale_filter, raw_src, sw, sh, disp_w, disp_h);
                         gpu.upload_and_blit(&scaled, fw, fh, &window);
                     }
                 }
@@ -728,39 +824,55 @@ fn main() {
                     } else {
                         (ww as usize, (ww as f64 / src_aspect) as usize)
                     }
-                } else { (0, 0) };
+                } else {
+                    (0, 0)
+                };
 
-                let (scaled, fw, fh) = cpu_scale_frame(
-                    &scale_filter, raw_src, sw, sh, disp_w, disp_h,
-                );
+                let (scaled, fw, fh) =
+                    cpu_scale_frame(&scale_filter, raw_src, sw, sh, disp_w, disp_h);
                 let (fw, fh) = (fw as usize, fh as usize);
-                let final_src = if fw == sw && fh == sh { raw_src } else { &scaled };
+                let final_src = if fw == sw && fh == sh {
+                    raw_src
+                } else {
+                    &scaled
+                };
 
                 if fw as u32 != tex_cur_w || fh as u32 != tex_cur_h {
-                    tex_cur_w = fw as u32; tex_cur_h = fh as u32;
-                    sdl_texture = texture_creator.create_texture_streaming(
-                        sdl3::pixels::PixelFormat::ARGB8888, tex_cur_w, tex_cur_h,
-                    ).unwrap();
+                    tex_cur_w = fw as u32;
+                    tex_cur_h = fh as u32;
+                    sdl_texture = texture_creator
+                        .create_texture_streaming(
+                            sdl3::pixels::PixelFormat::ARGB8888,
+                            tex_cur_w,
+                            tex_cur_h,
+                        )
+                        .unwrap();
                     sdl_texture.set_scale_mode(sdl3::render::ScaleMode::Nearest);
                 }
-                sdl_texture.with_lock(None, |pixels: &mut [u8], pitch: usize| {
-                    for y in 0..fh {
-                        for x in 0..fw {
-                            let argb = final_src[y * fw + x];
-                            let off = y * pitch + x * 4;
-                            pixels[off]     =  argb        as u8;
-                            pixels[off + 1] = (argb >>  8) as u8;
-                            pixels[off + 2] = (argb >> 16) as u8;
-                            pixels[off + 3] = 0xFF;
+                sdl_texture
+                    .with_lock(None, |pixels: &mut [u8], pitch: usize| {
+                        for y in 0..fh {
+                            for x in 0..fw {
+                                let argb = final_src[y * fw + x];
+                                let off = y * pitch + x * 4;
+                                pixels[off] = argb as u8;
+                                pixels[off + 1] = (argb >> 8) as u8;
+                                pixels[off + 2] = (argb >> 16) as u8;
+                                pixels[off + 3] = 0xFF;
+                            }
                         }
-                    }
-                }).unwrap();
+                    })
+                    .unwrap();
 
                 let dst_rect: Option<sdl3::render::FRect> = if is_resizable {
                     let dx = (ww as usize).saturating_sub(fw) / 2;
                     let dy = (wh as usize).saturating_sub(fh) / 2;
-                    Some(sdl3::render::FRect::new(dx as f32, dy as f32, fw as f32, fh as f32))
-                } else { None };
+                    Some(sdl3::render::FRect::new(
+                        dx as f32, dy as f32, fw as f32, fh as f32,
+                    ))
+                } else {
+                    None
+                };
                 canvas.clear();
                 canvas.copy(&sdl_texture, None, dst_rect).unwrap();
                 canvas.present();

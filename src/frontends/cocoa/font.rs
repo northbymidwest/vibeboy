@@ -105,8 +105,15 @@ pub(super) mod tiny_font {
     /// Each glyph cell is 6x8 pixels (5-wide glyph + 1px spacing, 7-high + 1px).
     /// `scale` multiplies pixel size (1 = native, 2 = 2x).
     pub fn draw_string(
-        buf: &mut [u32], buf_w: usize, buf_h: usize,
-        text: &str, mut x: usize, y: usize, fg: u32, bg: u32, scale: usize,
+        buf: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        text: &str,
+        mut x: usize,
+        y: usize,
+        fg: u32,
+        bg: u32,
+        scale: usize,
     ) {
         let glyph_w = 6 * scale;
         let glyph_h = 8 * scale;
@@ -116,10 +123,14 @@ pub(super) mod tiny_font {
         let strip_h = glyph_h + scale;
         for dy in 0..strip_h {
             let py = y + dy;
-            if py >= buf_h { break; }
+            if py >= buf_h {
+                break;
+            }
             for dx in 0..strip_w {
                 let px = x + dx;
-                if px >= buf_w { break; }
+                if px >= buf_w {
+                    break;
+                }
                 buf[py * buf_w + px] = bg;
             }
         }

@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use super::Cartridge;
 use crate::clock::Clock;
+use std::sync::Arc;
 
 pub struct HuC3 {
     rom: Arc<[u8]>,
@@ -41,7 +41,9 @@ impl HuC3 {
         let elapsed = now.saturating_sub(self.rtc_last_secs);
         self.rtc_last_secs = now;
         let elapsed_mins = elapsed / 60;
-        if elapsed_mins == 0 { return; }
+        if elapsed_mins == 0 {
+            return;
+        }
         self.rtc_minutes += elapsed_mins as u32;
         self.rtc_days += self.rtc_minutes / 1440;
         self.rtc_minutes %= 1440;
@@ -116,7 +118,10 @@ impl Cartridge for HuC3 {
             0x4000..=0x7FFF => self.rom_bank * 0x4000 + (addr as usize - 0x4000),
             _ => return 0xFF,
         };
-        self.rom.get(idx % self.rom.len().max(1)).copied().unwrap_or(0xFF)
+        self.rom
+            .get(idx % self.rom.len().max(1))
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
@@ -135,7 +140,10 @@ impl Cartridge for HuC3 {
         match self.mode {
             0x00 | 0x0A => {
                 let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
-                self.ram.get(idx % self.ram.len().max(1)).copied().unwrap_or(0xFF)
+                self.ram
+                    .get(idx % self.ram.len().max(1))
+                    .copied()
+                    .unwrap_or(0xFF)
             }
             0x0C => {
                 // RTC response read
@@ -162,8 +170,12 @@ impl Cartridge for HuC3 {
         }
     }
 
-    fn has_battery(&self) -> bool { true }
-    fn ram_data(&self) -> &[u8] { &self.ram }
+    fn has_battery(&self) -> bool {
+        true
+    }
+    fn ram_data(&self) -> &[u8] {
+        &self.ram
+    }
 
     fn save_data(&self) -> Vec<u8> {
         let mut data = self.ram.clone();
@@ -184,7 +196,8 @@ impl Cartridge for HuC3 {
         // Load RTC state
         if data.len() >= ram_len + 128 + 4 + 4 + 8 {
             let rtc_start = ram_len;
-            self.rtc_mem.copy_from_slice(&data[rtc_start..rtc_start + 128]);
+            self.rtc_mem
+                .copy_from_slice(&data[rtc_start..rtc_start + 128]);
             let mut buf4 = [0u8; 4];
             buf4.copy_from_slice(&data[rtc_start + 128..rtc_start + 132]);
             self.rtc_minutes = u32::from_le_bytes(buf4);
@@ -215,15 +228,17 @@ impl Cartridge for HuC3 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 9 + 128 + 2 + 8 { return; }
-        self.rom_bank = u32::from_le_bytes([d[0],d[1],d[2],d[3]]) as usize;
-        self.ram_bank = u32::from_le_bytes([d[4],d[5],d[6],d[7]]) as usize;
+        if d.len() < 9 + 128 + 2 + 8 {
+            return;
+        }
+        self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+        self.ram_bank = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
         self.mode = d[8];
         self.rtc_mem.copy_from_slice(&d[9..137]);
         self.rtc_addr = d[137];
         self.rtc_data_out = d[138];
-        self.rtc_minutes = u32::from_le_bytes([d[139],d[140],d[141],d[142]]);
-        self.rtc_days = u32::from_le_bytes([d[143],d[144],d[145],d[146]]);
+        self.rtc_minutes = u32::from_le_bytes([d[139], d[140], d[141], d[142]]);
+        self.rtc_days = u32::from_le_bytes([d[143], d[144], d[145], d[146]]);
         self.rtc_last_secs = self.clock.now_secs();
         let ram = &d[147..];
         let len = self.ram.len().min(ram.len());

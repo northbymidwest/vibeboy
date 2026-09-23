@@ -21,7 +21,9 @@ pub(super) struct EnvelopeClock {
 
 /// Update envelope clock state machine.
 pub(super) fn set_envelope_clock(ec: &mut EnvelopeClock, value: bool, direction: bool, volume: u8) {
-    if ec.clock == value { return; }
+    if ec.clock == value {
+        return;
+    }
     if value {
         ec.clock = true;
         ec.should_lock = (volume == 0xF && direction) || (volume == 0x0 && !direction);
@@ -42,7 +44,7 @@ pub(super) struct SquareCh {
     pub env_add: bool,
     pub env_period: u8,
     // NRx3/NRx4
-    pub freq: u16,         // 11-bit
+    pub freq: u16, // 11-bit
     pub len_enable: bool,
 
     // Internal
@@ -126,7 +128,8 @@ impl SquareCh {
         if !self.enabled || !self.dac_on || self.sample_suppressed {
             self.current_sample = 0;
         } else {
-            self.current_sample = DUTY_TABLE[self.duty as usize][self.duty_pos as usize] * self.volume;
+            self.current_sample =
+                DUTY_TABLE[self.duty as usize][self.duty_pos as usize] * self.volume;
         }
     }
 
@@ -146,8 +149,12 @@ impl SquareCh {
     /// Tick envelope: adjust volume unconditionally (after checking locked and env_period).
     pub fn tick_envelope(&mut self) {
         set_envelope_clock(&mut self.envelope_clock, false, false, 0);
-        if self.envelope_clock.locked { return; }
-        if self.env_period == 0 { return; }
+        if self.envelope_clock.locked {
+            return;
+        }
+        if self.env_period == 0 {
+            return;
+        }
         set_envelope_clock(&mut self.envelope_clock, false, false, 0);
         if self.env_add {
             self.volume = (self.volume + 1) & 0xF;
@@ -221,11 +228,18 @@ pub(super) struct Sweep {
 impl Sweep {
     pub fn new() -> Self {
         Sweep {
-            period: 0, negate: false, shift: 0,
-            enabled: false, shadow: 0, neg_used: false,
-            timer: 0, addend: 0,
-            reload_timer: 0, calc_countdown: 0,
-            calc_pending: false, completed_addend: 0,
+            period: 0,
+            negate: false,
+            shift: 0,
+            enabled: false,
+            shadow: 0,
+            neg_used: false,
+            timer: 0,
+            addend: 0,
+            reload_timer: 0,
+            calc_countdown: 0,
+            calc_pending: false,
+            completed_addend: 0,
             restart_hold: 0,
         }
     }
@@ -272,10 +286,16 @@ impl Sweep {
         if self.timer > 0 {
             self.timer -= 1;
         }
-        if self.timer > 0 { return; }
+        if self.timer > 0 {
+            return;
+        }
         self.timer = if self.period == 0 { 8 } else { self.period };
-        if !self.enabled { return; }
-        if self.period == 0 { return; }
+        if !self.enabled {
+            return;
+        }
+        if self.period == 0 {
+            return;
+        }
 
         // Sweep step: compute hypothetical new frequency.
         let delta = self.shadow >> self.shift;
@@ -335,7 +355,9 @@ impl Sweep {
             self.restart_hold -= 1;
         }
 
-        if !self.calc_pending { return; }
+        if !self.calc_pending {
+            return;
+        }
 
         // Reload timer must expire first
         if self.reload_timer > 0 {
@@ -423,7 +445,11 @@ impl WaveCh {
             cycles -= self.freq_timer;
             self.sample_pos = (self.sample_pos + 1) & 31;
             let byte = self.wave_ram[(self.sample_pos >> 1) as usize];
-            self.last_nibble = if self.sample_pos & 1 == 0 { byte >> 4 } else { byte & 0xF };
+            self.last_nibble = if self.sample_pos & 1 == 0 {
+                byte >> 4
+            } else {
+                byte & 0xF
+            };
             self.wave_form_just_read = cycles == 0;
             self.freq_timer = self.reload_period();
             if self.freq_timer == 0 {
@@ -543,7 +569,9 @@ impl NoiseCh {
 
     /// Advance the 14-bit hardware counter by `cycles` T-cycles.
     pub fn tick_counter(&mut self, mut cycles: u32) {
-        if !self.counter_active { return; }
+        if !self.counter_active {
+            return;
+        }
         self.countdown_reloaded = false;
         while cycles > 0 {
             if self.counter_countdown > cycles {
@@ -584,8 +612,12 @@ impl NoiseCh {
 
     pub fn tick_envelope(&mut self) {
         set_envelope_clock(&mut self.envelope_clock, false, false, 0);
-        if self.envelope_clock.locked { return; }
-        if self.env_period == 0 { return; }
+        if self.envelope_clock.locked {
+            return;
+        }
+        if self.env_period == 0 {
+            return;
+        }
         set_envelope_clock(&mut self.envelope_clock, false, false, 0);
         if self.env_add {
             self.volume = (self.volume + 1) & 0xF;
@@ -597,7 +629,13 @@ impl NoiseCh {
 
 // ── NRx2 glitch helper (CGB-D/E behavior) ────────────────────────────────
 
-pub(super) fn nrx2_glitch(volume: &mut u8, value: u8, old_value: u8, countdown: &mut u8, lock: &mut EnvelopeClock) {
+pub(super) fn nrx2_glitch(
+    volume: &mut u8,
+    value: u8,
+    old_value: u8,
+    countdown: &mut u8,
+    lock: &mut EnvelopeClock,
+) {
     if lock.clock {
         *countdown = value & 7;
     }

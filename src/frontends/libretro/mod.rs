@@ -47,11 +47,13 @@ const RETRO_MEMORY_SAVE_RAM: c_uint = 0;
 // ── libretro callback types ─────────────────────────────────────────────────
 
 type EnvironmentFn = unsafe extern "C" fn(cmd: c_uint, data: *mut c_void) -> bool;
-type VideoRefreshFn = unsafe extern "C" fn(data: *const c_void, width: c_uint, height: c_uint, pitch: usize);
+type VideoRefreshFn =
+    unsafe extern "C" fn(data: *const c_void, width: c_uint, height: c_uint, pitch: usize);
 type AudioSampleFn = unsafe extern "C" fn(left: i16, right: i16);
 type AudioSampleBatchFn = unsafe extern "C" fn(data: *const i16, frames: usize) -> usize;
 type InputPollFn = unsafe extern "C" fn();
-type InputStateFn = unsafe extern "C" fn(port: c_uint, device: c_uint, index: c_uint, id: c_uint) -> i16;
+type InputStateFn =
+    unsafe extern "C" fn(port: c_uint, device: c_uint, index: c_uint, id: c_uint) -> i16;
 
 // ── libretro structs ────────────────────────────────────────────────────────
 
@@ -129,7 +131,11 @@ static mut CB_INPUT_STATE: Option<InputStateFn> = None;
 
 /// Access global core state (libretro is single-threaded).
 unsafe fn core_mut() -> Option<&'static mut CoreState> {
-    unsafe { std::ptr::addr_of_mut!(CORE).as_mut().and_then(|o| o.as_mut()) }
+    unsafe {
+        std::ptr::addr_of_mut!(CORE)
+            .as_mut()
+            .and_then(|o| o.as_mut())
+    }
 }
 
 unsafe fn env_cb() -> Option<EnvironmentFn> {
@@ -166,8 +172,15 @@ fn get_model_from_options() -> Option<GbModel> {
     unsafe {
         let env = env_cb()?;
         let key = VARS_MODEL_KEY.as_ptr() as *const c_char;
-        let mut var = RetroVariable { key, value: ptr::null() };
-        if env(RETRO_ENVIRONMENT_GET_VARIABLE, &mut var as *mut _ as *mut c_void) && !var.value.is_null() {
+        let mut var = RetroVariable {
+            key,
+            value: ptr::null(),
+        };
+        if env(
+            RETRO_ENVIRONMENT_GET_VARIABLE,
+            &mut var as *mut _ as *mut c_void,
+        ) && !var.value.is_null()
+        {
             let val = CStr::from_ptr(var.value).to_str().ok()?;
             match val {
                 "DMG" => Some(GbModel::Dmg),
@@ -189,7 +202,11 @@ fn get_system_dir() -> Option<std::path::PathBuf> {
     unsafe {
         let env = env_cb()?;
         let mut dir: *const c_char = ptr::null();
-        if env(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &mut dir as *mut _ as *mut c_void) && !dir.is_null() {
+        if env(
+            RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY,
+            &mut dir as *mut _ as *mut c_void,
+        ) && !dir.is_null()
+        {
             Some(std::path::PathBuf::from(CStr::from_ptr(dir).to_str().ok()?))
         } else {
             None
@@ -209,7 +226,8 @@ fn load_boot_rom(model: GbModel) -> Option<Vec<u8>> {
         GbModel::Cgb => "cgb_boot.bin",
         GbModel::Agb => "cgb_agb_boot.bin",
     };
-    std::fs::read(sys_dir.join("vibeboy").join(filename)).ok()
+    std::fs::read(sys_dir.join("vibeboy").join(filename))
+        .ok()
         .or_else(|| std::fs::read(sys_dir.join(filename)).ok())
         .or_else(|| crate::bootrom::builtin(model).map(|b| b.to_vec()))
 }
@@ -236,7 +254,11 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
 pub extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
     let (w, h) = unsafe {
         if let Some(core) = core_mut() {
-            if core.emu.is_sgb() { (256u32, 224u32) } else { (160, 144) }
+            if core.emu.is_sgb() {
+                (256u32, 224u32)
+            } else {
+                (160, 144)
+            }
         } else {
             (160, 144)
         }
@@ -263,7 +285,10 @@ pub extern "C" fn retro_set_environment(cb: EnvironmentFn) {
 
         // Set pixel format to XRGB8888 (must be set before retro_load_game)
         let mut fmt = RETRO_PIXEL_FORMAT_XRGB8888;
-        let accepted = cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &mut fmt as *mut _ as *mut c_void);
+        let accepted = cb(
+            RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,
+            &mut fmt as *mut _ as *mut c_void,
+        );
         if !accepted {
             log::warn!("RetroArch did not accept XRGB8888 pixel format");
         }
@@ -279,33 +304,46 @@ pub extern "C" fn retro_set_environment(cb: EnvironmentFn) {
                 value: ptr::null(),
             },
         ];
-        cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars.as_ptr() as *mut c_void);
+        cb(
+            RETRO_ENVIRONMENT_SET_VARIABLES,
+            vars.as_ptr() as *mut c_void,
+        );
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_set_video_refresh(cb: VideoRefreshFn) {
-    unsafe { std::ptr::addr_of_mut!(CB_VIDEO_REFRESH).write(Some(cb)); }
+    unsafe {
+        std::ptr::addr_of_mut!(CB_VIDEO_REFRESH).write(Some(cb));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_set_audio_sample(cb: AudioSampleFn) {
-    unsafe { std::ptr::addr_of_mut!(CB_AUDIO_SAMPLE).write(Some(cb)); }
+    unsafe {
+        std::ptr::addr_of_mut!(CB_AUDIO_SAMPLE).write(Some(cb));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_set_audio_sample_batch(cb: AudioSampleBatchFn) {
-    unsafe { std::ptr::addr_of_mut!(CB_AUDIO_SAMPLE_BATCH).write(Some(cb)); }
+    unsafe {
+        std::ptr::addr_of_mut!(CB_AUDIO_SAMPLE_BATCH).write(Some(cb));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_set_input_poll(cb: InputPollFn) {
-    unsafe { std::ptr::addr_of_mut!(CB_INPUT_POLL).write(Some(cb)); }
+    unsafe {
+        std::ptr::addr_of_mut!(CB_INPUT_POLL).write(Some(cb));
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_set_input_state(cb: InputStateFn) {
-    unsafe { std::ptr::addr_of_mut!(CB_INPUT_STATE).write(Some(cb)); }
+    unsafe {
+        std::ptr::addr_of_mut!(CB_INPUT_STATE).write(Some(cb));
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -313,7 +351,9 @@ pub extern "C" fn retro_init() {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_deinit() {
-    unsafe { std::ptr::addr_of_mut!(CORE).write(None); }
+    unsafe {
+        std::ptr::addr_of_mut!(CORE).write(None);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -332,7 +372,14 @@ pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
         let model = get_model_from_options().unwrap_or_else(|| detect_model(&rom));
         let boot_rom = load_boot_rom(model);
 
-        let emu = Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_RATE as u32);
+        let emu = Emulator::new(
+            rom.clone(),
+            boot_rom,
+            model,
+            None,
+            clock::default_clock(),
+            AUDIO_RATE as u32,
+        );
 
         std::ptr::addr_of_mut!(CORE).write(Some(CoreState {
             emu,
@@ -348,13 +395,19 @@ pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn retro_load_game_special(_type: c_uint, _info: *const RetroGameInfo, _num: usize) -> bool {
+pub extern "C" fn retro_load_game_special(
+    _type: c_uint,
+    _info: *const RetroGameInfo,
+    _num: usize,
+) -> bool {
     false
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_unload_game() {
-    unsafe { std::ptr::addr_of_mut!(CORE).write(None); }
+    unsafe {
+        std::ptr::addr_of_mut!(CORE).write(None);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -374,20 +427,28 @@ pub extern "C" fn retro_run() {
         }
 
         // Poll input
-        if let Some(poll) = input_poll_cb() { poll(); }
+        if let Some(poll) = input_poll_cb() {
+            poll();
+        }
 
         if let Some(input_state) = input_state_cb() {
-            let btn = |id: c_uint| -> bool {
-                input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0
-            };
-            core.emu.set_button(Emulator::BTN_A,      btn(RETRO_DEVICE_ID_JOYPAD_A));
-            core.emu.set_button(Emulator::BTN_B,      btn(RETRO_DEVICE_ID_JOYPAD_B));
-            core.emu.set_button(Emulator::BTN_SELECT,  btn(RETRO_DEVICE_ID_JOYPAD_SELECT));
-            core.emu.set_button(Emulator::BTN_START,   btn(RETRO_DEVICE_ID_JOYPAD_START));
-            core.emu.set_button(Emulator::BTN_UP,      btn(RETRO_DEVICE_ID_JOYPAD_UP));
-            core.emu.set_button(Emulator::BTN_DOWN,    btn(RETRO_DEVICE_ID_JOYPAD_DOWN));
-            core.emu.set_button(Emulator::BTN_LEFT,    btn(RETRO_DEVICE_ID_JOYPAD_LEFT));
-            core.emu.set_button(Emulator::BTN_RIGHT,   btn(RETRO_DEVICE_ID_JOYPAD_RIGHT));
+            let btn = |id: c_uint| -> bool { input_state(0, RETRO_DEVICE_JOYPAD, 0, id) != 0 };
+            core.emu
+                .set_button(Emulator::BTN_A, btn(RETRO_DEVICE_ID_JOYPAD_A));
+            core.emu
+                .set_button(Emulator::BTN_B, btn(RETRO_DEVICE_ID_JOYPAD_B));
+            core.emu
+                .set_button(Emulator::BTN_SELECT, btn(RETRO_DEVICE_ID_JOYPAD_SELECT));
+            core.emu
+                .set_button(Emulator::BTN_START, btn(RETRO_DEVICE_ID_JOYPAD_START));
+            core.emu
+                .set_button(Emulator::BTN_UP, btn(RETRO_DEVICE_ID_JOYPAD_UP));
+            core.emu
+                .set_button(Emulator::BTN_DOWN, btn(RETRO_DEVICE_ID_JOYPAD_DOWN));
+            core.emu
+                .set_button(Emulator::BTN_LEFT, btn(RETRO_DEVICE_ID_JOYPAD_LEFT));
+            core.emu
+                .set_button(Emulator::BTN_RIGHT, btn(RETRO_DEVICE_ID_JOYPAD_RIGHT));
         }
 
         // Step one frame
@@ -405,7 +466,8 @@ pub extern "C" fn retro_run() {
             // Emulator outputs 0x00RRGGBB which matches libretro XRGB8888 directly.
             vcb(
                 fb.as_ptr() as *const c_void,
-                w, h,
+                w,
+                h,
                 (w as usize) * std::mem::size_of::<u32>(),
             );
         }
@@ -416,7 +478,8 @@ pub extern "C" fn retro_run() {
             if let Some(batch_cb) = audio_batch_cb() {
                 core.audio_buf_i16.clear();
                 for &s in &samples {
-                    core.audio_buf_i16.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                    core.audio_buf_i16
+                        .push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
                 }
 
                 let frames = core.audio_buf_i16.len() / 2;
@@ -432,7 +495,14 @@ pub extern "C" fn retro_reset() {
         if let Some(core) = core_mut() {
             let model = get_model_from_options().unwrap_or_else(|| detect_model(&core.rom));
             let boot_rom = load_boot_rom(model);
-            core.emu = Emulator::new(core.rom.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_RATE as u32);
+            core.emu = Emulator::new(
+                core.rom.clone(),
+                boot_rom,
+                model,
+                None,
+                clock::default_clock(),
+                AUDIO_RATE as u32,
+            );
             core.model = model;
         }
     }
@@ -493,12 +563,16 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
     unsafe {
-        if id != RETRO_MEMORY_SAVE_RAM { return ptr::null_mut(); }
+        if id != RETRO_MEMORY_SAVE_RAM {
+            return ptr::null_mut();
+        }
         let core = match core_mut() {
             Some(c) => c,
             None => return ptr::null_mut(),
         };
-        if !core.emu.has_battery() { return ptr::null_mut(); }
+        if !core.emu.has_battery() {
+            return ptr::null_mut();
+        }
         // Sync emulator save data (including RTC footer) to buffer
         core.save_buf = core.emu.save_data();
         core.save_buf.as_mut_ptr() as *mut c_void
@@ -508,12 +582,16 @@ pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
     unsafe {
-        if id != RETRO_MEMORY_SAVE_RAM { return 0; }
+        if id != RETRO_MEMORY_SAVE_RAM {
+            return 0;
+        }
         let core = match core_mut() {
             Some(c) => c,
             None => return 0,
         };
-        if !core.emu.has_battery() { return 0; }
+        if !core.emu.has_battery() {
+            return 0;
+        }
         // Ensure save_buf is populated so size is accurate
         if core.save_buf.is_empty() {
             core.save_buf = core.emu.save_data();
@@ -534,4 +612,6 @@ pub extern "C" fn retro_cheat_reset() {}
 pub extern "C" fn retro_cheat_set(_index: c_uint, _enabled: bool, _code: *const c_char) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn retro_get_region() -> c_uint { 0 } // NTSC
+pub extern "C" fn retro_get_region() -> c_uint {
+    0
+} // NTSC

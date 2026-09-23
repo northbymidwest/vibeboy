@@ -3,7 +3,6 @@
 /// Implements the SerialDevice trait to receive print data over the
 /// serial port and render completed prints. Completed prints are queued
 /// as RGBA pixel data in memory for frontends to retrieve and save.
-
 use crate::serial::SerialDevice;
 
 const PRINTER_DATA_SIZE: usize = 0x280;
@@ -172,8 +171,13 @@ impl Printer {
                     if self.compression {
                         if self.compression_run_length == 0 {
                             self.compression_run_is_compressed = byte_received & 0x80 != 0;
-                            self.compression_run_length = (byte_received & 0x7F) + 1
-                                + if self.compression_run_is_compressed { 1 } else { 0 };
+                            self.compression_run_length = (byte_received & 0x7F)
+                                + 1
+                                + if self.compression_run_is_compressed {
+                                    1
+                                } else {
+                                    0
+                                };
                         } else if self.compression_run_is_compressed {
                             while self.compression_run_length > 0 {
                                 if self.command_length < PRINTER_MAX_COMMAND_LENGTH {
@@ -275,12 +279,8 @@ impl Printer {
                                 byte_idx += 2;
                                 for x_pixel in 0..8 {
                                     let shift = 7 - x_pixel;
-                                    let color = ((lo >> shift) & 1)
-                                        | (((hi >> shift) & 1) << 1);
-                                    let idx = self.image_offset
-                                        + tile_x * 8
-                                        + x_pixel
-                                        + y * 160;
+                                    let color = ((lo >> shift) & 1) | (((hi >> shift) & 1) << 1);
+                                    let idx = self.image_offset + tile_x * 8 + x_pixel + y * 160;
                                     if idx < PRINTER_IMAGE_SIZE {
                                         self.image[idx] = color;
                                     }
@@ -381,6 +381,10 @@ impl SerialDevice for Printer {
         }
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

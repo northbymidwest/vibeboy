@@ -27,7 +27,7 @@
 //! and the crossings' chains-intersection point computed as the standard
 //! B-spline blend `(prev + 6·this + next) / 8` at t=0.5.
 
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{BTreeMap, btree_map};
 use svg::node::element::path::{Command, Data, Position};
 use vibeboy::scaling::vectorize::VectorizeData;
 
@@ -44,7 +44,12 @@ const IS_ENDPOINT: u32 = 128;
 // ---------------------------------------------------------------------------
 
 fn hex(c: u32) -> String {
-    format!("#{:02X}{:02X}{:02X}", (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        (c >> 16) & 0xFF,
+        (c >> 8) & 0xFF,
+        c & 0xFF
+    )
 }
 
 fn cmd_move(p: (f64, f64)) -> Command {
@@ -73,7 +78,11 @@ fn angle_cmp(adx: i64, ady: i64, bdx: i64, bdy: i64) -> std::cmp::Ordering {
     let ha = ady > 0 || (ady == 0 && adx > 0);
     let hb = bdy > 0 || (bdy == 0 && bdx > 0);
     if ha != hb {
-        return if ha { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        return if ha {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        };
     }
     (adx * bdy - ady * bdx).cmp(&0).reverse()
 }
@@ -85,14 +94,20 @@ fn angle_cmp(adx: i64, ady: i64, bdx: i64, bdy: i64) -> std::cmp::Ordering {
 /// Get diagonal state at grid corner (cx, cy) from the GPU resolved graph.
 /// Returns 0=none, 1=backslash, 2=slash.
 fn corner_diag(graph: &[u32], w: usize, h: usize, cx: usize, cy: usize) -> u8 {
-    if cx == 0 || cy == 0 || cx >= w || cy >= h { return 0; }
+    if cx == 0 || cy == 0 || cx >= w || cy >= h {
+        return 0;
+    }
     let stride = 2 * w + 1;
     let val = graph[2 * cy * stride + 2 * cx];
     let has_bs = (val & 1) != 0;
     let has_sl = (val & 2) != 0;
-    if has_bs && !has_sl { 1 }
-    else if has_sl && !has_bs { 2 }
-    else { 0 }
+    if has_bs && !has_sl {
+        1
+    } else if has_sl && !has_bs {
+        2
+    } else {
+        0
+    }
 }
 
 /// Build a Voronoi cell polygon (in x4 coords) for pixel (px, py).
@@ -108,24 +123,63 @@ fn pixel_cell(graph: &[u32], w: usize, h: usize, px: usize, py: usize) -> ([u64;
 
     let mut nodes = [0u64; 8];
     let mut len = 0;
-    let mut push = |x4: i32, y4: i32| { nodes[len] = pack_node(x4, y4); len += 1; };
+    let mut push = |x4: i32, y4: i32| {
+        nodes[len] = pack_node(x4, y4);
+        len += 1;
+    };
 
     // TL corner (pixel visits as BR of the corner)
-    match tl { 1 => { push(bx - 1, by + 1); push(bx + 1, by - 1); }
-               2 => { push(bx + 1, by + 1); }
-               _ => { push(bx, by); } }
+    match tl {
+        1 => {
+            push(bx - 1, by + 1);
+            push(bx + 1, by - 1);
+        }
+        2 => {
+            push(bx + 1, by + 1);
+        }
+        _ => {
+            push(bx, by);
+        }
+    }
     // TR corner (pixel visits as BL)
-    match tr { 1 => { push(bx + 3, by + 1); }
-               2 => { push(bx + 3, by - 1); push(bx + 5, by + 1); }
-               _ => { push(bx + 4, by); } }
+    match tr {
+        1 => {
+            push(bx + 3, by + 1);
+        }
+        2 => {
+            push(bx + 3, by - 1);
+            push(bx + 5, by + 1);
+        }
+        _ => {
+            push(bx + 4, by);
+        }
+    }
     // BR corner (pixel visits as TL)
-    match br { 1 => { push(bx + 5, by + 3); push(bx + 3, by + 5); }
-               2 => { push(bx + 3, by + 3); }
-               _ => { push(bx + 4, by + 4); } }
+    match br {
+        1 => {
+            push(bx + 5, by + 3);
+            push(bx + 3, by + 5);
+        }
+        2 => {
+            push(bx + 3, by + 3);
+        }
+        _ => {
+            push(bx + 4, by + 4);
+        }
+    }
     // BL corner (pixel visits as TR)
-    match bl { 1 => { push(bx + 1, by + 3); }
-               2 => { push(bx + 1, by + 5); push(bx - 1, by + 3); }
-               _ => { push(bx, by + 4); } }
+    match bl {
+        1 => {
+            push(bx + 1, by + 3);
+        }
+        2 => {
+            push(bx + 1, by + 5);
+            push(bx - 1, by + 3);
+        }
+        _ => {
+            push(bx, by + 4);
+        }
+    }
 
     (nodes, len)
 }
@@ -152,14 +206,24 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
         for x in 0..w {
             let color = pixels[y * w + x];
             let (cell, n) = pixel_cell(&data.graph, w, h, x, y);
-            if n < 3 { continue; }
+            if n < 3 {
+                continue;
+            }
 
             for i in 0..n {
                 let a = cell[i];
                 let b = cell[(i + 1) % n];
-                let (key, is_forward) = if a <= b { ((a, b), true) } else { ((b, a), false) };
+                let (key, is_forward) = if a <= b {
+                    ((a, b), true)
+                } else {
+                    ((b, a), false)
+                };
                 let entry = edge_map.entry(key).or_insert((NO_COLOR, NO_COLOR));
-                if is_forward { entry.1 = color; } else { entry.0 = color; }
+                if is_forward {
+                    entry.1 = color;
+                } else {
+                    entry.0 = color;
+                }
             }
         }
     }
@@ -168,9 +232,19 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
     for (&(a, b), &(left, right)) in &edge_map {
         let l = if left == NO_COLOR { VOID_COLOR } else { left };
         let r = if right == NO_COLOR { VOID_COLOR } else { right };
-        if l == r { continue; }
-        edges.push(DirEdge { from: a, to: b, color: r });
-        edges.push(DirEdge { from: b, to: a, color: l });
+        if l == r {
+            continue;
+        }
+        edges.push(DirEdge {
+            from: a,
+            to: b,
+            color: r,
+        });
+        edges.push(DirEdge {
+            from: b,
+            to: a,
+            color: l,
+        });
     }
 
     edges
@@ -184,7 +258,9 @@ fn build_cell_edges(data: &VectorizeData, pixels: &[u32]) -> Vec<DirEdge> {
 /// Returns (loop of packed node IDs, fill color) for each face.
 fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
     let n = edges.len();
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
 
     // Build outgoing adjacency sorted by angle.
     let mut out: Vec<(u64, i64, i64, usize)> = Vec::with_capacity(n);
@@ -202,7 +278,9 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
         while i < out.len() {
             let node = out[i].0;
             let start = i;
-            while i < out.len() && out[i].0 == node { i += 1; }
+            while i < out.len() && out[i].0 == node {
+                i += 1;
+            }
             ranges.insert(node, (start, i));
         }
     }
@@ -217,9 +295,8 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
         let rdy = (py - cy) as i64;
         if let Some(&(s, end)) = ranges.get(&e.to) {
             let slice = &out[s..end];
-            let p = slice.partition_point(|o|
-                angle_cmp(o.1, o.2, rdx, rdy) == std::cmp::Ordering::Less
-            );
+            let p = slice
+                .partition_point(|o| angle_cmp(o.1, o.2, rdx, rdy) == std::cmp::Ordering::Less);
             let prev = if p == 0 { slice.len() - 1 } else { p - 1 };
             next[i] = slice[prev].3;
         }
@@ -229,19 +306,25 @@ fn trace_faces(edges: &[DirEdge]) -> Vec<(Vec<u64>, u32)> {
     let mut used = vec![false; n];
     let mut faces = Vec::new();
     for start in 0..n {
-        if used[start] { continue; }
+        if used[start] {
+            continue;
+        }
         let mut nodes = Vec::new();
         let mut cur = start;
         let mut closed = false;
         loop {
             if used[cur] {
-                if cur == start { closed = true; }
+                if cur == start {
+                    closed = true;
+                }
                 break;
             }
             used[cur] = true;
             nodes.push(edges[cur].from);
             let ni = next[cur];
-            if ni >= n { break; }
+            if ni >= n {
+                break;
+            }
             cur = ni;
         }
         if nodes.len() >= 3 && closed {
@@ -325,12 +408,16 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
     let mut kink_pos: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
 
     let neighbor_node = |nci: i32| -> Option<u64> {
-        if nci < 0 { return None; }
+        if nci < 0 {
+            return None;
+        }
         Some(cp_loop_node(data, nci as usize, cw))
     };
 
     for ci in 0..num_cps {
-        if data.flags[ci] == 0 { continue; }
+        if data.flags[ci] == 0 {
+            continue;
+        }
         let nid = cp_loop_node(data, ci, cw);
         let pos = (
             data.positions[ci * 2] as f64,
@@ -341,7 +428,11 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
             prev: neighbor_node(data.neighbors[ci * 4]),
             next: neighbor_node(data.neighbors[ci * 4 + 1]),
             pos,
-            t_branch: if is_crossing_now { data.crossing_t[ci] as f64 } else { 0.5 },
+            t_branch: if is_crossing_now {
+                data.crossing_t[ci] as f64
+            } else {
+                0.5
+            },
         });
 
         let is_endpoint = data.flags[ci] & IS_ENDPOINT != 0;
@@ -369,10 +460,8 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
                     data.positions[next_idx as usize * 2] as f64,
                     data.positions[next_idx as usize * 2 + 1] as f64,
                 );
-                let prev_is_end =
-                    data.flags[prev_idx as usize] & IS_ENDPOINT != 0;
-                let next_is_end =
-                    data.flags[next_idx as usize] & IS_ENDPOINT != 0;
+                let prev_is_end = data.flags[prev_idx as usize] & IS_ENDPOINT != 0;
+                let next_is_end = data.flags[next_idx as usize] & IS_ENDPOINT != 0;
                 let pp = if prev_is_end {
                     (2.0 * prev_real.0 - pos.0, 2.0 * prev_real.1 - pos.1)
                 } else {
@@ -470,13 +559,14 @@ fn match_chain<'a>(
 #[allow(unused_assignments)] // `pen`'s last write inside the loop is intentional.
 fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
     let n = nodes.len();
-    if n < 3 { return; }
+    if n < 3 {
+        return;
+    }
 
     let is_optimized = |nid: u64| map.chains.contains_key(&nid);
     let mid = |a: (f64, f64), b: (f64, f64)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
-    let lerp = |a: (f64, f64), b: (f64, f64), t: f64| {
-        (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
-    };
+    let lerp =
+        |a: (f64, f64), b: (f64, f64), t: f64| (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
     let grid_pos = |nid: u64| -> (f64, f64) {
         let (x4, y4) = unpack_node(nid);
         (x4 as f64 / 4.0, y4 as f64 / 4.0)
@@ -489,9 +579,10 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
     // partner's position IS the clamped chain end. `None` means no chain
     // continues from `this` toward `next_nid` (the chain ends at this side).
     let chain_partner = |this_nid: u64, next_nid: u64| -> Option<&ChainNeighbors> {
-        map.chains.get(&next_nid)?.iter().find(|p| {
-            p.prev == Some(this_nid) || p.next == Some(this_nid)
-        })
+        map.chains
+            .get(&next_nid)?
+            .iter()
+            .find(|p| p.prev == Some(this_nid) || p.next == Some(this_nid))
     };
 
     // For a smooth iteration emitting Q ending toward `next_nid`: the natural
@@ -560,7 +651,11 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
             if let Some(part) = partial_chain(nid, next_loop) {
                 if let Some(p) = chain_partner(nid, next_loop) {
                     let partner_interior = p.prev.is_some() && p.next.is_some();
-                    return if partner_interior { mid(part.pos, p.pos) } else { p.pos };
+                    return if partner_interior {
+                        mid(part.pos, p.pos)
+                    } else {
+                        p.pos
+                    };
                 }
             }
             if is_kink(next_idx) {
@@ -570,7 +665,10 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
                     .copied()
                     .unwrap_or_else(|| grid_pos(next_nid));
             }
-            map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid))
+            map.kink_pos
+                .get(&nid)
+                .copied()
+                .unwrap_or_else(|| grid_pos(nid))
         } else {
             // Grid: L moves to next-side midpoint when next is smooth, to
             // next's kink_pos when next is a kink, or to the grid corner.
@@ -607,7 +705,11 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
             pen = end;
         } else if is_kink(i) {
             let prev_loop = nodes[(i + n - 1) % n];
-            let kp = map.kink_pos.get(&nid).copied().unwrap_or_else(|| grid_pos(nid));
+            let kp = map
+                .kink_pos
+                .get(&nid)
+                .copied()
+                .unwrap_or_else(|| grid_pos(nid));
             // τ for each de Casteljau split is read from the matched chain's
             // `t_branch` (not from a per-node value). At a crossing the
             // prev-side and next-side touch DIFFERENT chains (slot 0 vs
@@ -687,9 +789,8 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
                 // from current pen, and a preemptive `L next_kp` would
                 // bulldoze pen to the wrong position and create a cusp.
                 let endpoint_chain_to_next = map.chains.get(&nid).is_some_and(|cs| {
-                    cs.iter().any(|ch| {
-                        ch.prev == Some(next_nid) || ch.next == Some(next_nid)
-                    })
+                    cs.iter()
+                        .any(|ch| ch.prev == Some(next_nid) || ch.next == Some(next_nid))
                 });
                 if !endpoint_chain_to_next {
                     let next_kp = map
@@ -753,7 +854,9 @@ pub fn render_svg(data: &VectorizeData, pixels: &[u32]) -> String {
     // and the SVG renderer's AA stays consistent across all seams.
     let mut by_color: BTreeMap<u32, Data> = BTreeMap::new();
     for (nodes, color) in &faces {
-        if *color == VOID_COLOR { continue; }
+        if *color == VOID_COLOR {
+            continue;
+        }
         let entry = by_color.entry(*color).or_default();
         append_face_path(nodes, &map, entry);
     }

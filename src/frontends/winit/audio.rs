@@ -7,14 +7,37 @@ use super::AUDIO_SAMPLE_RATE;
 /// Blackman-windowed sinc, cutoff at Nyquist/2 (24kHz), normalized to unit DC gain.
 /// Symmetric with zero-valued odd taps (half-band property).
 pub(super) const HALFBAND_FIR: [f32; 31] = [
-     0.0000000000,  0.0000000000,  0.0004103229,  0.0000000000,
-    -0.0022302855,  0.0000000000,  0.0071008571,  0.0000000000,
-    -0.0179170304,  0.0000000000,  0.0401074177,  0.0000000000,
-    -0.0901069221,  0.0000000000,  0.3126333216,  0.5000046375,
-     0.3126333216,  0.0000000000, -0.0901069221,  0.0000000000,
-     0.0401074177,  0.0000000000, -0.0179170304,  0.0000000000,
-     0.0071008571,  0.0000000000, -0.0022302855,  0.0000000000,
-     0.0004103229,  0.0000000000,  0.0000000000,
+    0.0000000000,
+    0.0000000000,
+    0.0004103229,
+    0.0000000000,
+    -0.0022302855,
+    0.0000000000,
+    0.0071008571,
+    0.0000000000,
+    -0.0179170304,
+    0.0000000000,
+    0.0401074177,
+    0.0000000000,
+    -0.0901069221,
+    0.0000000000,
+    0.3126333216,
+    0.5000046375,
+    0.3126333216,
+    0.0000000000,
+    -0.0901069221,
+    0.0000000000,
+    0.0401074177,
+    0.0000000000,
+    -0.0179170304,
+    0.0000000000,
+    0.0071008571,
+    0.0000000000,
+    -0.0022302855,
+    0.0000000000,
+    0.0004103229,
+    0.0000000000,
+    0.0000000000,
 ];
 
 pub(super) struct AudioRing {
@@ -147,13 +170,17 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
         match result {
             Ok(stream) => {
                 if stream.play().is_ok() {
-                    eprintln!("Audio: {}Hz {}ch buf={:?}",
-                        config.sample_rate, config.channels, config.buffer_size);
+                    eprintln!(
+                        "Audio: {}Hz {}ch buf={:?}",
+                        config.sample_rate, config.channels, config.buffer_size
+                    );
                     return Some((stream, config.sample_rate));
                 }
             }
-            Err(e) => eprintln!("Audio: {}Hz {:?} failed: {e}",
-                config.sample_rate, config.buffer_size),
+            Err(e) => eprintln!(
+                "Audio: {}Hz {:?} failed: {e}",
+                config.sample_rate, config.buffer_size
+            ),
         }
     }
     eprintln!("Audio: all configurations failed");

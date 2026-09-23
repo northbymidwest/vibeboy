@@ -6,14 +6,13 @@
 ///   Mode 0: HBlank           — remainder of 456
 ///   Mode 1: VBlank           — lines 144-153, 456 dots each
 ///   Total frame: 154 lines × 456 = 70224 T-cycles
-
 mod registers;
 mod rendering;
 mod timing;
 
 /// Serde helper for VRAM: [[u8; 0x2000]; 2] (two 8KB banks).
 mod serde_vram {
-    use serde::{Serializer, Deserializer, Serialize, Deserialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(data: &[[u8; 0x2000]; 2], ser: S) -> Result<S::Ok, S::Error> {
         let combined: Vec<u8> = data[0].iter().chain(data[1].iter()).copied().collect();
@@ -36,8 +35,8 @@ mod serde_vram {
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct FifoPixel {
-    color_index: u8,        // 2-bit tile color (0-3)
-    palette: u8,            // CGB palette (0-7), 0 for DMG
+    color_index: u8, // 2-bit tile color (0-3)
+    palette: u8,     // CGB palette (0-7), 0 for DMG
     is_sprite: bool,
     bg_priority: bool,      // CGB BG attr bit 7
     sprite_bg_over: bool,   // sprite OAM attr bit 7
@@ -112,7 +111,7 @@ enum FetcherState {
 struct Fetcher {
     state: FetcherState,
     fetching_window: bool,
-    tile_x: u8,             // tiles fetched so far
+    tile_x: u8, // tiles fetched so far
     tile_id: u8,
     tile_attrs: u8,
     tile_data_low: u8,
@@ -210,10 +209,10 @@ pub struct Ppu {
     pub dma: u8,  // 0xFF46
 
     // GBC color palettes
-    pub bcps: u8,      // 0xFF68: BG Color Palette Spec
+    pub bcps: u8, // 0xFF68: BG Color Palette Spec
     #[serde(with = "serde_big_array::BigArray")]
     pub bcpd: [u8; 64], // 0xFF69: BG palette data (8 palettes x 4 colors x 2 bytes)
-    pub ocps: u8,      // 0xFF6A: OBJ Color Palette Spec
+    pub ocps: u8, // 0xFF6A: OBJ Color Palette Spec
     #[serde(with = "serde_big_array::BigArray")]
     pub ocpd: [u8; 64], // 0xFF6B: OBJ palette data
 
@@ -326,8 +325,8 @@ pub struct Ppu {
     pub(crate) position_in_line: i16,
     /// Sprite fetch in progress
     pub(crate) sprite_fetch_active: bool,
-    sprite_fetch_step: u8,   // 0=tile_id, 1=data_lo, 2=data_hi
-    sprite_fetch_tick: u8,   // 0-1 within each step (2T per step)
+    sprite_fetch_step: u8, // 0=tile_id, 1=data_lo, 2=data_hi
+    sprite_fetch_tick: u8, // 0-1 within each step (2T per step)
     /// Alignment delay before sprite fetch begins (BG fetcher keeps running)
     sprite_alignment_delay: u8,
     sprite_fetch_entry: usize, // index into scanline_sprites
@@ -401,7 +400,6 @@ pub struct Ppu {
     /// True while the fetcher is actively fetching window tiles (set when window
     /// activates, cleared by render_pixel_if_possible after first pixel pop).
     window_is_being_fetched: bool,
-
 }
 
 impl Ppu {
@@ -425,7 +423,7 @@ impl Ppu {
             stat: 0x85,
             scy: 0,
             scx: 0,
-            ly: 0x00,  // Updated per-model in Bus::new()
+            ly: 0x00, // Updated per-model in Bus::new()
             lyc: 0,
             bgp: 0xFC,
             obp0: 0xFF,
@@ -586,10 +584,8 @@ impl Ppu {
     pub fn set_post_boot(&mut self, model: crate::model::GbModel, is_cgb_game: bool, rom: &[u8]) {
         let (ly, dot, ticks) = match model {
             crate::model::GbModel::Dmg0 => (145u8, 99u32, 24_574_388u64),
-            crate::model::GbModel::Dmg |
-            crate::model::GbModel::Mgb  => (0, 403, 23_173_860u64),
-            crate::model::GbModel::Sgb |
-            crate::model::GbModel::Sgb2 => {
+            crate::model::GbModel::Dmg | crate::model::GbModel::Mgb => (0, 403, 23_173_860u64),
+            crate::model::GbModel::Sgb | crate::model::GbModel::Sgb2 => {
                 // SGB boot ROM timing depends on ROM header data popcount.
                 // Base ticks = 1686380; each 1-bit saves 4 T-cycles.
                 // First line after LCD enable is 449 dots; subsequent lines are 456.
@@ -601,18 +597,18 @@ impl Ppu {
                 let ly = ((1 + lines_after_first) % 154) as u8;
                 (ly, dot, total_ticks)
             }
-            crate::model::GbModel::Cgb0 |
-            crate::model::GbModel::Cgb if is_cgb_game => (144u8, 164u32, 12_355_028u64),
-            crate::model::GbModel::Cgb0 |
-            crate::model::GbModel::Cgb  => (148, 352, 12_357_040u64),
+            crate::model::GbModel::Cgb0 | crate::model::GbModel::Cgb if is_cgb_game => {
+                (144u8, 164u32, 12_355_028u64)
+            }
+            crate::model::GbModel::Cgb0 | crate::model::GbModel::Cgb => (148, 352, 12_357_040u64),
             crate::model::GbModel::Agb if is_cgb_game => (144, 168, 12_355_032u64),
-            crate::model::GbModel::Agb  => (148, 356, 12_357_044u64),
+            crate::model::GbModel::Agb => (148, 356, 12_357_044u64),
         };
         self.ly = ly;
         self.dot = dot;
         self.total_ticks = ticks;
-        self.mode = 1;  // All models are in VBlank at $0100
-        self.stat = (self.stat & 0xF8) | 1;  // Mode 1
+        self.mode = 1; // All models are in VBlank at $0100
+        self.stat = (self.stat & 0xF8) | 1; // Mode 1
         self.visible_ly = ly;
         self.ly_for_comparison = ly as i16;
         self.update_coincidence();
@@ -647,26 +643,26 @@ impl Ppu {
         let logo_end = 0x0134;
         let mut vram_addr: usize = 0x10; // tile 1 starts at VRAM $8010 = offset $10
         for i in logo_start..logo_end {
-            if i >= rom.len() { break; }
+            if i >= rom.len() {
+                break;
+            }
             let byte = rom[i];
             // High nibble → rows 0,1
             let doubled_hi = double_bits((byte >> 4) & 0x0F);
-            self.vram[0][vram_addr] = doubled_hi;     // row 0 lo
+            self.vram[0][vram_addr] = doubled_hi; // row 0 lo
             // vram_addr+1 = row 0 hi (stays 0)
-            self.vram[0][vram_addr + 2] = doubled_hi;  // row 1 lo
+            self.vram[0][vram_addr + 2] = doubled_hi; // row 1 lo
             // vram_addr+3 = row 1 hi (stays 0)
             vram_addr += 4;
             // Low nibble → rows 2,3
             let doubled_lo = double_bits(byte & 0x0F);
-            self.vram[0][vram_addr] = doubled_lo;     // row 2 lo
-            self.vram[0][vram_addr + 2] = doubled_lo;  // row 3 lo
+            self.vram[0][vram_addr] = doubled_lo; // row 2 lo
+            self.vram[0][vram_addr + 2] = doubled_lo; // row 3 lo
             vram_addr += 4;
         }
 
         // Trademark symbol (®) as tile $19 (VRAM offset $190)
-        const TRADEMARK: [u8; 8] = [
-            0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C,
-        ];
+        const TRADEMARK: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
         let tm_offset = 0x190; // tile $19 = 25 * 16 = 0x190
         for (row, &byte) in TRADEMARK.iter().enumerate() {
             self.vram[0][tm_offset + row * 2] = byte; // lo plane only
@@ -693,10 +689,16 @@ impl Ppu {
     /// Returns the row byte offset (8, 16, 24, ..., 152) or 0xFF if not in Mode 2
     /// or if the dot is before OAM search starts.
     pub fn oam_row_at_dot(&self, dot: u32) -> i16 {
-        if self.mode != 2 || self.cgb_mode { return 0xFF; }
-        if dot < 6 { return 0; }
+        if self.mode != 2 || self.cgb_mode {
+            return 0xFF;
+        }
+        if dot < 6 {
+            return 0;
+        }
         let mode2_end = 84u32; // DMG mode 2 ends at dot 84
-        if dot >= mode2_end { return 0xFF; }
+        if dot >= mode2_end {
+            return 0xFF;
+        }
         let oam_search_index = ((dot - 6) / 2) as i16;
         (oam_search_index & !1) * 4 + 8
     }

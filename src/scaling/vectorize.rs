@@ -19,7 +19,6 @@ pub const IS_CROSSING: u32 = 64;
 /// real quadratic curve instead of a degenerate straight tail.
 pub const IS_ENDPOINT: u32 = 128;
 
-
 // Direction bitmask encoding (matches reference)
 const DIR_NW: u32 = 1;
 const DIR_W: u32 = 2;
@@ -44,7 +43,7 @@ pub struct VectorizeData {
     pub neighbors: Vec<i32>,
     pub flags: Vec<u32>,
     pub crossing_t: Vec<f32>,
-    pub graph: Vec<u32>,  // resolved similarity graph (2*w+1 × 2*h+1)
+    pub graph: Vec<u32>, // resolved similarity graph (2*w+1 × 2*h+1)
     pub img_w: usize,
     pub img_h: usize,
 }
@@ -129,7 +128,11 @@ fn build_similarity_graph(pixels: &[u32], img_w: usize, img_h: usize) -> Vec<u32
             // Vertical edge to down neighbor
             if y + 1 < img_h {
                 graph[(2 * y + 2) * graph_stride + (2 * x + 1)] =
-                    if c == pixels[(y + 1) * img_w + x] { 1 } else { 0 };
+                    if c == pixels[(y + 1) * img_w + x] {
+                        1
+                    } else {
+                        0
+                    };
             }
 
             // Diagonal corner
@@ -416,10 +419,8 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
             let mut anti_vote: i32 = 0;
 
             // Heuristic 1: Curve length
-            let main_len =
-                walk_chain(bx, by, bx + 1, by + 1) + walk_chain(bx + 1, by + 1, bx, by);
-            let anti_len =
-                walk_chain(bx + 1, by, bx, by + 1) + walk_chain(bx, by + 1, bx + 1, by);
+            let main_len = walk_chain(bx, by, bx + 1, by + 1) + walk_chain(bx + 1, by + 1, bx, by);
+            let anti_len = walk_chain(bx + 1, by, bx, by + 1) + walk_chain(bx, by + 1, bx + 1, by);
             if main_len > anti_len {
                 main_vote += (main_len - anti_len) as i32;
             } else if anti_len > main_len {
@@ -468,11 +469,7 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
 // Stage 3: Build cell graph
 // ============================================================================
 
-fn build_cell_graph(
-    graph: &[u32],
-    img_w: usize,
-    img_h: usize,
-) -> (Vec<f32>, Vec<i32>, Vec<u32>) {
+fn build_cell_graph(graph: &[u32], img_w: usize, img_h: usize) -> (Vec<f32>, Vec<i32>, Vec<u32>) {
     let graph_stride = 2 * img_w + 1;
     let corners_w = img_w + 1;
     let corners_h = img_h + 1;
@@ -519,27 +516,25 @@ fn build_cell_graph(
     //      BR corner (cand at UL): need anti  (UR-LL = E↔S)
     //      BL corner (cand at UR): need main  (UL-LR = W↔S)
     let is_isolated_pixel = |px: i32, py: i32| -> bool {
-        if px <= 0 || py <= 0
-            || px >= img_w as i32 - 1
-            || py >= img_h as i32 - 1
-        {
+        if px <= 0 || py <= 0 || px >= img_w as i32 - 1 || py >= img_h as i32 - 1 {
             return false;
         }
         let cand = px_color(px, py);
         let n = px_color(px, py - 1);
-        if n == cand { return false; }
+        if n == cand {
+            return false;
+        }
         let e = px_color(px + 1, py);
         let s = px_color(px, py + 1);
         let w = px_color(px - 1, py);
-        if n != e || n != s || n != w { return false; }
-        let diag_tl = g(2 * px,       2 * py);
+        if n != e || n != s || n != w {
+            return false;
+        }
+        let diag_tl = g(2 * px, 2 * py);
         let diag_tr = g(2 * (px + 1), 2 * py);
         let diag_br = g(2 * (px + 1), 2 * (py + 1));
-        let diag_bl = g(2 * px,       2 * (py + 1));
-        (diag_tl & 2) != 0
-            && (diag_tr & 1) != 0
-            && (diag_br & 2) != 0
-            && (diag_bl & 1) != 0
+        let diag_bl = g(2 * px, 2 * (py + 1));
+        (diag_tl & 2) != 0 && (diag_tr & 1) != 0 && (diag_br & 2) != 0 && (diag_bl & 1) != 0
     };
 
     // Get the two pixel colors separated by a boundary edge at corner (cx,cy) in direction dir.
@@ -556,7 +551,9 @@ fn build_cell_graph(
     // Classify an edge as shading (similar colors) per paper Section 3.3.
     // YUV Euclidean distance <= 100/255.
     let is_shading_edge = |ca: u32, cb: u32| -> bool {
-        if ca == cb { return true; }
+        if ca == cb {
+            return true;
+        }
         let dr = ((ca >> 16) & 0xFF) as f32 - ((cb >> 16) & 0xFF) as f32;
         let dg = ((ca >> 8) & 0xFF) as f32 - ((cb >> 8) & 0xFF) as f32;
         let db = (ca & 0xFF) as f32 - (cb & 0xFF) as f32;
@@ -580,8 +577,12 @@ fn build_cell_graph(
 
         if shading_count == 1 {
             // 1 shading + 2 contour: connect the 2 contour edges.
-            if s0 { return (d1, d2); }
-            if s1 { return (d0, d2); }
+            if s0 {
+                return (d1, d2);
+            }
+            if s1 {
+                return (d0, d2);
+            }
             return (d0, d1);
         }
 
@@ -589,9 +590,13 @@ fn build_cell_graph(
         // At grid corners, opposite pairs (N-S=0^2, E-W=1^3) are 180 degrees;
         // all other pairs are 90 degrees. With 3 of 4 cardinal directions,
         // there is always exactly one opposite pair.
-        if (d0 ^ d2) == 2 { (d0, d2) }
-        else if (d0 ^ d1) == 2 { (d0, d1) }
-        else { (d1, d2) }
+        if (d0 ^ d2) == 2 {
+            (d0, d2)
+        } else if (d0 ^ d1) == 2 {
+            (d0, d1)
+        } else {
+            (d1, d2)
+        }
     };
 
     let cp_base = |cx: i32, cy: i32| -> i32 {
@@ -659,11 +664,15 @@ fn build_cell_graph(
                 // as scalars (N→E→S→W order) instead of a dynamically-written
                 // array — mirrors the shader, which would otherwise spill to
                 // scratch on GPU.
-                let (d0, d1, d2): (i32, i32, i32) =
-                    if !t_bnd_n { (1, 2, 3) }
-                    else if !t_bnd_e { (0, 2, 3) }
-                    else if !t_bnd_s { (0, 1, 3) }
-                    else { (0, 1, 2) };
+                let (d0, d1, d2): (i32, i32, i32) = if !t_bnd_n {
+                    (1, 2, 3)
+                } else if !t_bnd_e {
+                    (0, 2, 3)
+                } else if !t_bnd_s {
+                    (0, 1, 3)
+                } else {
+                    (0, 1, 2)
+                };
                 let (pair0, pair1) = select_tjunction_pair(cx, cy, d0, d1, d2);
                 let target_side = from_dir ^ 2;
                 if target_side != pair0 && target_side != pair1 {
@@ -773,7 +782,11 @@ fn build_cell_graph(
         // Only mark genuinely-active CPs as endpoints. Default-init slots
         // have flag=0 and prev=next=-1; without the flag!=0 guard they'd
         // get IS_ENDPOINT, overloading the bit's meaning.
-        let flag = if flag != 0 && (prev < 0 || next < 0) { flag | IS_ENDPOINT } else { flag };
+        let flag = if flag != 0 && (prev < 0 || next < 0) {
+            flag | IS_ENDPOINT
+        } else {
+            flag
+        };
         flags_buf[i] = flag;
     };
 
@@ -790,7 +803,11 @@ fn build_cell_graph(
         // Only mark genuinely-active CPs as endpoints. Default-init slots
         // have flag=0 and prev=next=-1; without the flag!=0 guard they'd
         // get IS_ENDPOINT, overloading the bit's meaning.
-        let flag = if flag != 0 && (prev < 0 || next < 0) { flag | IS_ENDPOINT } else { flag };
+        let flag = if flag != 0 && (prev < 0 || next < 0) {
+            flag | IS_ENDPOINT
+        } else {
+            flag
+        };
         positions[i * 2] = pos.0;
         positions[i * 2 + 1] = pos.1;
         neighbors_buf[i * 4] = prev;
@@ -812,7 +829,6 @@ fn build_cell_graph(
                 &mut positions,
                 &mut neighbors,
                 &mut flags,
-
                 base,
                 (0.0, 0.0),
                 -1,
@@ -823,7 +839,6 @@ fn build_cell_graph(
                 &mut positions,
                 &mut neighbors,
                 &mut flags,
-
                 base + 1,
                 (0.0, 0.0),
                 -1,
@@ -843,13 +858,15 @@ fn build_cell_graph(
                     has_boundary = !similar(cx as i32 - 1, 0, cx as i32, 0);
                 }
                 if cy == img_h && cx > 0 && cx < img_w {
-                    has_boundary = has_boundary || !similar(cx as i32 - 1, img_h as i32 - 1, cx as i32, img_h as i32 - 1);
+                    has_boundary = has_boundary
+                        || !similar(cx as i32 - 1, img_h as i32 - 1, cx as i32, img_h as i32 - 1);
                 }
                 if cx == 0 && cy > 0 && cy < img_h {
                     has_boundary = has_boundary || !similar(0, cy as i32 - 1, 0, cy as i32);
                 }
                 if cx == img_w && cy > 0 && cy < img_h {
-                    has_boundary = has_boundary || !similar(img_w as i32 - 1, cy as i32 - 1, img_w as i32 - 1, cy as i32);
+                    has_boundary = has_boundary
+                        || !similar(img_w as i32 - 1, cy as i32 - 1, img_w as i32 - 1, cy as i32);
                 }
                 if has_boundary {
                     // Find interior CP via nbr_cp_idx (graph-only, no
@@ -859,21 +876,44 @@ fn build_cell_graph(
                     // from_dir = direction at OUR (border) corner.
                     // nbr_cp_idx maps it to the opposite side at the neighbor.
                     if cy == img_h {
-                        nbr = nbr_cp_idx(cx as i32, cy as i32 - 1, 0); our_dir = 0;
+                        nbr = nbr_cp_idx(cx as i32, cy as i32 - 1, 0);
+                        our_dir = 0;
                     } else if cy == 0 {
-                        nbr = nbr_cp_idx(cx as i32, cy as i32 + 1, 2); our_dir = 2;
+                        nbr = nbr_cp_idx(cx as i32, cy as i32 + 1, 2);
+                        our_dir = 2;
                     } else if cx == img_w {
-                        nbr = nbr_cp_idx(cx as i32 - 1, cy as i32, 3); our_dir = 3;
+                        nbr = nbr_cp_idx(cx as i32 - 1, cy as i32, 3);
+                        our_dir = 3;
                     } else if cx == 0 {
-                        nbr = nbr_cp_idx(cx as i32 + 1, cy as i32, 1); our_dir = 1;
+                        nbr = nbr_cp_idx(cx as i32 + 1, cy as i32, 1);
+                        our_dir = 1;
                     }
                     if nbr >= 0 {
-                        write_cp_full(&mut positions, &mut neighbors, &mut flags,
-                            base, (cx as f32, cy as f32), -1, nbr, 1, -1, our_dir,
-                            cx as i32, cy as i32);
+                        write_cp_full(
+                            &mut positions,
+                            &mut neighbors,
+                            &mut flags,
+                            base,
+                            (cx as f32, cy as f32),
+                            -1,
+                            nbr,
+                            1,
+                            -1,
+                            our_dir,
+                            cx as i32,
+                            cy as i32,
+                        );
                     } else {
-                        write_cp(&mut positions, &mut neighbors, &mut flags,
-                            base, (cx as f32, cy as f32), -1, -1, 1);
+                        write_cp(
+                            &mut positions,
+                            &mut neighbors,
+                            &mut flags,
+                            base,
+                            (cx as f32, cy as f32),
+                            -1,
+                            -1,
+                            1,
+                        );
                     }
                 }
                 continue;
@@ -944,7 +984,6 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-        
                         base,
                         p0,
                         prev0,
@@ -991,7 +1030,6 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-        
                         base + 1,
                         p1,
                         prev1,
@@ -1050,7 +1088,6 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-        
                         base,
                         p0,
                         prev0,
@@ -1097,7 +1134,6 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-        
                         base + 1,
                         p1,
                         prev1,
@@ -1115,10 +1151,26 @@ fn build_cell_graph(
             // No diagonal (or both kept): single CP
             let pos = (cx as f32, cy as f32);
 
-            let n_idx = if bnd_n { nbr_cp_idx(icx, icy - 1, 0) } else { -1 };
-            let e_idx = if bnd_e { nbr_cp_idx(icx + 1, icy, 1) } else { -1 };
-            let s_idx = if bnd_s { nbr_cp_idx(icx, icy + 1, 2) } else { -1 };
-            let w_idx = if bnd_w { nbr_cp_idx(icx - 1, icy, 3) } else { -1 };
+            let n_idx = if bnd_n {
+                nbr_cp_idx(icx, icy - 1, 0)
+            } else {
+                -1
+            };
+            let e_idx = if bnd_e {
+                nbr_cp_idx(icx + 1, icy, 1)
+            } else {
+                -1
+            };
+            let s_idx = if bnd_s {
+                nbr_cp_idx(icx, icy + 1, 2)
+            } else {
+                -1
+            };
+            let w_idx = if bnd_w {
+                nbr_cp_idx(icx - 1, icy, 3)
+            } else {
+                -1
+            };
 
             if bnd_count == 2 {
                 // Regular chain node
@@ -1166,14 +1218,38 @@ fn build_cell_graph(
 
                 let mut flag = 2u32;
                 if prev_dir >= 0 && next_dir >= 0 {
-                    let prev_cx =
-                        icx + if prev_dir == 1 { 1 } else if prev_dir == 3 { -1 } else { 0 };
-                    let prev_cy =
-                        icy + if prev_dir == 2 { 1 } else if prev_dir == 0 { -1 } else { 0 };
-                    let next_cx =
-                        icx + if next_dir == 1 { 1 } else if next_dir == 3 { -1 } else { 0 };
-                    let next_cy =
-                        icy + if next_dir == 2 { 1 } else if next_dir == 0 { -1 } else { 0 };
+                    let prev_cx = icx
+                        + if prev_dir == 1 {
+                            1
+                        } else if prev_dir == 3 {
+                            -1
+                        } else {
+                            0
+                        };
+                    let prev_cy = icy
+                        + if prev_dir == 2 {
+                            1
+                        } else if prev_dir == 0 {
+                            -1
+                        } else {
+                            0
+                        };
+                    let next_cx = icx
+                        + if next_dir == 1 {
+                            1
+                        } else if next_dir == 3 {
+                            -1
+                        } else {
+                            0
+                        };
+                    let next_cy = icy
+                        + if next_dir == 2 {
+                            1
+                        } else if next_dir == 0 {
+                            -1
+                        } else {
+                            0
+                        };
                     let prev_pos = neighbor_cp_pos(prev_cx, prev_cy, prev_dir);
                     let next_pos = neighbor_cp_pos(next_cx, next_cy, next_dir);
                     if check_for_corner(
@@ -1187,7 +1263,6 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-    
                     base,
                     pos,
                     prev,
@@ -1218,7 +1293,6 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-    
                     base,
                     pos,
                     nbr,
@@ -1234,16 +1308,30 @@ fn build_cell_graph(
                 // Materialize the 3 set directions as scalars (N→E→S→W order)
                 // instead of a dynamically-written array — mirrors the shader,
                 // which would otherwise spill to scratch on GPU.
-                let (d0, d1, d2): (i32, i32, i32) =
-                    if !bnd_n { (1, 2, 3) }
-                    else if !bnd_e { (0, 2, 3) }
-                    else if !bnd_s { (0, 1, 3) }
-                    else { (0, 1, 2) };
+                let (d0, d1, d2): (i32, i32, i32) = if !bnd_n {
+                    (1, 2, 3)
+                } else if !bnd_e {
+                    (0, 2, 3)
+                } else if !bnd_s {
+                    (0, 1, 3)
+                } else {
+                    (0, 1, 2)
+                };
                 let (t_prev_dir, t_next_dir) = select_tjunction_pair(icx, icy, d0, d1, d2);
 
                 // Select prev/next index by direction (mirrors shader select tree).
-                let prev = match t_prev_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
-                let next = match t_next_dir { 0 => n_idx, 1 => e_idx, 2 => s_idx, _ => w_idx };
+                let prev = match t_prev_dir {
+                    0 => n_idx,
+                    1 => e_idx,
+                    2 => s_idx,
+                    _ => w_idx,
+                };
+                let next = match t_next_dir {
+                    0 => n_idx,
+                    1 => e_idx,
+                    2 => s_idx,
+                    _ => w_idx,
+                };
 
                 // Both slots stay at the grid corner. The stem CP gets snapped
                 // onto the rendered through-curve in update_tjunctions; storing
@@ -1254,7 +1342,6 @@ fn build_cell_graph(
                     &mut positions,
                     &mut neighbors,
                     &mut flags,
-    
                     base,
                     pos,
                     prev,
@@ -1287,7 +1374,6 @@ fn build_cell_graph(
                         &mut positions,
                         &mut neighbors,
                         &mut flags,
-        
                         base + 1,
                         pos,
                         stem_idx,
@@ -1344,29 +1430,31 @@ fn build_cell_graph(
     // CP carries that bit, so a bare `flags[pi] == 1` check would skip the
     // candidates this fixup is supposed to rescue.
     for i in 0..num_cps {
-        if flags[i] == 0 { continue; }
+        if flags[i] == 0 {
+            continue;
+        }
         let prev = neighbors[i * 4];
         let next = neighbors[i * 4 + 1];
         if prev >= 0 {
             let pi = prev as usize;
-            if (flags[pi] & !IS_ENDPOINT) == 1
-                && neighbors[pi * 4] < 0
-                && neighbors[pi * 4 + 1] < 0
+            if (flags[pi] & !IS_ENDPOINT) == 1 && neighbors[pi * 4] < 0 && neighbors[pi * 4 + 1] < 0
             {
                 neighbors[pi * 4 + 1] = i as i32;
                 let d = neighbors[i * 4 + 2];
-                if d >= 0 { neighbors[pi * 4 + 3] = (d + 2) % 4; }
+                if d >= 0 {
+                    neighbors[pi * 4 + 3] = (d + 2) % 4;
+                }
             }
         }
         if next >= 0 {
             let ni = next as usize;
-            if (flags[ni] & !IS_ENDPOINT) == 1
-                && neighbors[ni * 4] < 0
-                && neighbors[ni * 4 + 1] < 0
+            if (flags[ni] & !IS_ENDPOINT) == 1 && neighbors[ni * 4] < 0 && neighbors[ni * 4 + 1] < 0
             {
                 neighbors[ni * 4] = i as i32;
                 let d = neighbors[i * 4 + 3];
-                if d >= 0 { neighbors[ni * 4 + 2] = (d + 2) % 4; }
+                if d >= 0 {
+                    neighbors[ni * 4 + 2] = (d + 2) % 4;
+                }
             }
         }
     }
@@ -1397,25 +1485,33 @@ fn optimize_energy_cg(
     // CP at k-1 is a T-junction main. These mark segments that should
     // be handled via the T-junction stem loop (chain-rule through ghost).
     let is_stem_shadow = |k: i32| -> bool {
-        if k <= 0 { return false; }
+        if k <= 0 {
+            return false;
+        }
         let k = k as usize;
-        if k >= num_cps { return false; }
-        if (flags[k] & 1) == 0 { return false; }
+        if k >= num_cps {
+            return false;
+        }
+        if (flags[k] & 1) == 0 {
+            return false;
+        }
         (flags[k - 1] & IS_TJUNCTION) != 0
     };
     // True iff CP at index i is the second slot of a crossing pair
     // (slot 1 of an IS_CROSSING; slot 0 is at i-1).
     let is_xing_slot1 = |i: usize| -> bool {
-        if i == 0 { return false; }
+        if i == 0 {
+            return false;
+        }
         (flags[i] & IS_CROSSING) != 0 && (flags[i - 1] & IS_CROSSING) != 0
     };
 
     let ghost_weights = |prev_is_end: bool, next_is_end: bool| -> (f32, f32, f32) {
         match (prev_is_end, next_is_end) {
-            (false, false) => (0.75,  0.125, 0.125),
-            (true,  false) => (0.625, 0.25,  0.125),
-            (false, true ) => (0.625, 0.125, 0.25),
-            (true,  true ) => (0.5,   0.25,  0.25),
+            (false, false) => (0.75, 0.125, 0.125),
+            (true, false) => (0.625, 0.25, 0.125),
+            (false, true) => (0.625, 0.125, 0.25),
+            (true, true) => (0.5, 0.25, 0.25),
         }
     };
 
@@ -1450,16 +1546,22 @@ fn optimize_energy_cg(
     // attached to the T-junction's stem shadow at slot t+1. Mirrors
     // Polyak's stem_endpoints.
     let stem_endpoints = |t: usize| -> Option<(usize, usize)> {
-        if t + 1 >= num_cps { return None; }
+        if t + 1 >= num_cps {
+            return None;
+        }
         let s_idx = neighbors[(t + 1) * 4];
-        if s_idx < 0 { return None; }
+        if s_idx < 0 {
+            return None;
+        }
         let s = s_idx as usize;
         let so = if neighbors[s * 4] == (t + 1) as i32 {
             neighbors[s * 4 + 1]
         } else {
             neighbors[s * 4]
         };
-        if so < 0 { return None; }
+        if so < 0 {
+            return None;
+        }
         Some((s, so as usize))
     };
 
@@ -1472,7 +1574,9 @@ fn optimize_energy_cg(
     //   neither                  → 0 (full)
     let seg_mode_for = |center: usize, a: usize, c: usize| -> u8 {
         let cc = (flags[center] & IS_CORNER) != 0;
-        if cc { return 3; }
+        if cc {
+            return 3;
+        }
         let lc = (flags[a] & IS_CORNER) != 0;
         let rc = (flags[c] & IS_CORNER) != 0;
         match (lc, rc) {
@@ -1498,8 +1602,11 @@ fn optimize_energy_cg(
     // dva  = −perp(va)/|va|² = ( va.y/|va|², −va.x/|va|²)
     // dvb  = +perp(vb)/|vb|² = (−vb.y/|vb|²,  vb.x/|vb|²)
     // dm   = +perp(m)/|m|²   = (−m.y/|m|²,    m.x/|m|²)
-    let segment_jacs = |pa: (f32, f32), pb: (f32, f32), pc: (f32, f32), mode: u8|
-        -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+    let segment_jacs = |pa: (f32, f32),
+                        pb: (f32, f32),
+                        pc: (f32, f32),
+                        mode: u8|
+     -> ((f32, f32), (f32, f32), (f32, f32), f32) {
         let va = (pb.0 - pa.0, pb.1 - pa.1);
         let vb = (pc.0 - pb.0, pc.1 - pb.1);
         let inv_lva2 = 1.0 / (va.0 * va.0 + va.1 * va.1).max(1e-20);
@@ -1549,15 +1656,23 @@ fn optimize_energy_cg(
     // junction-pinned shadow) are skipped here and handled in the
     // T-junction stem loop.
     let seg_for = |i: usize| -> Option<(usize, usize, usize, u8)> {
-        if !active[i] { return None; }
+        if !active[i] {
+            return None;
+        }
         let prev = neighbors[i * 4];
         let next = neighbors[i * 4 + 1];
-        if prev < 0 || next < 0 { return None; }
-        if is_stem_shadow(prev) || is_stem_shadow(next) { return None; }
+        if prev < 0 || next < 0 {
+            return None;
+        }
+        if is_stem_shadow(prev) || is_stem_shadow(next) {
+            return None;
+        }
         let a = prev as usize;
         let c = next as usize;
         let mode = seg_mode_for(i, a, c);
-        if mode == 3 { return None; }
+        if mode == 3 {
+            return None;
+        }
         Some((a, i, c, mode))
     };
 
@@ -1565,12 +1680,32 @@ fn optimize_energy_cg(
     // segment's J and theta. Returns
     //   (theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s, so)
     // or None if the T-junction is incomplete.
-    let stem_seg = |t: usize, p: &[f32]| -> Option<(f32, (f32, f32), (f32, f32), (f32, f32), f32, f32, f32, usize, usize, usize, usize)> {
-        if !active[t] { return None; }
-        if (flags[t] & IS_TJUNCTION) == 0 { return None; }
+    let stem_seg = |t: usize,
+                    p: &[f32]|
+     -> Option<(
+        f32,
+        (f32, f32),
+        (f32, f32),
+        (f32, f32),
+        f32,
+        f32,
+        f32,
+        usize,
+        usize,
+        usize,
+        usize,
+    )> {
+        if !active[t] {
+            return None;
+        }
+        if (flags[t] & IS_TJUNCTION) == 0 {
+            return None;
+        }
         let t_prev = neighbors[t * 4];
         let t_next = neighbors[t * 4 + 1];
-        if t_prev < 0 || t_next < 0 { return None; }
+        if t_prev < 0 || t_next < 0 {
+            return None;
+        }
         let (s, so) = stem_endpoints(t)?;
         let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
         let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
@@ -1585,7 +1720,19 @@ fn optimize_energy_cg(
         let p_s = read_pos(p, s);
         let p_so = read_pos(p, so);
         let (j_a, j_b, j_c, theta) = segment_jacs(ghost, p_s, p_so, 0);
-        Some((theta, j_a, j_b, j_c, st, sp, sn, t_prev as usize, t_next as usize, s, so))
+        Some((
+            theta,
+            j_a,
+            j_b,
+            j_c,
+            st,
+            sp,
+            sn,
+            t_prev as usize,
+            t_next as usize,
+            s,
+            so,
+        ))
     };
 
     // Compute global gradient at p.
@@ -1593,48 +1740,65 @@ fn optimize_energy_cg(
         let mut g = vec![0.0f32; n];
         // Regular segments.
         for i in 0..num_cps {
-            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let Some((a, b, c, mode)) = seg_for(i) else {
+                continue;
+            };
             let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
             let (j_a, j_b, j_c, theta) = segment_jacs(pa, pb, pc, mode);
-            g[a*2]     += theta * j_a.0; g[a*2 + 1] += theta * j_a.1;
-            g[b*2]     += theta * j_b.0; g[b*2 + 1] += theta * j_b.1;
-            g[c*2]     += theta * j_c.0; g[c*2 + 1] += theta * j_c.1;
+            g[a * 2] += theta * j_a.0;
+            g[a * 2 + 1] += theta * j_a.1;
+            g[b * 2] += theta * j_b.0;
+            g[b * 2 + 1] += theta * j_b.1;
+            g[c * 2] += theta * j_c.0;
+            g[c * 2 + 1] += theta * j_c.1;
         }
         // T-junction stem segments. The stem segment is (ghost, s, so)
         // where ghost = sp·T_prev + st·T + sn·T_next. Chain rule
         // distributes J_a (∂θ/∂ghost) to T, T_prev, T_next.
         for t in 0..num_cps {
-            let Some((theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s, so)) =
-                stem_seg(t, p) else { continue; };
-            g[s*2]      += theta * j_b.0;        g[s*2 + 1]      += theta * j_b.1;
-            g[so*2]     += theta * j_c.0;        g[so*2 + 1]     += theta * j_c.1;
-            g[t*2]      += theta * st * j_a.0;   g[t*2 + 1]      += theta * st * j_a.1;
-            g[t_prev*2] += theta * sp * j_a.0;   g[t_prev*2 + 1] += theta * sp * j_a.1;
-            g[t_next*2] += theta * sn * j_a.0;   g[t_next*2 + 1] += theta * sn * j_a.1;
+            let Some((theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s, so)) = stem_seg(t, p)
+            else {
+                continue;
+            };
+            g[s * 2] += theta * j_b.0;
+            g[s * 2 + 1] += theta * j_b.1;
+            g[so * 2] += theta * j_c.0;
+            g[so * 2 + 1] += theta * j_c.1;
+            g[t * 2] += theta * st * j_a.0;
+            g[t * 2 + 1] += theta * st * j_a.1;
+            g[t_prev * 2] += theta * sp * j_a.0;
+            g[t_prev * 2 + 1] += theta * sp * j_a.1;
+            g[t_next * 2] += theta * sn * j_a.0;
+            g[t_next * 2 + 1] += theta * sn * j_a.1;
         }
         // Positional energy gradient.
         for i in 0..num_cps {
-            if !active[i] { continue; }
+            if !active[i] {
+                continue;
+            }
             let p_i = read_pos(p, i);
             let p_o = read_pos(orig_positions, i);
             let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
             let d2 = d.0 * d.0 + d.1 * d.1;
-            g[i*2]     += 4.0 * s4 * d2 * d.0;
-            g[i*2 + 1] += 4.0 * s4 * d2 * d.1;
+            g[i * 2] += 4.0 * s4 * d2 * d.0;
+            g[i * 2 + 1] += 4.0 * s4 * d2 * d.1;
         }
         // Crossing constraint: slot 1's row is summed into slot 0 (they
         // share a position). Then slot 1 zeroed.
         for i in 0..num_cps {
             if is_xing_slot1(i) {
-                g[(i-1)*2]     += g[i*2];
-                g[(i-1)*2 + 1] += g[i*2 + 1];
-                g[i*2] = 0.0;
-                g[i*2 + 1] = 0.0;
+                g[(i - 1) * 2] += g[i * 2];
+                g[(i - 1) * 2 + 1] += g[i * 2 + 1];
+                g[i * 2] = 0.0;
+                g[i * 2 + 1] = 0.0;
             }
         }
         // Zero pinned rows (junction-pinned shadows etc.).
         for i in 0..num_cps {
-            if !active[i] { g[i*2] = 0.0; g[i*2 + 1] = 0.0; }
+            if !active[i] {
+                g[i * 2] = 0.0;
+                g[i * 2 + 1] = 0.0;
+            }
         }
         g
     };
@@ -1643,18 +1807,26 @@ fn optimize_energy_cg(
         let mut hs = vec![0.0f32; n];
         // Regular segments.
         for i in 0..num_cps {
-            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let Some((a, b, c, mode)) = seg_for(i) else {
+                continue;
+            };
             let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
             let (j_a, j_b, j_c, _) = segment_jacs(pa, pb, pc, mode);
             let v_a = read_pos(v, a);
             let v_b = read_pos(v, b);
             let v_c = read_pos(v, c);
-            let inner = j_a.0 * v_a.0 + j_a.1 * v_a.1
-                      + j_b.0 * v_b.0 + j_b.1 * v_b.1
-                      + j_c.0 * v_c.0 + j_c.1 * v_c.1;
-            hs[a*2]     += inner * j_a.0; hs[a*2 + 1] += inner * j_a.1;
-            hs[b*2]     += inner * j_b.0; hs[b*2 + 1] += inner * j_b.1;
-            hs[c*2]     += inner * j_c.0; hs[c*2 + 1] += inner * j_c.1;
+            let inner = j_a.0 * v_a.0
+                + j_a.1 * v_a.1
+                + j_b.0 * v_b.0
+                + j_b.1 * v_b.1
+                + j_c.0 * v_c.0
+                + j_c.1 * v_c.1;
+            hs[a * 2] += inner * j_a.0;
+            hs[a * 2 + 1] += inner * j_a.1;
+            hs[b * 2] += inner * j_b.0;
+            hs[b * 2 + 1] += inner * j_b.1;
+            hs[c * 2] += inner * j_c.0;
+            hs[c * 2 + 1] += inner * j_c.1;
         }
         // T-junction stem segments. Effective Jacobian for the stem is:
         //   J_eff[T]      = st·J_a    (chain rule via ghost)
@@ -1665,47 +1837,61 @@ fn optimize_energy_cg(
         // inner = Σ J_eff · v over all 5 endpoints; then distribute.
         for t in 0..num_cps {
             let Some((_theta, j_a, j_b, j_c, st, sp, sn, t_prev, t_next, s_idx, so)) =
-                stem_seg(t, p) else { continue; };
-            let v_t  = read_pos(v, t);
+                stem_seg(t, p)
+            else {
+                continue;
+            };
+            let v_t = read_pos(v, t);
             let v_tp = read_pos(v, t_prev);
             let v_tn = read_pos(v, t_next);
-            let v_s  = read_pos(v, s_idx);
+            let v_s = read_pos(v, s_idx);
             let v_so = read_pos(v, so);
-            let inner =
-                  j_b.0 * v_s.0 + j_b.1 * v_s.1
-                + j_c.0 * v_so.0 + j_c.1 * v_so.1
+            let inner = j_b.0 * v_s.0
+                + j_b.1 * v_s.1
+                + j_c.0 * v_so.0
+                + j_c.1 * v_so.1
                 + st * (j_a.0 * v_t.0 + j_a.1 * v_t.1)
                 + sp * (j_a.0 * v_tp.0 + j_a.1 * v_tp.1)
                 + sn * (j_a.0 * v_tn.0 + j_a.1 * v_tn.1);
-            hs[s_idx*2]      += inner * j_b.0;        hs[s_idx*2 + 1]  += inner * j_b.1;
-            hs[so*2]         += inner * j_c.0;        hs[so*2 + 1]     += inner * j_c.1;
-            hs[t*2]          += inner * st * j_a.0;   hs[t*2 + 1]      += inner * st * j_a.1;
-            hs[t_prev*2]     += inner * sp * j_a.0;   hs[t_prev*2 + 1] += inner * sp * j_a.1;
-            hs[t_next*2]     += inner * sn * j_a.0;   hs[t_next*2 + 1] += inner * sn * j_a.1;
+            hs[s_idx * 2] += inner * j_b.0;
+            hs[s_idx * 2 + 1] += inner * j_b.1;
+            hs[so * 2] += inner * j_c.0;
+            hs[so * 2 + 1] += inner * j_c.1;
+            hs[t * 2] += inner * st * j_a.0;
+            hs[t * 2 + 1] += inner * st * j_a.1;
+            hs[t_prev * 2] += inner * sp * j_a.0;
+            hs[t_prev * 2 + 1] += inner * sp * j_a.1;
+            hs[t_next * 2] += inner * sn * j_a.0;
+            hs[t_next * 2 + 1] += inner * sn * j_a.1;
         }
         // Positional Hessian.
         for i in 0..num_cps {
-            if !active[i] { continue; }
+            if !active[i] {
+                continue;
+            }
             let p_i = read_pos(p, i);
             let p_o = read_pos(orig_positions, i);
             let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
             let v_i = read_pos(v, i);
             let d2 = d.0 * d.0 + d.1 * d.1;
             let d_dot_v = d.0 * v_i.0 + d.1 * v_i.1;
-            hs[i*2]     += 4.0 * s4 * (d2 * v_i.0 + 2.0 * d_dot_v * d.0);
-            hs[i*2 + 1] += 4.0 * s4 * (d2 * v_i.1 + 2.0 * d_dot_v * d.1);
+            hs[i * 2] += 4.0 * s4 * (d2 * v_i.0 + 2.0 * d_dot_v * d.0);
+            hs[i * 2 + 1] += 4.0 * s4 * (d2 * v_i.1 + 2.0 * d_dot_v * d.1);
         }
         // Crossing constraint: collapse slot 1 into slot 0.
         for i in 0..num_cps {
             if is_xing_slot1(i) {
-                hs[(i-1)*2]     += hs[i*2];
-                hs[(i-1)*2 + 1] += hs[i*2 + 1];
-                hs[i*2] = 0.0;
-                hs[i*2 + 1] = 0.0;
+                hs[(i - 1) * 2] += hs[i * 2];
+                hs[(i - 1) * 2 + 1] += hs[i * 2 + 1];
+                hs[i * 2] = 0.0;
+                hs[i * 2 + 1] = 0.0;
             }
         }
         for i in 0..num_cps {
-            if !active[i] { hs[i*2] = 0.0; hs[i*2 + 1] = 0.0; }
+            if !active[i] {
+                hs[i * 2] = 0.0;
+                hs[i * 2 + 1] = 0.0;
+            }
         }
         hs
     };
@@ -1714,7 +1900,9 @@ fn optimize_energy_cg(
         let mut e = 0.0f32;
         // Regular segments.
         for i in 0..num_cps {
-            let Some((a, b, c, mode)) = seg_for(i) else { continue; };
+            let Some((a, b, c, mode)) = seg_for(i) else {
+                continue;
+            };
             let (pa, pb, pc) = (read_pos(p, a), read_pos(p, b), read_pos(p, c));
             let va = (pb.0 - pa.0, pb.1 - pa.1);
             let vb = (pc.0 - pb.0, pc.1 - pb.1);
@@ -1734,12 +1922,16 @@ fn optimize_energy_cg(
         }
         // T-junction stem segments.
         for t in 0..num_cps {
-            let Some((theta, _, _, _, _, _, _, _, _, _, _)) = stem_seg(t, p) else { continue; };
+            let Some((theta, _, _, _, _, _, _, _, _, _, _)) = stem_seg(t, p) else {
+                continue;
+            };
             e += 0.5 * theta * theta;
         }
         // Positional energy.
         for i in 0..num_cps {
-            if !active[i] { continue; }
+            if !active[i] {
+                continue;
+            }
             let p_i = read_pos(p, i);
             let p_o = read_pos(orig_positions, i);
             let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
@@ -1757,8 +1949,8 @@ fn optimize_energy_cg(
     let enforce_xing_constraint = |buf: &mut [f32]| {
         for i in 0..num_cps {
             if is_xing_slot1(i) {
-                buf[i*2]     = buf[(i-1)*2];
-                buf[i*2 + 1] = buf[(i-1)*2 + 1];
+                buf[i * 2] = buf[(i - 1) * 2];
+                buf[i * 2 + 1] = buf[(i - 1) * 2 + 1];
             }
         }
     };
@@ -1775,14 +1967,20 @@ fn optimize_energy_cg(
         let mut s = r.clone();
         let mut r_dot_r: f32 = r.iter().map(|x| x * x).sum();
         let initial_r_dot_r = r_dot_r;
-        if initial_r_dot_r < 1e-30 { return delta; }
+        if initial_r_dot_r < 1e-30 {
+            return delta;
+        }
         for _ in 0..CG_MAX {
-            if r_dot_r < CG_TOL * CG_TOL * initial_r_dot_r { break; }
+            if r_dot_r < CG_TOL * CG_TOL * initial_r_dot_r {
+                break;
+            }
             // Constraint: matvec needs s[xing slot 1] = s[xing slot 0].
             enforce_xing_constraint(&mut s);
             let hs = compute_hs(p, &s);
             let s_dot_hs: f32 = s.iter().zip(&hs).map(|(a, b)| a * b).sum();
-            if s_dot_hs.abs() < 1e-20 { break; }
+            if s_dot_hs.abs() < 1e-20 {
+                break;
+            }
             let alpha = r_dot_r / s_dot_hs;
             for k in 0..n {
                 delta[k] += alpha * s[k];
@@ -1790,7 +1988,9 @@ fn optimize_energy_cg(
             }
             let r_dot_r_new: f32 = r.iter().map(|x| x * x).sum();
             let beta = r_dot_r_new / r_dot_r;
-            for k in 0..n { s[k] = r[k] + beta * s[k]; }
+            for k in 0..n {
+                s[k] = r[k] + beta * s[k];
+            }
             r_dot_r = r_dot_r_new;
         }
         delta
@@ -1803,9 +2003,16 @@ fn optimize_energy_cg(
         let g = compute_g(&p);
         let g_norm: f32 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
         if debug_cg {
-            eprintln!("cg iter {}: g_norm={:.6e} e={:.6}", iter, g_norm, compute_e(&p));
+            eprintln!(
+                "cg iter {}: g_norm={:.6e} e={:.6}",
+                iter,
+                g_norm,
+                compute_e(&p)
+            );
         }
-        if g_norm < 1e-6 { break; }
+        if g_norm < 1e-6 {
+            break;
+        }
         let mut delta = solve_cg(&p, &g);
         // δ across crossing pairs needs slot 1 = slot 0 so the position
         // update preserves the coincidence.
@@ -1814,7 +2021,11 @@ fn optimize_energy_cg(
         let mut alpha = 1.0f32;
         let mut accepted = false;
         for _ in 0..6 {
-            let p_trial: Vec<f32> = p.iter().zip(&delta).map(|(pi, di)| pi + alpha * di).collect();
+            let p_trial: Vec<f32> = p
+                .iter()
+                .zip(&delta)
+                .map(|(pi, di)| pi + alpha * di)
+                .collect();
             let e_new = compute_e(&p_trial);
             if e_new < e_old {
                 p = p_trial;
@@ -1823,14 +2034,15 @@ fn optimize_energy_cg(
             }
             alpha *= 0.5;
         }
-        if !accepted { break; }
+        if !accepted {
+            break;
+        }
     }
     if debug_cg {
         eprintln!("cg final: e={:.6}", compute_e(&p));
     }
     p
 }
-
 
 fn optimize_energy(
     positions: &[f32],
@@ -1842,9 +2054,7 @@ fn optimize_energy(
     let positional_scale: f32 = 2.5;
     let s4 = positional_scale * positional_scale * positional_scale * positional_scale;
 
-    let read_pos = |buf: &[f32], i: usize| -> (f32, f32) {
-        (buf[i * 2], buf[i * 2 + 1])
-    };
+    let read_pos = |buf: &[f32], i: usize| -> (f32, f32) { (buf[i * 2], buf[i * 2 + 1]) };
 
     let read_neighbor_pos = |buf: &[f32], i: usize| -> (f32, f32) {
         // T-junction ghost CP (junction-pinned, immediately follows a
@@ -1876,10 +2086,10 @@ fn optimize_energy(
                 let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
                 let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
                 let (sp, st, sn) = match (prev_is_end, next_is_end) {
-                    (false, false) => (0.125_f32, 0.75_f32,  0.125_f32),
-                    (true,  false) => (0.25,      0.625,     0.125),
-                    (false, true ) => (0.125,     0.625,     0.25),
-                    (true,  true ) => (0.25,      0.5,       0.25),
+                    (false, false) => (0.125_f32, 0.75_f32, 0.125_f32),
+                    (true, false) => (0.25, 0.625, 0.125),
+                    (false, true) => (0.125, 0.625, 0.25),
+                    (true, true) => (0.25, 0.5, 0.25),
                 };
                 let pp = (buf[t_prev as usize * 2], buf[t_prev as usize * 2 + 1]);
                 let pt = (buf[t * 2], buf[t * 2 + 1]);
@@ -1988,17 +2198,27 @@ fn optimize_energy(
             let gprev_corner = gprev_idx >= 0 && (flags[gprev_idx as usize] & IS_CORNER) != 0;
             let gnext_corner = gnext_idx >= 0 && (flags[gnext_idx as usize] & IS_CORNER) != 0;
 
-            let nn0 = if gprev_idx >= 0 { read_neighbor_pos(pos_in, gprev_idx as usize) } else { (0.0, 0.0) };
-            let nn1 = if gnext_idx >= 0 { read_neighbor_pos(pos_in, gnext_idx as usize) } else { (0.0, 0.0) };
+            let nn0 = if gprev_idx >= 0 {
+                read_neighbor_pos(pos_in, gprev_idx as usize)
+            } else {
+                (0.0, 0.0)
+            };
+            let nn1 = if gnext_idx >= 0 {
+                read_neighbor_pos(pos_in, gnext_idx as usize)
+            } else {
+                (0.0, 0.0)
+            };
             // SegMode = 0 full | 1 left-half | 2 right-half | 3 skip
             // For each of the 3 segments touching i, decode based on which
             // control points are corners.
             let seg_mode = |center_corner: bool, left_corner: bool, right_corner: bool| -> u8 {
-                if center_corner { return 3; }
+                if center_corner {
+                    return 3;
+                }
                 match (left_corner, right_corner) {
-                    (true,  true)  => 3,
-                    (true,  false) => 2, // left endpoint corner → right half
-                    (false, true)  => 1, // right endpoint corner → left half
+                    (true, true) => 3,
+                    (true, false) => 2, // left endpoint corner → right half
+                    (false, true) => 1, // right endpoint corner → left half
                     (false, false) => 0,
                 }
             };
@@ -2006,9 +2226,17 @@ fn optimize_energy(
             let mode_self = seg_mode(self_corner, prev_corner, next_corner);
             // Segment centered at prev: CPs are (gprev, prev, self).
             // Skip if gprev doesn't exist.
-            let mode_e_prev = if gprev_idx >= 0 { seg_mode(prev_corner, gprev_corner, self_corner) } else { 3 };
+            let mode_e_prev = if gprev_idx >= 0 {
+                seg_mode(prev_corner, gprev_corner, self_corner)
+            } else {
+                3
+            };
             // Segment centered at next: CPs are (self, next, gnext).
-            let mode_e_next = if gnext_idx >= 0 { seg_mode(next_corner, self_corner, gnext_corner) } else { 3 };
+            let mode_e_next = if gnext_idx >= 0 {
+                seg_mode(next_corner, self_corner, gnext_corner)
+            } else {
+                3
+            };
 
             // ---- Slot 1 (crossing's other chain) ----
             let mut c_n0 = (0.0_f32, 0.0_f32);
@@ -2032,13 +2260,19 @@ fn optimize_energy(
                 let other_flags = flags[other];
                 c_inc_self = (other_flags & IS_CORNER) == 0;
 
-                let c_inc_prev = c_prev_idx >= 0
-                    && (flags[c_prev_idx as usize] & IS_CORNER) == 0;
-                let c_inc_next = c_next_idx >= 0
-                    && (flags[c_next_idx as usize] & IS_CORNER) == 0;
+                let c_inc_prev = c_prev_idx >= 0 && (flags[c_prev_idx as usize] & IS_CORNER) == 0;
+                let c_inc_next = c_next_idx >= 0 && (flags[c_next_idx as usize] & IS_CORNER) == 0;
 
-                let c_gprev = if c_inc_prev { grandneighbor_idx(c_prev_idx, other as i32) } else { -1 };
-                let c_gnext = if c_inc_next { grandneighbor_idx(c_next_idx, other as i32) } else { -1 };
+                let c_gprev = if c_inc_prev {
+                    grandneighbor_idx(c_prev_idx, other as i32)
+                } else {
+                    -1
+                };
+                let c_gnext = if c_inc_next {
+                    grandneighbor_idx(c_next_idx, other as i32)
+                } else {
+                    -1
+                };
                 if c_gprev >= 0 {
                     c_nn0 = read_neighbor_pos(pos_in, c_gprev as usize);
                     c_inc_e_prev = true;
@@ -2082,11 +2316,16 @@ fn optimize_energy(
             // final energy because a smaller Picard step leaves room for
             // the gradient correction to debias). Halves picard inner ALU.
             let newton_iters: i32 = std::env::var("VBY_NEWTON")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
 
-            let add_segment = |va: (f32, f32), vb: (f32, f32),
-                               s_va: f32, s_vb: f32,
-                               e: &mut f32, g: &mut (f32, f32),
+            let add_segment = |va: (f32, f32),
+                               vb: (f32, f32),
+                               s_va: f32,
+                               s_vb: f32,
+                               e: &mut f32,
+                               g: &mut (f32, f32),
                                h: &mut [[f32; 2]; 2]| {
                 let cross = va.0 * vb.1 - va.1 * vb.0;
                 let dot = va.0 * vb.0 + va.1 * vb.1;
@@ -2111,9 +2350,12 @@ fn optimize_energy(
             // or v_b (left half), with the chain-rule coefficients halved
             // accordingly — reuses the same θ kernel. Mode 3 = skip.
             let add_segment_mode = |mode: u8,
-                                    va: (f32, f32), vb: (f32, f32),
-                                    s_va: f32, s_vb: f32,
-                                    e: &mut f32, g: &mut (f32, f32),
+                                    va: (f32, f32),
+                                    vb: (f32, f32),
+                                    s_va: f32,
+                                    s_vb: f32,
+                                    e: &mut f32,
+                                    g: &mut (f32, f32),
                                     h: &mut [[f32; 2]; 2]| {
                 match mode {
                     0 => add_segment(va, vb, s_va, s_vb, e, g, h),
@@ -2190,25 +2432,31 @@ fn optimize_energy(
                 // update_tjunctions Phase 1 (clamped-multiplicity B-spline).
                 let ghost_weights = |prev_is_end: bool, next_is_end: bool| -> (f32, f32, f32) {
                     match (prev_is_end, next_is_end) {
-                        (false, false) => (0.75,  0.125, 0.125),
-                        (true,  false) => (0.625, 0.25,  0.125),
-                        (false, true ) => (0.625, 0.125, 0.25),
-                        (true,  true ) => (0.5,   0.25,  0.25),
+                        (false, false) => (0.75, 0.125, 0.125),
+                        (true, false) => (0.625, 0.25, 0.125),
+                        (false, true) => (0.625, 0.125, 0.25),
+                        (true, true) => (0.5, 0.25, 0.25),
                     }
                 };
                 // Returns (s_pos, s_other_pos) for the stem CP attached to the
                 // T-junction at index t. None if no valid stem.
                 let stem_endpoints = |t: usize| -> Option<((f32, f32), (f32, f32))> {
-                    if t + 1 >= num_cps { return None; }
+                    if t + 1 >= num_cps {
+                        return None;
+                    }
                     let s_idx = neighbors[(t + 1) * 4];
-                    if s_idx < 0 { return None; }
+                    if s_idx < 0 {
+                        return None;
+                    }
                     let s = s_idx as usize;
                     let so = if neighbors[s * 4] == (t + 1) as i32 {
                         neighbors[s * 4 + 1]
                     } else {
                         neighbors[s * 4]
                     };
-                    if so < 0 { return None; }
+                    if so < 0 {
+                        return None;
+                    }
                     Some((read_pos(pos_in, s), read_neighbor_pos(pos_in, so as usize)))
                 };
 
@@ -2235,12 +2483,18 @@ fn optimize_energy(
                 // (if i is j's T_prev) or sn (if i is j's T_next).
                 for slot in 0..2usize {
                     let j_idx = neighbors[i * 4 + slot];
-                    if j_idx < 0 { continue; }
+                    if j_idx < 0 {
+                        continue;
+                    }
                     let j = j_idx as usize;
-                    if (flags[j] & IS_TJUNCTION) == 0 { continue; }
+                    if (flags[j] & IS_TJUNCTION) == 0 {
+                        continue;
+                    }
                     let j_prev = neighbors[j * 4];
                     let j_next = neighbors[j * 4 + 1];
-                    if j_prev < 0 || j_next < 0 { continue; }
+                    if j_prev < 0 || j_next < 0 {
+                        continue;
+                    }
                     let j_prev_is_end = (flags[j_prev as usize] & IS_ENDPOINT) != 0;
                     let j_next_is_end = (flags[j_next as usize] & IS_ENDPOINT) != 0;
                     let (st, sp, sn) = ghost_weights(j_prev_is_end, j_next_is_end);
@@ -2301,8 +2555,10 @@ fn optimize_energy(
                     (-g.0 * inv_trace, -g.1 * inv_trace)
                 } else {
                     let inv_det = 1.0 / det;
-                    (-(h11 * g.0 - h01 * g.1) * inv_det,
-                     -(-h01 * g.0 + h00 * g.1) * inv_det)
+                    (
+                        -(h11 * g.0 - h01 * g.1) * inv_det,
+                        -(-h01 * g.0 + h00 * g.1) * inv_det,
+                    )
                 };
 
                 // Backtracking line search: try the full step, halve until
@@ -2320,12 +2576,15 @@ fn optimize_energy(
                 let use_ls = std::env::var("VBY_LS").is_ok();
                 if !use_ls {
                     let cap: f32 = std::env::var("VBY_NOLS_CAP")
-                        .ok().and_then(|s| s.parse().ok()).unwrap_or(0.10);
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.10);
                     let len2 = dx * dx + dy * dy;
                     let (mut sx, mut sy) = (dx, dy);
                     if len2 > cap * cap {
                         let s = cap / len2.sqrt();
-                        sx *= s; sy *= s;
+                        sx *= s;
+                        sy *= s;
                     }
                     p = (p.0 + sx, p.1 + sy);
                 } else {
@@ -2357,29 +2616,42 @@ fn optimize_energy(
         }
     };
 
-
     // Global energy E(p) = Σ_segments 0.5·θ² + Σ_active s4·d⁴.
     // Used for ablation logging (VBY_DEBUG_LS=1). Iterates segments by
     // center CP (each counted once), skips center/both-corner segments
     // and stem-shadow-bounded segments (those are folded into the
     // T-junction stem loop via ghost coupling).
     let is_stem_shadow = |k: i32| -> bool {
-        if k <= 0 { return false; }
+        if k <= 0 {
+            return false;
+        }
         let k = k as usize;
-        if k >= num_cps { return false; }
-        if (flags[k] & 1) == 0 { return false; }
+        if k >= num_cps {
+            return false;
+        }
+        if (flags[k] & 1) == 0 {
+            return false;
+        }
         (flags[k - 1] & IS_TJUNCTION) != 0
     };
     let compute_e = |p: &[f32]| -> f32 {
         let mut e = 0.0f32;
         for b in 0..num_cps {
             let fb = flags[b];
-            if fb == 0 || (fb & 1) != 0 { continue; }
-            if (fb & IS_CORNER) != 0 { continue; }
+            if fb == 0 || (fb & 1) != 0 {
+                continue;
+            }
+            if (fb & IS_CORNER) != 0 {
+                continue;
+            }
             let prev = neighbors[b * 4];
             let next = neighbors[b * 4 + 1];
-            if prev < 0 || next < 0 { continue; }
-            if is_stem_shadow(prev) || is_stem_shadow(next) { continue; }
+            if prev < 0 || next < 0 {
+                continue;
+            }
+            if is_stem_shadow(prev) || is_stem_shadow(next) {
+                continue;
+            }
             let a = prev as usize;
             let c = next as usize;
             let lc = (flags[a] & IS_CORNER) != 0;
@@ -2411,28 +2683,38 @@ fn optimize_energy(
         }
         for t in 0..num_cps {
             let ft = flags[t];
-            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 { continue; }
+            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 {
+                continue;
+            }
             let t_prev = neighbors[t * 4];
             let t_next = neighbors[t * 4 + 1];
-            if t_prev < 0 || t_next < 0 { continue; }
-            if t + 1 >= num_cps { continue; }
+            if t_prev < 0 || t_next < 0 {
+                continue;
+            }
+            if t + 1 >= num_cps {
+                continue;
+            }
             let stem_n = neighbors[(t + 1) * 4];
-            if stem_n < 0 { continue; }
+            if stem_n < 0 {
+                continue;
+            }
             let s = stem_n as usize;
             let so_i = if neighbors[s * 4] == (t + 1) as i32 {
                 neighbors[s * 4 + 1]
             } else {
                 neighbors[s * 4]
             };
-            if so_i < 0 { continue; }
+            if so_i < 0 {
+                continue;
+            }
             let so = so_i as usize;
             let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
             let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
             let (sp, st, sn) = match (prev_is_end, next_is_end) {
                 (false, false) => (0.125_f32, 0.75_f32, 0.125_f32),
-                (true,  false) => (0.25, 0.625, 0.125),
-                (false, true ) => (0.125, 0.625, 0.25),
-                (true,  true ) => (0.25, 0.5, 0.25),
+                (true, false) => (0.25, 0.625, 0.125),
+                (false, true) => (0.125, 0.625, 0.25),
+                (true, true) => (0.25, 0.5, 0.25),
             };
             let p_t = read_pos(p, t);
             let p_tp = read_pos(p, t_prev as usize);
@@ -2450,7 +2732,9 @@ fn optimize_energy(
         }
         for i in 0..num_cps {
             let fi = flags[i];
-            if fi == 0 || (fi & 1) != 0 { continue; }
+            if fi == 0 || (fi & 1) != 0 {
+                continue;
+            }
             let p_i = read_pos(p, i);
             let p_o = read_pos(orig_positions, i);
             let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
@@ -2475,8 +2759,11 @@ fn optimize_energy(
     //          J_a=−dva−dm/2, J_b=dva, J_c=dm/2
     //   right half (left endpoint is corner): substitute va → m
     //          J_a=dm/2, J_b=−dvb, J_c=−dm/2+dvb
-    let segment_jacs = |pa: (f32, f32), pb: (f32, f32), pc: (f32, f32), mode: u8|
-        -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+    let segment_jacs = |pa: (f32, f32),
+                        pb: (f32, f32),
+                        pc: (f32, f32),
+                        mode: u8|
+     -> ((f32, f32), (f32, f32), (f32, f32), f32) {
         let va = (pb.0 - pa.0, pb.1 - pa.1);
         let vb = (pc.0 - pb.0, pc.1 - pb.1);
         let inv_lva2 = 1.0 / (va.0 * va.0 + va.1 * va.1).max(1e-20);
@@ -2488,7 +2775,12 @@ fn optimize_energy(
                 let cross = va.0 * vb.1 - va.1 * vb.0;
                 let dot = va.0 * vb.0 + va.1 * vb.1;
                 let theta = cross.atan2(dot);
-                ((-dva.0, -dva.1), (dva.0 - dvb.0, dva.1 - dvb.1), (dvb.0, dvb.1), theta)
+                (
+                    (-dva.0, -dva.1),
+                    (dva.0 - dvb.0, dva.1 - dvb.1),
+                    (dvb.0, dvb.1),
+                    theta,
+                )
             }
             1 => {
                 let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
@@ -2497,10 +2789,12 @@ fn optimize_energy(
                 let theta = cross.atan2(dot);
                 let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
                 let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
-                ((-dva.0 - dm.0 * 0.5, -dva.1 - dm.1 * 0.5),
-                 (dva.0, dva.1),
-                 (dm.0 * 0.5, dm.1 * 0.5),
-                 theta)
+                (
+                    (-dva.0 - dm.0 * 0.5, -dva.1 - dm.1 * 0.5),
+                    (dva.0, dva.1),
+                    (dm.0 * 0.5, dm.1 * 0.5),
+                    theta,
+                )
             }
             2 => {
                 let m = ((va.0 + vb.0) * 0.5, (va.1 + vb.1) * 0.5);
@@ -2509,10 +2803,12 @@ fn optimize_energy(
                 let theta = cross.atan2(dot);
                 let inv_lm2 = 1.0 / (m.0 * m.0 + m.1 * m.1).max(1e-20);
                 let dm = (-m.1 * inv_lm2, m.0 * inv_lm2);
-                ((dm.0 * 0.5, dm.1 * 0.5),
-                 (-dvb.0, -dvb.1),
-                 (-dm.0 * 0.5 + dvb.0, -dm.1 * 0.5 + dvb.1),
-                 theta)
+                (
+                    (dm.0 * 0.5, dm.1 * 0.5),
+                    (-dvb.0, -dvb.1),
+                    (-dm.0 * 0.5 + dvb.0, -dm.1 * 0.5 + dvb.1),
+                    theta,
+                )
             }
             _ => ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), 0.0),
         }
@@ -2523,12 +2819,20 @@ fn optimize_energy(
         // excluding stem-shadow bounded segments).
         for b in 0..num_cps {
             let fb = flags[b];
-            if fb == 0 || (fb & 1) != 0 { continue; }
-            if (fb & IS_CORNER) != 0 { continue; }
+            if fb == 0 || (fb & 1) != 0 {
+                continue;
+            }
+            if (fb & IS_CORNER) != 0 {
+                continue;
+            }
             let prev = neighbors[b * 4];
             let next = neighbors[b * 4 + 1];
-            if prev < 0 || next < 0 { continue; }
-            if is_stem_shadow(prev) || is_stem_shadow(next) { continue; }
+            if prev < 0 || next < 0 {
+                continue;
+            }
+            if is_stem_shadow(prev) || is_stem_shadow(next) {
+                continue;
+            }
             let a = prev as usize;
             let c = next as usize;
             let lc = (flags[a] & IS_CORNER) != 0;
@@ -2543,36 +2847,49 @@ fn optimize_energy(
             let pb = read_pos(p, b);
             let pc = read_neighbor_pos(p, c);
             let (j_a, j_b, j_c, theta) = segment_jacs(pa, pb, pc, mode);
-            g[a*2]     += theta * j_a.0; g[a*2 + 1] += theta * j_a.1;
-            g[b*2]     += theta * j_b.0; g[b*2 + 1] += theta * j_b.1;
-            g[c*2]     += theta * j_c.0; g[c*2 + 1] += theta * j_c.1;
+            g[a * 2] += theta * j_a.0;
+            g[a * 2 + 1] += theta * j_a.1;
+            g[b * 2] += theta * j_b.0;
+            g[b * 2 + 1] += theta * j_b.1;
+            g[c * 2] += theta * j_c.0;
+            g[c * 2 + 1] += theta * j_c.1;
         }
         // T-junction stem segments. Chain rule routes ∂θ/∂ghost back to
         // (T, T_prev, T_next) with weights (st, sp, sn).
         for t in 0..num_cps {
             let ft = flags[t];
-            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 { continue; }
+            if (ft & IS_TJUNCTION) == 0 || (ft & 1) != 0 {
+                continue;
+            }
             let t_prev = neighbors[t * 4];
             let t_next = neighbors[t * 4 + 1];
-            if t_prev < 0 || t_next < 0 { continue; }
-            if t + 1 >= num_cps { continue; }
+            if t_prev < 0 || t_next < 0 {
+                continue;
+            }
+            if t + 1 >= num_cps {
+                continue;
+            }
             let stem_n = neighbors[(t + 1) * 4];
-            if stem_n < 0 { continue; }
+            if stem_n < 0 {
+                continue;
+            }
             let s = stem_n as usize;
             let so_i = if neighbors[s * 4] == (t + 1) as i32 {
                 neighbors[s * 4 + 1]
             } else {
                 neighbors[s * 4]
             };
-            if so_i < 0 { continue; }
+            if so_i < 0 {
+                continue;
+            }
             let so = so_i as usize;
             let prev_is_end = (flags[t_prev as usize] & IS_ENDPOINT) != 0;
             let next_is_end = (flags[t_next as usize] & IS_ENDPOINT) != 0;
             let (sp, st, sn) = match (prev_is_end, next_is_end) {
                 (false, false) => (0.125_f32, 0.75_f32, 0.125_f32),
-                (true,  false) => (0.25, 0.625, 0.125),
-                (false, true ) => (0.125, 0.625, 0.25),
-                (true,  true ) => (0.25, 0.5, 0.25),
+                (true, false) => (0.25, 0.625, 0.125),
+                (false, true) => (0.125, 0.625, 0.25),
+                (true, true) => (0.25, 0.5, 0.25),
             };
             let p_t = read_pos(p, t);
             let p_tp = read_pos(p, t_prev as usize);
@@ -2584,38 +2901,45 @@ fn optimize_energy(
             let p_s = read_pos(p, s);
             let p_so = read_pos(p, so);
             let (j_a, j_b, j_c, theta) = segment_jacs(ghost, p_s, p_so, 0);
-            g[s*2]                   += theta * j_b.0;       g[s*2 + 1]                   += theta * j_b.1;
-            g[so*2]                  += theta * j_c.0;       g[so*2 + 1]                  += theta * j_c.1;
-            g[t*2]                   += theta * st * j_a.0;  g[t*2 + 1]                   += theta * st * j_a.1;
-            g[(t_prev as usize)*2]   += theta * sp * j_a.0;  g[(t_prev as usize)*2 + 1]   += theta * sp * j_a.1;
-            g[(t_next as usize)*2]   += theta * sn * j_a.0;  g[(t_next as usize)*2 + 1]   += theta * sn * j_a.1;
+            g[s * 2] += theta * j_b.0;
+            g[s * 2 + 1] += theta * j_b.1;
+            g[so * 2] += theta * j_c.0;
+            g[so * 2 + 1] += theta * j_c.1;
+            g[t * 2] += theta * st * j_a.0;
+            g[t * 2 + 1] += theta * st * j_a.1;
+            g[(t_prev as usize) * 2] += theta * sp * j_a.0;
+            g[(t_prev as usize) * 2 + 1] += theta * sp * j_a.1;
+            g[(t_next as usize) * 2] += theta * sn * j_a.0;
+            g[(t_next as usize) * 2 + 1] += theta * sn * j_a.1;
         }
         // Positional energy gradient: ∂(s4·d⁴)/∂p = 4 s4 d² d.
         for i in 0..num_cps {
             let fi = flags[i];
-            if fi == 0 || (fi & 1) != 0 { continue; }
+            if fi == 0 || (fi & 1) != 0 {
+                continue;
+            }
             let p_i = read_pos(p, i);
             let p_o = read_pos(orig_positions, i);
             let d = (p_i.0 - p_o.0, p_i.1 - p_o.1);
             let d2 = d.0 * d.0 + d.1 * d.1;
-            g[i*2]     += 4.0 * s4 * d2 * d.0;
-            g[i*2 + 1] += 4.0 * s4 * d2 * d.1;
+            g[i * 2] += 4.0 * s4 * d2 * d.0;
+            g[i * 2 + 1] += 4.0 * s4 * d2 * d.1;
         }
         // Crossing constraint: slot-1 row folded into slot-0 (they share a position).
         for i in 0..num_cps {
             if i > 0 && (flags[i] & IS_CROSSING) != 0 && (flags[i - 1] & IS_CROSSING) != 0 {
-                g[(i-1)*2]     += g[i*2];
-                g[(i-1)*2 + 1] += g[i*2 + 1];
-                g[i*2] = 0.0;
-                g[i*2 + 1] = 0.0;
+                g[(i - 1) * 2] += g[i * 2];
+                g[(i - 1) * 2 + 1] += g[i * 2 + 1];
+                g[i * 2] = 0.0;
+                g[i * 2 + 1] = 0.0;
             }
         }
         // Pin inactive CPs (junction-pinned shadows etc.).
         for i in 0..num_cps {
             let fi = flags[i];
             if fi == 0 || (fi & 1) != 0 {
-                g[i*2] = 0.0;
-                g[i*2 + 1] = 0.0;
+                g[i * 2] = 0.0;
+                g[i * 2 + 1] = 0.0;
             }
         }
         g
@@ -2639,8 +2963,14 @@ fn optimize_energy(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
-    let eta: f32 = std::env::var("VBY_ETA").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05);
-    let max_step: f32 = std::env::var("VBY_MAXSTEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.25);
+    let eta: f32 = std::env::var("VBY_ETA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.05);
+    let max_step: f32 = std::env::var("VBY_MAXSTEP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.25);
     // GPU-faithful topology, matching vectorscale's optimize-energy +
     // gradient-correction chain and vibeboy's wgpu Picard → grad pipeline.
     //   Pass A (picard, optimize-energy.slang in vectorscale / picard_step.slang in wgpu):
@@ -2684,19 +3014,20 @@ fn optimize_energy(
             let g_input = if fused { &buf_a } else { &buf_picard };
             let g = compute_g(g_input);
             for i in 0..num_cps {
-                let mut dx = -eta * g[i*2];
-                let mut dy = -eta * g[i*2 + 1];
-                let len2 = dx*dx + dy*dy;
+                let mut dx = -eta * g[i * 2];
+                let mut dy = -eta * g[i * 2 + 1];
+                let len2 = dx * dx + dy * dy;
                 if len2 > max_step * max_step {
                     let s = max_step / len2.sqrt();
-                    dx *= s; dy *= s;
+                    dx *= s;
+                    dy *= s;
                 }
-                buf_b[i*2]     = buf_picard[i*2]     + dx;
-                buf_b[i*2 + 1] = buf_picard[i*2 + 1] + dy;
+                buf_b[i * 2] = buf_picard[i * 2] + dx;
+                buf_b[i * 2 + 1] = buf_picard[i * 2 + 1] + dy;
             }
             if debug_ls {
                 let e_after = compute_e(&buf_b);
-                let g_norm: f32 = g.iter().map(|x| x*x).sum::<f32>().sqrt();
+                let g_norm: f32 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
                 eprintln!("iter {}: e={:.6} g_norm={:.4e}", iter, e_after, g_norm);
             }
         }
@@ -2720,7 +3051,12 @@ fn solve_quartic_in_unit(c4: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> [Option
     // while c0..c2 sit at ~1e-2. An absolute `1e-20` cutoff misses this.
     // 1e-6 because dividing by a coefficient that small still amplifies
     // noise enough to swamp legitimate roots.
-    let scale = c0.abs().max(c1.abs()).max(c2.abs()).max(c3.abs()).max(c4.abs());
+    let scale = c0
+        .abs()
+        .max(c1.abs())
+        .max(c2.abs())
+        .max(c3.abs())
+        .max(c4.abs());
     let eps = 1e-6 * scale.max(1.0);
     if c4.abs() < eps {
         return solve_cubic_in_unit(c3, c2, c1, c0);
@@ -2852,7 +3188,11 @@ fn solve_cubic_in_unit(c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
     } else {
         // disc <= 0: three real roots via trigonometric form.
         let r = (-p / 3.0).max(0.0).sqrt();
-        let cos_arg = if r > 1e-20 { (-q / 2.0) / (r * r * r) } else { 0.0 };
+        let cos_arg = if r > 1e-20 {
+            (-q / 2.0) / (r * r * r)
+        } else {
+            0.0
+        };
         let theta = cos_arg.clamp(-1.0, 1.0).acos();
         for k in 0..3 {
             let t = 2.0 * r * ((theta + 2.0 * std::f32::consts::PI * k as f32) / 3.0).cos() + shift;
@@ -2902,10 +3242,15 @@ pub struct CurveIntersect {
 ///   b = −P0 + P1
 ///   c = 0.5·P0 + 0.5·P1
 #[inline]
-fn bspline_poly(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32))
-    -> ((f32, f32), (f32, f32), (f32, f32))
-{
-    let a = (0.5 * p0.0 - p1.0 + 0.5 * p2.0, 0.5 * p0.1 - p1.1 + 0.5 * p2.1);
+fn bspline_poly(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+) -> ((f32, f32), (f32, f32), (f32, f32)) {
+    let a = (
+        0.5 * p0.0 - p1.0 + 0.5 * p2.0,
+        0.5 * p0.1 - p1.1 + 0.5 * p2.1,
+    );
     let b = (-p0.0 + p1.0, -p0.1 + p1.1);
     let c = (0.5 * p0.0 + 0.5 * p1.0, 0.5 * p0.1 + 0.5 * p1.1);
     (a, b, c)
@@ -2928,8 +3273,12 @@ fn bspline_poly(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32))
 /// F(t, s) = B_a(t) − B_b(s) without forming the resultant or back-
 /// solving an axis.
 pub fn intersect_quadratic_bsplines(
-    a_p0: (f32, f32), a_p1: (f32, f32), a_p2: (f32, f32),
-    b_p0: (f32, f32), b_p1: (f32, f32), b_p2: (f32, f32),
+    a_p0: (f32, f32),
+    a_p1: (f32, f32),
+    a_p2: (f32, f32),
+    b_p0: (f32, f32),
+    b_p1: (f32, f32),
+    b_p2: (f32, f32),
 ) -> CurveIntersect {
     let (aa, ba, ca) = bspline_poly(a_p0, a_p1, a_p2);
     let (ab, bb, cb) = bspline_poly(b_p0, b_p1, b_p2);
@@ -2962,7 +3311,9 @@ pub fn intersect_quadratic_bsplines(
         let dbx = 2.0 * ab.0 * s + bb.0;
         let dby = 2.0 * ab.1 * s + bb.1;
         let det = -dax * dby + day * dbx;
-        if det.abs() < 1e-12 { break; }
+        if det.abs() < 1e-12 {
+            break;
+        }
         // (Δt, Δs) = J⁻¹·F. With J⁻¹ = (1/det)·[[-dby, dbx], [-day, dax]],
         // Δt = (-dby·Fx + dbx·Fy) / det, Δs = (-day·Fx + dax·Fy) / det.
         // Newton update: (t, s) ← (t, s) − (Δt, Δs).
@@ -2971,7 +3322,9 @@ pub fn intersect_quadratic_bsplines(
         let step_s = inv * (-day * fx + dax * fy);
         t -= step_t;
         s -= step_s;
-        if step_t.abs() < 1e-7 && step_s.abs() < 1e-7 { break; }
+        if step_t.abs() < 1e-7 && step_s.abs() < 1e-7 {
+            break;
+        }
     }
     let t = t.clamp(0.0, 1.0);
     let s = s.clamp(0.0, 1.0);
@@ -3008,21 +3361,22 @@ fn update_tjunctions(
     //     intersection enough to flip wedge classification on near-boundary
     //     pixels.
 
-    let read_pos = |positions: &[f32], ci: usize| -> (f32, f32) {
-        (positions[ci * 2], positions[ci * 2 + 1])
-    };
-    let is_end = |idx: i32| -> bool {
-        idx >= 0 && (flags[idx as usize] & IS_ENDPOINT) != 0
-    };
+    let read_pos =
+        |positions: &[f32], ci: usize| -> (f32, f32) { (positions[ci * 2], positions[ci * 2 + 1]) };
+    let is_end = |idx: i32| -> bool { idx >= 0 && (flags[idx as usize] & IS_ENDPOINT) != 0 };
 
     // Phase 1: T-junction stem snap. 3 passes for convergence.
     for _ in 0..3 {
         for i in 0..num_cps {
             let f = flags[i];
-            if (f & IS_TJUNCTION) == 0 { continue; }
+            if (f & IS_TJUNCTION) == 0 {
+                continue;
+            }
             let prev_idx = neighbors[i * 4];
             let next_idx = neighbors[i * 4 + 1];
-            if prev_idx < 0 || next_idx < 0 { continue; }
+            if prev_idx < 0 || next_idx < 0 {
+                continue;
+            }
 
             let prev_pos = read_pos(positions, prev_idx as usize);
             let next_pos = read_pos(positions, next_idx as usize);
@@ -3032,12 +3386,12 @@ fn update_tjunctions(
             let stem = i ^ 1;
             if stem < num_cps && (flags[stem] & !IS_ENDPOINT) == 1 {
                 let (sp, st, sn) = match (prev_is_end, next_is_end) {
-                    (false, false) => (0.125, 0.75,  0.125),
-                    (true,  false) => (0.25,  0.625, 0.125),
-                    (false, true ) => (0.125, 0.625, 0.25),
-                    (true,  true ) => (0.25,  0.5,   0.25),
+                    (false, false) => (0.125, 0.75, 0.125),
+                    (true, false) => (0.25, 0.625, 0.125),
+                    (false, true) => (0.125, 0.625, 0.25),
+                    (true, true) => (0.25, 0.5, 0.25),
                 };
-                positions[stem * 2]     = sp * prev_pos.0 + st * through.0 + sn * next_pos.0;
+                positions[stem * 2] = sp * prev_pos.0 + st * through.0 + sn * next_pos.0;
                 positions[stem * 2 + 1] = sp * prev_pos.1 + st * through.1 + sn * next_pos.1;
             }
         }
@@ -3046,20 +3400,30 @@ fn update_tjunctions(
     // Phase 2: write t values for every crossing. Runs after Phase 1 so any
     // stem-CP neighbor reads see the snapped position.
     for i in 0..num_cps {
-        if (flags[i] & IS_CROSSING) == 0 || (i & 1) != 0 { continue; }
+        if (flags[i] & IS_CROSSING) == 0 || (i & 1) != 0 {
+            continue;
+        }
         let other = i + 1;
-        if other >= num_cps { continue; }
+        if other >= num_cps {
+            continue;
+        }
 
         let n_idx = neighbors[i * 4];
         let s_idx = neighbors[i * 4 + 1];
         let e_idx = neighbors[other * 4];
         let w_idx = neighbors[other * 4 + 1];
-        if n_idx < 0 || s_idx < 0 || e_idx < 0 || w_idx < 0 { continue; }
+        if n_idx < 0 || s_idx < 0 || e_idx < 0 || w_idx < 0 {
+            continue;
+        }
 
         let cp_a = read_pos(positions, i);
         let cp_b = read_pos(positions, other);
         let ghost = |np: (f32, f32), is_endpoint: bool, cp: (f32, f32)| -> (f32, f32) {
-            if is_endpoint { (2.0 * np.0 - cp.0, 2.0 * np.1 - cp.1) } else { np }
+            if is_endpoint {
+                (2.0 * np.0 - cp.0, 2.0 * np.1 - cp.1)
+            } else {
+                np
+            }
         };
         let n_in = ghost(read_pos(positions, n_idx as usize), is_end(n_idx), cp_a);
         let s_in = ghost(read_pos(positions, s_idx as usize), is_end(s_idx), cp_a);
@@ -3067,11 +3431,10 @@ fn update_tjunctions(
         let w_in = ghost(read_pos(positions, w_idx as usize), is_end(w_idx), cp_b);
 
         let r = intersect_quadratic_bsplines(n_in, cp_a, s_in, e_in, cp_b, w_in);
-        crossing_t[i]     = r.t_a; // t on N-S curve (slot 0)
+        crossing_t[i] = r.t_a; // t on N-S curve (slot 0)
         crossing_t[other] = r.t_b; // t on E-W curve (slot 1)
     }
 }
-
 
 // ============================================================================
 // Stage 6: Rasterize
@@ -3099,10 +3462,7 @@ fn beval_deriv(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, 
 /// `(t, d²)` matching `closest_on_span_poly`'s signature so callers can
 /// dispatch on `CpData::is_line` and merge results into the same hit array.
 #[inline(always)]
-fn closest_on_segment(
-    a0x: f32, a0y: f32, a1x: f32, a1y: f32,
-    ptx: f32, pty: f32,
-) -> (f32, f32) {
+fn closest_on_segment(a0x: f32, a0y: f32, a1x: f32, a1y: f32, ptx: f32, pty: f32) -> (f32, f32) {
     let vx = a1x - a0x;
     let vy = a1y - a0y;
     let vv = vx * vx + vy * vy;
@@ -3127,7 +3487,9 @@ fn polish_root_q(t: f32, c2: f32, c1: f32, c0: f32) -> f32 {
     let ddp = (2.0 * c2).mul_add(t, c1);
     if ddp.abs() > 1e-10 {
         let step = dp / ddp;
-        if step.abs() < 0.5 { return t - step; }
+        if step.abs() < 0.5 {
+            return t - step;
+        }
     }
     t
 }
@@ -3139,7 +3501,9 @@ fn polish_root_c(t: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> f32 {
     let ddp = (3.0 * c3).mul_add(t, 2.0 * c2).mul_add(t, c1);
     if ddp.abs() > 1e-10 {
         let step = dp / ddp;
-        if step.abs() < 0.5 { return t - step; }
+        if step.abs() < 0.5 {
+            return t - step;
+        }
     }
     t
 }
@@ -3151,8 +3515,14 @@ fn polish_root_c(t: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> f32 {
 /// No iterative Newton, no coarse sweep, no degenerate endpoint traps.
 #[inline(always)]
 fn closest_on_span_poly(
-    ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32,
-    ptx: f32, pty: f32,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+    ptx: f32,
+    pty: f32,
 ) -> (f32, f32) {
     // Shift: let dx(t) = ax*t² + bx*t + (cx-ptx), dy(t) similarly
     let ex = cx - ptx;
@@ -3203,7 +3573,10 @@ fn closest_on_span_poly(
                 for t in [t1, t2] {
                     if t > 0.0 && t < 1.0 {
                         let d = eval_d2(t);
-                        if d < best_d2 { best_d2 = d; best_t = t; }
+                        if d < best_d2 {
+                            best_d2 = d;
+                            best_t = t;
+                        }
                     }
                 }
             }
@@ -3212,7 +3585,10 @@ fn closest_on_span_poly(
             let t = polish_root_c(-c0 / c1, c3, c2, c1, c0);
             if t > 0.0 && t < 1.0 {
                 let d = eval_d2(t);
-                if d < best_d2 { best_d2 = d; best_t = t; }
+                if d < best_d2 {
+                    best_d2 = d;
+                    best_t = t;
+                }
             }
         }
     } else {
@@ -3221,8 +3597,8 @@ fn closest_on_span_poly(
         let inv3a = 1.0 / (3.0 * c3);
         let shift = -c2 * inv3a;
         let p = (3.0 * c3 * c1 - c2 * c2) / (3.0 * c3 * c3);
-        let q = (2.0 * c2 * c2 * c2 - 9.0 * c3 * c2 * c1 + 27.0 * c3 * c3 * c0)
-            / (27.0 * c3 * c3 * c3);
+        let q =
+            (2.0 * c2 * c2 * c2 - 9.0 * c3 * c2 * c1 + 27.0 * c3 * c3 * c0) / (27.0 * c3 * c3 * c3);
 
         // FMA on q²/4 + p³/27: single-rounding sum, one extra bit at the
         // disc≈0 boundary (near triple root) where the two terms cancel.
@@ -3235,7 +3611,10 @@ fn closest_on_span_poly(
             let t = polish_root_c(u + shift, c3, c2, c1, c0);
             if t > 0.0 && t < 1.0 {
                 let d = eval_d2(t);
-                if d < best_d2 { best_d2 = d; best_t = t; }
+                if d < best_d2 {
+                    best_d2 = d;
+                    best_t = t;
+                }
             }
         } else {
             // Three real roots (trigonometric). cube_r = 2·sqrt(-p/3) is
@@ -3243,14 +3622,21 @@ fn closest_on_span_poly(
             // value via one sqrt instead of (p*p*p, sqrt, cbrt) — faster
             // *and* avoids the precision loss of cbrt-on-a-sqrt.
             let r = (-p / 3.0).max(0.0).sqrt();
-            let cos_arg = if r > 1e-20 { (-q * 0.5) / (r * r * r) } else { 0.0 };
+            let cos_arg = if r > 1e-20 {
+                (-q * 0.5) / (r * r * r)
+            } else {
+                0.0
+            };
             let phi = cos_arg.clamp(-1.0, 1.0).acos();
             for k in 0..3 {
                 let angle = (phi + std::f32::consts::TAU * k as f32) / 3.0;
                 let t = polish_root_c(2.0 * r * angle.cos() + shift, c3, c2, c1, c0);
                 if t > 0.0 && t < 1.0 {
                     let d = eval_d2(t);
-                    if d < best_d2 { best_d2 = d; best_t = t; }
+                    if d < best_d2 {
+                        best_d2 = d;
+                        best_t = t;
+                    }
                 }
             }
         }
@@ -3282,9 +3668,12 @@ struct CpData {
     orig_next: (f32, f32),
     /// Precomputed polynomial coefficients: B(t) = a*t² + b*t + c
     /// B'(t) = 2*a*t + b, B''(t) = 2*a
-    poly_ax: f32, poly_ay: f32,
-    poly_bx: f32, poly_by: f32,
-    poly_cx: f32, poly_cy: f32,
+    poly_ax: f32,
+    poly_ay: f32,
+    poly_bx: f32,
+    poly_by: f32,
+    poly_cx: f32,
+    poly_cy: f32,
     /// Branch threshold for prev_dir vs next_dir in resolve_from_cp. For
     /// non-clamped (interior) spans this is 0.5; for clamped Bezier spans
     /// (Q0=prev_endpoint or Q2=next_endpoint), the parameterization is
@@ -3327,9 +3716,12 @@ struct CpData {
 /// and (if a ≠ 0) at the interior critical point t* = −b/(2a) when it
 /// falls within [0, 1].
 fn spline_aabb(
-    poly_ax: f32, poly_ay: f32,
-    poly_bx: f32, poly_by: f32,
-    poly_cx: f32, poly_cy: f32,
+    poly_ax: f32,
+    poly_ay: f32,
+    poly_bx: f32,
+    poly_by: f32,
+    poly_cx: f32,
+    poly_cy: f32,
 ) -> ((f32, f32), (f32, f32)) {
     // x at t=0 is poly_cx; at t=1 is poly_cx + poly_bx + poly_ax.
     let x0 = poly_cx;
@@ -3370,18 +3762,30 @@ pub fn get_px_color(pixels: &[u32], img_w: usize, img_h: usize, px: i32, py: i32
 
 #[inline(always)]
 pub fn get_edge_colors(
-    pixels: &[u32], img_w: usize, img_h: usize,
-    icx: i32, icy: i32, dir: i32,
+    pixels: &[u32],
+    img_w: usize,
+    img_h: usize,
+    icx: i32,
+    icy: i32,
+    dir: i32,
 ) -> (u32, u32) {
     match dir {
-        0 => (get_px_color(pixels, img_w, img_h, icx - 1, icy - 1),
-              get_px_color(pixels, img_w, img_h, icx, icy - 1)),
-        1 => (get_px_color(pixels, img_w, img_h, icx, icy - 1),
-              get_px_color(pixels, img_w, img_h, icx, icy)),
-        2 => (get_px_color(pixels, img_w, img_h, icx, icy),
-              get_px_color(pixels, img_w, img_h, icx - 1, icy)),
-        3 => (get_px_color(pixels, img_w, img_h, icx - 1, icy),
-              get_px_color(pixels, img_w, img_h, icx - 1, icy - 1)),
+        0 => (
+            get_px_color(pixels, img_w, img_h, icx - 1, icy - 1),
+            get_px_color(pixels, img_w, img_h, icx, icy - 1),
+        ),
+        1 => (
+            get_px_color(pixels, img_w, img_h, icx, icy - 1),
+            get_px_color(pixels, img_w, img_h, icx, icy),
+        ),
+        2 => (
+            get_px_color(pixels, img_w, img_h, icx, icy),
+            get_px_color(pixels, img_w, img_h, icx - 1, icy),
+        ),
+        3 => (
+            get_px_color(pixels, img_w, img_h, icx - 1, icy),
+            get_px_color(pixels, img_w, img_h, icx - 1, icy - 1),
+        ),
         _ => (0, 0),
     }
 }
@@ -3418,10 +3822,13 @@ fn line_coverage_pos(normal: (f32, f32), d_perp_pixel: f32) -> f32 {
     let b = nx.min(ny);
     let half_ext = (a + b) * 0.5;
     let lin_ext = (a - b) * 0.5;
-    if d_perp_pixel >= half_ext { 1.0 }
-    else if d_perp_pixel <= -half_ext { 0.0 }
-    else if d_perp_pixel.abs() <= lin_ext { 0.5 + d_perp_pixel / a }
-    else if d_perp_pixel > 0.0 {
+    if d_perp_pixel >= half_ext {
+        1.0
+    } else if d_perp_pixel <= -half_ext {
+        0.0
+    } else if d_perp_pixel.abs() <= lin_ext {
+        0.5 + d_perp_pixel / a
+    } else if d_perp_pixel > 0.0 {
         let t = half_ext - d_perp_pixel;
         1.0 - 0.5 * t * t / (a * b)
     } else {
@@ -3440,16 +3847,20 @@ fn line_coverage_pos(normal: (f32, f32), d_perp_pixel: f32) -> f32 {
 /// its cpt is an external junction point and colors are resolved per
 /// segment by the LUT.
 fn build_aa_line(
-    sc: &CpData, t: f32,
-    pixels: &[u32], img_w: usize, img_h: usize,
+    sc: &CpData,
+    t: f32,
+    pixels: &[u32],
+    img_w: usize,
+    img_h: usize,
 ) -> Option<(AaLine, u32, u32)> {
     let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
     let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
-    if tl < 1e-4 { return None; }
+    if tl < 1e-4 {
+        return None;
+    }
     let normal = (-tang.1 / tl, tang.0 / tl);
     let target_seg1 = t >= sc.t_branch;
-    let (pos, neg) =
-        resolve_lut_segment(sc, normal, pixels, img_w, img_h, target_seg1)?;
+    let (pos, neg) = resolve_lut_segment(sc, normal, pixels, img_w, img_h, target_seg1)?;
     let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
     Some((AaLine { cpt, normal }, pos, neg))
 }
@@ -3459,12 +3870,18 @@ fn build_aa_line(
 /// Returns the unit tangent alongside the line so the caller can align
 /// line_b's normal to line_a's tangent direction.
 fn build_junction_aa_line(
-    sc: &CpData, t_eval: f32, j: (f32, f32),
-    pixels: &[u32], img_w: usize, img_h: usize,
+    sc: &CpData,
+    t_eval: f32,
+    j: (f32, f32),
+    pixels: &[u32],
+    img_w: usize,
+    img_h: usize,
 ) -> Option<(AaLine, (f32, f32))> {
     let tang = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t_eval);
     let tl = (tang.0 * tang.0 + tang.1 * tang.1).sqrt();
-    if tl < 1e-4 { return None; }
+    if tl < 1e-4 {
+        return None;
+    }
     let tang_unit = (tang.0 / tl, tang.1 / tl);
     let normal = (-tang_unit.1, tang_unit.0);
 
@@ -3476,7 +3893,9 @@ fn build_junction_aa_line(
         let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir);
         l != r
     };
-    if !prev_split && !next_split { return None; }
+    if !prev_split && !next_split {
+        return None;
+    }
 
     Some((AaLine { cpt: j, normal }, tang_unit))
 }
@@ -3487,36 +3906,66 @@ fn build_junction_aa_line(
 fn resolve_lut_segment(
     sc_a: &CpData,
     line_a_normal: (f32, f32),
-    pixels: &[u32], img_w: usize, img_h: usize,
+    pixels: &[u32],
+    img_w: usize,
+    img_h: usize,
     target_is_seg1: bool,
 ) -> Option<(u32, u32)> {
     let (mut pl, mut pr) = (0u32, 0u32);
     let (mut nl, mut nr) = (0u32, 0u32);
     if sc_a.prev_dir >= 0 {
         let (l, r) = get_edge_colors(pixels, img_w, img_h, sc_a.icx, sc_a.icy, sc_a.prev_dir);
-        pl = l; pr = r;
+        pl = l;
+        pr = r;
     }
     if sc_a.next_dir >= 0 {
         let (l, r) = get_edge_colors(pixels, img_w, img_h, sc_a.icx, sc_a.icy, sc_a.next_dir);
-        nl = l; nr = r;
+        nl = l;
+        nr = r;
     }
     let prev_valid = pl != pr;
     let next_valid = nl != nr;
     let (color_left, color_right, ref_t);
     if sc_a.prev_ci < 0 {
-        if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-        else { return None; }
+        if next_valid {
+            color_left = nr;
+            color_right = nl;
+            ref_t = 1.0;
+        } else {
+            return None;
+        }
     } else if sc_a.next_ci < 0 {
-        if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-        else { return None; }
+        if prev_valid {
+            color_left = pl;
+            color_right = pr;
+            ref_t = 0.0;
+        } else {
+            return None;
+        }
     } else if !target_is_seg1 {
-        if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-        else if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-        else { return None; }
+        if prev_valid {
+            color_left = pl;
+            color_right = pr;
+            ref_t = 0.0;
+        } else if next_valid {
+            color_left = nr;
+            color_right = nl;
+            ref_t = 1.0;
+        } else {
+            return None;
+        }
     } else {
-        if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-        else if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-        else { return None; }
+        if next_valid {
+            color_left = nr;
+            color_right = nl;
+            ref_t = 1.0;
+        } else if prev_valid {
+            color_left = pl;
+            color_right = pr;
+            ref_t = 0.0;
+        } else {
+            return None;
+        }
     }
     let ot = beval_deriv(sc_a.orig_prev, sc_a.orig_pos, sc_a.orig_next, ref_t);
     let on = (-ot.1, ot.0);
@@ -3596,8 +4045,16 @@ fn rasterize(
         let cp_real = read_pos_f(ci as i32);
         // 2-CP-chain fallback: if either neighbor is missing, use the CP
         // itself for that side (degenerate, straight-line span).
-        let prev_pos = if prev_ci >= 0 { read_pos_f(prev_ci) } else { cp_real };
-        let next_pos = if next_ci >= 0 { read_pos_f(next_ci) } else { cp_real };
+        let prev_pos = if prev_ci >= 0 {
+            read_pos_f(prev_ci)
+        } else {
+            cp_real
+        };
+        let next_pos = if next_ci >= 0 {
+            read_pos_f(next_ci)
+        } else {
+            cp_real
+        };
 
         // If a neighbor is an endpoint, replace its position with a virtual
         // ghost = 2*real - cp so that bspline_eval(...,t=0|1) lands exactly
@@ -3628,9 +4085,15 @@ fn rasterize(
             // p1=midpoint, p2=(3·a1-a0)/2 so bspline_eval gives
             // B(t) = lerp(a0, a1, t) and the polynomial t² coefficient is 0.
             // a0 = prev side, a1 = next side.
-            let p0 = (1.5 * a0_pos.0 - 0.5 * a1_pos.0, 1.5 * a0_pos.1 - 0.5 * a1_pos.1);
+            let p0 = (
+                1.5 * a0_pos.0 - 0.5 * a1_pos.0,
+                1.5 * a0_pos.1 - 0.5 * a1_pos.1,
+            );
             let p1 = (0.5 * (a0_pos.0 + a1_pos.0), 0.5 * (a0_pos.1 + a1_pos.1));
-            let p2 = (1.5 * a1_pos.0 - 0.5 * a0_pos.0, 1.5 * a1_pos.1 - 0.5 * a0_pos.1);
+            let p2 = (
+                1.5 * a1_pos.0 - 0.5 * a0_pos.0,
+                1.5 * a1_pos.1 - 0.5 * a0_pos.1,
+            );
             (p1, p0, p2)
         } else {
             let cp = cp_real;
@@ -3657,9 +4120,12 @@ fn rasterize(
         // sending the solver down the full-cubic numerical-disaster path.
         let (poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy) = if two_cp_chain {
             (
-                0.0, 0.0,
-                a1_pos.0 - a0_pos.0, a1_pos.1 - a0_pos.1,
-                a0_pos.0, a0_pos.1,
+                0.0,
+                0.0,
+                a1_pos.0 - a0_pos.0,
+                a1_pos.1 - a0_pos.1,
+                a0_pos.0,
+                a0_pos.1,
             )
         } else {
             (
@@ -3692,8 +4158,14 @@ fn rasterize(
             let interior_mid_x = 0.125 * pp.0 + 0.75 * cp.0 + 0.125 * np.0;
             let interior_mid_y = 0.125 * pp.1 + 0.75 * cp.1 + 0.125 * np.1;
             closest_on_span_poly(
-                poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
-                interior_mid_x, interior_mid_y,
+                poly_ax,
+                poly_ay,
+                poly_bx,
+                poly_by,
+                poly_cx,
+                poly_cy,
+                interior_mid_x,
+                interior_mid_y,
             )
             .0
         } else {
@@ -3705,21 +4177,34 @@ fn rasterize(
         // line in original cell-graph coordinates that the AA flip-detection
         // in the rasterizer expects.
         let (orig_pos_out, orig_prev_out, orig_next_out) = if two_cp_chain {
-            let q0 = (1.5 * a0_orig.0 - 0.5 * a1_orig.0, 1.5 * a0_orig.1 - 0.5 * a1_orig.1);
+            let q0 = (
+                1.5 * a0_orig.0 - 0.5 * a1_orig.0,
+                1.5 * a0_orig.1 - 0.5 * a1_orig.1,
+            );
             let q1 = (0.5 * (a0_orig.0 + a1_orig.0), 0.5 * (a0_orig.1 + a1_orig.1));
-            let q2 = (1.5 * a1_orig.0 - 0.5 * a0_orig.0, 1.5 * a1_orig.1 - 0.5 * a0_orig.1);
+            let q2 = (
+                1.5 * a1_orig.0 - 0.5 * a0_orig.0,
+                1.5 * a1_orig.1 - 0.5 * a0_orig.1,
+            );
             (q1, q0, q2)
         } else {
             (
                 read_orig_f(ci as i32),
-                if prev_ci >= 0 { read_orig_f(prev_ci) } else { read_orig_f(ci as i32) },
-                if next_ci >= 0 { read_orig_f(next_ci) } else { read_orig_f(ci as i32) },
+                if prev_ci >= 0 {
+                    read_orig_f(prev_ci)
+                } else {
+                    read_orig_f(ci as i32)
+                },
+                if next_ci >= 0 {
+                    read_orig_f(next_ci)
+                } else {
+                    read_orig_f(ci as i32)
+                },
             )
         };
 
-        let (bbox_min, bbox_max) = spline_aabb(
-            poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
-        );
+        let (bbox_min, bbox_max) =
+            spline_aabb(poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy);
         all_cps.push(CpData {
             ci: ci as i32,
             pos: cp,
@@ -3728,7 +4213,12 @@ fn rasterize(
             next_pos: np,
             orig_prev: orig_prev_out,
             orig_next: orig_next_out,
-            poly_ax, poly_ay, poly_bx, poly_by, poly_cx, poly_cy,
+            poly_ax,
+            poly_ay,
+            poly_bx,
+            poly_by,
+            poly_cx,
+            poly_cy,
             prev_dir: cp_neighbors[ci * 4 + 2],
             next_dir: cp_neighbors[ci * 4 + 3],
             icx: (ci / 2 % corners_w) as i32,
@@ -3755,108 +4245,112 @@ fn rasterize(
 
     let mut output = vec![0u32; out_w * out_h];
 
-    let resolve_from_cp =
-        |pt: (f32, f32), sc: &CpData, t: f32| -> Option<u32> {
-            // Endpoint defer: when this CP's curve has its closest point
-            // exactly at an endpoint that's structurally co-located with
-            // another CP's curve (degenerate stem at t=1, clamped Bezier
-            // extension at t=0), the local edges describe a different region.
-            // Defer to the next-closest candidate so the local CP wins. The
-            // returned None falls through to the fallback color (the source
-            // pixel underneath), which is correct for genuine
-            // outside-the-curve-extent pixels.
-            //
-            // The t == 0.0 / t == 1.0 exact compares are sound because
-            // closest_on_segment / closest_on_span_poly clamp t to exactly
-            // 0 or 1 at the endpoints — they don't return 1e-7 noise. Don't
-            // relax this to an epsilon: a curve whose closest point is
-            // *just* inside (t=0.001) shouldn't defer.
-            let prev_extends =
-                sc.prev_ci < 0 || (flags[sc.prev_ci as usize] & IS_ENDPOINT) != 0;
-            let next_extends =
-                sc.next_ci < 0 || (flags[sc.next_ci as usize] & IS_ENDPOINT) != 0;
-            if (prev_extends && t == 0.0) || (next_extends && t == 1.0) {
-                return None;
-            }
-            let (mut pl, mut pr) = (0u32, 0u32);
-            let (mut nl, mut nr) = (0u32, 0u32);
-            if sc.prev_dir >= 0 { let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir); pl = l; pr = r; }
-            if sc.next_dir >= 0 { let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir); nl = l; nr = r; }
+    let resolve_from_cp = |pt: (f32, f32), sc: &CpData, t: f32| -> Option<u32> {
+        // Endpoint defer: when this CP's curve has its closest point
+        // exactly at an endpoint that's structurally co-located with
+        // another CP's curve (degenerate stem at t=1, clamped Bezier
+        // extension at t=0), the local edges describe a different region.
+        // Defer to the next-closest candidate so the local CP wins. The
+        // returned None falls through to the fallback color (the source
+        // pixel underneath), which is correct for genuine
+        // outside-the-curve-extent pixels.
+        //
+        // The t == 0.0 / t == 1.0 exact compares are sound because
+        // closest_on_segment / closest_on_span_poly clamp t to exactly
+        // 0 or 1 at the endpoints — they don't return 1e-7 noise. Don't
+        // relax this to an epsilon: a curve whose closest point is
+        // *just* inside (t=0.001) shouldn't defer.
+        let prev_extends = sc.prev_ci < 0 || (flags[sc.prev_ci as usize] & IS_ENDPOINT) != 0;
+        let next_extends = sc.next_ci < 0 || (flags[sc.next_ci as usize] & IS_ENDPOINT) != 0;
+        if (prev_extends && t == 0.0) || (next_extends && t == 1.0) {
+            return None;
+        }
+        let (mut pl, mut pr) = (0u32, 0u32);
+        let (mut nl, mut nr) = (0u32, 0u32);
+        if sc.prev_dir >= 0 {
+            let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.prev_dir);
+            pl = l;
+            pr = r;
+        }
+        if sc.next_dir >= 0 {
+            let (l, r) = get_edge_colors(pixels, img_w, img_h, sc.icx, sc.icy, sc.next_dir);
+            nl = l;
+            nr = r;
+        }
 
-            let prev_valid = pl != pr;
-            let next_valid = nl != nr;
+        let prev_valid = pl != pr;
+        let next_valid = nl != nr;
 
-            let (color_left, color_right, ref_t);
+        let (color_left, color_right, ref_t);
 
-            if sc.prev_ci < 0 {
-                if next_valid {
-                    color_left = nr;
-                    color_right = nl;
-                    ref_t = 1.0;
-                } else {
-                    return None;
-                }
-            } else if sc.next_ci < 0 {
-                if prev_valid {
-                    color_left = pl;
-                    color_right = pr;
-                    ref_t = 0.0;
-                } else {
-                    return None;
-                }
-            } else if t < sc.t_branch {
-                if prev_valid {
-                    color_left = pl;
-                    color_right = pr;
-                    ref_t = 0.0;
-                } else if next_valid {
-                    color_left = nr;
-                    color_right = nl;
-                    ref_t = 1.0;
-                } else {
-                    return None;
-                }
+        if sc.prev_ci < 0 {
+            if next_valid {
+                color_left = nr;
+                color_right = nl;
+                ref_t = 1.0;
             } else {
-                if next_valid {
-                    color_left = nr;
-                    color_right = nl;
-                    ref_t = 1.0;
-                } else if prev_valid {
-                    color_left = pl;
-                    color_right = pr;
-                    ref_t = 0.0;
-                } else {
-                    return None;
-                }
-            }
-
-            let orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
-            let tl2 = (orig_tangent.0 * orig_tangent.0 + orig_tangent.1 * orig_tangent.1).sqrt();
-            if tl2 < 1e-4 {
                 return None;
             }
-            let orig_tangent = (orig_tangent.0 / tl2, orig_tangent.1 / tl2);
-            let orig_normal = (-orig_tangent.1, orig_tangent.0);
-
-            let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
-            let opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
-            let otl = (opt_tangent.0 * opt_tangent.0 + opt_tangent.1 * opt_tangent.1).sqrt();
-            if otl < 1e-4 {
-                return None;
-            }
-            let opt_tangent = (opt_tangent.0 / otl, opt_tangent.1 / otl);
-            let opt_normal = (-opt_tangent.1, opt_tangent.0);
-
-            let normals_agree =
-                opt_normal.0 * orig_normal.0 + opt_normal.1 * orig_normal.1 > 0.0;
-            let side = (pt.0 - cpt.0) * opt_normal.0 + (pt.1 - cpt.1) * opt_normal.1;
-
-            if normals_agree {
-                Some(if side > 0.0 { color_left } else { color_right })
+        } else if sc.next_ci < 0 {
+            if prev_valid {
+                color_left = pl;
+                color_right = pr;
+                ref_t = 0.0;
             } else {
-                Some(if side > 0.0 { color_right } else { color_left })
+                return None;
             }
-        };
+        } else if t < sc.t_branch {
+            if prev_valid {
+                color_left = pl;
+                color_right = pr;
+                ref_t = 0.0;
+            } else if next_valid {
+                color_left = nr;
+                color_right = nl;
+                ref_t = 1.0;
+            } else {
+                return None;
+            }
+        } else {
+            if next_valid {
+                color_left = nr;
+                color_right = nl;
+                ref_t = 1.0;
+            } else if prev_valid {
+                color_left = pl;
+                color_right = pr;
+                ref_t = 0.0;
+            } else {
+                return None;
+            }
+        }
+
+        let orig_tangent = beval_deriv(sc.orig_prev, sc.orig_pos, sc.orig_next, ref_t);
+        let tl2 = (orig_tangent.0 * orig_tangent.0 + orig_tangent.1 * orig_tangent.1).sqrt();
+        if tl2 < 1e-4 {
+            return None;
+        }
+        let orig_tangent = (orig_tangent.0 / tl2, orig_tangent.1 / tl2);
+        let orig_normal = (-orig_tangent.1, orig_tangent.0);
+
+        let cpt = beval(sc.prev_pos, sc.pos, sc.next_pos, t);
+        let opt_tangent = beval_deriv(sc.prev_pos, sc.pos, sc.next_pos, t);
+        let otl = (opt_tangent.0 * opt_tangent.0 + opt_tangent.1 * opt_tangent.1).sqrt();
+        if otl < 1e-4 {
+            return None;
+        }
+        let opt_tangent = (opt_tangent.0 / otl, opt_tangent.1 / otl);
+        let opt_normal = (-opt_tangent.1, opt_tangent.0);
+
+        let normals_agree = opt_normal.0 * orig_normal.0 + opt_normal.1 * orig_normal.1 > 0.0;
+        let side = (pt.0 - cpt.0) * opt_normal.0 + (pt.1 - cpt.1) * opt_normal.1;
+
+        if normals_agree {
+            Some(if side > 0.0 { color_left } else { color_right })
+        } else {
+            Some(if side > 0.0 { color_right } else { color_left })
+        }
+    };
 
     let inv_scale = 1.0 / scale_factor;
     // AA threshold: a pixel's half-diagonal² in source units is
@@ -3868,15 +4362,19 @@ fn rasterize(
     let aa_threshold = 0.5 / (scale_factor * scale_factor);
 
     // Rasterize row range into output chunk
-    let rasterize_rows = |chunk: &mut [u32], start: usize,
-        all_cps: &[CpData], ci_to_all_cps: &[i32]|
-    {
+    let rasterize_rows = |chunk: &mut [u32],
+                          start: usize,
+                          all_cps: &[CpData],
+                          ci_to_all_cps: &[i32]| {
         // Per-fragment span test: insert into a top-3 hit array if close
         // enough. `cp_i` is the all_cps array position (matches the slot
         // returned by the wedge-AA dual-curve hit lookup).
-        let mut try_cp = |cp_i: u32, center: (f32, f32),
-                          hit_d2: &mut [f32; 3], hit_t: &mut [f32; 3],
-                          hit_idx: &mut [u32; 3], num_hits: &mut usize| {
+        let mut try_cp = |cp_i: u32,
+                          center: (f32, f32),
+                          hit_d2: &mut [f32; 3],
+                          hit_t: &mut [f32; 3],
+                          hit_idx: &mut [u32; 3],
+                          num_hits: &mut usize| {
             let sc = &all_cps[cp_i as usize];
 
             // Sound spline-AABB cull: spline ⊆ AABB → dist(pt, spline) ≥
@@ -3885,41 +4383,68 @@ fn rasterize(
             // Replaces an unsound 3-sample-distance quick screen that could
             // produce false negatives (rejecting CPs whose closest point on
             // the curve was actually within reach but not at a sample).
-            if center.0 < sc.bbox_min.0 - 1.0 || center.0 > sc.bbox_max.0 + 1.0 ||
-               center.1 < sc.bbox_min.1 - 1.0 || center.1 > sc.bbox_max.1 + 1.0 {
+            if center.0 < sc.bbox_min.0 - 1.0
+                || center.0 > sc.bbox_max.0 + 1.0
+                || center.1 < sc.bbox_min.1 - 1.0
+                || center.1 > sc.bbox_max.1 + 1.0
+            {
                 return;
             }
 
             let result = if sc.is_line {
-                let (a0x, a0y) = (0.5 * (sc.prev_pos.0 + sc.pos.0),
-                                   0.5 * (sc.prev_pos.1 + sc.pos.1));
-                let (a1x, a1y) = (0.5 * (sc.pos.0 + sc.next_pos.0),
-                                   0.5 * (sc.pos.1 + sc.next_pos.1));
+                let (a0x, a0y) = (
+                    0.5 * (sc.prev_pos.0 + sc.pos.0),
+                    0.5 * (sc.prev_pos.1 + sc.pos.1),
+                );
+                let (a1x, a1y) = (
+                    0.5 * (sc.pos.0 + sc.next_pos.0),
+                    0.5 * (sc.pos.1 + sc.next_pos.1),
+                );
                 closest_on_segment(a0x, a0y, a1x, a1y, center.0, center.1)
             } else {
                 closest_on_span_poly(
-                    sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by,
-                    sc.poly_cx, sc.poly_cy, center.0, center.1,
+                    sc.poly_ax, sc.poly_ay, sc.poly_bx, sc.poly_by, sc.poly_cx, sc.poly_cy,
+                    center.0, center.1,
                 )
             };
             let span_best_t = result.0;
             let span_best_d2 = result.1;
-            if span_best_d2 >= 1.0 { return; }
+            if span_best_d2 >= 1.0 {
+                return;
+            }
 
             // Insertion sort via explicit if/else over constant indices.
             // Mirrors the GPU rasterizer's structure for consistency.
             if span_best_d2 < hit_d2[0] {
-                hit_d2[2] = hit_d2[1]; hit_t[2] = hit_t[1]; hit_idx[2] = hit_idx[1];
-                hit_d2[1] = hit_d2[0]; hit_t[1] = hit_t[0]; hit_idx[1] = hit_idx[0];
-                hit_d2[0] = span_best_d2; hit_t[0] = span_best_t; hit_idx[0] = cp_i;
-                if *num_hits < 3 { *num_hits += 1; }
+                hit_d2[2] = hit_d2[1];
+                hit_t[2] = hit_t[1];
+                hit_idx[2] = hit_idx[1];
+                hit_d2[1] = hit_d2[0];
+                hit_t[1] = hit_t[0];
+                hit_idx[1] = hit_idx[0];
+                hit_d2[0] = span_best_d2;
+                hit_t[0] = span_best_t;
+                hit_idx[0] = cp_i;
+                if *num_hits < 3 {
+                    *num_hits += 1;
+                }
             } else if span_best_d2 < hit_d2[1] {
-                hit_d2[2] = hit_d2[1]; hit_t[2] = hit_t[1]; hit_idx[2] = hit_idx[1];
-                hit_d2[1] = span_best_d2; hit_t[1] = span_best_t; hit_idx[1] = cp_i;
-                if *num_hits < 3 { *num_hits += 1; }
+                hit_d2[2] = hit_d2[1];
+                hit_t[2] = hit_t[1];
+                hit_idx[2] = hit_idx[1];
+                hit_d2[1] = span_best_d2;
+                hit_t[1] = span_best_t;
+                hit_idx[1] = cp_i;
+                if *num_hits < 3 {
+                    *num_hits += 1;
+                }
             } else if span_best_d2 < hit_d2[2] {
-                hit_d2[2] = span_best_d2; hit_t[2] = span_best_t; hit_idx[2] = cp_i;
-                if *num_hits < 3 { *num_hits += 1; }
+                hit_d2[2] = span_best_d2;
+                hit_t[2] = span_best_t;
+                hit_idx[2] = cp_i;
+                if *num_hits < 3 {
+                    *num_hits += 1;
+                }
             }
         };
 
@@ -3951,19 +4476,33 @@ fn rasterize(
                     for cdx in 0..2 {
                         let cx = cell_x + cdx;
                         let cy = cell_y + cdy;
-                        if cx >= corners_w || cy >= img_h + 1 { continue; }
+                        if cx >= corners_w || cy >= img_h + 1 {
+                            continue;
+                        }
                         let slot0_ci = (cy * corners_w + cx) * 2;
                         // slot 0
                         let m0 = ci_to_all_cps[slot0_ci];
                         if m0 >= 0 {
-                            try_cp(m0 as u32, center, &mut hit_d2, &mut hit_t,
-                                   &mut hit_idx, &mut num_hits);
+                            try_cp(
+                                m0 as u32,
+                                center,
+                                &mut hit_d2,
+                                &mut hit_t,
+                                &mut hit_idx,
+                                &mut num_hits,
+                            );
                         }
                         // slot 1
                         let m1 = ci_to_all_cps[slot0_ci + 1];
                         if m1 >= 0 {
-                            try_cp(m1 as u32, center, &mut hit_d2, &mut hit_t,
-                                   &mut hit_idx, &mut num_hits);
+                            try_cp(
+                                m1 as u32,
+                                center,
+                                &mut hit_d2,
+                                &mut hit_t,
+                                &mut hit_idx,
+                                &mut num_hits,
+                            );
                         }
                         // T-junction stem fan-out: at this cell corner if
                         // slot 0 is a T-junction through-CP, the stem-bottom
@@ -3978,13 +4517,21 @@ fn rasterize(
                                 let s_cx = (sci as usize / 2) % corners_w;
                                 let s_cy = (sci as usize / 2) / corners_w;
                                 // Skip when stem-bottom is already a cell corner.
-                                let already = s_cx >= cell_x && s_cx <= cell_x + 1
-                                           && s_cy >= cell_y && s_cy <= cell_y + 1;
+                                let already = s_cx >= cell_x
+                                    && s_cx <= cell_x + 1
+                                    && s_cy >= cell_y
+                                    && s_cy <= cell_y + 1;
                                 if !already {
                                     let mf = ci_to_all_cps[sci as usize];
                                     if mf >= 0 {
-                                        try_cp(mf as u32, center, &mut hit_d2, &mut hit_t,
-                                               &mut hit_idx, &mut num_hits);
+                                        try_cp(
+                                            mf as u32,
+                                            center,
+                                            &mut hit_d2,
+                                            &mut hit_t,
+                                            &mut hit_idx,
+                                            &mut num_hits,
+                                        );
                                     }
                                 }
                             }
@@ -4005,19 +4552,25 @@ fn rasterize(
                 // Try each hit in order — unrolled across constant indices
                 // for consistency with the GPU rasterizer.
                 if num_hits >= 1 && resolved_h < 0 {
-                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[0] as usize], hit_t[0]) {
+                    if let Some(c) =
+                        resolve_from_cp(center, &all_cps[hit_idx[0] as usize], hit_t[0])
+                    {
                         center_color = c;
                         resolved_h = 0;
                     }
                 }
                 if num_hits >= 2 && resolved_h < 0 {
-                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[1] as usize], hit_t[1]) {
+                    if let Some(c) =
+                        resolve_from_cp(center, &all_cps[hit_idx[1] as usize], hit_t[1])
+                    {
                         center_color = c;
                         resolved_h = 1;
                     }
                 }
                 if num_hits >= 3 && resolved_h < 0 {
-                    if let Some(c) = resolve_from_cp(center, &all_cps[hit_idx[2] as usize], hit_t[2]) {
+                    if let Some(c) =
+                        resolve_from_cp(center, &all_cps[hit_idx[2] as usize], hit_t[2])
+                    {
                         center_color = c;
                         resolved_h = 2;
                     }
@@ -4068,21 +4621,32 @@ fn rasterize(
                 //       whichever of sc_b's prev/next is IS_ENDPOINT-flagged
                 //       (t=0 for prev side, t=1 for next side).
                 let slot1_neighbor_t = |sc_a: &CpData, sc_b: &CpData| -> Option<f32> {
-                    let slot1_ci = ((sc_a.icy as usize * corners_w + sc_a.icx as usize) * 2 + 1) as i32;
-                    if (slot1_ci as usize) >= flags.len() { return None; }
+                    let slot1_ci =
+                        ((sc_a.icy as usize * corners_w + sc_a.icx as usize) * 2 + 1) as i32;
+                    if (slot1_ci as usize) >= flags.len() {
+                        return None;
+                    }
                     // Case (a)
-                    if sc_b.ci == slot1_ci { return Some(1.0); }
+                    if sc_b.ci == slot1_ci {
+                        return Some(1.0);
+                    }
                     // Case (b)
                     let slot1_prev = cp_neighbors[(slot1_ci as usize) * 4];
                     let slot1_next = cp_neighbors[(slot1_ci as usize) * 4 + 1];
-                    if slot1_prev != sc_b.ci && slot1_next != sc_b.ci { return None; }
-                    let prev_is_end = sc_b.prev_ci >= 0
-                        && (flags[sc_b.prev_ci as usize] & IS_ENDPOINT) != 0;
-                    let next_is_end = sc_b.next_ci >= 0
-                        && (flags[sc_b.next_ci as usize] & IS_ENDPOINT) != 0;
-                    if prev_is_end { Some(0.0) }
-                    else if next_is_end { Some(1.0) }
-                    else { None }  // shouldn't happen for a real slot-1 neighbor
+                    if slot1_prev != sc_b.ci && slot1_next != sc_b.ci {
+                        return None;
+                    }
+                    let prev_is_end =
+                        sc_b.prev_ci >= 0 && (flags[sc_b.prev_ci as usize] & IS_ENDPOINT) != 0;
+                    let next_is_end =
+                        sc_b.next_ci >= 0 && (flags[sc_b.next_ci as usize] & IS_ENDPOINT) != 0;
+                    if prev_is_end {
+                        Some(0.0)
+                    } else if next_is_end {
+                        Some(1.0)
+                    } else {
+                        None
+                    } // shouldn't happen for a real slot-1 neighbor
                 };
                 let mut through_h: Option<usize> = None;
                 let mut stem_h: Option<usize> = None;
@@ -4100,8 +4664,7 @@ fn rasterize(
                     } else {
                         None
                     };
-                    let both_x_same =
-                        (cp0.flag & IS_CROSSING) != 0
+                    let both_x_same = (cp0.flag & IS_CROSSING) != 0
                         && (cp1.flag & IS_CROSSING) != 0
                         && cp0.icx == cp1.icx
                         && cp0.icy == cp1.icy;
@@ -4134,12 +4697,15 @@ fn rasterize(
                 // the same pixel). For now they get single-curve AA, which
                 // is at least free of the spurious-third-color artifact.
                 if let Some(ah) = through_h {
-                    let sc_a = if ah == 0 { &all_cps[hit_idx[0] as usize] }
-                                          else { &all_cps[hit_idx[1] as usize] };
+                    let sc_a = if ah == 0 {
+                        &all_cps[hit_idx[0] as usize]
+                    } else {
+                        &all_cps[hit_idx[1] as usize]
+                    };
                     let j = beval(sc_a.prev_pos, sc_a.pos, sc_a.next_pos, sc_a.t_branch);
                     let pix_half = inv_scale * 0.5;
-                    let in_pixel = (j.0 - center.0).abs() <= pix_half
-                                && (j.1 - center.1).abs() <= pix_half;
+                    let in_pixel =
+                        (j.0 - center.0).abs() <= pix_half && (j.1 - center.1).abs() <= pix_half;
                     if !in_pixel {
                         through_h = None;
                         stem_h = None;
@@ -4168,10 +4734,16 @@ fn rasterize(
                 let mut line_a_hit: (u32, f32) = (0, 0.0);
                 if let (Some(ah), Some(bh)) = (through_h, stem_h) {
                     // ah, bh ∈ {0, 1}; explicit selection.
-                    let sc_a = if ah == 0 { &all_cps[hit_idx[0] as usize] }
-                                          else { &all_cps[hit_idx[1] as usize] };
-                    let sc_b = if bh == 0 { &all_cps[hit_idx[0] as usize] }
-                                          else { &all_cps[hit_idx[1] as usize] };
+                    let sc_a = if ah == 0 {
+                        &all_cps[hit_idx[0] as usize]
+                    } else {
+                        &all_cps[hit_idx[1] as usize]
+                    };
+                    let sc_b = if bh == 0 {
+                        &all_cps[hit_idx[0] as usize]
+                    } else {
+                        &all_cps[hit_idx[1] as usize]
+                    };
                     // J = beval(sc_a, t_branch) — point on the rendered through
                     // curve at the junction parameter (NOT sc_a.pos, which is
                     // a polynomial control point and may differ from the curve
@@ -4185,14 +4757,17 @@ fn rasterize(
                         // direction" along the through curve, i.e., post-
                         // junction (seg 1). If lb's normal opposes tang_a,
                         // flip it so sb-sign tracks pre/post consistently.
-                        if lb_line.normal.0 * tang_a_unit.0
-                           + lb_line.normal.1 * tang_a_unit.1 < 0.0 {
+                        if lb_line.normal.0 * tang_a_unit.0 + lb_line.normal.1 * tang_a_unit.1 < 0.0
+                        {
                             lb_line.normal = (-lb_line.normal.0, -lb_line.normal.1);
                         }
                         line_a = Some(la_line);
                         line_b = Some(lb_line);
-                        line_a_hit = if ah == 0 { (hit_idx[0], hit_t[0]) }
-                                                else { (hit_idx[1], hit_t[1]) };
+                        line_a_hit = if ah == 0 {
+                            (hit_idx[0], hit_t[0])
+                        } else {
+                            (hit_idx[1], hit_t[1])
+                        };
                     }
                 }
 
@@ -4260,10 +4835,14 @@ fn rasterize(
                     let mut sum_b = 0.0f32;
                     let mut total_area = 0.0f32;
 
-                    let accumulate = |u: (f32, f32), v: (f32, f32),
-                                          sa_m: f32, sb_m: f32,
-                                          sum_r: &mut f32, sum_g: &mut f32,
-                                          sum_b: &mut f32, total: &mut f32| {
+                    let accumulate = |u: (f32, f32),
+                                      v: (f32, f32),
+                                      sa_m: f32,
+                                      sb_m: f32,
+                                      sum_r: &mut f32,
+                                      sum_g: &mut f32,
+                                      sum_b: &mut f32,
+                                      total: &mut f32| {
                         let ux = u.0 - j.0;
                         let uy = u.1 - j.1;
                         let vx = v.0 - j.0;
@@ -4271,9 +4850,11 @@ fn rasterize(
                         // J is interior, walk is consistent; abs covers
                         // either Y-up or Y-down convention.
                         let area = 0.5 * (ux * vy - uy * vx).abs();
-                        if area < 1e-9 { return; }
-                        let idx = (if sa_m > 0.0 { 1 } else { 0 })
-                            | (if sb_m > 0.0 { 2 } else { 0 });
+                        if area < 1e-9 {
+                            return;
+                        }
+                        let idx =
+                            (if sa_m > 0.0 { 1 } else { 0 }) | (if sb_m > 0.0 { 2 } else { 0 });
                         let (rl, gl, bl) = lut[idx];
                         *sum_r += rl * area;
                         *sum_g += gl * area;
@@ -4316,16 +4897,32 @@ fn rasterize(
                             if t_curr > t_prev + 1e-9 {
                                 let v = edge_pt(t_curr);
                                 let m = edge_pt(0.5 * (t_prev + t_curr));
-                                accumulate(u, v, sa_at(m), sb_at(m),
-                                    &mut sum_r, &mut sum_g, &mut sum_b, &mut total_area);
+                                accumulate(
+                                    u,
+                                    v,
+                                    sa_at(m),
+                                    sb_at(m),
+                                    &mut sum_r,
+                                    &mut sum_g,
+                                    &mut sum_b,
+                                    &mut total_area,
+                                );
                                 u = v;
                             }
                             t_prev = t_curr;
                         }
                         if t_prev < 1.0 - 1e-9 {
                             let m = edge_pt(0.5 * (t_prev + 1.0));
-                            accumulate(u, q, sa_at(m), sb_at(m),
-                                &mut sum_r, &mut sum_g, &mut sum_b, &mut total_area);
+                            accumulate(
+                                u,
+                                q,
+                                sa_at(m),
+                                sb_at(m),
+                                &mut sum_r,
+                                &mut sum_g,
+                                &mut sum_b,
+                                &mut total_area,
+                            );
                         }
                     }
 
@@ -4354,8 +4951,9 @@ fn rasterize(
                     // Returns Some(packed_color) on success, None for any
                     // degeneracy (no valid second curve, parallel lines,
                     // missing edge colors).
-                    if aa_idx < 0 { None }
-                    else {
+                    if aa_idx < 0 {
+                        None
+                    } else {
                         let sc_a = &all_cps[aa_idx as usize];
                         // Pick sc_b: first hit not on sc_a's chain, within
                         // threshold. Hits are sorted ascending by d2, so we
@@ -4365,16 +4963,20 @@ fn rasterize(
                         let mut bh: Option<usize> = None;
                         macro_rules! try_sec {
                             ($s:expr, $hi:expr, $ht:expr, $hd:expr) => {
-                                if bh.is_none() && $s < num_hits
+                                if bh.is_none()
+                                    && $s < num_hits
                                     && $hi as i32 != aa_idx
-                                    && $hd < aa_threshold {
+                                    && $hd < aa_threshold
+                                {
                                     let cp_b = &all_cps[$hi as usize];
                                     let same_chain = sc_a.ci == cp_b.ci
                                         || sc_a.ci == cp_b.prev_ci
                                         || sc_a.ci == cp_b.next_ci
                                         || cp_b.ci == sc_a.prev_ci
                                         || cp_b.ci == sc_a.next_ci;
-                                    if !same_chain { bh = Some($s); }
+                                    if !same_chain {
+                                        bh = Some($s);
+                                    }
                                 }
                             };
                         }
@@ -4392,15 +4994,18 @@ fn rasterize(
 
                             let (la, a_pos, a_neg) =
                                 build_aa_line(sc_a, aa_t, pixels, img_w, img_h)?;
-                            let (lb, b_pos, b_neg) =
-                                build_aa_line(sc_b, bt, pixels, img_w, img_h)?;
-                            if a_pos == a_neg && b_pos == b_neg { return None; }
+                            let (lb, b_pos, b_neg) = build_aa_line(sc_b, bt, pixels, img_w, img_h)?;
+                            if a_pos == a_neg && b_pos == b_neg {
+                                return None;
+                            }
 
                             // Inner-side: which side of curve A faces curve B?
                             // dot(cpt_b - cpt_a, na) > 0 → B is on A's pos side.
                             let delta_ba = (lb.cpt.0 - la.cpt.0, lb.cpt.1 - la.cpt.1);
-                            let inner_a_pos = delta_ba.0 * la.normal.0 + delta_ba.1 * la.normal.1 > 0.0;
-                            let inner_b_pos = -delta_ba.0 * lb.normal.0 + -delta_ba.1 * lb.normal.1 > 0.0;
+                            let inner_a_pos =
+                                delta_ba.0 * la.normal.0 + delta_ba.1 * la.normal.1 > 0.0;
+                            let inner_b_pos =
+                                -delta_ba.0 * lb.normal.0 + -delta_ba.1 * lb.normal.1 > 0.0;
                             let a_inner = if inner_a_pos { a_pos } else { a_neg };
                             let a_outer = if inner_a_pos { a_neg } else { a_pos };
                             let b_inner = if inner_b_pos { b_pos } else { b_neg };
@@ -4413,7 +5018,9 @@ fn rasterize(
                             // structural detector — e.g. two chains terminating
                             // at the same point just outside the pixel).
                             // Defer to single-curve AA.
-                            if a_inner != b_inner { return None; }
+                            if a_inner != b_inner {
+                                return None;
+                            }
 
                             // 3-stripe formula. Lines that don't cross in the
                             // pixel partition it into A_outer | middle | B_outer
@@ -4421,13 +5028,23 @@ fn rasterize(
                             // the pixel). Each outer fraction is a single-line
                             // coverage — closed-form, no boundary sweep.
                             let d_a = ((center.0 - la.cpt.0) * la.normal.0
-                                     + (center.1 - la.cpt.1) * la.normal.1) / inv_scale;
+                                + (center.1 - la.cpt.1) * la.normal.1)
+                                / inv_scale;
                             let d_b = ((center.0 - lb.cpt.0) * lb.normal.0
-                                     + (center.1 - lb.cpt.1) * lb.normal.1) / inv_scale;
+                                + (center.1 - lb.cpt.1) * lb.normal.1)
+                                / inv_scale;
                             let frac_a_pos = line_coverage_pos(la.normal, d_a);
                             let frac_b_pos = line_coverage_pos(lb.normal, d_b);
-                            let frac_a_outer = if inner_a_pos { 1.0 - frac_a_pos } else { frac_a_pos };
-                            let frac_b_outer = if inner_b_pos { 1.0 - frac_b_pos } else { frac_b_pos };
+                            let frac_a_outer = if inner_a_pos {
+                                1.0 - frac_a_pos
+                            } else {
+                                frac_a_pos
+                            };
+                            let frac_b_outer = if inner_b_pos {
+                                1.0 - frac_b_pos
+                            } else {
+                                frac_b_pos
+                            };
 
                             // Lines crossing inside the pixel → A_outer and
                             // B_outer regions overlap, fractions sum > 1.
@@ -4458,7 +5075,8 @@ fn rasterize(
                     match build_aa_line(sc, aa_t, pixels, img_w, img_h) {
                         Some((line, pos_side, neg_side)) if pos_side != neg_side => {
                             let d_p = ((center.0 - line.cpt.0) * line.normal.0
-                                     + (center.1 - line.cpt.1) * line.normal.1) / inv_scale;
+                                + (center.1 - line.cpt.1) * line.normal.1)
+                                / inv_scale;
                             let frac = line_coverage_pos(line.normal, d_p);
                             let (r0, g0, b0) = srgb_decode(pos_side);
                             let (r1, g1, b1) = srgb_decode(neg_side);
@@ -4487,13 +5105,19 @@ fn rasterize(
             let chunks: Vec<&mut [u32]> = output.chunks_mut(out_w * rows_per_thread).collect();
             let all_cps = &all_cps;
             let ci_to_all_cps = &ci_to_all_cps;
-            let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
-                let start = ci * rows_per_thread;
-                scope.spawn(move || {
-                    rasterize_rows(chunk, start, all_cps, ci_to_all_cps);
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .enumerate()
+                .map(|(ci, chunk)| {
+                    let start = ci * rows_per_thread;
+                    scope.spawn(move || {
+                        rasterize_rows(chunk, start, all_cps, ci_to_all_cps);
+                    })
                 })
-            }).collect();
-            for h in handles { h.join().unwrap(); }
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
         });
     }
     #[cfg(target_arch = "wasm32")]
@@ -4599,11 +5223,18 @@ mod tests {
         // Intersection at origin. Both span centers (P1) are at origin so curves
         // are straight; intersection should land at (0,0) with t=s=0.5.
         let r = intersect_quadratic_bsplines(
-            (0.0, -1.0), (0.0, 0.0), (0.0, 1.0),
-            (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
         );
-        assert!(approx_eq(r.p.0, 0.0, 1e-4) && approx_eq(r.p.1, 0.0, 1e-4),
-            "p = {:?}", r.p);
+        assert!(
+            approx_eq(r.p.0, 0.0, 1e-4) && approx_eq(r.p.1, 0.0, 1e-4),
+            "p = {:?}",
+            r.p
+        );
         assert!(approx_eq(r.t_a, 0.5, 1e-4));
         assert!(approx_eq(r.t_b, 0.5, 1e-4));
     }
@@ -4614,21 +5245,41 @@ mod tests {
         // optimizer moves things). Intersection point and t-values should be
         // such that B_a(t_a) == B_b(t_b) within tolerance.
         let a0 = (-1.0, -1.2);
-        let a1 = ( 0.1,  0.05);
-        let a2 = ( 0.9,  1.4);
-        let b0 = (-1.3,  1.0);
+        let a1 = (0.1, 0.05);
+        let a2 = (0.9, 1.4);
+        let b0 = (-1.3, 1.0);
         let b1 = (-0.05, 0.1);
-        let b2 = ( 1.2, -0.9);
+        let b2 = (1.2, -0.9);
 
         let r = intersect_quadratic_bsplines(a0, a1, a2, b0, b1, b2);
 
         let pa = beval2(a0, a1, a2, r.t_a);
         let pb = beval2(b0, b1, b2, r.t_b);
         // Both evaluated points should equal r.p and each other.
-        assert!(approx_eq(pa.0, r.p.0, 1e-3), "pa.x={} r.p.x={}", pa.0, r.p.0);
-        assert!(approx_eq(pa.1, r.p.1, 1e-3), "pa.y={} r.p.y={}", pa.1, r.p.1);
-        assert!(approx_eq(pb.0, r.p.0, 1e-3), "pb.x={} r.p.x={}", pb.0, r.p.0);
-        assert!(approx_eq(pb.1, r.p.1, 1e-3), "pb.y={} r.p.y={}", pb.1, r.p.1);
+        assert!(
+            approx_eq(pa.0, r.p.0, 1e-3),
+            "pa.x={} r.p.x={}",
+            pa.0,
+            r.p.0
+        );
+        assert!(
+            approx_eq(pa.1, r.p.1, 1e-3),
+            "pa.y={} r.p.y={}",
+            pa.1,
+            r.p.1
+        );
+        assert!(
+            approx_eq(pb.0, r.p.0, 1e-3),
+            "pb.x={} r.p.x={}",
+            pb.0,
+            r.p.0
+        );
+        assert!(
+            approx_eq(pb.1, r.p.1, 1e-3),
+            "pb.y={} r.p.y={}",
+            pb.1,
+            r.p.1
+        );
         assert!((0.0..=1.0).contains(&r.t_a));
         assert!((0.0..=1.0).contains(&r.t_b));
     }
@@ -4638,11 +5289,11 @@ mod tests {
         // X-shape with curvature: NW-SE curve and SW-NE curve, mid-CPs offset
         // off the corner. Verify the returned (p, t_a, t_b) satisfy both curves.
         let a0 = (-2.0, -2.0);
-        let a1 = ( 0.0,  0.3);
-        let a2 = ( 2.0,  2.0);
-        let b0 = (-2.0,  2.0);
-        let b1 = (-0.2,  0.0);
-        let b2 = ( 2.0, -2.0);
+        let a1 = (0.0, 0.3);
+        let a2 = (2.0, 2.0);
+        let b0 = (-2.0, 2.0);
+        let b1 = (-0.2, 0.0);
+        let b2 = (2.0, -2.0);
 
         let r = intersect_quadratic_bsplines(a0, a1, a2, b0, b1, b2);
 
@@ -4650,7 +5301,9 @@ mod tests {
         let pb = beval2(b0, b1, b2, r.t_b);
         let dx = pa.0 - pb.0;
         let dy = pa.1 - pb.1;
-        assert!(dx * dx + dy * dy < 1e-4,
-            "B_a(t_a)={pa:?}  B_b(t_b)={pb:?}  delta=({dx},{dy})");
+        assert!(
+            dx * dx + dy * dy < 1e-4,
+            "B_a(t_a)={pa:?}  B_b(t_b)={pb:?}  delta=({dx},{dy})"
+        );
     }
 }

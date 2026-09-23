@@ -19,13 +19,7 @@
 /// using area-coverage antialiased nearest-neighbor.
 ///
 /// Pixel format is ARGB8888 (0xAA_RR_GG_BB).
-pub fn scale(
-    src: &[u32],
-    src_w: usize,
-    src_h: usize,
-    dst_w: usize,
-    dst_h: usize,
-) -> Vec<u32> {
+pub fn scale(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u32> {
     assert!(src.len() >= src_w * src_h);
     let mut dst = vec![0u32; dst_w * dst_h];
 

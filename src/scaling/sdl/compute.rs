@@ -1,7 +1,7 @@
 //! Compute pipeline init and dispatch for scaling filters and full GPU vectorize.
 
-use sdl3::gpu;
 use super::common::*;
+use sdl3::gpu;
 
 // ── OmniScale compute pipeline ──────────────────────────────────────────────
 
@@ -12,10 +12,13 @@ use super::common::*;
 ///   set 2 = 1 uniform buffer
 fn init_scale_compute(
     device: &gpu::Device,
-    spirv: &[u8], msl: &[u8], dxil: &[u8],
+    spirv: &[u8],
+    msl: &[u8],
+    dxil: &[u8],
     label: &str,
 ) -> Option<gpu::ComputePipeline> {
-    let pipeline = device.create_compute_pipeline()
+    let pipeline = device
+        .create_compute_pipeline()
         .with_code(gpu::ShaderFormat::SPIRV, spirv)
         .with_entrypoint(c"main")
         .with_uniform_buffers(1)
@@ -23,28 +26,42 @@ fn init_scale_compute(
         .with_readwrite_storage_textures(1)
         .with_thread_count(16, 16, 1)
         .build()
-        .or_else(|_| if !dxil.is_empty() {
-            device.create_compute_pipeline()
-                .with_code(gpu::ShaderFormat::DXIL, dxil)
-                .with_entrypoint(c"main")
+        .or_else(|_| {
+            if !dxil.is_empty() {
+                device
+                    .create_compute_pipeline()
+                    .with_code(gpu::ShaderFormat::DXIL, dxil)
+                    .with_entrypoint(c"main")
+                    .with_uniform_buffers(1)
+                    .with_readonly_storage_buffers(1)
+                    .with_readwrite_storage_textures(1)
+                    .with_thread_count(16, 16, 1)
+                    .build()
+            } else {
+                Err(sdl3::get_error())
+            }
+        })
+        .or_else(|_| {
+            device
+                .create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::MSL, msl)
+                .with_entrypoint(c"main_0")
                 .with_uniform_buffers(1)
                 .with_readonly_storage_buffers(1)
                 .with_readwrite_storage_textures(1)
                 .with_thread_count(16, 16, 1)
                 .build()
-        } else { Err(sdl3::get_error()) })
-        .or_else(|_| device.create_compute_pipeline()
-            .with_code(gpu::ShaderFormat::MSL, msl)
-            .with_entrypoint(c"main_0")
-            .with_uniform_buffers(1)
-            .with_readonly_storage_buffers(1)
-            .with_readwrite_storage_textures(1)
-            .with_thread_count(16, 16, 1)
-            .build());
+        });
 
     match pipeline {
-        Ok(p) => { eprintln!("{label} compute pipeline ready"); Some(p) }
-        Err(e) => { eprintln!("{label} compute pipeline failed: {e}"); None }
+        Ok(p) => {
+            eprintln!("{label} compute pipeline ready");
+            Some(p)
+        }
+        Err(e) => {
+            eprintln!("{label} compute pipeline failed: {e}");
+            None
+        }
     }
 }
 
@@ -77,7 +94,8 @@ pub fn init_super_xbr_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comp
     let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.metal"));
     let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/super_xbr_comp.dxil"));
 
-    let pipeline = device.create_compute_pipeline()
+    let pipeline = device
+        .create_compute_pipeline()
         .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
         .with_entrypoint(c"main")
         .with_uniform_buffers(1)
@@ -86,30 +104,44 @@ pub fn init_super_xbr_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comp
         .with_readwrite_storage_textures(1)
         .with_thread_count(16, 16, 1)
         .build()
-        .or_else(|_| if !comp_dxil.is_empty() {
-            device.create_compute_pipeline()
-                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
-                .with_entrypoint(c"main")
+        .or_else(|_| {
+            if !comp_dxil.is_empty() {
+                device
+                    .create_compute_pipeline()
+                    .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                    .with_entrypoint(c"main")
+                    .with_uniform_buffers(1)
+                    .with_readonly_storage_buffers(1)
+                    .with_readwrite_storage_buffers(1)
+                    .with_readwrite_storage_textures(1)
+                    .with_thread_count(16, 16, 1)
+                    .build()
+            } else {
+                Err(sdl3::get_error())
+            }
+        })
+        .or_else(|_| {
+            device
+                .create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::MSL, comp_msl)
+                .with_entrypoint(c"main_0")
                 .with_uniform_buffers(1)
                 .with_readonly_storage_buffers(1)
                 .with_readwrite_storage_buffers(1)
                 .with_readwrite_storage_textures(1)
                 .with_thread_count(16, 16, 1)
                 .build()
-        } else { Err(sdl3::get_error()) })
-        .or_else(|_| device.create_compute_pipeline()
-            .with_code(gpu::ShaderFormat::MSL, comp_msl)
-            .with_entrypoint(c"main_0")
-            .with_uniform_buffers(1)
-            .with_readonly_storage_buffers(1)
-            .with_readwrite_storage_buffers(1)
-            .with_readwrite_storage_textures(1)
-            .with_thread_count(16, 16, 1)
-            .build());
+        });
 
     match pipeline {
-        Ok(p) => { eprintln!("super_xbr compute pipeline ready"); Some(p) }
-        Err(e) => { eprintln!("super_xbr compute pipeline failed: {e}"); None }
+        Ok(p) => {
+            eprintln!("super_xbr compute pipeline ready");
+            Some(p)
+        }
+        Err(e) => {
+            eprintln!("super_xbr compute pipeline failed: {e}");
+            None
+        }
     }
 }
 init_scale_pipeline!(init_omniscale_legacy_compute_pipeline, "omniscale_legacy");
@@ -130,7 +162,8 @@ pub fn init_scalefx_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comput
     let comp_msl = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.metal"));
     let comp_dxil = include_bytes!(concat!(env!("OUT_DIR"), "/scalefx_comp.dxil"));
 
-    let pipeline = device.create_compute_pipeline()
+    let pipeline = device
+        .create_compute_pipeline()
         .with_code(gpu::ShaderFormat::SPIRV, comp_spirv)
         .with_entrypoint(c"main")
         .with_uniform_buffers(1)
@@ -139,30 +172,44 @@ pub fn init_scalefx_compute_pipeline(device: &gpu::Device) -> Option<gpu::Comput
         .with_readwrite_storage_textures(1)
         .with_thread_count(16, 16, 1)
         .build()
-        .or_else(|_| if !comp_dxil.is_empty() {
-            device.create_compute_pipeline()
-                .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
-                .with_entrypoint(c"main")
+        .or_else(|_| {
+            if !comp_dxil.is_empty() {
+                device
+                    .create_compute_pipeline()
+                    .with_code(gpu::ShaderFormat::DXIL, comp_dxil)
+                    .with_entrypoint(c"main")
+                    .with_uniform_buffers(1)
+                    .with_readonly_storage_buffers(1)
+                    .with_readwrite_storage_buffers(5)
+                    .with_readwrite_storage_textures(1)
+                    .with_thread_count(16, 16, 1)
+                    .build()
+            } else {
+                Err(sdl3::get_error())
+            }
+        })
+        .or_else(|_| {
+            device
+                .create_compute_pipeline()
+                .with_code(gpu::ShaderFormat::MSL, comp_msl)
+                .with_entrypoint(c"main_0")
                 .with_uniform_buffers(1)
                 .with_readonly_storage_buffers(1)
                 .with_readwrite_storage_buffers(5)
                 .with_readwrite_storage_textures(1)
                 .with_thread_count(16, 16, 1)
                 .build()
-        } else { Err(sdl3::get_error()) })
-        .or_else(|_| device.create_compute_pipeline()
-            .with_code(gpu::ShaderFormat::MSL, comp_msl)
-            .with_entrypoint(c"main_0")
-            .with_uniform_buffers(1)
-            .with_readonly_storage_buffers(1)
-            .with_readwrite_storage_buffers(5)
-            .with_readwrite_storage_textures(1)
-            .with_thread_count(16, 16, 1)
-            .build());
+        });
 
     match pipeline {
-        Ok(p) => { eprintln!("scalefx compute pipeline ready"); Some(p) }
-        Err(e) => { eprintln!("scalefx compute pipeline failed: {e}"); None }
+        Ok(p) => {
+            eprintln!("scalefx compute pipeline ready");
+            Some(p)
+        }
+        Err(e) => {
+            eprintln!("scalefx compute pipeline failed: {e}");
+            None
+        }
     }
 }
 
@@ -172,85 +219,171 @@ pub fn scalefx_compute_and_blit(
     gpu_tex: &gpu::Texture<'static>,
     pipeline: &gpu::ComputePipeline,
     pixels: &[u32],
-    src_w: u32, src_h: u32,
-    out_w: u32, out_h: u32,
+    src_w: u32,
+    src_h: u32,
+    out_w: u32,
+    out_h: u32,
     is_9x: bool,
 ) {
     let cmd = device.acquire_command_buffer().expect("cmd buf");
 
-    let px_bytes = unsafe {
-        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-    };
+    let px_bytes =
+        unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
     let px_size = px_bytes.len().max(4) as u32;
-    let px_xfer = device.create_transfer_buffer()
+    let px_xfer = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-        .with_size(px_size).build().expect("px transfer");
+        .with_size(px_size)
+        .build()
+        .expect("px transfer");
     {
         let mut map = px_xfer.map::<u8>(device, true);
         map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
         map.unmap();
     }
     let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
-    let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
-    let px_buf = device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf");
+    let rw =
+        gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
+    let px_buf = device
+        .create_buffer()
+        .with_usage(ro)
+        .with_size(px_size)
+        .build()
+        .expect("px buf");
 
     // For 9x: intermediate buffers need to be sized for the larger (3x) second pass.
     // First pass: src_w × src_h intermediates, 3x output.
     // Second pass: (src_w*3) × (src_h*3) intermediates, 9x output.
-    let max_intermediate = if is_9x { src_w * 3 * src_h * 3 } else { src_w * src_h };
+    let max_intermediate = if is_9x {
+        src_w * 3 * src_h * 3
+    } else {
+        src_w * src_h
+    };
     let buf_size = (max_intermediate * 16).max(16);
-    let buf0 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf0");
-    let buf1 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf1");
-    let buf2 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf2");
-    let buf3 = device.create_buffer().with_usage(rw).with_size(buf_size).build().expect("sfx buf3");
+    let buf0 = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(buf_size)
+        .build()
+        .expect("sfx buf0");
+    let buf1 = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(buf_size)
+        .build()
+        .expect("sfx buf1");
+    let buf2 = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(buf_size)
+        .build()
+        .expect("sfx buf2");
+    let buf3 = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(buf_size)
+        .build()
+        .expect("sfx buf3");
 
     // px_out: pass 4 writes packed XRGB pixels here; for 9x, second pass reads this as input
     // px_out2: separate write target for the second pass (avoids RO/RW aliasing on px_out)
     // Always sized for the first pass 4 output — shader writes unconditionally.
     let px_out_size = (src_w * 3 * src_h * 3 * 4).max(4);
-    let px_out = device.create_buffer().with_usage(rw).with_size(px_out_size).build().expect("sfx px_out");
+    let px_out = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(px_out_size)
+        .build()
+        .expect("sfx px_out");
     let px_out2_size = if is_9x { (out_w * out_h * 4).max(4) } else { 4 };
-    let px_out2 = device.create_buffer().with_usage(rw).with_size(px_out2_size).build().expect("sfx px_out2");
+    let px_out2 = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(px_out2_size)
+        .build()
+        .expect("sfx px_out2");
 
     #[repr(C)]
-    struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+    struct Uniforms {
+        src_w: u32,
+        src_h: u32,
+        out_w: u32,
+        out_h: u32,
+        pass: u32,
+        _pad: [u32; 3],
+    }
 
     // Upload pixels
     {
         let cp = device.begin_copy_pass(&cmd).expect("copy pass");
         cp.upload_to_gpu_buffer(
             gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
-            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
+            gpu::BufferRegion::new()
+                .with_buffer(&px_buf)
+                .with_size(px_size),
+            false,
+        );
         device.end_copy_pass(cp);
     }
 
     // Helper: dispatch 5 ScaleFX passes
-    let dispatch_5_passes = |cmd: &gpu::CommandBuffer, px_src: &gpu::Buffer, px_dst: &gpu::Buffer,
-                              sw: u32, sh: u32, ow: u32, oh: u32, first: bool| {
+    let dispatch_5_passes = |cmd: &gpu::CommandBuffer,
+                             px_src: &gpu::Buffer,
+                             px_dst: &gpu::Buffer,
+                             sw: u32,
+                             sh: u32,
+                             ow: u32,
+                             oh: u32,
+                             first: bool| {
         let sd_x = sw.div_ceil(16);
         let sd_y = sh.div_ceil(16);
         let od_x = ow.div_ceil(16);
         let od_y = oh.div_ceil(16);
 
         for pass_idx in 0u32..5 {
-            let cp = device.begin_compute_pass(
-                cmd,
-                &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex)
-                    .with_cycle(first && pass_idx == 0)],
-                &[
-                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf0.clone()).with_cycle(false),
-                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf1.clone()).with_cycle(false),
-                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf2.clone()).with_cycle(false),
-                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&buf3.clone()).with_cycle(false),
-                    gpu::StorageBufferReadWriteBinding::new().with_buffer(&px_dst.clone()).with_cycle(false),
-                ],
-            ).expect("compute pass");
+            let cp = device
+                .begin_compute_pass(
+                    cmd,
+                    &[gpu::StorageTextureReadWriteBinding::new()
+                        .with_texture(gpu_tex)
+                        .with_cycle(first && pass_idx == 0)],
+                    &[
+                        gpu::StorageBufferReadWriteBinding::new()
+                            .with_buffer(&buf0.clone())
+                            .with_cycle(false),
+                        gpu::StorageBufferReadWriteBinding::new()
+                            .with_buffer(&buf1.clone())
+                            .with_cycle(false),
+                        gpu::StorageBufferReadWriteBinding::new()
+                            .with_buffer(&buf2.clone())
+                            .with_cycle(false),
+                        gpu::StorageBufferReadWriteBinding::new()
+                            .with_buffer(&buf3.clone())
+                            .with_cycle(false),
+                        gpu::StorageBufferReadWriteBinding::new()
+                            .with_buffer(&px_dst.clone())
+                            .with_cycle(false),
+                    ],
+                )
+                .expect("compute pass");
             cp.bind_compute_pipeline(pipeline);
             cp.bind_compute_storage_buffers(0, &[px_src.clone()]);
-            cmd.push_compute_uniform_data(0, &Uniforms {
-                src_w: sw, src_h: sh, out_w: ow, out_h: oh, pass: pass_idx, _pad: [0; 3],
-            });
-            let (dx, dy) = if pass_idx < 4 { (sd_x, sd_y) } else { (od_x, od_y) };
+            cmd.push_compute_uniform_data(
+                0,
+                &Uniforms {
+                    src_w: sw,
+                    src_h: sh,
+                    out_w: ow,
+                    out_h: oh,
+                    pass: pass_idx,
+                    _pad: [0; 3],
+                },
+            );
+            let (dx, dy) = if pass_idx < 4 {
+                (sd_x, sd_y)
+            } else {
+                (od_x, od_y)
+            };
             cp.dispatch(dx, dy, 1);
             device.end_compute_pass(cp);
         }
@@ -283,7 +416,9 @@ pub fn scalefx_compute_and_blit(
         blit_info.destination.h = vh as u32;
         blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
         blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
-        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+        unsafe {
+            sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info);
+        }
     }
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
@@ -296,46 +431,56 @@ pub fn scale_compute_and_blit(
     gpu_tex: &gpu::Texture<'static>,
     pipeline: &gpu::ComputePipeline,
     pixels: &[u32],
-    out_w: u32, out_h: u32,
+    out_w: u32,
+    out_h: u32,
     uniforms: &[u32; 8],
 ) {
     let cmd = device.acquire_command_buffer().expect("cmd buf");
 
-    let px_bytes = unsafe {
-        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-    };
+    let px_bytes =
+        unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
 
     let px_size = px_bytes.len().max(4) as u32;
-    let px_xfer = device.create_transfer_buffer()
+    let px_xfer = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
         .with_size(px_size)
-        .build().expect("px transfer");
+        .build()
+        .expect("px transfer");
     {
         let mut map = px_xfer.map::<u8>(device, true);
         map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
         map.unmap();
     }
-    let px_buf = device.create_buffer()
+    let px_buf = device
+        .create_buffer()
         .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)
         .with_size(px_size)
-        .build().expect("px buf");
+        .build()
+        .expect("px buf");
 
     {
         let cp = device.begin_copy_pass(&cmd).expect("copy pass");
         cp.upload_to_gpu_buffer(
             gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
-            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size),
+            gpu::BufferRegion::new()
+                .with_buffer(&px_buf)
+                .with_size(px_size),
             false,
         );
         device.end_copy_pass(cp);
     }
 
     {
-        let compute_pass = device.begin_compute_pass(
-            &cmd,
-            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
-            &[],
-        ).expect("compute pass");
+        let compute_pass = device
+            .begin_compute_pass(
+                &cmd,
+                &[gpu::StorageTextureReadWriteBinding::new()
+                    .with_texture(gpu_tex)
+                    .with_cycle(true)],
+                &[],
+            )
+            .expect("compute pass");
         compute_pass.bind_compute_pipeline(pipeline);
         compute_pass.bind_compute_storage_buffers(0, &[px_buf]);
 
@@ -360,7 +505,9 @@ pub fn scale_compute_and_blit(
         blit_info.destination.h = vh as u32;
         blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
         blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
-        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+        unsafe {
+            sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info);
+        }
     }
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
@@ -372,36 +519,56 @@ pub fn super_xbr_compute_and_blit(
     gpu_tex: &gpu::Texture<'static>,
     pipeline: &gpu::ComputePipeline,
     pixels: &[u32],
-    src_w: u32, src_h: u32,
-    out_w: u32, out_h: u32,
+    src_w: u32,
+    src_h: u32,
+    out_w: u32,
+    out_h: u32,
 ) {
     let cmd = device.acquire_command_buffer().expect("cmd buf");
 
     // Upload pixel data
-    let px_bytes = unsafe {
-        std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-    };
+    let px_bytes =
+        unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
     let px_size = px_bytes.len().max(4) as u32;
-    let px_xfer = device.create_transfer_buffer()
+    let px_xfer = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-        .with_size(px_size).build().expect("px transfer");
+        .with_size(px_size)
+        .build()
+        .expect("px transfer");
     {
         let mut map = px_xfer.map::<u8>(device, true);
         map.mem_mut()[..px_bytes.len()].copy_from_slice(px_bytes);
         map.unmap();
     }
-    let px_buf = device.create_buffer()
+    let px_buf = device
+        .create_buffer()
         .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ)
-        .with_size(px_size).build().expect("px buf");
+        .with_size(px_size)
+        .build()
+        .expect("px buf");
 
     // Intermediate buffer (out_w * out_h * 4 bytes)
     let intermed_size = out_w * out_h * 4;
-    let intermed_buf = device.create_buffer()
-        .with_usage(gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE)
-        .with_size(intermed_size.max(4)).build().expect("intermed buf");
+    let intermed_buf = device
+        .create_buffer()
+        .with_usage(
+            gpu::BufferUsageFlags::COMPUTE_STORAGE_READ
+                | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE,
+        )
+        .with_size(intermed_size.max(4))
+        .build()
+        .expect("intermed buf");
 
     #[repr(C)]
-    struct Uniforms { src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32, _pad: [u32; 3] }
+    struct Uniforms {
+        src_w: u32,
+        src_h: u32,
+        out_w: u32,
+        out_h: u32,
+        pass: u32,
+        _pad: [u32; 3],
+    }
 
     let dispatch_x = out_w.div_ceil(16);
     let dispatch_y = out_h.div_ceil(16);
@@ -411,24 +578,40 @@ pub fn super_xbr_compute_and_blit(
         let cp = device.begin_copy_pass(&cmd).expect("copy pass");
         cp.upload_to_gpu_buffer(
             gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
-            gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
+            gpu::BufferRegion::new()
+                .with_buffer(&px_buf)
+                .with_size(px_size),
+            false,
+        );
         device.end_copy_pass(cp);
     }
 
     // 3 passes in one command buffer — clone handles for each bind call
     for pass_idx in 0u32..3 {
-        let cp = device.begin_compute_pass(
-            &cmd,
-            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex)
-                .with_cycle(pass_idx == 0)],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&intermed_buf.clone())
-                .with_cycle(pass_idx == 0)],
-        ).expect("compute pass");
+        let cp = device
+            .begin_compute_pass(
+                &cmd,
+                &[gpu::StorageTextureReadWriteBinding::new()
+                    .with_texture(gpu_tex)
+                    .with_cycle(pass_idx == 0)],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(&intermed_buf.clone())
+                    .with_cycle(pass_idx == 0)],
+            )
+            .expect("compute pass");
         cp.bind_compute_pipeline(pipeline);
         cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
-        cmd.push_compute_uniform_data(0, &Uniforms {
-            src_w, src_h, out_w, out_h, pass: pass_idx, _pad: [0; 3],
-        });
+        cmd.push_compute_uniform_data(
+            0,
+            &Uniforms {
+                src_w,
+                src_h,
+                out_w,
+                out_h,
+                pass: pass_idx,
+                _pad: [0; 3],
+            },
+        );
         cp.dispatch(dispatch_x, dispatch_y, 1);
         device.end_compute_pass(cp);
     }
@@ -446,7 +629,9 @@ pub fn super_xbr_compute_and_blit(
         blit_info.destination.h = vh as u32;
         blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
         blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Linear as i32);
-        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+        unsafe {
+            sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info);
+        }
     }
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
@@ -502,10 +687,19 @@ pub struct GpuVectorizePipelines {
 }
 
 pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipelines> {
-    fn make(device: &gpu::Device, spirv: &[u8], msl: &[u8], dxil: &[u8],
-            ro_bufs: u32, rw_bufs: u32, rw_tex: u32, threads: (u32,u32,u32),
-            label: &str) -> Option<gpu::ComputePipeline> {
-        let result = device.create_compute_pipeline()
+    fn make(
+        device: &gpu::Device,
+        spirv: &[u8],
+        msl: &[u8],
+        dxil: &[u8],
+        ro_bufs: u32,
+        rw_bufs: u32,
+        rw_tex: u32,
+        threads: (u32, u32, u32),
+        label: &str,
+    ) -> Option<gpu::ComputePipeline> {
+        let result = device
+            .create_compute_pipeline()
             .with_code(gpu::ShaderFormat::SPIRV, spirv)
             .with_entrypoint(c"main")
             .with_uniform_buffers(1)
@@ -514,85 +708,149 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
             .with_readwrite_storage_textures(rw_tex)
             .with_thread_count(threads.0, threads.1, threads.2)
             .build()
-            .or_else(|_| if !dxil.is_empty() {
-                device.create_compute_pipeline()
-                    .with_code(gpu::ShaderFormat::DXIL, dxil)
-                    .with_entrypoint(c"main")
+            .or_else(|_| {
+                if !dxil.is_empty() {
+                    device
+                        .create_compute_pipeline()
+                        .with_code(gpu::ShaderFormat::DXIL, dxil)
+                        .with_entrypoint(c"main")
+                        .with_uniform_buffers(1)
+                        .with_readonly_storage_buffers(ro_bufs)
+                        .with_readwrite_storage_buffers(rw_bufs)
+                        .with_readwrite_storage_textures(rw_tex)
+                        .with_thread_count(threads.0, threads.1, threads.2)
+                        .build()
+                } else {
+                    Err(sdl3::get_error())
+                }
+            })
+            .or_else(|_| {
+                device
+                    .create_compute_pipeline()
+                    .with_code(gpu::ShaderFormat::MSL, msl)
+                    .with_entrypoint(c"main_0")
                     .with_uniform_buffers(1)
                     .with_readonly_storage_buffers(ro_bufs)
                     .with_readwrite_storage_buffers(rw_bufs)
                     .with_readwrite_storage_textures(rw_tex)
                     .with_thread_count(threads.0, threads.1, threads.2)
                     .build()
-            } else { Err(sdl3::get_error()) })
-            .or_else(|_| device.create_compute_pipeline()
-                .with_code(gpu::ShaderFormat::MSL, msl)
-                .with_entrypoint(c"main_0")
-                .with_uniform_buffers(1)
-                .with_readonly_storage_buffers(ro_bufs)
-                .with_readwrite_storage_buffers(rw_bufs)
-                .with_readwrite_storage_textures(rw_tex)
-                .with_thread_count(threads.0, threads.1, threads.2)
-                .build());
+            });
         match result {
             Ok(p) => Some(p),
-            Err(e) => { eprintln!("vectorize-gpu: {label} pipeline failed: {e}"); None }
+            Err(e) => {
+                eprintln!("vectorize-gpu: {label} pipeline failed: {e}");
+                None
+            }
         }
     }
 
-    let sim = make(device,
+    let sim = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/similarity_graph_comp.dxil")),
-        1, 2, 0, (16, 16, 1), "similarity_graph")?;
+        1,
+        2,
+        0,
+        (16, 16, 1),
+        "similarity_graph",
+    )?;
 
-    let resolve = make(device,
+    let resolve = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/resolve_crossings_comp.dxil")),
-        2, 1, 0, (16, 16, 1), "resolve_crossings")?;
+        2,
+        1,
+        0,
+        (16, 16, 1),
+        "resolve_crossings",
+    )?;
 
-    let cell = make(device,
+    let cell = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_graph_comp.dxil")),
-        1, 3, 0, (16, 16, 1), "cell_graph")?;
+        1,
+        3,
+        0,
+        (16, 16, 1),
+        "cell_graph",
+    )?;
 
-    let picard = make(device,
+    let picard = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/picard_step_comp.dxil")),
-        4, 1, 0, (256, 1, 1), "picard_step")?;
+        4,
+        1,
+        0,
+        (256, 1, 1),
+        "picard_step",
+    )?;
 
-    let grad = make(device,
+    let grad = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/gradient_correction_comp.dxil")),
-        4, 1, 0, (256, 1, 1), "gradient_correction")?;
+        4,
+        1,
+        0,
+        (256, 1, 1),
+        "gradient_correction",
+    )?;
 
-    let tjunc = make(device,
+    let tjunc = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/update_tjunction_comp.dxil")),
-        2, 1, 0, (256, 1, 1), "update_tjunction")?;
+        2,
+        1,
+        0,
+        (256, 1, 1),
+        "update_tjunction",
+    )?;
 
-    let xpack = make(device,
+    let xpack = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/crossing_pack_comp.dxil")),
-        3, 1, 0, (256, 1, 1), "crossing_pack")?;
+        3,
+        1,
+        0,
+        (256, 1, 1),
+        "crossing_pack",
+    )?;
 
-    let rast = make(device,
+    let rast = make(
+        device,
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.spv")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.metal")),
         include_bytes!(concat!(env!("OUT_DIR"), "/cell_rasterizer_comp.dxil")),
-        5, 1, 1, (256, 1, 1), "cell_rasterizer")?;
+        5,
+        1,
+        1,
+        (256, 1, 1),
+        "cell_rasterizer",
+    )?;
 
     eprintln!("Full GPU vectorize pipeline ready (8 stages)");
     Some(GpuVectorizePipelines {
-        sim_graph: sim, resolve, cell_graph: cell,
-        picard, grad,
-        tjunction: tjunc, crossing_pack: xpack, rasterizer: rast,
+        sim_graph: sim,
+        resolve,
+        cell_graph: cell,
+        picard,
+        grad,
+        tjunction: tjunc,
+        crossing_pack: xpack,
+        rasterizer: rast,
         buf_cache: None,
     })
 }
@@ -615,7 +873,8 @@ fn dispatch_stages_1_5b(
     orig_pos_buf: &gpu::Buffer,
     opt_picard_buf: &gpu::Buffer,
     crossing_t_buf: &gpu::Buffer,
-    img_w: u32, img_h: u32,
+    img_w: u32,
+    img_h: u32,
 ) -> gpu::Buffer {
     let graph_stride = 2 * img_w + 1;
     let corners_w = img_w + 1;
@@ -626,13 +885,38 @@ fn dispatch_stages_1_5b(
 
     // Stage 1: Similarity graph (also writes per-pixel valence mask)
     {
-        let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(valence_buf).with_cycle(false)]).expect("sim pass");
+        let cp = device
+            .begin_compute_pass(
+                cmd,
+                &[],
+                &[
+                    gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(graph_buf)
+                        .with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(valence_buf)
+                        .with_cycle(false),
+                ],
+            )
+            .expect("sim pass");
         cp.bind_compute_pipeline(&pipelines.sim_graph);
         cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
+        #[repr(C)]
+        struct U {
+            img_w: u32,
+            img_h: u32,
+            graph_stride: u32,
+            _p: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                img_w,
+                img_h,
+                graph_stride,
+                _p: 0,
+            },
+        );
         cp.dispatch(img_w.div_ceil(16), img_h.div_ceil(16), 1);
         device.end_compute_pass(cp);
     }
@@ -641,34 +925,91 @@ fn dispatch_stages_1_5b(
     {
         let cp = device.begin_copy_pass(cmd).expect("graph copy");
         unsafe {
-            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_buf.raw(), offset: 0 };
-            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: graph_snapshot.raw(), offset: 0 };
+            let src = sdl3::sys::gpu::SDL_GPUBufferLocation {
+                buffer: graph_buf.raw(),
+                offset: 0,
+            };
+            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation {
+                buffer: graph_snapshot.raw(),
+                offset: 0,
+            };
             sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, graph_size, false);
         }
         device.end_copy_pass(cp);
     }
     {
-        let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(graph_buf).with_cycle(false)]).expect("resolve pass");
+        let cp = device
+            .begin_compute_pass(
+                cmd,
+                &[],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(graph_buf)
+                    .with_cycle(false)],
+            )
+            .expect("resolve pass");
         cp.bind_compute_pipeline(&pipelines.resolve);
         cp.bind_compute_storage_buffers(0, &[graph_snapshot.clone(), valence_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, _p: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, _p: 0 });
-        cp.dispatch(img_w.saturating_sub(1).div_ceil(16), img_h.saturating_sub(1).div_ceil(16), 1);
+        #[repr(C)]
+        struct U {
+            img_w: u32,
+            img_h: u32,
+            graph_stride: u32,
+            _p: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                img_w,
+                img_h,
+                graph_stride,
+                _p: 0,
+            },
+        );
+        cp.dispatch(
+            img_w.saturating_sub(1).div_ceil(16),
+            img_h.saturating_sub(1).div_ceil(16),
+            1,
+        );
         device.end_compute_pass(cp);
     }
 
     // Stage 3: Cell graph
     {
-        let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(pos_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(nbr_buf).with_cycle(false),
-              gpu::StorageBufferReadWriteBinding::new().with_buffer(flag_buf).with_cycle(false),
-            ]).expect("cell pass");
+        let cp = device
+            .begin_compute_pass(
+                cmd,
+                &[],
+                &[
+                    gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(pos_buf)
+                        .with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(nbr_buf)
+                        .with_cycle(false),
+                    gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(flag_buf)
+                        .with_cycle(false),
+                ],
+            )
+            .expect("cell pass");
         cp.bind_compute_pipeline(&pipelines.cell_graph);
         cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, graph_stride: u32, corners_w: u32 }
-        cmd.push_compute_uniform_data(0, &U { img_w, img_h, graph_stride, corners_w });
+        #[repr(C)]
+        struct U {
+            img_w: u32,
+            img_h: u32,
+            graph_stride: u32,
+            corners_w: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                img_w,
+                img_h,
+                graph_stride,
+                corners_w,
+            },
+        );
         cp.dispatch(corners_w.div_ceil(16), corners_h.div_ceil(16), 1);
         device.end_compute_pass(cp);
     }
@@ -677,8 +1018,14 @@ fn dispatch_stages_1_5b(
     {
         let cp = device.begin_copy_pass(cmd).expect("orig pos copy");
         unsafe {
-            let src = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: pos_buf.raw(), offset: 0 };
-            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation { buffer: orig_pos_buf.raw(), offset: 0 };
+            let src = sdl3::sys::gpu::SDL_GPUBufferLocation {
+                buffer: pos_buf.raw(),
+                offset: 0,
+            };
+            let dst = sdl3::sys::gpu::SDL_GPUBufferLocation {
+                buffer: orig_pos_buf.raw(),
+                offset: 0,
+            };
             sdl3::sys::gpu::SDL_CopyGPUBufferToBuffer(cp.raw(), &src, &dst, pos_size, false);
         }
         device.end_copy_pass(cp);
@@ -692,29 +1039,68 @@ fn dispatch_stages_1_5b(
     // sees the latest result as input. The pair converges to ∇E = 0 (the
     // exact local minimum) — Picard alone reaches a biased Gauss-Seidel
     // fixed point; the grad pass debiases it.
-    #[repr(C)] struct U { num_nodes: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
-    let uni = U { num_nodes: num_cps, _pad0: 0, _pad1: 0, _pad2: 0 };
+    #[repr(C)]
+    struct U {
+        num_nodes: u32,
+        _pad0: u32,
+        _pad1: u32,
+        _pad2: u32,
+    }
+    let uni = U {
+        num_nodes: num_cps,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
     let mut cur_in = pos_buf.clone();
     let mut cur_out = opt_out_buf.clone();
     for _ in 0..OPT_OUTER_PASSES {
         // Picard pass: cur_in + orig + nbr + flag → opt_picard_buf
         {
-            let cp = device.begin_compute_pass(cmd, &[],
-                &[gpu::StorageBufferReadWriteBinding::new().with_buffer(opt_picard_buf).with_cycle(false)],
-            ).expect("picard pass");
+            let cp = device
+                .begin_compute_pass(
+                    cmd,
+                    &[],
+                    &[gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(opt_picard_buf)
+                        .with_cycle(false)],
+                )
+                .expect("picard pass");
             cp.bind_compute_pipeline(&pipelines.picard);
-            cp.bind_compute_storage_buffers(0, &[cur_in.clone(), orig_pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
+            cp.bind_compute_storage_buffers(
+                0,
+                &[
+                    cur_in.clone(),
+                    orig_pos_buf.clone(),
+                    nbr_buf.clone(),
+                    flag_buf.clone(),
+                ],
+            );
             cmd.push_compute_uniform_data(0, &uni);
             cp.dispatch(num_cps.div_ceil(256), 1, 1);
             device.end_compute_pass(cp);
         }
         // Grad pass: opt_picard_buf + orig + nbr + flag → cur_out
         {
-            let cp = device.begin_compute_pass(cmd, &[],
-                &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&cur_out).with_cycle(false)],
-            ).expect("grad pass");
+            let cp = device
+                .begin_compute_pass(
+                    cmd,
+                    &[],
+                    &[gpu::StorageBufferReadWriteBinding::new()
+                        .with_buffer(&cur_out)
+                        .with_cycle(false)],
+                )
+                .expect("grad pass");
             cp.bind_compute_pipeline(&pipelines.grad);
-            cp.bind_compute_storage_buffers(0, &[opt_picard_buf.clone(), orig_pos_buf.clone(), nbr_buf.clone(), flag_buf.clone()]);
+            cp.bind_compute_storage_buffers(
+                0,
+                &[
+                    opt_picard_buf.clone(),
+                    orig_pos_buf.clone(),
+                    nbr_buf.clone(),
+                    flag_buf.clone(),
+                ],
+            );
             cmd.push_compute_uniform_data(0, &uni);
             cp.dispatch(num_cps.div_ceil(256), 1, 1);
             device.end_compute_pass(cp);
@@ -727,13 +1113,33 @@ fn dispatch_stages_1_5b(
     // stem CPs are also neighbors of other T-junctions.
     let _ = orig_pos_buf; // no longer needed after legacy inverse-correction was removed
     for _ in 0..3 {
-        let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&optimized_pos).with_cycle(false)],
-        ).expect("tjunc pass");
+        let cp = device
+            .begin_compute_pass(
+                cmd,
+                &[],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(&optimized_pos)
+                    .with_cycle(false)],
+            )
+            .expect("tjunc pass");
         cp.bind_compute_pipeline(&pipelines.tjunction);
         cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone()]);
-        #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
-        cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
+        #[repr(C)]
+        struct U {
+            num_nodes: u32,
+            _p0: u32,
+            _p1: u32,
+            _p2: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                num_nodes: num_cps,
+                _p0: 0,
+                _p1: 0,
+                _p2: 0,
+            },
+        );
         cp.dispatch(num_cps.div_ceil(256), 1, 1);
         device.end_compute_pass(cp);
     }
@@ -744,13 +1150,36 @@ fn dispatch_stages_1_5b(
     // as a RW binding too — that's what triggers SDL3's automatic
     // buffer-write→buffer-read barrier; pure RO bindings don't.
     {
-        let cp = device.begin_compute_pass(cmd, &[],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(crossing_t_buf).with_cycle(false)],
-        ).expect("xpack pass");
+        let cp = device
+            .begin_compute_pass(
+                cmd,
+                &[],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(crossing_t_buf)
+                    .with_cycle(false)],
+            )
+            .expect("xpack pass");
         cp.bind_compute_pipeline(&pipelines.crossing_pack);
-        cp.bind_compute_storage_buffers(0, &[nbr_buf.clone(), flag_buf.clone(), optimized_pos.clone()]);
-        #[repr(C)] struct U { num_nodes: u32, _p0: u32, _p1: u32, _p2: u32 }
-        cmd.push_compute_uniform_data(0, &U { num_nodes: num_cps, _p0: 0, _p1: 0, _p2: 0 });
+        cp.bind_compute_storage_buffers(
+            0,
+            &[nbr_buf.clone(), flag_buf.clone(), optimized_pos.clone()],
+        );
+        #[repr(C)]
+        struct U {
+            num_nodes: u32,
+            _p0: u32,
+            _p1: u32,
+            _p2: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                num_nodes: num_cps,
+                _p0: 0,
+                _p1: 0,
+                _p2: 0,
+            },
+        );
         cp.dispatch(num_cps.div_ceil(256), 1, 1);
         device.end_compute_pass(cp);
     }
@@ -768,8 +1197,10 @@ pub fn gpu_vectorize_full_pipeline(
     gpu_tex: &gpu::Texture<'static>,
     pipelines: &mut GpuVectorizePipelines,
     pixels: &[u32],
-    img_w: u32, img_h: u32,
-    out_w: u32, out_h: u32,
+    img_w: u32,
+    img_h: u32,
+    out_w: u32,
+    out_h: u32,
     scale: f32,
 ) {
     let graph_stride = 2 * img_w + 1;
@@ -782,31 +1213,98 @@ pub fn gpu_vectorize_full_pipeline(
     let pos_size = (num_cps * 2 * 4).max(4);
 
     // Ensure GPU buffers are cached (allocated once, reused each frame)
-    if pipelines.buf_cache.as_ref().map_or(true, |c| c.img_w != img_w || c.img_h != img_h) {
-        let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
+    if pipelines
+        .buf_cache
+        .as_ref()
+        .map_or(true, |c| c.img_w != img_w || c.img_h != img_h)
+    {
+        let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ
+            | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
         let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
         let nbr_size = (num_cps * 4 * 4).max(4);
         let flag_size = (num_cps * 4).max(4);
         let crossing_t_size = (num_cps * 4).max(4);
         let valence_size = (img_w * img_h * 4).max(4);
         pipelines.buf_cache = Some(CellRastBufCache {
-            img_w, img_h,
-            px_buf: device.create_buffer().with_usage(ro).with_size(px_size).build().expect("px buf"),
-            graph_buf: device.create_buffer().with_usage(rw).with_size(graph_size).build().expect("graph buf"),
-            graph_snapshot: device.create_buffer().with_usage(ro).with_size(graph_size).build().expect("graph snapshot"),
-            valence_buf: device.create_buffer().with_usage(rw).with_size(valence_size).build().expect("valence buf"),
-            pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("pos buf"),
-            nbr_buf: device.create_buffer().with_usage(rw).with_size(nbr_size).build().expect("nbr buf"),
-            flag_buf: device.create_buffer().with_usage(rw).with_size(flag_size).build().expect("flag buf"),
-            opt_out_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("opt out buf"),
-            orig_pos_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("orig pos buf"),
-            crossing_t_buf: device.create_buffer().with_usage(rw).with_size(crossing_t_size).build().expect("crossing_t buf"),
-            opt_picard_buf: device.create_buffer().with_usage(rw).with_size(pos_size).build().expect("opt_picard buf"),
-            px_xfer: device.create_transfer_buffer()
+            img_w,
+            img_h,
+            px_buf: device
+                .create_buffer()
+                .with_usage(ro)
+                .with_size(px_size)
+                .build()
+                .expect("px buf"),
+            graph_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(graph_size)
+                .build()
+                .expect("graph buf"),
+            graph_snapshot: device
+                .create_buffer()
+                .with_usage(ro)
+                .with_size(graph_size)
+                .build()
+                .expect("graph snapshot"),
+            valence_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(valence_size)
+                .build()
+                .expect("valence buf"),
+            pos_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(pos_size)
+                .build()
+                .expect("pos buf"),
+            nbr_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(nbr_size)
+                .build()
+                .expect("nbr buf"),
+            flag_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(flag_size)
+                .build()
+                .expect("flag buf"),
+            opt_out_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(pos_size)
+                .build()
+                .expect("opt out buf"),
+            orig_pos_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(pos_size)
+                .build()
+                .expect("orig pos buf"),
+            crossing_t_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(crossing_t_size)
+                .build()
+                .expect("crossing_t buf"),
+            opt_picard_buf: device
+                .create_buffer()
+                .with_usage(rw)
+                .with_size(pos_size)
+                .build()
+                .expect("opt_picard buf"),
+            px_xfer: device
+                .create_transfer_buffer()
                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-                .with_size(px_size).build().expect("px xfer"),
+                .with_size(px_size)
+                .build()
+                .expect("px xfer"),
         });
-        eprintln!("Cell rasterizer buffer cache allocated for {}x{}", img_w, img_h);
+        eprintln!(
+            "Cell rasterizer buffer cache allocated for {}x{}",
+            img_w, img_h
+        );
     }
     let b = pipelines.buf_cache.as_ref().unwrap();
 
@@ -815,7 +1313,8 @@ pub fn gpu_vectorize_full_pipeline(
     // Upload pixel data (reuse cached transfer buffer)
     {
         let mut map = b.px_xfer.map::<u8>(device, true);
-        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         map.mem_mut()[..bytes.len()].copy_from_slice(bytes);
         map.unmap();
     }
@@ -823,18 +1322,32 @@ pub fn gpu_vectorize_full_pipeline(
         let cp = device.begin_copy_pass(&cmd).expect("copy pass");
         cp.upload_to_gpu_buffer(
             gpu::TransferBufferLocation::new().with_transfer_buffer(&b.px_xfer),
-            gpu::BufferRegion::new().with_buffer(&b.px_buf).with_size(px_size), false);
+            gpu::BufferRegion::new()
+                .with_buffer(&b.px_buf)
+                .with_size(px_size),
+            false,
+        );
         device.end_copy_pass(cp);
     }
 
     // Stages 1-5b: vectorize pipeline (shared with screenshot path)
     let optimized_pos = dispatch_stages_1_5b(
-        device, &cmd, pipelines,
-        &b.px_buf, &b.graph_buf, &b.graph_snapshot, &b.valence_buf,
-        &b.pos_buf, &b.nbr_buf, &b.flag_buf,
-        &b.opt_out_buf, &b.orig_pos_buf,
+        device,
+        &cmd,
+        pipelines,
+        &b.px_buf,
+        &b.graph_buf,
+        &b.graph_snapshot,
+        &b.valence_buf,
+        &b.pos_buf,
+        &b.nbr_buf,
+        &b.flag_buf,
+        &b.opt_out_buf,
+        &b.orig_pos_buf,
         &b.opt_picard_buf,
-        &b.crossing_t_buf, img_w, img_h,
+        &b.crossing_t_buf,
+        img_w,
+        img_h,
     );
 
     // Stage 6: Tile-based cell rasterizer (one workgroup per 2×2 source tile).
@@ -865,15 +1378,52 @@ pub fn gpu_vectorize_full_pipeline(
         let tiles_w = img_w.div_ceil(2);
         let tiles_h = img_h.div_ceil(2);
         let total_tiles = tiles_w * tiles_h;
-        let cp = device.begin_compute_pass(&cmd,
-            &[gpu::StorageTextureReadWriteBinding::new().with_texture(gpu_tex).with_cycle(true)],
-            &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&b.crossing_t_buf).with_cycle(false)]).expect("rast pass");
+        let cp = device
+            .begin_compute_pass(
+                &cmd,
+                &[gpu::StorageTextureReadWriteBinding::new()
+                    .with_texture(gpu_tex)
+                    .with_cycle(true)],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(&b.crossing_t_buf)
+                    .with_cycle(false)],
+            )
+            .expect("rast pass");
         cp.bind_compute_pipeline(&pipelines.rasterizer);
-        cp.bind_compute_storage_buffers(0, &[b.px_buf.clone(), optimized_pos.clone(), b.orig_pos_buf.clone(), b.flag_buf.clone(), b.nbr_buf.clone()]);
-        #[repr(C)] struct U { img_w: u32, img_h: u32, out_w: u32, out_h: u32,
-                               scale: f32, corners_w: u32, tiles_w: u32, tiles_h: u32 }
-        cmd.push_compute_uniform_data(0, &U {
-            img_w, img_h, out_w, out_h, scale, corners_w, tiles_w, tiles_h });
+        cp.bind_compute_storage_buffers(
+            0,
+            &[
+                b.px_buf.clone(),
+                optimized_pos.clone(),
+                b.orig_pos_buf.clone(),
+                b.flag_buf.clone(),
+                b.nbr_buf.clone(),
+            ],
+        );
+        #[repr(C)]
+        struct U {
+            img_w: u32,
+            img_h: u32,
+            out_w: u32,
+            out_h: u32,
+            scale: f32,
+            corners_w: u32,
+            tiles_w: u32,
+            tiles_h: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                img_w,
+                img_h,
+                out_w,
+                out_h,
+                scale,
+                corners_w,
+                tiles_w,
+                tiles_h,
+            },
+        );
         cp.dispatch(total_tiles, 1, 1);
         device.end_compute_pass(cp);
     }
@@ -884,10 +1434,12 @@ pub fn gpu_vectorize_full_pipeline(
         let src_aspect = out_w as f32 / out_h as f32;
         let dst_aspect = sw_w as f32 / sw_h as f32;
         let (dx, dy, dw, dh) = if dst_aspect > src_aspect {
-            let dh = sw_h; let dw = (sw_h as f32 * src_aspect) as u32;
+            let dh = sw_h;
+            let dw = (sw_h as f32 * src_aspect) as u32;
             ((sw_w - dw) / 2, 0, dw, dh)
         } else {
-            let dw = sw_w; let dh = (sw_w as f32 / src_aspect) as u32;
+            let dw = sw_w;
+            let dh = (sw_w as f32 / src_aspect) as u32;
             (0, (sw_h - dh) / 2, dw, dh)
         };
         let mut blit_info = sdl3::sys::gpu::SDL_GPUBlitInfo::default();
@@ -901,7 +1453,9 @@ pub fn gpu_vectorize_full_pipeline(
         blit_info.destination.h = dh;
         blit_info.load_op = sdl3::sys::gpu::SDL_GPULoadOp::CLEAR;
         blit_info.filter = sdl3::sys::gpu::SDL_GPUFilter(gpu::Filter::Nearest as i32);
-        unsafe { sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info); }
+        unsafe {
+            sdl3::sys::gpu::SDL_BlitGPUTexture(cmd.raw(), &blit_info);
+        }
     }
     submit_and_sync(device, cmd, swapchain_raw.is_null());
 }
@@ -914,12 +1468,17 @@ pub fn gpu_vectorize_full_pipeline(
 /// on CPU, printing debug info for specific artifact pixels.
 #[allow(clippy::too_many_arguments)]
 fn cpu_rasterize_debug(
-    pixels: &[u32], img_w: u32, img_h: u32,
+    pixels: &[u32],
+    img_w: u32,
+    img_h: u32,
     cp_positions: &[f32],   // optimized positions, 2 floats per CP
     orig_positions: &[f32], // original positions, 2 floats per CP
     cp_flags: &[u32],       // 1 u32 per CP
     cp_neighbors: &[i32],   // 4 i32 per CP
-    out_w: u32, out_h: u32, scale: f32, corners_w: u32,
+    out_w: u32,
+    out_h: u32,
+    scale: f32,
+    corners_w: u32,
 ) {
     fn px_color(pixels: &[u32], x: i32, y: i32, img_w: u32, img_h: u32) -> u32 {
         let x = x.clamp(0, img_w as i32 - 1);
@@ -927,25 +1486,46 @@ fn cpu_rasterize_debug(
         pixels[(y as usize) * (img_w as usize) + x as usize]
     }
     fn read_pos(positions: &[f32], idx: i32) -> (f32, f32) {
-        if idx < 0 { return (-1e10, -1e10); }
+        if idx < 0 {
+            return (-1e10, -1e10);
+        }
         let i = idx as usize;
         (positions[i * 2], positions[i * 2 + 1])
     }
-    fn beval(p0: (f32,f32), p1: (f32,f32), p2: (f32,f32), t: f32) -> (f32,f32) {
+    fn beval(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, f32) {
         let u = 1.0 - t;
-        (0.5*u*u*p0.0 + (u*t+0.5)*p1.0 + 0.5*t*t*p2.0,
-         0.5*u*u*p0.1 + (u*t+0.5)*p1.1 + 0.5*t*t*p2.1)
+        (
+            0.5 * u * u * p0.0 + (u * t + 0.5) * p1.0 + 0.5 * t * t * p2.0,
+            0.5 * u * u * p0.1 + (u * t + 0.5) * p1.1 + 0.5 * t * t * p2.1,
+        )
     }
-    fn beval_deriv(p0: (f32,f32), p1: (f32,f32), p2: (f32,f32), t: f32) -> (f32,f32) {
-        ((t-1.0)*p0.0 + (1.0-2.0*t)*p1.0 + t*p2.0,
-         (t-1.0)*p0.1 + (1.0-2.0*t)*p1.1 + t*p2.1)
+    fn beval_deriv(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), t: f32) -> (f32, f32) {
+        (
+            (t - 1.0) * p0.0 + (1.0 - 2.0 * t) * p1.0 + t * p2.0,
+            (t - 1.0) * p0.1 + (1.0 - 2.0 * t) * p1.1 + t * p2.1,
+        )
     }
-    fn dot2(a: (f32,f32), b: (f32,f32)) -> f32 { a.0*b.0 + a.1*b.1 }
-    fn len2(a: (f32,f32)) -> f32 { a.0*a.0 + a.1*a.1 }
+    fn dot2(a: (f32, f32), b: (f32, f32)) -> f32 {
+        a.0 * b.0 + a.1 * b.1
+    }
+    fn len2(a: (f32, f32)) -> f32 {
+        a.0 * a.0 + a.1 * a.1
+    }
     fn color_str(c: u32) -> String {
-        format!("#{:02x}{:02x}{:02x}", (c>>16)&0xff, (c>>8)&0xff, c&0xff)
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (c >> 16) & 0xff,
+            (c >> 8) & 0xff,
+            c & 0xff
+        )
     }
-    fn edge_colors_for_cp(pixels: &[u32], img_w: u32, img_h: u32, cp_neighbors: &[i32], ci: usize) -> (u32, u32, u32, u32) {
+    fn edge_colors_for_cp(
+        pixels: &[u32],
+        img_w: u32,
+        img_h: u32,
+        cp_neighbors: &[i32],
+        ci: usize,
+    ) -> (u32, u32, u32, u32) {
         let prev_dir = cp_neighbors[ci * 4 + 2];
         let next_dir = cp_neighbors[ci * 4 + 3];
         let icx = (ci / 2 % (img_w as usize + 1)) as i32;
@@ -957,15 +1537,23 @@ fn cpu_rasterize_debug(
         };
         let edge_col = |dir: i32| -> (u32, u32) {
             match dir {
-                0 => (get_px(icx-1, icy-1), get_px(icx, icy-1)),
-                1 => (get_px(icx, icy-1), get_px(icx, icy)),
-                2 => (get_px(icx, icy), get_px(icx-1, icy)),
-                3 => (get_px(icx-1, icy), get_px(icx-1, icy-1)),
+                0 => (get_px(icx - 1, icy - 1), get_px(icx, icy - 1)),
+                1 => (get_px(icx, icy - 1), get_px(icx, icy)),
+                2 => (get_px(icx, icy), get_px(icx - 1, icy)),
+                3 => (get_px(icx - 1, icy), get_px(icx - 1, icy - 1)),
                 _ => (0, 0),
             }
         };
-        let (pl, pr) = if prev_dir >= 0 { edge_col(prev_dir) } else { (0, 0) };
-        let (nl, nr) = if next_dir >= 0 { edge_col(next_dir) } else { (0, 0) };
+        let (pl, pr) = if prev_dir >= 0 {
+            edge_col(prev_dir)
+        } else {
+            (0, 0)
+        };
+        let (nl, nr) = if next_dir >= 0 {
+            edge_col(next_dir)
+        } else {
+            (0, 0)
+        };
         (pl, pr, nl, nr)
     }
 
@@ -983,22 +1571,45 @@ fn cpu_rasterize_debug(
             let src_y = (dpy + 0.5) / scale;
             let scx = src_x.floor() as i32;
             let scy = src_y.floor() as i32;
-            eprintln!("DEBUG: pixel ({},{}) → src ({:.2},{:.2}), searching CPs near corner ({},{})", dpx, dpy, src_x, src_y, scx, scy);
-            for cy in (scy-1)..=(scy+1) {
-                for cx in (scx-1)..=(scx+1) {
+            eprintln!(
+                "DEBUG: pixel ({},{}) → src ({:.2},{:.2}), searching CPs near corner ({},{})",
+                dpx, dpy, src_x, src_y, scx, scy
+            );
+            for cy in (scy - 1)..=(scy + 1) {
+                for cx in (scx - 1)..=(scx + 1) {
                     for slot in 0..2 {
-                        if cx < 0 || cy < 0 || cx >= corners_w as i32 || cy > img_h as i32 { continue; }
+                        if cx < 0 || cy < 0 || cx >= corners_w as i32 || cy > img_h as i32 {
+                            continue;
+                        }
                         let ci = (cy as usize * corners_w as usize + cx as usize) * 2 + slot;
-                        if ci >= cp_flags.len() { continue; }
+                        if ci >= cp_flags.len() {
+                            continue;
+                        }
                         let flag = cp_flags[ci];
-                        if flag == 0 { continue; }
+                        if flag == 0 {
+                            continue;
+                        }
                         let prev = cp_neighbors[ci * 4];
                         let next = cp_neighbors[ci * 4 + 1];
                         let pos = read_pos(cp_positions, ci as i32);
-                        let (pl, pr, nl, nr) = edge_colors_for_cp(pixels, img_w, img_h, cp_neighbors, ci);
-                        eprintln!("  ci={} corner({},{}) slot={} flag={} prev={} next={} pos=({:.2},{:.2}) pl={} pr={} nl={} nr={}",
-                            ci, cx, cy, slot, flag, prev, next, pos.0, pos.1,
-                            color_str(pl), color_str(pr), color_str(nl), color_str(nr));
+                        let (pl, pr, nl, nr) =
+                            edge_colors_for_cp(pixels, img_w, img_h, cp_neighbors, ci);
+                        eprintln!(
+                            "  ci={} corner({},{}) slot={} flag={} prev={} next={} pos=({:.2},{:.2}) pl={} pr={} nl={} nr={}",
+                            ci,
+                            cx,
+                            cy,
+                            slot,
+                            flag,
+                            prev,
+                            next,
+                            pos.0,
+                            pos.1,
+                            color_str(pl),
+                            color_str(pr),
+                            color_str(nl),
+                            color_str(nr)
+                        );
                     }
                 }
             }
@@ -1008,11 +1619,13 @@ fn cpu_rasterize_debug(
     // Rasterize every output pixel using same logic as GPU shader
     let debug_all = std::env::var("CPU_RASTER_ALL").is_ok();
     // Debug specific pixel: CPU_RASTER_PX=x,y
-    let debug_px: Option<(u32,u32)> = std::env::var("CPU_RASTER_PX").ok().and_then(|s| {
+    let debug_px: Option<(u32, u32)> = std::env::var("CPU_RASTER_PX").ok().and_then(|s| {
         let parts: Vec<&str> = s.split(',').collect();
         if parts.len() == 2 {
             Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
-        } else { None }
+        } else {
+            None
+        }
     });
 
     for opy in 0..out_h {
@@ -1026,31 +1639,62 @@ fn cpu_rasterize_debug(
             let nn_color = px_color(pixels, nn_x, nn_y, img_w, img_h);
 
             // Collect hits (same as GPU)
-            struct Hit { dist2: f32, t: f32, orig_t: f32, ci: i32, prev_ci: i32, next_ci: i32 }
+            struct Hit {
+                dist2: f32,
+                t: f32,
+                orig_t: f32,
+                ci: i32,
+                prev_ci: i32,
+                next_ci: i32,
+            }
             let mut hits: Vec<Hit> = Vec::new();
 
             let search_cx = (fx.floor() as i32).clamp(0, img_w as i32);
             let search_cy = (fy.floor() as i32).clamp(0, img_h as i32);
 
-            for cy in (search_cy-2)..=(search_cy+2) {
-                for cx in (search_cx-2)..=(search_cx+2) {
+            for cy in (search_cy - 2)..=(search_cy + 2) {
+                for cx in (search_cx - 2)..=(search_cx + 2) {
                     for slot in 0..2 {
-                        if cx < 0 || cy < 0 || cx >= corners_w as i32 || cy > img_h as i32 { continue; }
+                        if cx < 0 || cy < 0 || cx >= corners_w as i32 || cy > img_h as i32 {
+                            continue;
+                        }
                         let ci = (cy * corners_w as i32 + cx) * 2 + slot;
-                        if ci < 0 || ci >= num_cps as i32 { continue; }
+                        if ci < 0 || ci >= num_cps as i32 {
+                            continue;
+                        }
                         let flag = cp_flags[ci as usize];
-                        if flag == 0 { continue; }
+                        if flag == 0 {
+                            continue;
+                        }
                         let prev_ci = cp_neighbors[ci as usize * 4];
                         let next_ci = cp_neighbors[ci as usize * 4 + 1];
-                        if prev_ci < 0 && next_ci < 0 { continue; }
+                        if prev_ci < 0 && next_ci < 0 {
+                            continue;
+                        }
 
                         let cp = read_pos(cp_positions, ci);
-                        let pp = if prev_ci >= 0 { read_pos(cp_positions, prev_ci) } else { cp };
-                        let pn = if next_ci >= 0 { read_pos(cp_positions, next_ci) } else { cp };
+                        let pp = if prev_ci >= 0 {
+                            read_pos(cp_positions, prev_ci)
+                        } else {
+                            cp
+                        };
+                        let pn = if next_ci >= 0 {
+                            read_pos(cp_positions, next_ci)
+                        } else {
+                            cp
+                        };
 
                         let ocp = read_pos(orig_positions, ci);
-                        let opp = if prev_ci >= 0 { read_pos(orig_positions, prev_ci) } else { ocp };
-                        let opn = if next_ci >= 0 { read_pos(orig_positions, next_ci) } else { ocp };
+                        let opp = if prev_ci >= 0 {
+                            read_pos(orig_positions, prev_ci)
+                        } else {
+                            ocp
+                        };
+                        let opn = if next_ci >= 0 {
+                            read_pos(orig_positions, next_ci)
+                        } else {
+                            ocp
+                        };
 
                         let mut best_d2 = 1e10f32;
                         let mut best_t = 0.0f32;
@@ -1060,17 +1704,36 @@ fn cpu_rasterize_debug(
                         for s in 0..=n {
                             let t = s as f32 / n as f32;
                             let bp = beval(pp, cp, pn, t);
-                            let d2 = len2((pt.0-bp.0, pt.1-bp.1));
-                            if d2 < best_d2 { best_d2 = d2; best_t = t; }
+                            let d2 = len2((pt.0 - bp.0, pt.1 - bp.1));
+                            if d2 < best_d2 {
+                                best_d2 = d2;
+                                best_t = t;
+                            }
                             let obp = beval(opp, ocp, opn, t);
-                            let od2 = len2((pt.0-obp.0, pt.1-obp.1));
-                            if od2 < orig_best_d2 { orig_best_d2 = od2; best_orig_t = t; }
+                            let od2 = len2((pt.0 - obp.0, pt.1 - obp.1));
+                            if od2 < orig_best_d2 {
+                                orig_best_d2 = od2;
+                                best_orig_t = t;
+                            }
                         }
 
                         if best_d2 < 1.0 {
-                            let pos = hits.iter().position(|h| best_d2 < h.dist2).unwrap_or(hits.len());
+                            let pos = hits
+                                .iter()
+                                .position(|h| best_d2 < h.dist2)
+                                .unwrap_or(hits.len());
                             if hits.len() < 4 || pos < 4 {
-                                hits.insert(pos, Hit { dist2: best_d2, t: best_t, orig_t: best_orig_t, ci, prev_ci, next_ci });
+                                hits.insert(
+                                    pos,
+                                    Hit {
+                                        dist2: best_d2,
+                                        t: best_t,
+                                        orig_t: best_orig_t,
+                                        ci,
+                                        prev_ci,
+                                        next_ci,
+                                    },
+                                );
                                 hits.truncate(4);
                             }
                         }
@@ -1096,51 +1759,105 @@ fn cpu_rasterize_debug(
                 if hit.prev_ci < 0 {
                     // Endpoint: skip if pixel is beyond start
                     let ep = read_pos(cp_positions, hit.ci);
-                    let toward = (read_pos(cp_positions, hit.next_ci).0 - ep.0,
-                                  read_pos(cp_positions, hit.next_ci).1 - ep.1);
-                    if (pt.0 - ep.0) * toward.0 + (pt.1 - ep.1) * toward.1 < 0.0 { continue; }
-                    if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-                    else { continue; }
+                    let toward = (
+                        read_pos(cp_positions, hit.next_ci).0 - ep.0,
+                        read_pos(cp_positions, hit.next_ci).1 - ep.1,
+                    );
+                    if (pt.0 - ep.0) * toward.0 + (pt.1 - ep.1) * toward.1 < 0.0 {
+                        continue;
+                    }
+                    if next_valid {
+                        color_left = nr;
+                        color_right = nl;
+                        ref_t = 1.0;
+                    } else {
+                        continue;
+                    }
                 } else if hit.next_ci < 0 {
                     // Endpoint: skip if pixel is beyond end
                     let ep = read_pos(cp_positions, hit.ci);
-                    let toward = (read_pos(cp_positions, hit.prev_ci).0 - ep.0,
-                                  read_pos(cp_positions, hit.prev_ci).1 - ep.1);
-                    if (pt.0 - ep.0) * toward.0 + (pt.1 - ep.1) * toward.1 < 0.0 { continue; }
-                    if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-                    else { continue; }
+                    let toward = (
+                        read_pos(cp_positions, hit.prev_ci).0 - ep.0,
+                        read_pos(cp_positions, hit.prev_ci).1 - ep.1,
+                    );
+                    if (pt.0 - ep.0) * toward.0 + (pt.1 - ep.1) * toward.1 < 0.0 {
+                        continue;
+                    }
+                    if prev_valid {
+                        color_left = pl;
+                        color_right = pr;
+                        ref_t = 0.0;
+                    } else {
+                        continue;
+                    }
                 } else if t < 0.5 {
-                    if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-                    else if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-                    else { continue; }
+                    if prev_valid {
+                        color_left = pl;
+                        color_right = pr;
+                        ref_t = 0.0;
+                    } else if next_valid {
+                        color_left = nr;
+                        color_right = nl;
+                        ref_t = 1.0;
+                    } else {
+                        continue;
+                    }
                 } else {
-                    if next_valid { color_left = nr; color_right = nl; ref_t = 1.0; }
-                    else if prev_valid { color_left = pl; color_right = pr; ref_t = 0.0; }
-                    else { continue; }
+                    if next_valid {
+                        color_left = nr;
+                        color_right = nl;
+                        ref_t = 1.0;
+                    } else if prev_valid {
+                        color_left = pl;
+                        color_right = pr;
+                        ref_t = 0.0;
+                    } else {
+                        continue;
+                    }
                 }
 
                 let orig_cp = read_pos(orig_positions, hit.ci);
-                let orig_pp = if hit.prev_ci >= 0 { read_pos(orig_positions, hit.prev_ci) } else { orig_cp };
-                let orig_pn = if hit.next_ci >= 0 { read_pos(orig_positions, hit.next_ci) } else { orig_cp };
+                let orig_pp = if hit.prev_ci >= 0 {
+                    read_pos(orig_positions, hit.prev_ci)
+                } else {
+                    orig_cp
+                };
+                let orig_pn = if hit.next_ci >= 0 {
+                    read_pos(orig_positions, hit.next_ci)
+                } else {
+                    orig_cp
+                };
                 let orig_tangent = beval_deriv(orig_pp, orig_cp, orig_pn, ref_t);
                 let tl2 = len2(orig_tangent).sqrt();
-                if tl2 < 1e-8 { continue; }
-                let orig_tangent = (orig_tangent.0/tl2, orig_tangent.1/tl2);
+                if tl2 < 1e-8 {
+                    continue;
+                }
+                let orig_tangent = (orig_tangent.0 / tl2, orig_tangent.1 / tl2);
                 let orig_normal = (-orig_tangent.1, orig_tangent.0);
 
                 let opt_cp = read_pos(cp_positions, hit.ci);
-                let opt_pp = if hit.prev_ci >= 0 { read_pos(cp_positions, hit.prev_ci) } else { opt_cp };
-                let opt_pn = if hit.next_ci >= 0 { read_pos(cp_positions, hit.next_ci) } else { opt_cp };
+                let opt_pp = if hit.prev_ci >= 0 {
+                    read_pos(cp_positions, hit.prev_ci)
+                } else {
+                    opt_cp
+                };
+                let opt_pn = if hit.next_ci >= 0 {
+                    read_pos(cp_positions, hit.next_ci)
+                } else {
+                    opt_cp
+                };
                 let cpt = beval(opt_pp, opt_cp, opt_pn, t);
 
                 let opt_tangent = beval_deriv(opt_pp, opt_cp, opt_pn, t);
                 let otl = len2(opt_tangent).sqrt();
-                if otl < 1e-8 { continue; }
-                let opt_tangent = (opt_tangent.0/otl, opt_tangent.1/otl);
+                if otl < 1e-8 {
+                    continue;
+                }
+                let opt_tangent = (opt_tangent.0 / otl, opt_tangent.1 / otl);
                 let opt_normal = (-opt_tangent.1, opt_tangent.0);
 
                 let normals_agree = dot2(opt_normal, orig_normal) > 0.0;
-                let side = dot2((pt.0-cpt.0, pt.1-cpt.1), opt_normal);
+                let side = dot2((pt.0 - cpt.0, pt.1 - cpt.1), opt_normal);
                 let assigned = if normals_agree {
                     if side > 0.0 { color_left } else { color_right }
                 } else {
@@ -1173,29 +1890,43 @@ fn cpu_rasterize_debug(
             output[(opy * out_w + opx) as usize] = final_color;
 
             // Debug output for specific pixel or all suspicious pixels
-            let is_target = debug_px.map_or(false, |(dx,dy)| opx == dx && opy == dy);
+            let is_target = debug_px.map_or(false, |(dx, dy)| opx == dx && opy == dy);
             let is_suspicious = resolved && final_color != nn_color;
             if (is_target || (debug_all && is_suspicious)) && !debug_info.is_empty() {
-                eprintln!("pixel ({},{}) → {} (nn={}) hits={}{}",
-                    opx, opy, color_str(final_color), color_str(nn_color),
+                eprintln!(
+                    "pixel ({},{}) → {} (nn={}) hits={}{}",
+                    opx,
+                    opy,
+                    color_str(final_color),
+                    color_str(nn_color),
                     hits.len(),
-                    if is_suspicious { " *** DIFFERS FROM NN ***" } else { "" });
+                    if is_suspicious {
+                        " *** DIFFERS FROM NN ***"
+                    } else {
+                        ""
+                    }
+                );
                 for line in &debug_info {
                     eprintln!("{}", line);
                 }
             }
-            if is_suspicious { mismatches += 1; }
+            if is_suspicious {
+                mismatches += 1;
+            }
         }
     }
-    eprintln!("CPU rasterizer: {} pixels differ from nearest-neighbor", mismatches);
+    eprintln!(
+        "CPU rasterizer: {} pixels differ from nearest-neighbor",
+        mismatches
+    );
 
     // Save CPU rasterizer output as PNG
     let path = "/tmp/cpu_rasterizer_output.png";
     let mut rgb = vec![0u8; (out_w * out_h * 3) as usize];
     for (i, &c) in output.iter().enumerate() {
-        rgb[i*3]   = ((c >> 16) & 0xff) as u8;
-        rgb[i*3+1] = ((c >> 8) & 0xff) as u8;
-        rgb[i*3+2] = (c & 0xff) as u8;
+        rgb[i * 3] = ((c >> 16) & 0xff) as u8;
+        rgb[i * 3 + 1] = ((c >> 8) & 0xff) as u8;
+        rgb[i * 3 + 2] = (c & 0xff) as u8;
     }
     image::save_buffer(path, &rgb, out_w, out_h, image::ColorType::Rgb8).unwrap();
     eprintln!("CPU rasterizer output saved to {}", path);
@@ -1207,33 +1938,47 @@ fn cpu_rasterize_debug(
 /// result. Uses `dispatch_stages_1_4b()` shared with the live pipeline.
 /// Includes optional CPU debug rasterizer (set `CPU_RASTER` env var).
 pub fn gpu_full_pipeline_screenshot(
-    src: &[u32], src_w: usize, src_h: usize, scale: usize,
+    src: &[u32],
+    src_w: usize,
+    src_h: usize,
+    scale: usize,
 ) -> Option<(Vec<u32>, u32, u32)> {
     let img_w = src_w as u32;
     let img_h = src_h as u32;
     let out_w = (src_w * scale) as u32;
     let out_h = (src_h * scale) as u32;
-    if out_w == 0 || out_h == 0 { return None; }
+    if out_w == 0 || out_h == 0 {
+        return None;
+    }
 
     let sdl = sdl3::init().ok()?;
     let video = sdl.video().ok()?;
     let window = video.window("gpu_full", 1, 1).hidden().build().ok()?;
 
     let all_formats = gpu::ShaderFormat::PRIVATE
-        | gpu::ShaderFormat::SPIRV | gpu::ShaderFormat::MSL
-        | gpu::ShaderFormat::DXBC | gpu::ShaderFormat::DXIL;
-    let device = gpu::Device::new(all_formats, false).ok()?.with_window(&window).ok()?;
+        | gpu::ShaderFormat::SPIRV
+        | gpu::ShaderFormat::MSL
+        | gpu::ShaderFormat::DXBC
+        | gpu::ShaderFormat::DXIL;
+    let device = gpu::Device::new(all_formats, false)
+        .ok()?
+        .with_window(&window)
+        .ok()?;
 
     let pipelines = init_full_gpu_pipeline(&device)?;
 
-    let out_tex = device.create_texture(
-        gpu::TextureCreateInfo::new()
-            .with_type(gpu::TextureType::_2D)
-            .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
-            .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
-            .with_width(out_w).with_height(out_h)
-            .with_layer_count_or_depth(1).with_num_levels(1)
-    ).ok()?;
+    let out_tex = device
+        .create_texture(
+            gpu::TextureCreateInfo::new()
+                .with_type(gpu::TextureType::_2D)
+                .with_format(gpu::TextureFormat::B8g8r8a8Unorm)
+                .with_usage(gpu::TextureUsage::SAMPLER | gpu::TextureUsage::COMPUTE_STORAGE_WRITE)
+                .with_width(out_w)
+                .with_height(out_h)
+                .with_layer_count_or_depth(1)
+                .with_num_levels(1),
+        )
+        .ok()?;
 
     // Run the full pipeline (reuse the same dispatch function but with our tex)
     // We need to duplicate the dispatch logic without the blit-to-swapchain part.
@@ -1246,7 +1991,8 @@ pub fn gpu_full_pipeline_screenshot(
     let corners_w = img_w + 1;
     let corners_h = img_h + 1;
     let num_cps = corners_w * corners_h * 2;
-    let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
+    let rw =
+        gpu::BufferUsageFlags::COMPUTE_STORAGE_READ | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
     let ro = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ;
 
     let px_size = img_w * img_h * 4;
@@ -1256,74 +2002,161 @@ pub fn gpu_full_pipeline_screenshot(
     let flag_size = num_cps * 4;
 
     // Upload pixels
-    let px_xfer = device.create_transfer_buffer()
+    let px_xfer = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::UPLOAD)
-        .with_size(px_size).build().ok()?;
+        .with_size(px_size)
+        .build()
+        .ok()?;
     {
         let mut map = px_xfer.map::<u8>(&device, true);
         let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len() * 4) };
         map.mem_mut()[..bytes.len()].copy_from_slice(bytes);
         map.unmap();
     }
-    let px_buf = device.create_buffer().with_usage(ro).with_size(px_size).build().ok()?;
-    let graph_buf = device.create_buffer().with_usage(rw).with_size(graph_size.max(4)).build().ok()?;
-    let pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
-    let nbr_buf = device.create_buffer().with_usage(rw).with_size(nbr_size.max(4)).build().ok()?;
-    let flag_buf = device.create_buffer().with_usage(rw).with_size(flag_size.max(4)).build().ok()?;
-    let opt_out_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
+    let px_buf = device
+        .create_buffer()
+        .with_usage(ro)
+        .with_size(px_size)
+        .build()
+        .ok()?;
+    let graph_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(graph_size.max(4))
+        .build()
+        .ok()?;
+    let pos_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(pos_size.max(4))
+        .build()
+        .ok()?;
+    let nbr_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(nbr_size.max(4))
+        .build()
+        .ok()?;
+    let flag_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(flag_size.max(4))
+        .build()
+        .ok()?;
+    let opt_out_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(pos_size.max(4))
+        .build()
+        .ok()?;
 
-    { let cp = device.begin_copy_pass(&cmd).ok()?;
-      cp.upload_to_gpu_buffer(
-          gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
-          gpu::BufferRegion::new().with_buffer(&px_buf).with_size(px_size), false);
-      device.end_copy_pass(cp); }
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        cp.upload_to_gpu_buffer(
+            gpu::TransferBufferLocation::new().with_transfer_buffer(&px_xfer),
+            gpu::BufferRegion::new()
+                .with_buffer(&px_buf)
+                .with_size(px_size),
+            false,
+        );
+        device.end_copy_pass(cp);
+    }
 
-    let graph_snapshot = device.create_buffer().with_usage(ro).with_size(graph_size.max(4)).build().ok()?;
-    let valence_buf = device.create_buffer().with_usage(rw).with_size((img_w * img_h * 4).max(4)).build().ok()?;
-    let orig_pos_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
-    let crossing_t_buf = device.create_buffer().with_usage(rw).with_size((num_cps * 4).max(4)).build().ok()?;
-    let opt_picard_buf = device.create_buffer().with_usage(rw).with_size(pos_size.max(4)).build().ok()?;
+    let graph_snapshot = device
+        .create_buffer()
+        .with_usage(ro)
+        .with_size(graph_size.max(4))
+        .build()
+        .ok()?;
+    let valence_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size((img_w * img_h * 4).max(4))
+        .build()
+        .ok()?;
+    let orig_pos_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(pos_size.max(4))
+        .build()
+        .ok()?;
+    let crossing_t_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size((num_cps * 4).max(4))
+        .build()
+        .ok()?;
+    let opt_picard_buf = device
+        .create_buffer()
+        .with_usage(rw)
+        .with_size(pos_size.max(4))
+        .build()
+        .ok()?;
 
     // Stages 1-5b: shared vectorize pipeline dispatch
     dispatch_stages_1_5b(
-        &device, &cmd, &pipelines,
-        &px_buf, &graph_buf, &graph_snapshot, &valence_buf,
-        &pos_buf, &nbr_buf, &flag_buf,
-        &opt_out_buf, &orig_pos_buf,
+        &device,
+        &cmd,
+        &pipelines,
+        &px_buf,
+        &graph_buf,
+        &graph_snapshot,
+        &valence_buf,
+        &pos_buf,
+        &nbr_buf,
+        &flag_buf,
+        &opt_out_buf,
+        &orig_pos_buf,
         &opt_picard_buf,
-        &crossing_t_buf, img_w, img_h,
+        &crossing_t_buf,
+        img_w,
+        img_h,
     );
 
     // Debug: download positions before and after optimizer
     let pos_dl_size = num_cps * 2 * 4;
-    let pos_dl = device.create_transfer_buffer()
+    let pos_dl = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-        .with_size(pos_dl_size).build().ok()?;
-    let opt_dl = device.create_transfer_buffer()
+        .with_size(pos_dl_size)
+        .build()
+        .ok()?;
+    let opt_dl = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-        .with_size(pos_dl_size).build().ok()?;
-    let nbr_dl = device.create_transfer_buffer()
+        .with_size(pos_dl_size)
+        .build()
+        .ok()?;
+    let nbr_dl = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-        .with_size(num_cps * 4 * 4).build().ok()?;
-    { let cp = device.begin_copy_pass(&cmd).ok()?;
-      unsafe {
-          let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-          src.buffer = pos_buf.raw(); src.size = pos_dl_size;
-          let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-          dst.transfer_buffer = pos_dl.raw();
-          sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
+        .with_size(num_cps * 4 * 4)
+        .build()
+        .ok()?;
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        unsafe {
+            let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
+            src.buffer = pos_buf.raw();
+            src.size = pos_dl_size;
+            let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
+            dst.transfer_buffer = pos_dl.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
-          src.buffer = opt_out_buf.raw();
-          dst.transfer_buffer = opt_dl.raw();
-          sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
+            src.buffer = opt_out_buf.raw();
+            dst.transfer_buffer = opt_dl.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
-          let mut src2 = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-          src2.buffer = nbr_buf.raw(); src2.size = num_cps * 4 * 4;
-          let mut dst2 = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-          dst2.transfer_buffer = nbr_dl.raw();
-          sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src2, &dst2);
-      }
-      device.end_copy_pass(cp); }
+            let mut src2 = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
+            src2.buffer = nbr_buf.raw();
+            src2.size = num_cps * 4 * 4;
+            let mut dst2 = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
+            dst2.transfer_buffer = nbr_dl.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src2, &dst2);
+        }
+        device.end_copy_pass(cp);
+    }
 
     // Submit and read back positions before running rasterizer
     let fence0 = cmd.submit_and_acquire_fence(&device).ok()?;
@@ -1344,22 +2177,32 @@ pub fn gpu_full_pipeline_screenshot(
             let py = pos_data[i * 2 + 1];
             let ox = opt_data[i * 2];
             let oy = opt_data[i * 2 + 1];
-            if (px - ox).abs() > 0.001 || (py - oy).abs() > 0.001 { diff_count += 1; }
-            if px.abs() > 0.001 || py.abs() > 0.001 { nonzero_pos += 1; }
+            if (px - ox).abs() > 0.001 || (py - oy).abs() > 0.001 {
+                diff_count += 1;
+            }
+            if px.abs() > 0.001 || py.abs() > 0.001 {
+                nonzero_pos += 1;
+            }
             let n0 = nbr_data[i * 4];
             let n1 = nbr_data[i * 4 + 1];
-            if n0 >= 0 || n1 >= 0 { valid_nbr += 1; }
+            if n0 >= 0 || n1 >= 0 {
+                valid_nbr += 1;
+            }
         }
         // Also download flags
-        let flag_dl = device.create_transfer_buffer()
+        let flag_dl = device
+            .create_transfer_buffer()
             .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-            .with_size(num_cps * 4).build().ok();
+            .with_size(num_cps * 4)
+            .build()
+            .ok();
         if let Some(ref fdl) = flag_dl {
             let cmd2 = device.acquire_command_buffer().ok().unwrap();
             let cp2 = device.begin_copy_pass(&cmd2).ok().unwrap();
             unsafe {
                 let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-                src.buffer = flag_buf.raw(); src.size = num_cps * 4;
+                src.buffer = flag_buf.raw();
+                src.size = num_cps * 4;
                 let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
                 dst.transfer_buffer = fdl.raw();
                 sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp2.raw(), &src, &dst);
@@ -1371,51 +2214,81 @@ pub fn gpu_full_pipeline_screenshot(
             let fdata = fmap.mem();
             let pinned_count = fdata.iter().filter(|&&f| f & 1 != 0).count();
             let active_count = fdata.iter().filter(|&&f| f != 0).count();
-            eprintln!("GPU debug: flags: {} pinned, {} with any flag set", pinned_count, active_count);
+            eprintln!(
+                "GPU debug: flags: {} pinned, {} with any flag set",
+                pinned_count, active_count
+            );
             drop(fmap);
         }
 
-        let nonzero_opt = opt_data.chunks(2).filter(|c| c[0].abs() > 0.001 || c[1].abs() > 0.001).count();
-        eprintln!("GPU debug: {} CPs, {} nonzero pos, {} nonzero opt, {} with valid neighbors, {} changed by optimizer",
-            num_cps, nonzero_pos, nonzero_opt, valid_nbr, diff_count);
+        let nonzero_opt = opt_data
+            .chunks(2)
+            .filter(|c| c[0].abs() > 0.001 || c[1].abs() > 0.001)
+            .count();
+        eprintln!(
+            "GPU debug: {} CPs, {} nonzero pos, {} nonzero opt, {} with valid neighbors, {} changed by optimizer",
+            num_cps, nonzero_pos, nonzero_opt, valid_nbr, diff_count
+        );
 
         // Check graph buffer too
-        eprintln!("GPU debug: graph_size={}, graph_stride={}", graph_size, graph_stride);
+        eprintln!(
+            "GPU debug: graph_size={}, graph_stride={}",
+            graph_size, graph_stride
+        );
         // Dump all CPs for visualization
         let mut integer_count = 0u32;
         let mut fractional_count = 0u32;
         if std::env::var("DUMP_CPS").is_ok() {
             for i in 0..num_cps as usize {
-                let px = pos_data[i * 2]; let py = pos_data[i * 2 + 1];
-                let ox = opt_data[i * 2]; let oy = opt_data[i * 2 + 1];
-                let n0 = nbr_data[i * 4]; let n1 = nbr_data[i * 4 + 1];
+                let px = pos_data[i * 2];
+                let py = pos_data[i * 2 + 1];
+                let ox = opt_data[i * 2];
+                let oy = opt_data[i * 2 + 1];
+                let n0 = nbr_data[i * 4];
+                let n1 = nbr_data[i * 4 + 1];
                 let flag = if let Some(ref fdl) = flag_dl {
                     let fmap = fdl.map::<u32>(&device, false);
                     let f = fmap.mem()[i];
                     drop(fmap);
                     f
-                } else { 0 };
+                } else {
+                    0
+                };
                 println!("{} {} {} {} {} {} {} {}", i, px, py, ox, oy, n0, n1, flag);
             }
         }
         let mut disconnected_count = 0u32;
         for i in 0..num_cps as usize {
-            let px = pos_data[i * 2]; let py = pos_data[i * 2 + 1];
-            if px.abs() < 0.001 && py.abs() < 0.001 { continue; }
+            let px = pos_data[i * 2];
+            let py = pos_data[i * 2 + 1];
+            if px.abs() < 0.001 && py.abs() < 0.001 {
+                continue;
+            }
             let is_frac = (px.fract().abs() > 0.01) || (py.fract().abs() > 0.01);
-            if is_frac { fractional_count += 1; } else { integer_count += 1; }
-            let n0 = nbr_data[i * 4]; let n1 = nbr_data[i * 4 + 1];
+            if is_frac {
+                fractional_count += 1;
+            } else {
+                integer_count += 1;
+            }
+            let n0 = nbr_data[i * 4];
+            let n1 = nbr_data[i * 4 + 1];
             let flag = if let Some(ref fdl) = flag_dl {
                 let fmap = fdl.map::<u32>(&device, false);
                 let f = fmap.mem()[i];
                 drop(fmap);
                 f
-            } else { 0 };
+            } else {
+                0
+            };
             // A CP is "disconnected" if it has a position but no neighbors and isn't a border CP
-            if n0 < 0 && n1 < 0 && flag != 1 { disconnected_count += 1; }
+            if n0 < 0 && n1 < 0 && flag != 1 {
+                disconnected_count += 1;
+            }
         }
-        eprintln!("GPU debug: {} integer CPs, {} fractional (diagonal) CPs, Disconnected: {}",
-            integer_count, fractional_count, disconnected_count);
+        eprintln!(
+            "GPU debug: {} integer CPs, {} fractional (diagonal) CPs, Disconnected: {}",
+            integer_count, fractional_count, disconnected_count
+        );
 
         // CPU rasterizer: mirror the GPU cell_rasterizer logic for debugging.
         // Downloads orig_positions, then runs the same algorithm
@@ -1423,15 +2296,19 @@ pub fn gpu_full_pipeline_screenshot(
         if std::env::var("CPU_RASTER").is_ok() {
             // Download orig_positions
             let orig_dl_size = num_cps * 2 * 4; // 2 f32 per CP
-            let orig_dl = device.create_transfer_buffer()
+            let orig_dl = device
+                .create_transfer_buffer()
                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-                .with_size(orig_dl_size).build().ok();
+                .with_size(orig_dl_size)
+                .build()
+                .ok();
             if let Some(odl) = &orig_dl {
                 let cmd3 = device.acquire_command_buffer().ok().unwrap();
                 let cp3 = device.begin_copy_pass(&cmd3).ok().unwrap();
                 unsafe {
                     let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-                    src.buffer = orig_pos_buf.raw(); src.size = orig_dl_size;
+                    src.buffer = orig_pos_buf.raw();
+                    src.size = orig_dl_size;
                     let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
                     dst.transfer_buffer = odl.raw();
                     sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp3.raw(), &src, &dst);
@@ -1443,53 +2320,115 @@ pub fn gpu_full_pipeline_screenshot(
                 let omap = odl.map::<f32>(&device, false);
                 let fmap2 = if let Some(ref fdl) = flag_dl {
                     Some(fdl.map::<u32>(&device, false))
-                } else { None };
+                } else {
+                    None
+                };
 
                 let orig_pos = omap.mem();
                 let flags_slice = fmap2.as_ref().map(|m| m.mem());
 
                 cpu_rasterize_debug(
-                    src, img_w, img_h,
-                    pos_data, orig_pos, flags_slice.unwrap_or(&[]),
+                    src,
+                    img_w,
+                    img_h,
+                    pos_data,
+                    orig_pos,
+                    flags_slice.unwrap_or(&[]),
                     nbr_data,
-                    out_w, out_h, scale as f32, corners_w,
+                    out_w,
+                    out_h,
+                    scale as f32,
+                    corners_w,
                 );
-                drop(omap); drop(fmap2);
+                drop(omap);
+                drop(fmap2);
             }
         }
 
-        drop(pos_map); drop(opt_map); drop(nbr_map);
+        drop(pos_map);
+        drop(opt_map);
+        drop(nbr_map);
     }
 
     // New command buffer for rasterizer
     let cmd = device.acquire_command_buffer().ok()?;
 
     // Tile-based rasterizer: one workgroup per 2×2 source tile
-    { let tiles_w = img_w.div_ceil(2);
-      let tiles_h = img_h.div_ceil(2);
-      let total_tiles = tiles_w * tiles_h;
-      let cp = device.begin_compute_pass(&cmd,
-          &[gpu::StorageTextureReadWriteBinding::new().with_texture(&out_tex).with_cycle(true)],
-          &[gpu::StorageBufferReadWriteBinding::new().with_buffer(&crossing_t_buf).with_cycle(false)]).ok()?;
-      cp.bind_compute_pipeline(&pipelines.rasterizer);
-      cp.bind_compute_storage_buffers(0, &[px_buf.clone(), pos_buf.clone(), orig_pos_buf.clone(), flag_buf.clone(), nbr_buf.clone()]);
-      #[repr(C)] struct U{iw:u32,ih:u32,ow:u32,oh:u32,s:f32,cw:u32,tw:u32,th:u32}
-      cmd.push_compute_uniform_data(0,&U{iw:img_w,ih:img_h,ow:out_w,oh:out_h,s:scale as f32,cw:corners_w,tw:tiles_w,th:tiles_h});
-      cp.dispatch(total_tiles,1,1); device.end_compute_pass(cp); }
+    {
+        let tiles_w = img_w.div_ceil(2);
+        let tiles_h = img_h.div_ceil(2);
+        let total_tiles = tiles_w * tiles_h;
+        let cp = device
+            .begin_compute_pass(
+                &cmd,
+                &[gpu::StorageTextureReadWriteBinding::new()
+                    .with_texture(&out_tex)
+                    .with_cycle(true)],
+                &[gpu::StorageBufferReadWriteBinding::new()
+                    .with_buffer(&crossing_t_buf)
+                    .with_cycle(false)],
+            )
+            .ok()?;
+        cp.bind_compute_pipeline(&pipelines.rasterizer);
+        cp.bind_compute_storage_buffers(
+            0,
+            &[
+                px_buf.clone(),
+                pos_buf.clone(),
+                orig_pos_buf.clone(),
+                flag_buf.clone(),
+                nbr_buf.clone(),
+            ],
+        );
+        #[repr(C)]
+        struct U {
+            iw: u32,
+            ih: u32,
+            ow: u32,
+            oh: u32,
+            s: f32,
+            cw: u32,
+            tw: u32,
+            th: u32,
+        }
+        cmd.push_compute_uniform_data(
+            0,
+            &U {
+                iw: img_w,
+                ih: img_h,
+                ow: out_w,
+                oh: out_h,
+                s: scale as f32,
+                cw: corners_w,
+                tw: tiles_w,
+                th: tiles_h,
+            },
+        );
+        cp.dispatch(total_tiles, 1, 1);
+        device.end_compute_pass(cp);
+    }
 
     // Download from texture
-    let dl_buf = device.create_transfer_buffer()
+    let dl_buf = device
+        .create_transfer_buffer()
         .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
-        .with_size(out_w * out_h * 4).build().ok()?;
-    { let cp = device.begin_copy_pass(&cmd).ok()?;
-      unsafe {
-          let mut src_r = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
-          src_r.texture = out_tex.raw(); src_r.w = out_w; src_r.h = out_h; src_r.d = 1;
-          let mut dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
-          dst.transfer_buffer = dl_buf.raw();
-          sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_r, &dst);
-      }
-      device.end_copy_pass(cp); }
+        .with_size(out_w * out_h * 4)
+        .build()
+        .ok()?;
+    {
+        let cp = device.begin_copy_pass(&cmd).ok()?;
+        unsafe {
+            let mut src_r = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
+            src_r.texture = out_tex.raw();
+            src_r.w = out_w;
+            src_r.h = out_h;
+            src_r.d = 1;
+            let mut dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
+            dst.transfer_buffer = dl_buf.raw();
+            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_r, &dst);
+        }
+        device.end_copy_pass(cp);
+    }
 
     let fence = cmd.submit_and_acquire_fence(&device).ok()?;
     device.wait_fences(true, &[fence]).ok()?;
@@ -1507,4 +2446,3 @@ pub fn gpu_full_pipeline_screenshot(
     drop(map);
     Some((pixels, out_w, out_h))
 }
-

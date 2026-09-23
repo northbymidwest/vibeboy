@@ -36,7 +36,9 @@ pub fn reverse_audio(samples: &mut [f32]) {
 
 /// Apply a short cosine fade-in to the start of each frame's audio.
 pub fn fade_frame_boundaries(samples: &mut [f32], frame_len: usize) {
-    if frame_len == 0 { return; }
+    if frame_len == 0 {
+        return;
+    }
     let fade_len = 64.min(frame_len);
     let mut offset = 0;
     while offset + frame_len * 2 <= samples.len() {
@@ -71,13 +73,15 @@ pub fn downsample_audio(samples: &[f32], factor: usize) -> Vec<f32> {
         };
         let t = i as f64 / (TAPS - 1) as f64;
         let window = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
-                          + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
+            + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
         let v = sinc * window;
         kernel[i] = v as f32;
         sum += v;
     }
     let inv = 1.0 / sum as f32;
-    for k in &mut kernel { *k *= inv; }
+    for k in &mut kernel {
+        *k *= inv;
+    }
 
     let stereo_frames = samples.len() / 2;
     let out_frames = stereo_frames / factor;
@@ -88,8 +92,8 @@ pub fn downsample_audio(samples: &[f32], factor: usize) -> Vec<f32> {
         let mut l = 0.0f32;
         let mut r = 0.0f32;
         for (j, &k) in kernel.iter().enumerate() {
-            let src = (center as i32 + j as i32 - HALF_TAPS)
-                .clamp(0, stereo_frames as i32 - 1) as usize;
+            let src =
+                (center as i32 + j as i32 - HALF_TAPS).clamp(0, stereo_frames as i32 - 1) as usize;
             l += samples[src * 2] * k;
             r += samples[src * 2 + 1] * k;
         }

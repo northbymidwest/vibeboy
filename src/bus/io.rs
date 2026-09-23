@@ -1,5 +1,4 @@
 /// I/O register read/write dispatch (0xFF00-0xFF7F).
-
 use super::Bus;
 
 impl Bus {
@@ -25,22 +24,30 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF40..=0xFF4B => self.ppu.read(addr),
             0xFF4D => {
-                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat {
+                    return 0xFF;
+                }
                 self.key1 | 0x7E
             }
             // VBK, BGPI, OBPI: accessible on CGB even in DMG-compat mode
             0xFF4F | 0xFF68 | 0xFF6A => {
-                if !self.model.is_cgb() { return 0xFF; }
+                if !self.model.is_cgb() {
+                    return 0xFF;
+                }
                 self.ppu.read(addr)
             }
             // BGPD, OBPD: blocked in DMG-compat mode
             0xFF69 | 0xFF6B => {
-                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat {
+                    return 0xFF;
+                }
                 self.ppu.read(addr)
             }
             0xFF51..=0xFF54 => 0xFF, // HDMA src/dst are write-only
             0xFF55 => {
-                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat {
+                    return 0xFF;
+                }
                 // Bit 7: 0 = active, 1 = not active
                 // Bits 0-6: remaining blocks minus 1
                 let remaining = self.hdma.blocks.wrapping_sub(1) & 0x7F;
@@ -50,18 +57,68 @@ impl Bus {
                     0x80 | remaining
                 }
             }
-            0xFF50 => if self.boot_rom_active { 0xFE } else { 0xFF },
+            0xFF50 => {
+                if self.boot_rom_active {
+                    0xFE
+                } else {
+                    0xFF
+                }
+            }
             0xFF70 => {
-                if !self.model.is_cgb() || self.dmg_compat { return 0xFF; }
+                if !self.model.is_cgb() || self.dmg_compat {
+                    return 0xFF;
+                }
                 self.wram_bank as u8 | 0xF8
             }
-            0xFF6C => if self.model.is_cgb() { self.ppu.opri | 0xFE } else { 0xFF },
-            0xFF72 => if self.model.is_cgb() { self.ff72 } else { 0xFF },
-            0xFF73 => if self.model.is_cgb() { self.ff73 } else { 0xFF },
-            0xFF74 => if self.model.is_cgb() { self.ff74 } else { 0xFF },
-            0xFF75 => if self.model.is_cgb() { self.ff75 | 0x8F } else { 0xFF },
-            0xFF76 => if self.model.is_cgb() { self.apu.pcm12() } else { 0xFF },
-            0xFF77 => if self.model.is_cgb() { self.apu.pcm34() } else { 0xFF },
+            0xFF6C => {
+                if self.model.is_cgb() {
+                    self.ppu.opri | 0xFE
+                } else {
+                    0xFF
+                }
+            }
+            0xFF72 => {
+                if self.model.is_cgb() {
+                    self.ff72
+                } else {
+                    0xFF
+                }
+            }
+            0xFF73 => {
+                if self.model.is_cgb() {
+                    self.ff73
+                } else {
+                    0xFF
+                }
+            }
+            0xFF74 => {
+                if self.model.is_cgb() {
+                    self.ff74
+                } else {
+                    0xFF
+                }
+            }
+            0xFF75 => {
+                if self.model.is_cgb() {
+                    self.ff75 | 0x8F
+                } else {
+                    0xFF
+                }
+            }
+            0xFF76 => {
+                if self.model.is_cgb() {
+                    self.apu.pcm12()
+                } else {
+                    0xFF
+                }
+            }
+            0xFF77 => {
+                if self.model.is_cgb() {
+                    self.apu.pcm34()
+                } else {
+                    0xFF
+                }
+            }
             _ => 0xFF,
         }
     }
@@ -239,8 +296,7 @@ impl Bus {
                     self.ppu_deferred -= 1;
                     self.ppu.lcdc = saved_lcdc;
                     // Window disable during window fetch: set glitch flag
-                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0
-                        && self.ppu.fetcher_is_window()
+                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0 && self.ppu.fetcher_is_window()
                     {
                         self.ppu.disable_window_pixel_insertion_glitch = true;
                     }
@@ -292,7 +348,9 @@ impl Bus {
             0xFF51..=0xFF55 if !self.model.is_cgb() || self.dmg_compat => {} // ignore on DMG/compat
             0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | ((val as u16) << 8),
             0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | ((val & 0xF0) as u16),
-            0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | (((val & 0x1F) as u16) << 8) | 0x8000,
+            0xFF53 => {
+                self.hdma.dst = (self.hdma.dst & 0x00FF) | (((val & 0x1F) as u16) << 8) | 0x8000
+            }
             0xFF54 => self.hdma.dst = (self.hdma.dst & 0xFF00) | ((val & 0xF0) as u16),
             0xFF55 => self.start_hdma(val),
             0xFF50 => {
@@ -313,10 +371,10 @@ impl Bus {
                         // (the boot ROM has programmed these)
                         for i in 0..4 {
                             let off = i * 2;
-                            self.ppu.dmg_bg_ref[i] = self.ppu.bcpd[off] as u16
-                                | ((self.ppu.bcpd[off + 1] as u16) << 8);
-                            self.ppu.dmg_obj_ref[0][i] = self.ppu.ocpd[off] as u16
-                                | ((self.ppu.ocpd[off + 1] as u16) << 8);
+                            self.ppu.dmg_bg_ref[i] =
+                                self.ppu.bcpd[off] as u16 | ((self.ppu.bcpd[off + 1] as u16) << 8);
+                            self.ppu.dmg_obj_ref[0][i] =
+                                self.ppu.ocpd[off] as u16 | ((self.ppu.ocpd[off + 1] as u16) << 8);
                             self.ppu.dmg_obj_ref[1][i] = self.ppu.ocpd[8 + off] as u16
                                 | ((self.ppu.ocpd[8 + off + 1] as u16) << 8);
                         }
@@ -328,11 +386,21 @@ impl Bus {
                 let bank = (val & 0x07) as usize;
                 self.wram_bank = if bank == 0 { 1 } else { bank };
             }
-            0xFF6C if self.model.is_cgb() => { self.ppu.opri = val & 0x01; }
-            0xFF72 if self.model.is_cgb() => { self.ff72 = val; }
-            0xFF73 if self.model.is_cgb() => { self.ff73 = val; }
-            0xFF74 if self.model.is_cgb() => { self.ff74 = val; }
-            0xFF75 if self.model.is_cgb() => { self.ff75 = val & 0x70; }
+            0xFF6C if self.model.is_cgb() => {
+                self.ppu.opri = val & 0x01;
+            }
+            0xFF72 if self.model.is_cgb() => {
+                self.ff72 = val;
+            }
+            0xFF73 if self.model.is_cgb() => {
+                self.ff73 = val;
+            }
+            0xFF74 if self.model.is_cgb() => {
+                self.ff74 = val;
+            }
+            0xFF75 if self.model.is_cgb() => {
+                self.ff75 = val & 0x70;
+            }
             _ => {}
         }
     }

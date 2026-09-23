@@ -70,14 +70,12 @@ impl GpuRenderer {
             ..Default::default()
         }))
         .unwrap();
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
         .unwrap();
 
         let size = window.inner_size();
@@ -274,11 +272,13 @@ impl GpuRenderer {
 
         // Uniform buffer: [scale_x, scale_y, 0, 0]
         let uniform_data = [scale_x, scale_y, 0.0f32, 0.0f32];
-        let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&uniform_data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let uniform_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&uniform_data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         if self.bind_group.is_none() {
             // Recreate bind group (texture or uniform changed)
@@ -304,7 +304,8 @@ impl GpuRenderer {
         }
 
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
@@ -338,7 +339,8 @@ impl GpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         tex: &wgpu::Texture,
         surface_view: &wgpu::TextureView,
-        src_w: u32, src_h: u32,
+        src_w: u32,
+        src_h: u32,
     ) {
         let win_w = self.surface_config.width as f32;
         let win_h = self.surface_config.height as f32;
@@ -350,19 +352,30 @@ impl GpuRenderer {
             (1.0, win_aspect / src_aspect)
         };
         let uniform_data = [scale_x, scale_y, 0.0f32, 0.0f32];
-        let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&uniform_data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let uniform_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&uniform_data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let view = tex.create_view(&Default::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buf.as_entire_binding(),
+                },
             ],
         });
         {

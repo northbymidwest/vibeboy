@@ -3,7 +3,6 @@
 /// Runs the SGB BIOS ROM on a minimal 65C816 CPU to process SGB commands.
 /// This enables games that use DATA_SND to hotpatch the BIOS (e.g. Kirby's
 /// Dream Land 2) to get correct per-tile palette attributes.
-
 pub mod bus;
 pub mod cpu;
 pub mod dma;
@@ -48,7 +47,11 @@ impl SnesSys {
             }
             0
         });
-        SnesSys { cpu, bus, frame_count: 0 }
+        SnesSys {
+            cpu,
+            bus,
+            frame_count: 0,
+        }
     }
 
     /// Run one SNES frame (~357,366 master cycles).
@@ -155,7 +158,12 @@ impl SnesSys {
             for &(addr, val, desc) in gates {
                 if self.bus.wram[addr] == 0 {
                     self.bus.wram[addr] = val;
-                    log::info!("SNES: force-enabled {} (WRAM[${:04X}]={:02X})", desc, addr, val);
+                    log::info!(
+                        "SNES: force-enabled {} (WRAM[${:04X}]={:02X})",
+                        desc,
+                        addr,
+                        val
+                    );
                 }
             }
             // The BIOS CLI instruction at $B150 enables IRQ after init.
@@ -174,8 +182,11 @@ impl SnesSys {
         if self.frame_count.is_multiple_of(300) {
             log::debug!(
                 "SNES frame {}: PC={:02X}:{:04X} NMITIMEN=${:02X} apu_state={}",
-                self.frame_count, self.cpu.pbr, self.cpu.pc,
-                self.bus.nmitimen, self.bus.apu_state,
+                self.frame_count,
+                self.cpu.pbr,
+                self.cpu.pc,
+                self.bus.nmitimen,
+                self.bus.apu_state,
             );
         }
     }
@@ -206,12 +217,8 @@ impl SnesSys {
         // Update bus cycle counter so VCOUNT reads return correct scanline
         self.bus.current_cpu_cycles = self.cpu.cycles;
         let bus_ptr = &mut self.bus as *mut SnesBus;
-        let read_fn = move |addr: u32| -> u8 {
-            unsafe { (*bus_ptr).read(addr) }
-        };
-        let mut write_fn = move |addr: u32, val: u8| {
-            unsafe { (*bus_ptr).write(addr, val) }
-        };
+        let read_fn = move |addr: u32| -> u8 { unsafe { (*bus_ptr).read(addr) } };
+        let mut write_fn = move |addr: u32, val: u8| unsafe { (*bus_ptr).write(addr, val) };
         self.cpu.step(&read_fn, &mut write_fn);
 
         // Check if IRQ was acknowledged (TIMEUP read)
@@ -230,8 +237,14 @@ impl SnesSys {
     /// Feed a command packet from the GB to the SNES.
     pub fn feed_packet(&mut self, data: &[u8; 16]) {
         let cmd = (data[0] >> 3) & 0x1F;
-        log::debug!("SNES: feed packet cmd=${:02X} [{:02X} {:02X} {:02X} {:02X} ...]",
-            cmd, data[0], data[1], data[2], data[3]);
+        log::debug!(
+            "SNES: feed packet cmd=${:02X} [{:02X} {:02X} {:02X} {:02X} ...]",
+            cmd,
+            data[0],
+            data[1],
+            data[2],
+            data[3]
+        );
 
         // Handle DATA_SND (cmd $0F) directly: write bytes to SNES WRAM.
         // The BIOS state machine may not be in a packet-reading state,
@@ -252,7 +265,11 @@ impl SnesSys {
                         self.bus.wram[wram_addr] = data[5 + i];
                     }
                 }
-                log::debug!("SNES: DATA_SND wrote {} bytes to WRAM ${:04X}", num_bytes, snes_addr);
+                log::debug!(
+                    "SNES: DATA_SND wrote {} bytes to WRAM ${:04X}",
+                    num_bytes,
+                    snes_addr
+                );
             }
         }
 
@@ -357,8 +374,8 @@ impl SnesSys {
         for pal in 0..4 {
             for col in 0..4 {
                 let off = (pal * stride + col) * 2;
-                pals[pal][col] = self.bus.ppu.cgram[off] as u16
-                    | ((self.bus.ppu.cgram[off + 1] as u16) << 8);
+                pals[pal][col] =
+                    self.bus.ppu.cgram[off] as u16 | ((self.bus.ppu.cgram[off + 1] as u16) << 8);
             }
         }
         pals
@@ -382,8 +399,8 @@ impl SnesSys {
         for i in 0..896 {
             let off = map_base + i * 2;
             if off + 1 < self.bus.ppu.vram.len() {
-                tilemap[i] = self.bus.ppu.vram[off] as u16
-                    | ((self.bus.ppu.vram[off + 1] as u16) << 8);
+                tilemap[i] =
+                    self.bus.ppu.vram[off] as u16 | ((self.bus.ppu.vram[off + 1] as u16) << 8);
             }
         }
 

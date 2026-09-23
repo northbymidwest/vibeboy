@@ -9,18 +9,27 @@
 //! Every output pixel is either the center color or a weighted blend between
 //! the center and one edge neighbor, preserving the pixel-art aesthetic.
 
-use super::{get, color_dist_bt2020};
+use super::{color_dist_bt2020, get};
 
 // ── Scale factor enum ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XbrzScale { Xbrz2x, Xbrz3x, Xbrz4x, Xbrz5x, Xbrz6x }
+pub enum XbrzScale {
+    Xbrz2x,
+    Xbrz3x,
+    Xbrz4x,
+    Xbrz5x,
+    Xbrz6x,
+}
 
 impl XbrzScale {
     pub fn factor(self) -> u32 {
         match self {
-            Self::Xbrz2x => 2, Self::Xbrz3x => 3, Self::Xbrz4x => 4,
-            Self::Xbrz5x => 5, Self::Xbrz6x => 6,
+            Self::Xbrz2x => 2,
+            Self::Xbrz3x => 3,
+            Self::Xbrz4x => 4,
+            Self::Xbrz5x => 5,
+            Self::Xbrz6x => 6,
         }
     }
 }
@@ -31,10 +40,14 @@ impl XbrzScale {
 const EQUAL_THRESHOLD: f32 = 30.0;
 
 #[inline(always)]
-fn dist(a: u32, b: u32) -> f32 { color_dist_bt2020(a, b) }
+fn dist(a: u32, b: u32) -> f32 {
+    color_dist_bt2020(a, b)
+}
 
 #[inline(always)]
-fn colors_equal(a: u32, b: u32) -> bool { dist(a, b) < EQUAL_THRESHOLD }
+fn colors_equal(a: u32, b: u32) -> bool {
+    dist(a, b) < EQUAL_THRESHOLD
+}
 
 // ── Edge strength per corner ────────────────────────────────────────────────
 
@@ -48,13 +61,16 @@ const DOMINANT_THRESHOLD: f32 = 3.6;
 
 /// Pack four 2-bit edge values into a single byte.
 /// Layout: corner0=[1:0], corner1=[3:2], corner2=[5:4], corner3=[7:6]
-#[inline(always)] fn pack_edge(c0: u8, c1: u8, c2: u8, c3: u8) -> u8 {
+#[inline(always)]
+fn pack_edge(c0: u8, c1: u8, c2: u8, c3: u8) -> u8 {
     c0 | (c1 << 2) | (c2 << 4) | (c3 << 6)
 }
-#[inline(always)] fn read_edge(packed: u8, corner: u8) -> u8 {
+#[inline(always)]
+fn read_edge(packed: u8, corner: u8) -> u8 {
     (packed >> (corner * 2)) & 3
 }
-#[inline(always)] fn write_edge(packed: &mut u8, corner: u8, val: u8) {
+#[inline(always)]
+fn write_edge(packed: &mut u8, corner: u8, val: u8) {
     let shift = corner * 2;
     *packed = (*packed & !(3 << shift)) | (val << shift);
 }
@@ -81,37 +97,55 @@ fn rotate_edges(packed: u8) -> u8 {
 ///       n  o
 /// ```
 fn analyze_junction(src: &[u32], w: usize, h: usize, jx: isize, jy: isize) -> u8 {
-    let f = get(src, w, h, jx,     jy);
+    let f = get(src, w, h, jx, jy);
     let g = get(src, w, h, jx + 1, jy);
-    let j = get(src, w, h, jx,     jy + 1);
+    let j = get(src, w, h, jx, jy + 1);
     let k = get(src, w, h, jx + 1, jy + 1);
 
     // Uniform 2×2 blocks have no edges
-    if (f == g && j == k) || (f == j && g == k) { return 0; }
+    if (f == g && j == k) || (f == j && g == k) {
+        return 0;
+    }
 
-    let b  = get(src, w, h, jx,     jy - 1);
-    let c  = get(src, w, h, jx + 1, jy - 1);
-    let e  = get(src, w, h, jx - 1, jy);
+    let b = get(src, w, h, jx, jy - 1);
+    let c = get(src, w, h, jx + 1, jy - 1);
+    let e = get(src, w, h, jx - 1, jy);
     let h_ = get(src, w, h, jx + 2, jy);
-    let i  = get(src, w, h, jx - 1, jy + 1);
-    let l  = get(src, w, h, jx + 2, jy + 1);
-    let n  = get(src, w, h, jx,     jy + 2);
-    let o  = get(src, w, h, jx + 1, jy + 2);
+    let i = get(src, w, h, jx - 1, jy + 1);
+    let l = get(src, w, h, jx + 2, jy + 1);
+    let n = get(src, w, h, jx, jy + 2);
+    let o = get(src, w, h, jx + 1, jy + 2);
 
     let d_jg = dist(i, f) + dist(f, c) + dist(n, k) + dist(k, h_) + 4.0 * dist(j, g);
     let d_fk = dist(e, j) + dist(j, o) + dist(b, g) + dist(g, l) + 4.0 * dist(f, k);
 
     let mut result = 0u8;
     if d_jg < d_fk {
-        let s = if DOMINANT_THRESHOLD * d_jg < d_fk { EDGE_DOMINANT } else { EDGE_NORMAL };
+        let s = if DOMINANT_THRESHOLD * d_jg < d_fk {
+            EDGE_DOMINANT
+        } else {
+            EDGE_NORMAL
+        };
         // j-g diagonal wins: affects f(BR=corner2) and k(TL=corner0)
-        if f != g && f != j { write_edge(&mut result, 2, s); }
-        if k != j && k != g { write_edge(&mut result, 0, s); }
+        if f != g && f != j {
+            write_edge(&mut result, 2, s);
+        }
+        if k != j && k != g {
+            write_edge(&mut result, 0, s);
+        }
     } else if d_fk < d_jg {
-        let s = if DOMINANT_THRESHOLD * d_fk < d_jg { EDGE_DOMINANT } else { EDGE_NORMAL };
+        let s = if DOMINANT_THRESHOLD * d_fk < d_jg {
+            EDGE_DOMINANT
+        } else {
+            EDGE_NORMAL
+        };
         // f-k diagonal wins: affects g(BL=corner3) and j(TR=corner1)
-        if g != f && g != k { write_edge(&mut result, 3, s); }
-        if j != f && j != k { write_edge(&mut result, 1, s); }
+        if g != f && g != k {
+            write_edge(&mut result, 3, s);
+        }
+        if j != f && j != k {
+            write_edge(&mut result, 1, s);
+        }
     }
     result
 }
@@ -155,31 +189,48 @@ const STEEP_THRESHOLD: f32 = 2.2;
 #[inline(always)]
 fn should_blend(edge_info: u8, center: u32, pixels: &CornerPixels) -> bool {
     // Dominant edges always blend
-    if read_edge(edge_info, 2) >= EDGE_DOMINANT { return true; }
+    if read_edge(edge_info, 2) >= EDGE_DOMINANT {
+        return true;
+    }
     // Conflicting adjacent edges suppress blending
-    if read_edge(edge_info, 1) != EDGE_NONE && !colors_equal(center, pixels.g) { return false; }
-    if read_edge(edge_info, 3) != EDGE_NONE && !colors_equal(center, pixels.c) { return false; }
+    if read_edge(edge_info, 1) != EDGE_NONE && !colors_equal(center, pixels.g) {
+        return false;
+    }
+    if read_edge(edge_info, 3) != EDGE_NONE && !colors_equal(center, pixels.c) {
+        return false;
+    }
     // Continuous same-color band suppresses blending
     if !colors_equal(center, pixels.i)
         && colors_equal(pixels.g, pixels.h)
         && colors_equal(pixels.h, pixels.i)
         && colors_equal(pixels.i, pixels.f)
         && colors_equal(pixels.f, pixels.c)
-    { return false; }
+    {
+        return false;
+    }
     true
 }
 
 /// The 8 relevant neighbor pixels for a corner (after rotation, these are
 /// always relative to the bottom-right corner).
 struct CornerPixels {
-    b: u32, c: u32,     // top-center, top-right
-    f: u32, g: u32,     // center-right, bottom-right (the edge pixel)
-    h: u32, i: u32,     // bottom-center, bottom-right-far
-    d: u32, _e: u32,    // far-right, far-right-bottom
+    b: u32,
+    c: u32, // top-center, top-right
+    f: u32,
+    g: u32, // center-right, bottom-right (the edge pixel)
+    h: u32,
+    i: u32, // bottom-center, bottom-right-far
+    d: u32,
+    _e: u32, // far-right, far-right-bottom
 }
 
 /// Edge direction classification.
-enum EdgeDir { Steep, Shallow, SteepAndShallow, Diagonal }
+enum EdgeDir {
+    Steep,
+    Shallow,
+    SteepAndShallow,
+    Diagonal,
+}
 
 /// Classify the edge direction at a corner.
 ///
@@ -193,10 +244,10 @@ fn classify_edge(center: u32, cp: &CornerPixels) -> EdgeDir {
     let fg = dist(cp.f, cp.g);
     let hc = dist(cp.h, cp.c);
 
-    let is_shallow = STEEP_THRESHOLD * fg <= hc
-        && !colors_equal(center, cp.g) && !colors_equal(cp.d, cp.g);
-    let is_steep = STEEP_THRESHOLD * hc <= fg
-        && !colors_equal(center, cp.c) && !colors_equal(cp.b, cp.c);
+    let is_shallow =
+        STEEP_THRESHOLD * fg <= hc && !colors_equal(center, cp.g) && !colors_equal(cp.d, cp.g);
+    let is_steep =
+        STEEP_THRESHOLD * hc <= fg && !colors_equal(center, cp.c) && !colors_equal(cp.b, cp.c);
 
     match (is_steep, is_shallow) {
         (true, true) => EdgeDir::SteepAndShallow,
@@ -210,14 +261,23 @@ fn classify_edge(center: u32, cp: &CornerPixels) -> EdgeDir {
 
 /// A single blend instruction: write `weight` of the edge color at (row, col)
 /// within the NxN output block.
-struct BlendOp { row: u8, col: u8, weight: f32 }
+struct BlendOp {
+    row: u8,
+    col: u8,
+    weight: f32,
+}
 
 /// Apply a set of blend operations to an output block.
 /// Coordinates are rotated by `rotation` (0-3 for 0°/90°/180°/270°).
 fn apply_blend(
-    out: &mut [u32], out_w: usize,
-    base_x: usize, base_y: usize, n: usize,
-    rotation: u8, center: u32, edge: u32,
+    out: &mut [u32],
+    out_w: usize,
+    base_x: usize,
+    base_y: usize,
+    n: usize,
+    rotation: u8,
+    center: u32,
+    edge: u32,
     ops: &[BlendOp],
 ) {
     for op in ops {
@@ -276,42 +336,161 @@ macro_rules! ops {
 
 fn shallow_ops(n: usize) -> &'static [BlendOp] {
     match n {
-        2 => ops![(1,0, 0.25), (1,1, 0.75)],
-        3 => ops![(2,0, 0.25), (1,2, 0.25), (2,1, 0.75), (2,2, 1.0)],
-        4 => ops![(3,0, 0.25), (2,2, 0.25), (3,1, 0.75), (2,3, 0.75), (3,2, 1.0), (3,3, 1.0)],
-        5 => ops![(4,0, 0.25), (3,2, 0.25), (2,4, 0.25), (4,1, 0.75), (3,3, 0.75), (4,2, 1.0), (4,3, 1.0), (4,4, 1.0), (3,4, 1.0)],
-        _ => ops![(5,0, 0.25), (4,2, 0.25), (3,4, 0.25), (5,1, 0.75), (4,3, 0.75), (3,5, 0.75), (5,2, 1.0), (5,3, 1.0), (5,4, 1.0), (5,5, 1.0), (4,4, 1.0), (4,5, 1.0)],
+        2 => ops![(1, 0, 0.25), (1, 1, 0.75)],
+        3 => ops![(2, 0, 0.25), (1, 2, 0.25), (2, 1, 0.75), (2, 2, 1.0)],
+        4 => ops![
+            (3, 0, 0.25),
+            (2, 2, 0.25),
+            (3, 1, 0.75),
+            (2, 3, 0.75),
+            (3, 2, 1.0),
+            (3, 3, 1.0)
+        ],
+        5 => ops![
+            (4, 0, 0.25),
+            (3, 2, 0.25),
+            (2, 4, 0.25),
+            (4, 1, 0.75),
+            (3, 3, 0.75),
+            (4, 2, 1.0),
+            (4, 3, 1.0),
+            (4, 4, 1.0),
+            (3, 4, 1.0)
+        ],
+        _ => ops![
+            (5, 0, 0.25),
+            (4, 2, 0.25),
+            (3, 4, 0.25),
+            (5, 1, 0.75),
+            (4, 3, 0.75),
+            (3, 5, 0.75),
+            (5, 2, 1.0),
+            (5, 3, 1.0),
+            (5, 4, 1.0),
+            (5, 5, 1.0),
+            (4, 4, 1.0),
+            (4, 5, 1.0)
+        ],
     }
 }
 
 fn steep_ops(n: usize) -> &'static [BlendOp] {
     // Steep = transpose of shallow (swap row/col)
     match n {
-        2 => ops![(0,1, 0.25), (1,1, 0.75)],
-        3 => ops![(0,2, 0.25), (2,1, 0.25), (1,2, 0.75), (2,2, 1.0)],
-        4 => ops![(0,3, 0.25), (2,2, 0.25), (1,3, 0.75), (3,2, 0.75), (2,3, 1.0), (3,3, 1.0)],
-        5 => ops![(0,4, 0.25), (2,3, 0.25), (4,2, 0.25), (1,4, 0.75), (3,3, 0.75), (2,4, 1.0), (3,4, 1.0), (4,4, 1.0), (4,3, 1.0)],
-        _ => ops![(0,5, 0.25), (2,4, 0.25), (4,3, 0.25), (1,5, 0.75), (3,4, 0.75), (5,3, 0.75), (2,5, 1.0), (3,5, 1.0), (4,5, 1.0), (5,5, 1.0), (4,4, 1.0), (5,4, 1.0)],
+        2 => ops![(0, 1, 0.25), (1, 1, 0.75)],
+        3 => ops![(0, 2, 0.25), (2, 1, 0.25), (1, 2, 0.75), (2, 2, 1.0)],
+        4 => ops![
+            (0, 3, 0.25),
+            (2, 2, 0.25),
+            (1, 3, 0.75),
+            (3, 2, 0.75),
+            (2, 3, 1.0),
+            (3, 3, 1.0)
+        ],
+        5 => ops![
+            (0, 4, 0.25),
+            (2, 3, 0.25),
+            (4, 2, 0.25),
+            (1, 4, 0.75),
+            (3, 3, 0.75),
+            (2, 4, 1.0),
+            (3, 4, 1.0),
+            (4, 4, 1.0),
+            (4, 3, 1.0)
+        ],
+        _ => ops![
+            (0, 5, 0.25),
+            (2, 4, 0.25),
+            (4, 3, 0.25),
+            (1, 5, 0.75),
+            (3, 4, 0.75),
+            (5, 3, 0.75),
+            (2, 5, 1.0),
+            (3, 5, 1.0),
+            (4, 5, 1.0),
+            (5, 5, 1.0),
+            (4, 4, 1.0),
+            (5, 4, 1.0)
+        ],
     }
 }
 
 fn steep_and_shallow_ops(n: usize) -> &'static [BlendOp] {
     match n {
-        2 => ops![(0,1, 0.25), (1,0, 0.25), (1,1, 5.0/6.0)],
-        3 => ops![(0,2, 0.25), (2,0, 0.25), (2,1, 0.75), (1,2, 0.75), (2,2, 1.0)],
-        4 => ops![(0,3, 0.25), (3,0, 0.25), (3,1, 0.75), (1,3, 0.75), (2,2, 1.0/3.0), (3,2, 1.0), (2,3, 1.0), (3,3, 1.0)],
-        5 => ops![(0,4, 0.25), (2,3, 0.25), (1,4, 0.75), (4,0, 0.25), (3,2, 0.25), (4,1, 0.75), (3,3, 2.0/3.0), (2,4, 1.0), (3,4, 1.0), (4,4, 1.0), (4,2, 1.0), (4,3, 1.0)],
-        _ => ops![(0,5, 0.25), (2,4, 0.25), (1,5, 0.75), (3,4, 0.75), (5,0, 0.25), (4,2, 0.25), (5,1, 0.75), (4,3, 0.75), (2,5, 1.0), (3,5, 1.0), (4,5, 1.0), (5,5, 1.0), (4,4, 1.0), (5,4, 1.0), (5,2, 1.0), (5,3, 1.0)],
+        2 => ops![(0, 1, 0.25), (1, 0, 0.25), (1, 1, 5.0 / 6.0)],
+        3 => ops![
+            (0, 2, 0.25),
+            (2, 0, 0.25),
+            (2, 1, 0.75),
+            (1, 2, 0.75),
+            (2, 2, 1.0)
+        ],
+        4 => ops![
+            (0, 3, 0.25),
+            (3, 0, 0.25),
+            (3, 1, 0.75),
+            (1, 3, 0.75),
+            (2, 2, 1.0 / 3.0),
+            (3, 2, 1.0),
+            (2, 3, 1.0),
+            (3, 3, 1.0)
+        ],
+        5 => ops![
+            (0, 4, 0.25),
+            (2, 3, 0.25),
+            (1, 4, 0.75),
+            (4, 0, 0.25),
+            (3, 2, 0.25),
+            (4, 1, 0.75),
+            (3, 3, 2.0 / 3.0),
+            (2, 4, 1.0),
+            (3, 4, 1.0),
+            (4, 4, 1.0),
+            (4, 2, 1.0),
+            (4, 3, 1.0)
+        ],
+        _ => ops![
+            (0, 5, 0.25),
+            (2, 4, 0.25),
+            (1, 5, 0.75),
+            (3, 4, 0.75),
+            (5, 0, 0.25),
+            (4, 2, 0.25),
+            (5, 1, 0.75),
+            (4, 3, 0.75),
+            (2, 5, 1.0),
+            (3, 5, 1.0),
+            (4, 5, 1.0),
+            (5, 5, 1.0),
+            (4, 4, 1.0),
+            (5, 4, 1.0),
+            (5, 2, 1.0),
+            (5, 3, 1.0)
+        ],
     }
 }
 
 fn diagonal_ops(n: usize) -> &'static [BlendOp] {
     match n {
-        2 => ops![(1,1, 0.5)],
-        3 => ops![(1,2, 1.0/8.0), (2,1, 1.0/8.0), (2,2, 7.0/8.0)],
-        4 => ops![(3,2, 0.5), (2,3, 0.5), (3,3, 1.0)],
-        5 => ops![(4,2, 1.0/8.0), (3,3, 1.0/8.0), (2,4, 1.0/8.0), (4,3, 7.0/8.0), (3,4, 7.0/8.0), (4,4, 1.0)],
-        _ => ops![(5,3, 0.5), (4,4, 0.5), (3,5, 0.5), (4,5, 1.0), (5,4, 1.0), (5,5, 1.0)],
+        2 => ops![(1, 1, 0.5)],
+        3 => ops![(1, 2, 1.0 / 8.0), (2, 1, 1.0 / 8.0), (2, 2, 7.0 / 8.0)],
+        4 => ops![(3, 2, 0.5), (2, 3, 0.5), (3, 3, 1.0)],
+        5 => ops![
+            (4, 2, 1.0 / 8.0),
+            (3, 3, 1.0 / 8.0),
+            (2, 4, 1.0 / 8.0),
+            (4, 3, 7.0 / 8.0),
+            (3, 4, 7.0 / 8.0),
+            (4, 4, 1.0)
+        ],
+        _ => ops![
+            (5, 3, 0.5),
+            (4, 4, 0.5),
+            (3, 5, 0.5),
+            (4, 5, 1.0),
+            (5, 4, 1.0),
+            (5, 5, 1.0)
+        ],
     }
 }
 
@@ -319,11 +498,17 @@ fn corner_ops(n: usize) -> &'static [BlendOp] {
     // Corner weights approximate the area outside a quarter-circle inscribed
     // in the NxN output block. 2x: 1-π/4 ≈ 0.2146, then geometrically scaled.
     match n {
-        2 => ops![(1,1, 0.21)],
-        3 => ops![(2,2, 0.45)],
-        4 => ops![(3,3, 0.68), (3,2, 0.09), (2,3, 0.09)],
-        5 => ops![(4,4, 0.86), (4,3, 0.23), (3,4, 0.23)],
-        _ => ops![(5,5, 0.97), (5,4, 0.42), (4,5, 0.42), (5,3, 0.06), (3,5, 0.06)],
+        2 => ops![(1, 1, 0.21)],
+        3 => ops![(2, 2, 0.45)],
+        4 => ops![(3, 3, 0.68), (3, 2, 0.09), (2, 3, 0.09)],
+        5 => ops![(4, 4, 0.86), (4, 3, 0.23), (3, 4, 0.23)],
+        _ => ops![
+            (5, 5, 0.97),
+            (5, 4, 0.42),
+            (4, 5, 0.42),
+            (5, 3, 0.06),
+            (3, 5, 0.06)
+        ],
     }
 }
 
@@ -354,7 +539,9 @@ pub fn scale(src: &[u32], w: usize, h: usize, mode: XbrzScale) -> Vec<u32> {
             }
 
             let edge_info = edges[py * w + px];
-            if edge_info == 0 { continue; } // no edges, block is uniform
+            if edge_info == 0 {
+                continue;
+            } // no edges, block is uniform
 
             let ix = px as isize;
             let iy = py as isize;
@@ -368,32 +555,50 @@ pub fn scale(src: &[u32], w: usize, h: usize, mode: XbrzScale) -> Vec<u32> {
                 // Rotate edge info to bring current corner to position 2 (bottom-right)
                 let rotated = {
                     let mut r = edge_info;
-                    for _ in 0..rotation { r = rotate_edges(r); }
+                    for _ in 0..rotation {
+                        r = rotate_edges(r);
+                    }
                     r
                 };
 
-                if read_edge(rotated, 2) == EDGE_NONE { continue; }
+                if read_edge(rotated, 2) == EDGE_NONE {
+                    continue;
+                }
 
                 // Gather neighbors using direction vectors.
                 // (dx, dy) points toward the corner being processed.
                 let (dx, dy) = DIRS[rotation as usize];
                 let cp = CornerPixels {
-                    f: get(src, w, h, ix + dx, iy),          // horizontal toward corner
-                    h: get(src, w, h, ix, iy + dy),          // vertical toward corner
-                    g: get(src, w, h, ix - dx, iy + dy),     // opposite-horizontal, same-vertical
-                    i: get(src, w, h, ix + dx, iy + dy),     // the diagonal corner itself
-                    c: get(src, w, h, ix + dx, iy - dy),     // horizontal toward, vertical away
-                    b: get(src, w, h, ix, iy - dy),          // vertical away from corner
-                    d: get(src, w, h, ix - dx, iy),          // horizontal away from corner
-                    _e: get(src, w, h, ix - dx, iy - dy),    // opposite diagonal
+                    f: get(src, w, h, ix + dx, iy),       // horizontal toward corner
+                    h: get(src, w, h, ix, iy + dy),       // vertical toward corner
+                    g: get(src, w, h, ix - dx, iy + dy),  // opposite-horizontal, same-vertical
+                    i: get(src, w, h, ix + dx, iy + dy),  // the diagonal corner itself
+                    c: get(src, w, h, ix + dx, iy - dy),  // horizontal toward, vertical away
+                    b: get(src, w, h, ix, iy - dy),       // vertical away from corner
+                    d: get(src, w, h, ix - dx, iy),       // horizontal away from corner
+                    _e: get(src, w, h, ix - dx, iy - dy), // opposite diagonal
                 };
 
                 // Blend target: the closer of the two orthogonal neighbors
-                let target = if dist(center, cp.f) <= dist(center, cp.h) { cp.f } else { cp.h };
+                let target = if dist(center, cp.f) <= dist(center, cp.h) {
+                    cp.f
+                } else {
+                    cp.h
+                };
 
                 if !should_blend(rotated, center, &cp) {
                     // Even without line blending, corners get a small AA blend
-                    apply_blend(&mut out, ow, ox, oy, n, rotation, center, target, corner_ops(n));
+                    apply_blend(
+                        &mut out,
+                        ow,
+                        ox,
+                        oy,
+                        n,
+                        rotation,
+                        center,
+                        target,
+                        corner_ops(n),
+                    );
                     continue;
                 }
 

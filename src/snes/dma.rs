@@ -3,14 +3,14 @@
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
-    pub dmap: u8,    // $43x0: transfer mode / direction
-    pub bbad: u8,    // $43x1: B-bus address ($21xx)
-    pub a1t: u32,    // $43x2-x4: A-bus source address (24-bit)
-    pub das: u16,    // $43x5-x6: byte count (0 = 65536)
-    pub dasb: u8,    // $43x7: indirect bank (HDMA only)
-    pub a2a: u16,    // $43x8-x9: HDMA table address
-    pub ntrl: u8,    // $43xA: HDMA line counter
-    pub unused: u8,  // $43xB: unused
+    pub dmap: u8,   // $43x0: transfer mode / direction
+    pub bbad: u8,   // $43x1: B-bus address ($21xx)
+    pub a1t: u32,   // $43x2-x4: A-bus source address (24-bit)
+    pub das: u16,   // $43x5-x6: byte count (0 = 65536)
+    pub dasb: u8,   // $43x7: indirect bank (HDMA only)
+    pub a2a: u16,   // $43x8-x9: HDMA table address
+    pub ntrl: u8,   // $43xA: HDMA line counter
+    pub unused: u8, // $43xB: unused
 }
 
 impl DmaChannel {
@@ -98,7 +98,9 @@ impl DmaController {
     ) -> u64 {
         let mut total_cycles = 0u64;
         for ch in 0..8 {
-            if enable & (1 << ch) == 0 { continue; }
+            if enable & (1 << ch) == 0 {
+                continue;
+            }
             let c = &self.channels[ch];
             let direction = c.dmap & 0x80; // 0=A→B, 0x80=B→A
             let mode = c.dmap & 0x07;
@@ -134,9 +136,11 @@ impl DmaController {
 
                 if !fixed {
                     if decrement {
-                        a_addr = (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_sub(1) as u32 & 0xFFFF);
+                        a_addr =
+                            (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_sub(1) as u32 & 0xFFFF);
                     } else {
-                        a_addr = (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_add(1) as u32 & 0xFFFF);
+                        a_addr =
+                            (a_addr & 0xFF0000) | ((a_addr as u16).wrapping_add(1) as u32 & 0xFFFF);
                     }
                 }
 

@@ -1,5 +1,4 @@
 /// APU register read/write dispatch (0xFF10-0xFF3F).
-
 use super::Apu;
 use super::channels::{NOISE_DIVISORS, nrx2_glitch};
 
@@ -7,7 +6,11 @@ impl Apu {
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             // CH1
-            0xFF10 => 0x80 | (self.sweep.period << 4) | (if self.sweep.negate { 0x08 } else { 0 }) | self.sweep.shift,
+            0xFF10 => {
+                0x80 | (self.sweep.period << 4)
+                    | (if self.sweep.negate { 0x08 } else { 0 })
+                    | self.sweep.shift
+            }
             0xFF11 => 0x3F | (self.ch1.duty << 6),
             0xFF12 => self.ch1.nrx2_raw,
             0xFF13 => 0xFF,
@@ -19,7 +22,13 @@ impl Apu {
             0xFF18 => 0xFF,
             0xFF19 => 0xBF | (if self.ch2.len_enable { 0x40 } else { 0 }),
             // CH3
-            0xFF1A => if self.ch3.dac_on { 0xFF } else { 0x7F },
+            0xFF1A => {
+                if self.ch3.dac_on {
+                    0xFF
+                } else {
+                    0x7F
+                }
+            }
             0xFF1B => 0xFF,
             0xFF1C => 0x9F | (self.ch3.vol_code << 5),
             0xFF1D => 0xFF,
@@ -28,17 +37,29 @@ impl Apu {
             // CH4
             0xFF20 => 0xFF,
             0xFF21 => self.ch4.nrx2_raw,
-            0xFF22 => (self.ch4.clock_shift << 4) | (if self.ch4.lfsr_narrow { 0x08 } else { 0 }) | self.ch4.divisor_code,
+            0xFF22 => {
+                (self.ch4.clock_shift << 4)
+                    | (if self.ch4.lfsr_narrow { 0x08 } else { 0 })
+                    | self.ch4.divisor_code
+            }
             0xFF23 => 0xBF | (if self.ch4.len_enable { 0x40 } else { 0 }),
             // Global
             0xFF24 => self.nr50,
             0xFF25 => self.nr51,
             0xFF26 => {
                 let mut v = if self.power { 0x80 } else { 0x00 } | 0x70;
-                if self.ch1.enabled { v |= 0x01; }
-                if self.ch2.enabled { v |= 0x02; }
-                if self.ch3.enabled { v |= 0x04; }
-                if self.ch4.enabled { v |= 0x08; }
+                if self.ch1.enabled {
+                    v |= 0x01;
+                }
+                if self.ch2.enabled {
+                    v |= 0x02;
+                }
+                if self.ch3.enabled {
+                    v |= 0x04;
+                }
+                if self.ch4.enabled {
+                    v |= 0x08;
+                }
                 v
             }
             // Wave RAM: when CH3 is active, access redirects to current sample position.
@@ -120,13 +141,19 @@ impl Apu {
                 let old_value = self.ch1.nrx2_raw;
                 self.ch1.nrx2_raw = val;
                 self.ch1.env_init_vol = val >> 4;
-                self.ch1.env_add     = val & 0x08 != 0;
-                self.ch1.env_period  = val & 0x07;
+                self.ch1.env_add = val & 0x08 != 0;
+                self.ch1.env_period = val & 0x07;
                 self.ch1.dac_on = val & 0xF8 != 0;
                 if !self.ch1.dac_on {
                     self.ch1.enabled = false;
                 } else if self.ch1.enabled {
-                    nrx2_glitch(&mut self.ch1.volume, val, old_value, &mut self.ch1.volume_countdown, &mut self.ch1.envelope_clock);
+                    nrx2_glitch(
+                        &mut self.ch1.volume,
+                        val,
+                        old_value,
+                        &mut self.ch1.volume_countdown,
+                        &mut self.ch1.envelope_clock,
+                    );
                     self.ch1.update_sample();
                     // PCM mask: CH1 is low nibble of pcm_mask[0]
                     self.pcm_mask[0] &= self.ch1.volume | 0xF0;
@@ -173,13 +200,19 @@ impl Apu {
                 let old_value = self.ch2.nrx2_raw;
                 self.ch2.nrx2_raw = val;
                 self.ch2.env_init_vol = val >> 4;
-                self.ch2.env_add     = val & 0x08 != 0;
-                self.ch2.env_period  = val & 0x07;
+                self.ch2.env_add = val & 0x08 != 0;
+                self.ch2.env_period = val & 0x07;
                 self.ch2.dac_on = val & 0xF8 != 0;
                 if !self.ch2.dac_on {
                     self.ch2.enabled = false;
                 } else if self.ch2.enabled {
-                    nrx2_glitch(&mut self.ch2.volume, val, old_value, &mut self.ch2.volume_countdown, &mut self.ch2.envelope_clock);
+                    nrx2_glitch(
+                        &mut self.ch2.volume,
+                        val,
+                        old_value,
+                        &mut self.ch2.volume_countdown,
+                        &mut self.ch2.envelope_clock,
+                    );
                     self.ch2.update_sample();
                     // PCM mask: CH2 is high nibble of pcm_mask[0]
                     self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
@@ -220,7 +253,9 @@ impl Apu {
             // ── CH3 ────────────────────────────────────────────────────────
             0xFF1A => {
                 self.ch3.dac_on = val & 0x80 != 0;
-                if !self.ch3.dac_on { self.ch3.enabled = false; }
+                if !self.ch3.dac_on {
+                    self.ch3.enabled = false;
+                }
             }
             0xFF1B => self.ch3.length_counter = 256 - val as u16,
             0xFF1C => self.ch3.vol_code = (val >> 5) & 0x03,
@@ -242,13 +277,19 @@ impl Apu {
                 let old_value = self.ch4.nrx2_raw;
                 self.ch4.nrx2_raw = val;
                 self.ch4.env_init_vol = val >> 4;
-                self.ch4.env_add     = val & 0x08 != 0;
-                self.ch4.env_period  = val & 0x07;
+                self.ch4.env_add = val & 0x08 != 0;
+                self.ch4.env_period = val & 0x07;
                 self.ch4.dac_on = val & 0xF8 != 0;
                 if !self.ch4.dac_on {
                     self.ch4.enabled = false;
                 } else if self.ch4.enabled {
-                    nrx2_glitch(&mut self.ch4.volume, val, old_value, &mut self.ch4.volume_countdown, &mut self.ch4.envelope_clock);
+                    nrx2_glitch(
+                        &mut self.ch4.volume,
+                        val,
+                        old_value,
+                        &mut self.ch4.volume_countdown,
+                        &mut self.ch4.envelope_clock,
+                    );
                     // PCM mask: CH4 is high nibble of pcm_mask[1]
                     self.pcm_mask[1] &= (self.ch4.volume << 4) | 0x0F;
                 }
@@ -260,8 +301,8 @@ impl Apu {
                     let new_divisor = NOISE_DIVISORS[new_div_code as usize];
                     self.ch4.counter_countdown = new_divisor;
                 }
-                self.ch4.clock_shift  = val >> 4;
-                self.ch4.lfsr_narrow  = val & 0x08 != 0;
+                self.ch4.clock_shift = val >> 4;
+                self.ch4.lfsr_narrow = val & 0x08 != 0;
                 self.ch4.divisor_code = val & 0x07;
             }
             0xFF23 => {

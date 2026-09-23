@@ -6,8 +6,8 @@ mod compute;
 mod gpu;
 
 use clap::Parser;
-use gtk4::prelude::*;
 use gtk4::glib;
+use gtk4::prelude::*;
 use model::GbModel;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -22,7 +22,10 @@ pub(crate) const SGB_H: u32 = 224;
 pub(crate) const AUDIO_SAMPLE_RATE: u32 = 96_000;
 
 #[derive(Parser)]
-#[command(name = "vibeboy", about = "Game Boy / Game Boy Color emulator (GTK4 frontend)")]
+#[command(
+    name = "vibeboy",
+    about = "Game Boy / Game Boy Color emulator (GTK4 frontend)"
+)]
 pub(crate) struct Cli {
     /// Path to ROM file (.gb / .gbc). If omitted, a file dialog will open.
     pub rom: Option<PathBuf>,
@@ -118,7 +121,14 @@ fn create_emu_state(
     }
     eprintln!();
 
-    let mut emu = emulator::Emulator::new(rom.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_SAMPLE_RATE);
+    let mut emu = emulator::Emulator::new(
+        rom.clone(),
+        boot_rom,
+        model,
+        None,
+        clock::default_clock(),
+        AUDIO_SAMPLE_RATE,
+    );
     ui_util::load_sav(&mut emu, &rom_path);
 
     if cli.printer {
@@ -130,10 +140,12 @@ fn create_emu_state(
     let src_w = if is_sgb { SGB_W } else { GB_W };
     let src_h = if is_sgb { SGB_H } else { GB_H };
 
-    let audio_ring = std::sync::Arc::new(std::sync::Mutex::new(
-        audio::AudioRing::new(AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2, AUDIO_SAMPLE_RATE),
-    ));
-    let (_audio_stream, actual_rate) = match audio::start_audio(std::sync::Arc::clone(&audio_ring)) {
+    let audio_ring = std::sync::Arc::new(std::sync::Mutex::new(audio::AudioRing::new(
+        AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
+        AUDIO_SAMPLE_RATE,
+    )));
+    let (_audio_stream, actual_rate) = match audio::start_audio(std::sync::Arc::clone(&audio_ring))
+    {
         Some((s, r)) => (Some(s), r),
         None => (None, AUDIO_SAMPLE_RATE),
     };
@@ -171,9 +183,11 @@ fn create_emu_state(
 }
 
 fn build_ui(app: &gtk4::Application, cli: Cli) {
-    let initial_filter = cli.filter.as_ref().and_then(|name| {
-        scaling::ScaleFilter::from_name(name)
-    }).unwrap_or(scaling::ScaleFilter::Nearest);
+    let initial_filter = cli
+        .filter
+        .as_ref()
+        .and_then(|name| scaling::ScaleFilter::from_name(name))
+        .unwrap_or(scaling::ScaleFilter::Nearest);
 
     // Create window
     let window = gtk4::ApplicationWindow::builder()
@@ -238,9 +252,13 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let model_submenu = gtk4::gio::Menu::new();
     model_submenu.append(Some("Auto"), Some("app.model::auto"));
     for (name, id) in [
-        ("DMG0", "dmg0"), ("DMG", "dmg"), ("MGB", "mgb"),
-        ("SGB", "sgb"), ("SGB2", "sgb2"),
-        ("CGB", "cgb"), ("AGB", "agb"),
+        ("DMG0", "dmg0"),
+        ("DMG", "dmg"),
+        ("MGB", "mgb"),
+        ("SGB", "sgb"),
+        ("SGB2", "sgb2"),
+        ("CGB", "cgb"),
+        ("AGB", "agb"),
     ] {
         model_submenu.append(Some(name), Some(&format!("app.model::{}", id)));
     }
@@ -266,7 +284,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         if group == scaling::FilterMenuGroup::Main {
             filter_menu.append(Some(display_name), Some(&action_name));
         } else {
-            sub_menus.entry(group.label())
+            sub_menus
+                .entry(group.label())
                 .or_insert_with(gtk4::gio::Menu::new)
                 .append(Some(display_name), Some(&action_name));
         }
@@ -313,7 +332,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let gpu_compute: Rc<RefCell<Option<compute::GpuCompute>>> = Rc::new(RefCell::new(None));
     #[cfg(not(target_os = "linux"))]
     let gpu_compute: Rc<RefCell<Option<()>>> = Rc::new(RefCell::new(None));
-    let pending_frame: Rc<RefCell<gpu::PendingFrame>> = Rc::new(RefCell::new(gpu::PendingFrame::default()));
+    let pending_frame: Rc<RefCell<gpu::PendingFrame>> =
+        Rc::new(RefCell::new(gpu::PendingFrame::default()));
 
     // GLArea realize: init GL resources + wgpu compute (same GL context)
     gl_area.connect_realize({
@@ -398,13 +418,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                     // CPU pixel upload path
                     renderer.render(
-                        &f.pixels,
-                        f.frame_w,
-                        f.frame_h,
-                        vp_w,
-                        vp_h,
-                        f.src_w,
-                        f.src_h,
+                        &f.pixels, f.frame_w, f.frame_h, vp_w, vp_h, f.src_w, f.src_h,
                     );
                 }
             }
@@ -488,9 +502,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 frame_dur.as_millis().max(1) as u64
             };
 
-            let source_id = glib::timeout_add_local(
-                std::time::Duration::from_millis(interval_ms),
-                move || {
+            let source_id =
+                glib::timeout_add_local(std::time::Duration::from_millis(interval_ms), move || {
                     {
                         let mut st = state_tick.borrow_mut();
                         let st = match st.as_mut() {
@@ -508,12 +521,16 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             let released = old & !gs.buttons;
                             for bit in 0..8u8 {
                                 let mask = 1 << bit;
-                                if pressed & mask != 0 { st.emu.set_button(mask, true); }
+                                if pressed & mask != 0 {
+                                    st.emu.set_button(mask, true);
+                                }
                                 if released & mask != 0 && st.kb_buttons & mask == 0 {
                                     st.emu.set_button(mask, false);
                                 }
                             }
-                            if gs.rewind { st.emu.set_rewinding(true); }
+                            if gs.rewind {
+                                st.emu.set_rewinding(true);
+                            }
                             st.fast_forward = st.fast_forward || gs.fast_forward;
                             // Rumble
                             if st.emu.has_rumble() {
@@ -579,7 +596,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2;
                                 let target_fill = samples_per_frame * 3;
                                 let max_fill = samples_per_frame * 8;
-                                let queued = st.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+                                let queued =
+                                    st.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
 
                                 frames_stepped = if queued < target_fill / 2 {
                                     2
@@ -613,8 +631,16 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                             // Get frame buffer and dimensions
                             let is_sgb = st.emu.is_sgb();
-                            let base_w = if is_sgb { SGB_W as usize } else { GB_W as usize };
-                            let base_h = if is_sgb { SGB_H as usize } else { GB_H as usize };
+                            let base_w = if is_sgb {
+                                SGB_W as usize
+                            } else {
+                                GB_W as usize
+                            };
+                            let base_h = if is_sgb {
+                                SGB_H as usize
+                            } else {
+                                GB_H as usize
+                            };
                             let fb: &[u32] = if is_sgb {
                                 st.emu.sgb_composited_frame()
                             } else {
@@ -632,58 +658,69 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                             // Check if we can use GPU compute for this filter
                             #[cfg(target_os = "linux")]
-                            let wgpu_filter = if st.force_cpu { None } else { compute::to_wgpu_filter(st.scale_filter) };
+                            let wgpu_filter = if st.force_cpu {
+                                None
+                            } else {
+                                compute::to_wgpu_filter(st.scale_filter)
+                            };
                             #[cfg(not(target_os = "linux"))]
-                            let wgpu_filter: Option<scaling::wgpu_scale::WgpuScaleFilter> = None;
-                            let use_gpu = !st.force_cpu && wgpu_filter.is_some() && gpu_compute.borrow().is_some();
+                            let wgpu_filter: Option<
+                                scaling::wgpu_scale::WgpuScaleFilter,
+                            > = None;
+                            let use_gpu = !st.force_cpu
+                                && wgpu_filter.is_some()
+                                && gpu_compute.borrow().is_some();
 
                             // Apply scaling filter: GPU deferred to render callback, else CPU
-                            let (pixels, pw, ph, gpu_filter_for_render): (&[u32], usize, usize, Option<scaling::wgpu_scale::WgpuScaleFilter>) =
-                                if use_gpu {
-                                    // Send raw pixels to render callback for zero-copy GPU compute
-                                    (fb, base_w, base_h, wgpu_filter)
-                                } else if st.scale_filter == scaling::ScaleFilter::Nearest {
-                                    (fb, base_w, base_h, None)
-                                } else if !st.force_cpu && st.scale_filter == scaling::ScaleFilter::Vectorize {
-                                    // Full 6-stage GPU vectorize pipeline
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        let s = scale_fit as f32;
-                                        let ow = (base_w as f32 * s).round() as u32;
-                                        let oh = (base_h as f32 * s).round() as u32;
-                                        let mut gc = gpu_compute.borrow_mut();
-                                        if let Some(ref mut compute) = *gc {
-                                            if let Some((gl_tex, gw, gh)) =
-                                                compute.vectorize(fb, base_w as u32, base_h as u32, ow, oh, s)
-                                            {
-                                                let mut pf = pending_frame.borrow_mut();
-                                                pf.pixels.clear();
-                                                pf.frame_w = gw;
-                                                pf.frame_h = gh;
-                                                pf.src_w = base_w as u32;
-                                                pf.src_h = base_h as u32;
-                                                pf.gpu_filter = None;
-                                                pf.gl_texture = Some(gl_tex);
-                                                pf.fit_w = fit_w as u32;
-                                                pf.fit_h = fit_h as u32;
-                                                pf.factor = 0;
-                                                drop(gc);
-                                                drop(pf);
-                                                gl_area.queue_render();
-                                                return glib::ControlFlow::Continue;
-                                            }
+                            let (pixels, pw, ph, gpu_filter_for_render): (
+                                &[u32],
+                                usize,
+                                usize,
+                                Option<scaling::wgpu_scale::WgpuScaleFilter>,
+                            ) = if use_gpu {
+                                // Send raw pixels to render callback for zero-copy GPU compute
+                                (fb, base_w, base_h, wgpu_filter)
+                            } else if st.scale_filter == scaling::ScaleFilter::Nearest {
+                                (fb, base_w, base_h, None)
+                            } else if !st.force_cpu
+                                && st.scale_filter == scaling::ScaleFilter::Vectorize
+                            {
+                                // Full 6-stage GPU vectorize pipeline
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let s = scale_fit as f32;
+                                    let ow = (base_w as f32 * s).round() as u32;
+                                    let oh = (base_h as f32 * s).round() as u32;
+                                    let mut gc = gpu_compute.borrow_mut();
+                                    if let Some(ref mut compute) = *gc {
+                                        if let Some((gl_tex, gw, gh)) = compute.vectorize(
+                                            fb,
+                                            base_w as u32,
+                                            base_h as u32,
+                                            ow,
+                                            oh,
+                                            s,
+                                        ) {
+                                            let mut pf = pending_frame.borrow_mut();
+                                            pf.pixels.clear();
+                                            pf.frame_w = gw;
+                                            pf.frame_h = gh;
+                                            pf.src_w = base_w as u32;
+                                            pf.src_h = base_h as u32;
+                                            pf.gpu_filter = None;
+                                            pf.gl_texture = Some(gl_tex);
+                                            pf.fit_w = fit_w as u32;
+                                            pf.fit_h = fit_h as u32;
+                                            pf.factor = 0;
+                                            drop(gc);
+                                            drop(pf);
+                                            gl_area.queue_render();
+                                            return glib::ControlFlow::Continue;
                                         }
                                     }
-                                    // CPU fallback
-                                    if let Some((scaled, w, h)) = scaling::cpu_scale(
-                                        st.scale_filter, fb, base_w, base_h, fit_w, fit_h,
-                                    ) {
-                                        st.scaled_buf = scaled;
-                                        (&st.scaled_buf, w as usize, h as usize, None)
-                                    } else {
-                                        (fb, base_w, base_h, None)
-                                    }
-                                } else if let Some((scaled, w, h)) = scaling::cpu_scale(
+                                }
+                                // CPU fallback
+                                if let Some((scaled, w, h)) = scaling::cpu_scale(
                                     st.scale_filter,
                                     fb,
                                     base_w,
@@ -695,7 +732,20 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     (&st.scaled_buf, w as usize, h as usize, None)
                                 } else {
                                     (fb, base_w, base_h, None)
-                                };
+                                }
+                            } else if let Some((scaled, w, h)) = scaling::cpu_scale(
+                                st.scale_filter,
+                                fb,
+                                base_w,
+                                base_h,
+                                fit_w,
+                                fit_h,
+                            ) {
+                                st.scaled_buf = scaled;
+                                (&st.scaled_buf, w as usize, h as usize, None)
+                            } else {
+                                (fb, base_w, base_h, None)
+                            };
 
                             // Render: GL path or Cairo fallback
                             if gl_renderer.borrow().is_some() {
@@ -736,8 +786,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         }
                     }
                     glib::ControlFlow::Continue
-                },
-            );
+                });
 
             // Store the source ID so we can cancel it later if needed
             let mut st = state.borrow_mut();
@@ -793,7 +842,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let state_key = Rc::clone(&state);
     let key_controller = gtk4::EventControllerKey::new();
     key_controller.connect_key_pressed(glib::clone!(
-        #[strong] state_key,
+        #[strong]
+        state_key,
         move |_, keyval, _keycode, _modifier| {
             let mut st = state_key.borrow_mut();
             let st = match st.as_mut() {
@@ -812,11 +862,19 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     st.sav_flusher.flush(&st.emu);
                     std::process::exit(0);
                 }
-                gtk4::gdk::Key::BackSpace => { st.emu.set_rewinding(true); }
-                gtk4::gdk::Key::Tab => { st.fast_forward = true; }
-                gtk4::gdk::Key::minus => { st.slow_motion = true; }
+                gtk4::gdk::Key::BackSpace => {
+                    st.emu.set_rewinding(true);
+                }
+                gtk4::gdk::Key::Tab => {
+                    st.fast_forward = true;
+                }
+                gtk4::gdk::Key::minus => {
+                    st.slow_motion = true;
+                }
                 gtk4::gdk::Key::period => {
-                    if st.paused { st.step_one_frame = true; }
+                    if st.paused {
+                        st.step_one_frame = true;
+                    }
                 }
                 gtk4::gdk::Key::F5 => {
                     let slot = st.current_slot;
@@ -846,7 +904,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         }
     ));
     key_controller.connect_key_released(glib::clone!(
-        #[strong] state_key,
+        #[strong]
+        state_key,
         move |_, keyval, _keycode, _modifier| {
             let mut st = state_key.borrow_mut();
             let st = match st.as_mut() {
@@ -859,9 +918,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 st.emu.set_button(b, false);
             }
             match keyval {
-                gtk4::gdk::Key::BackSpace => { st.emu.set_rewinding(false); }
-                gtk4::gdk::Key::Tab => { st.fast_forward = false; }
-                gtk4::gdk::Key::minus => { st.slow_motion = false; }
+                gtk4::gdk::Key::BackSpace => {
+                    st.emu.set_rewinding(false);
+                }
+                gtk4::gdk::Key::Tab => {
+                    st.fast_forward = false;
+                }
+                gtk4::gdk::Key::minus => {
+                    st.slow_motion = false;
+                }
                 _ => {}
             }
         }
@@ -900,13 +965,17 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         dialog.set_filters(Some(&filters));
 
         let load = load_rom_for_open.clone();
-        dialog.open(Some(&window_for_open), gtk4::gio::Cancellable::NONE, move |result| {
-            if let Ok(file) = result {
-                if let Some(path) = file.path() {
-                    load(path, scaling::ScaleFilter::Nearest);
+        dialog.open(
+            Some(&window_for_open),
+            gtk4::gio::Cancellable::NONE,
+            move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        load(path, scaling::ScaleFilter::Nearest);
+                    }
                 }
-            }
-        });
+            },
+        );
     });
     app.add_action(&action_open);
 
@@ -927,12 +996,18 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     action_reset.connect_activate(move |_, _| {
         let mut st = state_reset.borrow_mut();
         if let Some(s) = st.as_mut() {
-            let model = s.model_override
+            let model = s
+                .model_override
                 .unwrap_or_else(|| ui_util::auto_detect_model(&s.rom_data));
             let boot_rom = load_boot_rom(model, &cli_for_reset);
             let path = s.rom_path.clone();
             s.emu = emulator::Emulator::new(
-                s.rom_data.clone(), boot_rom, model, None, clock::default_clock(), AUDIO_SAMPLE_RATE,
+                s.rom_data.clone(),
+                boot_rom,
+                model,
+                None,
+                clock::default_clock(),
+                AUDIO_SAMPLE_RATE,
             );
             ui_util::load_sav(&mut s.emu, &path);
             s.model = model;
@@ -949,9 +1024,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Save state slot action (parameter: slot number as string "1"-"9")
     let state_save = Rc::clone(&state);
-    let action_save_slot = gtk4::gio::SimpleAction::new(
-        "save-slot", Some(&glib::VariantTy::STRING),
-    );
+    let action_save_slot =
+        gtk4::gio::SimpleAction::new("save-slot", Some(&glib::VariantTy::STRING));
     action_save_slot.connect_activate(move |_, param| {
         if let Some(param) = param {
             if let Some(s) = param.str() {
@@ -969,9 +1043,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Load state slot action
     let state_load = Rc::clone(&state);
-    let action_load_slot = gtk4::gio::SimpleAction::new(
-        "load-slot", Some(&glib::VariantTy::STRING),
-    );
+    let action_load_slot =
+        gtk4::gio::SimpleAction::new("load-slot", Some(&glib::VariantTy::STRING));
     action_load_slot.connect_activate(move |_, param| {
         if let Some(param) = param {
             if let Some(s) = param.str() {
@@ -992,9 +1065,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let cli_for_model = Rc::clone(&cli_rc);
     let window_for_model = window.clone();
     let start_timer_for_model = start_frame_timer.clone();
-    let action_model = gtk4::gio::SimpleAction::new(
-        "model", Some(&glib::VariantTy::STRING),
-    );
+    let action_model = gtk4::gio::SimpleAction::new("model", Some(&glib::VariantTy::STRING));
     action_model.connect_activate(move |_, param| {
         if let Some(param) = param {
             if let Some(name) = param.str() {
@@ -1022,7 +1093,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     let filter = s.scale_filter;
 
                     let new_state = create_emu_state(
-                        rom, rom_path.clone(), &cli_for_model, filter, model_override,
+                        rom,
+                        rom_path.clone(),
+                        &cli_for_model,
+                        filter,
+                        model_override,
                     );
                     let src_w = new_state.src_w;
                     let src_h = new_state.src_h;
@@ -1032,9 +1107,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         "VibeBoy \u{2014} {}",
                         rom_path.file_name().unwrap_or_default().to_string_lossy()
                     )));
-                    window_for_model.set_default_size(
-                        (src_w * SCALE) as i32, (src_h * SCALE) as i32,
-                    );
+                    window_for_model
+                        .set_default_size((src_w * SCALE) as i32, (src_h * SCALE) as i32);
                 }
                 drop(st);
                 start_timer_for_model();
@@ -1068,21 +1142,21 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Printer toggle action
     let state_printer = Rc::clone(&state);
-    let action_printer = gtk4::gio::SimpleAction::new_stateful(
-        "toggle-printer",
-        None,
-        &cli_rc.printer.to_variant(),
-    );
+    let action_printer =
+        gtk4::gio::SimpleAction::new_stateful("toggle-printer", None, &cli_rc.printer.to_variant());
     action_printer.connect_activate(move |action, _| {
         let mut st = state_printer.borrow_mut();
         if let Some(s) = st.as_mut() {
-            let currently_on = action.state().and_then(|v| v.get::<bool>()).unwrap_or(false);
+            let currently_on = action
+                .state()
+                .and_then(|v| v.get::<bool>())
+                .unwrap_or(false);
             let new_state = !currently_on;
             action.set_state(&new_state.to_variant());
             if new_state {
-                s.emu.attach_serial_device(
-                    Box::new(printer::Printer::new(s.model.cpu_clock_rate()))
-                );
+                s.emu.attach_serial_device(Box::new(printer::Printer::new(
+                    s.model.cpu_clock_rate(),
+                )));
                 eprintln!("Game Boy Printer connected");
             } else {
                 s.emu.attach_serial_device(Box::new(serial::Disconnected));
@@ -1094,15 +1168,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Force CPU toggle action
     let state_force_cpu = Rc::clone(&state);
-    let action_force_cpu = gtk4::gio::SimpleAction::new_stateful(
-        "force-cpu",
-        None,
-        &false.to_variant(),
-    );
+    let action_force_cpu =
+        gtk4::gio::SimpleAction::new_stateful("force-cpu", None, &false.to_variant());
     action_force_cpu.connect_activate(move |action, _| {
         let mut st = state_force_cpu.borrow_mut();
         if let Some(s) = st.as_mut() {
-            let currently_on = action.state().and_then(|v| v.get::<bool>()).unwrap_or(false);
+            let currently_on = action
+                .state()
+                .and_then(|v| v.get::<bool>())
+                .unwrap_or(false);
             let new_state = !currently_on;
             action.set_state(&new_state.to_variant());
             s.force_cpu = new_state;
@@ -1178,4 +1252,3 @@ fn key_to_button(keyval: gtk4::gdk::Key) -> Option<u8> {
         _ => None,
     }
 }
-

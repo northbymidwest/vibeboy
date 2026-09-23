@@ -1,5 +1,5 @@
 use crate::apu::Apu;
-use crate::cartridge::{make_cartridge, Cartridge};
+use crate::cartridge::{Cartridge, make_cartridge};
 use crate::clock::Clock;
 use crate::joypad::Joypad;
 use crate::model::GbModel;
@@ -7,7 +7,6 @@ use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::sgb::Sgb;
 use crate::timer::Timer;
-
 
 mod dma;
 mod io;
@@ -55,9 +54,14 @@ pub struct OamDma {
 impl OamDma {
     fn new() -> Self {
         OamDma {
-            active: false, source: 0, progress: 0, delay: 0,
-            was_blocking: false, blocking: false,
-            pending_write: None, bus_conflict_value: None,
+            active: false,
+            source: 0,
+            progress: 0,
+            delay: 0,
+            was_blocking: false,
+            blocking: false,
+            pending_write: None,
+            bus_conflict_value: None,
             last_bus_byte: 0xFF,
             bus_release_dots: 0,
         }
@@ -68,8 +72,12 @@ impl OamDma {
     /// Compute whether OAM should be blocked this M-cycle, based on current DMA state
     /// (called before step_oam_dma so the result reflects the start of the M-cycle).
     fn compute_blocking(&self) -> bool {
-        if !self.active { return false; }
-        if self.delay > 0 { return self.was_blocking; }
+        if !self.active {
+            return false;
+        }
+        if self.delay > 0 {
+            return self.was_blocking;
+        }
         true // actively copying
     }
 }
@@ -90,7 +98,14 @@ pub struct Hdma {
 
 impl Hdma {
     fn new() -> Self {
-        Hdma { src: 0, dst: 0x8000, blocks: 0, mode: 0, active: false, in_transfer: false }
+        Hdma {
+            src: 0,
+            dst: 0x8000,
+            blocks: 0,
+            mode: 0,
+            active: false,
+            in_transfer: false,
+        }
     }
 }
 
@@ -156,12 +171,13 @@ pub struct Bus {
     /// Extra T-cycles consumed by GDMA/HDMA that the CPU must account for.
     /// Set during DMA transfers, read and cleared by CPU after each instruction.
     pub(crate) dma_halt_cycles: u32,
-
 }
 
 /// Simple LCG PRNG for RAM initialization.
 fn ram_random(state: &mut u64) -> u8 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     (*state >> 56) as u8
 }
 
@@ -210,7 +226,13 @@ fn init_hram(model: GbModel) -> [u8; 0x7F] {
 }
 
 impl Bus {
-    pub fn new(rom: std::sync::Arc<[u8]>, boot_rom: Option<Vec<u8>>, model: GbModel, clock: std::sync::Arc<dyn Clock>, sample_rate: u32) -> Self {
+    pub fn new(
+        rom: std::sync::Arc<[u8]>,
+        boot_rom: Option<Vec<u8>>,
+        model: GbModel,
+        clock: std::sync::Arc<dyn Clock>,
+        sample_rate: u32,
+    ) -> Self {
         let boot_rom_active = boot_rom.is_some();
 
         let mut ppu = Ppu::new();
@@ -261,7 +283,11 @@ impl Bus {
         }
 
         // Compute timer before rom is moved into cartridge
-        let timer = if boot_rom_active { Timer::reset(model) } else { Timer::post_boot(model, is_cgb_game, &rom) };
+        let timer = if boot_rom_active {
+            Timer::reset(model)
+        } else {
+            Timer::post_boot(model, is_cgb_game, &rom)
+        };
 
         let cart = make_cartridge(rom, clock);
 
@@ -270,7 +296,16 @@ impl Bus {
             ppu,
             timer,
             joypad,
-            apu: if boot_rom_active { Apu::reset(model.cpu_clock_rate(), model.is_cgb(), sample_rate) } else { Apu::new(model.cpu_clock_rate(), model.is_cgb(), model.is_sgb(), sample_rate) },
+            apu: if boot_rom_active {
+                Apu::reset(model.cpu_clock_rate(), model.is_cgb(), sample_rate)
+            } else {
+                Apu::new(
+                    model.cpu_clock_rate(),
+                    model.is_cgb(),
+                    model.is_sgb(),
+                    sample_rate,
+                )
+            },
             wram: init_wram(model),
             wram_bank: 1,
             hram: init_hram(model),
@@ -382,12 +417,16 @@ impl Bus {
 
     // ── Public accessors for Cpu ───────────────────────────────────────────────
 
-    pub fn ie(&self) -> u8 { self.ie }
+    pub fn ie(&self) -> u8 {
+        self.ie
+    }
     pub fn if_reg(&mut self) -> u8 {
         self.flush_ppu_deferred();
         self.if_
     }
-    pub fn if_mut(&mut self) -> &mut u8 { &mut self.if_ }
+    pub fn if_mut(&mut self) -> &mut u8 {
+        &mut self.if_
+    }
 
     // ── Memory read ───────────────────────────────────────────────────────────
 
@@ -406,7 +445,9 @@ impl Bus {
         }
         if self.model.is_cgb() {
             // CGB: same-bus conflict after 2 M-cycle warm-up (delay + first copy at progress=0)
-            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+            if self.oam_dma.active
+                && self.oam_dma.delay == 0
+                && self.oam_dma.progress > 0
                 && self.oam_dma_same_bus(addr)
             {
                 return self.oam_dma_conflict_byte();
@@ -414,7 +455,9 @@ impl Bus {
         } else {
             // DMG: during active DMA transfer (after warm-up), reads from the same bus
             // as the DMA source return the previous byte transferred.
-            if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+            if self.oam_dma.active
+                && self.oam_dma.delay == 0
+                && self.oam_dma.progress > 0
                 && self.oam_dma_same_bus(addr)
             {
                 return self.oam_dma_conflict_byte();
@@ -442,7 +485,9 @@ impl Bus {
             }
             // Default: same bus check
             match src {
-                0x0000..=0x7FFF | 0xA000..=0xBFFF => matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF),
+                0x0000..=0x7FFF | 0xA000..=0xBFFF => {
+                    matches!(addr, 0x0000..=0x7FFF | 0xA000..=0xBFFF)
+                }
                 0x8000..=0x9FFF => matches!(addr, 0x8000..=0x9FFF),
                 0xC000..=0xDFFF => matches!(addr, 0xC000..=0xDFFF),
                 _ => false,
@@ -465,7 +510,10 @@ impl Bus {
             return 0xFF;
         }
         // Both DMG and CGB return the last byte transferred (source + progress - 1)
-        let mut src = self.oam_dma.source.wrapping_add(self.oam_dma.progress as u16 - 1);
+        let mut src = self
+            .oam_dma
+            .source
+            .wrapping_add(self.oam_dma.progress as u16 - 1);
         if !self.model.is_cgb() && src >= 0xFE00 {
             src -= 0x2000;
         }
@@ -504,7 +552,11 @@ impl Bus {
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize], // echo
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize], // echo
             0xFE00..=0xFE9F => {
-                if !self.ppu.oam_accessible { 0xFF } else { self.ppu.read_oam(addr) }
+                if !self.ppu.oam_accessible {
+                    0xFF
+                } else {
+                    self.ppu.read_oam(addr)
+                }
             }
             0xFEA0..=0xFEFF => {
                 // DMG/MGB/SGB: reads return 0x00
@@ -513,7 +565,7 @@ impl Bus {
             }
             0xFF00..=0xFF7F => self.read_io(addr),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
-            0xFFFF          => self.ie,
+            0xFFFF => self.ie,
         }
     }
 
@@ -544,7 +596,9 @@ impl Bus {
         // on the data bus. The DMA pipeline is holding a byte that was read
         // in the previous M-cycle — the CPU's write replaces that byte's
         // value before it gets flushed to OAM.
-        if self.oam_dma.active && self.oam_dma.delay == 0 && self.oam_dma.progress > 0
+        if self.oam_dma.active
+            && self.oam_dma.delay == 0
+            && self.oam_dma.progress > 0
             && self.oam_dma_same_bus(addr)
         {
             // Replace the pending pipeline byte (from previous step's read)
@@ -576,12 +630,14 @@ impl Bus {
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize] = val,
             0xF000..=0xFDFF => self.wram[self.wram_bank][(addr - 0xF000) as usize] = val,
             0xFE00..=0xFE9F => {
-                if self.ppu.oam_write_accessible { self.ppu.write_oam(addr, val); }
+                if self.ppu.oam_write_accessible {
+                    self.ppu.write_oam(addr, val);
+                }
             }
             0xFEA0..=0xFEFF => {} // unusable
             0xFF00..=0xFF7F => self.write_io(addr, val),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
-            0xFFFF          => self.ie = val,
+            0xFFFF => self.ie = val,
         }
     }
 
@@ -612,7 +668,10 @@ impl Bus {
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
             // Clear bus release after one eager tick cycle
-            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
+            self.oam_dma.bus_release_dots = self
+                .oam_dma
+                .bus_release_dots
+                .saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -641,7 +700,10 @@ impl Bus {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
-            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
+            self.oam_dma.bus_release_dots = self
+                .oam_dma
+                .bus_release_dots
+                .saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -662,7 +724,10 @@ impl Bus {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(ppu_cycles);
             self.if_ |= flags;
-            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(ppu_cycles as u8);
+            self.oam_dma.bus_release_dots = self
+                .oam_dma
+                .bus_release_dots
+                .saturating_sub(ppu_cycles as u8);
         } else {
             self.ppu_deferred += ppu_cycles;
         }
@@ -679,7 +744,10 @@ impl Bus {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(bus_cycles);
             self.if_ |= flags;
-            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(bus_cycles as u8);
+            self.oam_dma.bus_release_dots = self
+                .oam_dma
+                .bus_release_dots
+                .saturating_sub(bus_cycles as u8);
         } else {
             self.ppu_deferred += bus_cycles;
         }
@@ -693,7 +761,10 @@ impl Bus {
             self.sync_ppu_dma_bus_byte();
             let flags = self.ppu.step(bus_cycles);
             self.if_ |= flags;
-            self.oam_dma.bus_release_dots = self.oam_dma.bus_release_dots.saturating_sub(bus_cycles as u8);
+            self.oam_dma.bus_release_dots = self
+                .oam_dma
+                .bus_release_dots
+                .saturating_sub(bus_cycles as u8);
         } else {
             self.ppu_deferred += bus_cycles;
         }
@@ -755,7 +826,10 @@ impl Bus {
                 self.if_ |= flags;
                 // Write real value, remaining 1T uses it
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 let flags = self.ppu.step(1);
                 self.if_ |= flags;
             }
@@ -766,7 +840,10 @@ impl Bus {
                     self.if_ |= flags;
                 }
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
             }
             // DMG SCY: READ_NEW — (ppu_cycles-1)T old, write, 1T new
             0xFF42 if !self.model.is_cgb() => {
@@ -775,7 +852,10 @@ impl Bus {
                     self.if_ |= flags;
                 }
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 if ppu_cycles >= 1 {
                     let flags = self.ppu.step(1);
                     self.if_ |= flags;
@@ -788,7 +868,10 @@ impl Bus {
                     self.if_ |= flags;
                 }
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 let remaining = ppu_cycles.min(2);
                 if remaining > 0 {
                     let flags = self.ppu.step(remaining);
@@ -803,7 +886,10 @@ impl Bus {
                 }
                 let old_lcdc = self.ppu.lcdc;
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 // TILE_SEL (bit 4) transition 1→0: 1T glitch window
                 if (old_lcdc & 0x10) != 0 && (val & 0x10) == 0 {
                     self.ppu.tile_sel_glitch = true;
@@ -811,7 +897,10 @@ impl Bus {
                     self.if_ |= flags;
                     self.ppu.tile_sel_glitch = false;
                     self.ppu_tick_debt = 1; // borrow 1T from next M-cycle
-                    if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                    if self.ppu.if_flags != 0 {
+                        self.if_ |= self.ppu.if_flags;
+                        self.ppu.if_flags = 0;
+                    }
                 }
             }
             // DMG LCDC: complex glitch handler
@@ -834,14 +923,16 @@ impl Bus {
                     self.if_ |= flags;
                     self.ppu.lcdc = saved_lcdc;
                     // Window disable glitch
-                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0
-                        && self.ppu.fetcher_is_window()
+                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0 && self.ppu.fetcher_is_window()
                     {
                         self.ppu.disable_window_pixel_insertion_glitch = true;
                     }
                     // Write real value, remaining 1T
                     self.ppu.write(addr, val);
-                    if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                    if self.ppu.if_flags != 0 {
+                        self.if_ |= self.ppu.if_flags;
+                        self.ppu.if_flags = 0;
+                    }
                     let flags = self.ppu.step(1);
                     self.if_ |= flags;
                 } else {
@@ -850,7 +941,10 @@ impl Bus {
                         self.if_ |= flags;
                     }
                     self.ppu.write(addr, val);
-                    if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                    if self.ppu.if_flags != 0 {
+                        self.if_ |= self.ppu.if_flags;
+                        self.ppu.if_flags = 0;
+                    }
                 }
             }
             // WY: READ_NEW — write takes effect 1T before end of M-cycle
@@ -860,7 +954,10 @@ impl Bus {
                     self.if_ |= flags;
                 }
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 if ppu_cycles >= 1 {
                     let flags = self.ppu.step(1);
                     self.if_ |= flags;
@@ -873,14 +970,20 @@ impl Bus {
                     self.if_ |= flags;
                 }
                 self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
                 // 1T with wx_just_changed to suppress window trigger
                 self.ppu.wx_just_changed = true;
                 let flags = self.ppu.step(1);
                 self.if_ |= flags;
                 self.ppu.wx_just_changed = false;
                 self.ppu_tick_debt = 1; // compensate for the extra 1T
-                if self.ppu.if_flags != 0 { self.if_ |= self.ppu.if_flags; self.ppu.if_flags = 0; }
+                if self.ppu.if_flags != 0 {
+                    self.if_ |= self.ppu.if_flags;
+                    self.ppu.if_flags = 0;
+                }
             }
             // Fallback (should not be reached if is_ppu_conflict_register is correct)
             _ => {
@@ -899,9 +1002,7 @@ impl Bus {
     /// During OAM DMA, the PPU reads whatever byte is on the OAM data bus
     /// (the current DMA transfer byte) instead of stored OAM values.
     fn sync_ppu_dma_bus_byte(&mut self) {
-        self.ppu.dma_bus_byte = if self.oam_dma.is_blocking()
-            || self.oam_dma.bus_release_dots > 0
-        {
+        self.ppu.dma_bus_byte = if self.oam_dma.is_blocking() || self.oam_dma.bus_release_dots > 0 {
             Some(self.oam_dma.last_bus_byte)
         } else {
             None
@@ -1078,8 +1179,13 @@ impl Bus {
         if let Some(ref mut sgb) = self.sgb {
             sgb.tick_transfer();
         }
-        let has_transfer = self.sgb.as_ref().map_or(false, |s: &Sgb| s.has_pending_transfer());
-        if !has_transfer { return; }
+        let has_transfer = self
+            .sgb
+            .as_ref()
+            .map_or(false, |s: &Sgb| s.has_pending_transfer());
+        if !has_transfer {
+            return;
+        }
 
         // Read VRAM tiles directly to reconstruct the 4096-byte transfer data.
         // The game writes data as tiles at $8000-$8FFF, sets up the tilemap with

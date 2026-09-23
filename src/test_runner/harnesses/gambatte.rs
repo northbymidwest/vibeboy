@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use vibeboy::model::GbModel;
 use crate::harness::{TestHarness, TestResult};
-use crate::util::{make_emu, GB_FB_WIDTH};
+use crate::util::{GB_FB_WIDTH, make_emu};
+use vibeboy::model::GbModel;
 
 // Gambatte hex digit tile patterns (8x8 pixels each, bit 7=leftmost pixel)
 // 1 = black (0x000000), 0 = white (0xF8F8F8)
@@ -48,11 +48,17 @@ fn gambatte_tile_matches(fb: &[u32], tile_x: usize, digit: usize) -> bool {
         for x in 0..8 {
             let pixel = fb[y * GB_FB_WIDTH + tile_x * 8 + x] & 0x00FFFFFF;
             let luma = (pixel >> 16) & 0xFF; // use red channel as brightness proxy
-            if luma < (darkest & 0xFF) { darkest = luma; }
-            if luma > (lightest & 0xFF) { lightest = luma; }
+            if luma < (darkest & 0xFF) {
+                darkest = luma;
+            }
+            if luma > (lightest & 0xFF) {
+                lightest = luma;
+            }
         }
     }
-    if darkest == lightest { return false; } // uniform tile — can't match any digit
+    if darkest == lightest {
+        return false;
+    } // uniform tile — can't match any digit
     let threshold = (darkest + lightest) / 2;
 
     for y in 0..8 {
@@ -115,7 +121,11 @@ fn parse_gambatte_test(path: &Path) -> Option<GambatteExpected> {
             let ch = &stem[c_pos + 10..];
             let ch_end = ch.find('_').unwrap_or(ch.len());
             let ch = &ch[..ch_end];
-            if is_hex(ch) { Some(ch.to_uppercase()) } else { None }
+            if is_hex(ch) {
+                Some(ch.to_uppercase())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -217,10 +227,7 @@ impl TestHarness for GambatteHarness {
                         if actual.is_empty() {
                             actual = "?".to_string();
                         }
-                        eprintln!(
-                            "  [{:?}] digit {}: expected={} got={}",
-                            model, i, c, actual
-                        );
+                        eprintln!("  [{:?}] digit {}: expected={} got={}", model, i, c, actual);
                     }
                     return TestResult::Fail;
                 }

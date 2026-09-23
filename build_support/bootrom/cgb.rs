@@ -70,14 +70,20 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ld_a(1);
     for i in 0..8 {
         a.ld_hli_a();
-        if i < 7 { a.inc_a(); }
+        if i < 7 {
+            a.inc_a();
+        }
     }
     // Swatch: tiles 0 (color0), 9 (color1), 10 (color2), 11 (color3)
     a.ld_hl_imm(swatch);
-    a.xor_a(); a.ld_hli_a();
-    a.ld_a(9); a.ld_hli_a();
-    a.ld_a(10); a.ld_hli_a();
-    a.ld_a(11); a.ld_hli_a();
+    a.xor_a();
+    a.ld_hli_a();
+    a.ld_a(9);
+    a.ld_hli_a();
+    a.ld_a(10);
+    a.ld_hli_a();
+    a.ld_a(11);
+    a.ld_hli_a();
 
     // Bank 1: palette attributes for split tiles.
     // Each split tile uses color 2 for the left letter and color 3 for the right.
@@ -93,7 +99,10 @@ pub fn build(agb: bool) -> Vec<u8> {
     // Swatch tiles: all use palette 7
     a.ld_hl_imm(swatch);
     a.ld_a(7);
-    a.ld_hli_a(); a.ld_hli_a(); a.ld_hli_a(); a.ld_hli_a();
+    a.ld_hli_a();
+    a.ld_hli_a();
+    a.ld_hli_a();
+    a.ld_hli_a();
     a.xor_a();
     a.ldh_n_a(0x4F); // VBK = 0
 
@@ -123,8 +132,10 @@ pub fn build(agb: bool) -> Vec<u8> {
         let lb = (left_color >> 10) & 0x1F;
         let light = ((lr + 31) / 2) | (((lg + 31) / 2) << 5) | (((lb + 31) / 2) << 10);
         for c in &[0x7FFF, light, left_color, right_color] {
-            a.ld_a(*c as u8); a.ldh_n_a(0x69);
-            a.ld_a((*c >> 8) as u8); a.ldh_n_a(0x69);
+            a.ld_a(*c as u8);
+            a.ldh_n_a(0x69);
+            a.ld_a((*c >> 8) as u8);
+            a.ldh_n_a(0x69);
         }
     }
 
@@ -132,17 +143,27 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ld_a(0x80 | 56); // BGPI: auto-inc, palette 7
     a.ldh_n_a(0x68);
     for _ in 0..4 {
-        a.ld_a(0xFF); a.ldh_n_a(0x69);
-        a.ld_a(0x7F); a.ldh_n_a(0x69);
+        a.ld_a(0xFF);
+        a.ldh_n_a(0x69);
+        a.ld_a(0x7F);
+        a.ldh_n_a(0x69);
     }
 
     // --- LCD on, boot chime ---
-    a.ld_a(0x91); a.ldh_n_a(0x40); // LCDC
+    a.ld_a(0x91);
+    a.ldh_n_a(0x40); // LCDC
     for &(reg, val) in &[
-        (0x26u8, 0x80u8), (0x24, 0x77), (0x25, 0xF3), (0x10, 0x67),
-        (0x11, 0x80), (0x12, 0xF3), (0x13, 0x83), (0x14, 0x87),
+        (0x26u8, 0x80u8),
+        (0x24, 0x77),
+        (0x25, 0xF3),
+        (0x10, 0x67),
+        (0x11, 0x80),
+        (0x12, 0xF3),
+        (0x13, 0x83),
+        (0x14, 0x87),
     ] {
-        a.ld_a(val); a.ldh_n_a(reg);
+        a.ld_a(val);
+        a.ldh_n_a(reg);
     }
 
     // --- Wait ~2 sec, polling joypad once per frame ---
@@ -154,10 +175,13 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ld_e(120);
     a.label("w1");
     // Wait for VBlank start (LY == 144)
-    a.ldh_a_n(0x44); a.cp_a_n(144); a.jr_nz("w1");
+    a.ldh_a_n(0x44);
+    a.cp_a_n(144);
+    a.jr_nz("w1");
 
     // Poll joypad
-    a.ld_a(0x20); a.ldh_n_a(0x00); // select D-pad
+    a.ld_a(0x20);
+    a.ldh_n_a(0x00); // select D-pad
     a.ldh_a_n(0x00); // debounce
     a.ldh_a_n(0x00); // stable read
     a.and_n(0x0F);
@@ -165,7 +189,8 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.and_n(0x0F);
     a.swap_a(); // D-pad in high nibble
     a.ld_b_a();
-    a.ld_a(0x10); a.ldh_n_a(0x00); // select buttons
+    a.ld_a(0x10);
+    a.ldh_n_a(0x00); // select buttons
     a.ldh_a_n(0x00);
     a.ldh_a_n(0x00);
     a.and_n(0x03);
@@ -188,22 +213,32 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.call("sub_update_swatch");
     a.pop_de();
     a.label("w_no_btn");
-    a.ld_a(0x30); a.ldh_n_a(0x00); // reset joypad
+    a.ld_a(0x30);
+    a.ldh_n_a(0x00); // reset joypad
 
     // Wait for VBlank to end
     a.label("w2");
-    a.ldh_a_n(0x44); a.cp_a_n(144); a.jr_z("w2");
-    a.dec_e(); a.jr_nz("w1");
+    a.ldh_a_n(0x44);
+    a.cp_a_n(144);
+    a.jr_z("w2");
+    a.dec_e();
+    a.jr_nz("w1");
 
     // --- Final audio ---
-    a.ld_a(0xBF); a.ldh_n_a(0x11);
-    a.ld_a(0xF3); a.ldh_n_a(0x12);
-    a.ld_a(0xBF); a.ldh_n_a(0x14);
+    a.ld_a(0xBF);
+    a.ldh_n_a(0x11);
+    a.ld_a(0xF3);
+    a.ldh_n_a(0x12);
+    a.ld_a(0xBF);
+    a.ldh_n_a(0x14);
 
     // --- LCD off ---
     a.label("off_vbl");
-    a.ldh_a_n(0x44); a.cp_a_n(144); a.jr_nz("off_vbl");
-    a.xor_a(); a.ldh_n_a(0x40);
+    a.ldh_a_n(0x44);
+    a.cp_a_n(144);
+    a.jr_nz("off_vbl");
+    a.xor_a();
+    a.ldh_n_a(0x40);
 
     // --- Clear VRAM for game ---
     a.call("sub_clear_vram");
@@ -225,15 +260,22 @@ pub fn build(agb: bool) -> Vec<u8> {
     }
 
     // CH1: zero volume, set post-boot register values
-    a.ld_a(0x80); a.ldh_n_a(0x10); // NR10
-    a.xor_a(); a.ldh_n_a(0x12); // NR12 = 0 → vol=0 on trigger
-    a.ld_a(0xBF); a.ldh_n_a(0x14); // trigger
-    a.ld_a(0xBF); a.ldh_n_a(0x11); // NR11
-    a.ld_a(0xF3); a.ldh_n_a(0x12); // NR12
+    a.ld_a(0x80);
+    a.ldh_n_a(0x10); // NR10
+    a.xor_a();
+    a.ldh_n_a(0x12); // NR12 = 0 → vol=0 on trigger
+    a.ld_a(0xBF);
+    a.ldh_n_a(0x14); // trigger
+    a.ld_a(0xBF);
+    a.ldh_n_a(0x11); // NR11
+    a.ld_a(0xF3);
+    a.ldh_n_a(0x12); // NR12
 
     // Joypad + IF
-    a.ld_a(0x30); a.ldh_n_a(0x00); // P1
-    a.ld_a(0x01); a.ldh_n_a(0x0F); // IF
+    a.ld_a(0x30);
+    a.ldh_n_a(0x00); // P1
+    a.ld_a(0x01);
+    a.ldh_n_a(0x0F); // IF
 
     // --- CGB vs DMG? ---
     a.ld_a_nn(0x0143);
@@ -243,7 +285,8 @@ pub fn build(agb: bool) -> Vec<u8> {
     // ============================================================
     // DMG game: palette selection
     // ============================================================
-    a.ld_a(0xFC); a.ldh_n_a(0x47); // BGP
+    a.ld_a(0xFC);
+    a.ldh_n_a(0x47); // BGP
 
     // Check saved joypad combo
     a.ldh_a_n(0x86);
@@ -374,12 +417,16 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.add_hl_de();
 
     // Read 3 offsets
-    a.ld_a_hli(); a.ldh_n_a(0x80);
-    a.ld_a_hli(); a.ldh_n_a(0x81);
-    a.ld_a_hl_ind(); a.ldh_n_a(0x82);
+    a.ld_a_hli();
+    a.ldh_n_a(0x80);
+    a.ld_a_hli();
+    a.ldh_n_a(0x81);
+    a.ld_a_hl_ind();
+    a.ldh_n_a(0x82);
 
     // BG = offset2
-    a.ldh_a_n(0x82); a.ldh_n_a(0x83);
+    a.ldh_a_n(0x82);
+    a.ldh_n_a(0x83);
 
     // OBJ0: offset0 if bit5, else offset2
     a.ld_a_b();
@@ -410,13 +457,15 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.ldh_n_a(0x85);
 
     // Program BG palette 0
-    a.ld_a(0x80); a.ldh_n_a(0x68);
+    a.ld_a(0x80);
+    a.ldh_n_a(0x68);
     a.ldh_a_n(0x83);
     a.ld_c(0x69);
     a.call("sub_copy_pal");
 
     // Program OBJ palette 0
-    a.ld_a(0x80); a.ldh_n_a(0x6A);
+    a.ld_a(0x80);
+    a.ldh_n_a(0x6A);
     a.ldh_a_n(0x84);
     a.ld_c(0x6B);
     a.call("sub_copy_pal");
@@ -426,23 +475,32 @@ pub fn build(agb: bool) -> Vec<u8> {
     a.call("sub_copy_pal");
 
     // DMG compat register values
-    a.ld_d(0x00); a.ld_e(0x08); a.ld_h(0x00); a.ld_l(0x7C);
+    a.ld_d(0x00);
+    a.ld_e(0x08);
+    a.ld_h(0x00);
+    a.ld_l(0x7C);
     a.jr("final");
 
     // ============================================================
     // CGB native game
     // ============================================================
     a.label("is_cgb");
-    a.ld_d(0xFF); a.ld_e(0x56); a.ld_h(0x00); a.ld_l(0x0D);
+    a.ld_d(0xFF);
+    a.ld_e(0x56);
+    a.ld_h(0x00);
+    a.ld_l(0x0D);
 
     // ============================================================
     // Final: set remaining IO and CPU registers, hand off
     // ============================================================
     a.label("final");
 
-    a.ld_a(0x88); a.ldh_n_a(0x68); // BCPS
-    a.ld_a(0x90); a.ldh_n_a(0x6A); // OCPS
-    a.ld_a(0x91); a.ldh_n_a(0x40); // LCDC
+    a.ld_a(0x88);
+    a.ldh_n_a(0x68); // BCPS
+    a.ld_a(0x90);
+    a.ldh_n_a(0x6A); // OCPS
+    a.ld_a(0x91);
+    a.ldh_n_a(0x40); // LCDC
 
     a.ld_b(if agb { 0x01 } else { 0x00 });
     a.ld_c(0x00);
@@ -454,17 +512,31 @@ pub fn build(agb: bool) -> Vec<u8> {
     // Subroutine: clear both VRAM banks
     // ============================================================
     a.label("sub_clear_vram");
-    a.xor_a(); a.ldh_n_a(0x4F);
-    a.ld_hl_imm(0x8000); a.ld_b(0x20); a.ld_c(0);
+    a.xor_a();
+    a.ldh_n_a(0x4F);
+    a.ld_hl_imm(0x8000);
+    a.ld_b(0x20);
+    a.ld_c(0);
     a.label("sv0");
-    a.ld_hli_a(); a.dec_c(); a.jr_nz("sv0");
-    a.dec_b(); a.jr_nz("sv0");
-    a.ld_a(1); a.ldh_n_a(0x4F);
-    a.xor_a(); a.ld_hl_imm(0x8000); a.ld_b(0x20); a.ld_c(0);
+    a.ld_hli_a();
+    a.dec_c();
+    a.jr_nz("sv0");
+    a.dec_b();
+    a.jr_nz("sv0");
+    a.ld_a(1);
+    a.ldh_n_a(0x4F);
+    a.xor_a();
+    a.ld_hl_imm(0x8000);
+    a.ld_b(0x20);
+    a.ld_c(0);
     a.label("sv1");
-    a.ld_hli_a(); a.dec_c(); a.jr_nz("sv1");
-    a.dec_b(); a.jr_nz("sv1");
-    a.xor_a(); a.ldh_n_a(0x4F);
+    a.ld_hli_a();
+    a.dec_c();
+    a.jr_nz("sv1");
+    a.dec_b();
+    a.jr_nz("sv1");
+    a.xor_a();
+    a.ldh_n_a(0x4F);
     a.ret();
 
     // ============================================================

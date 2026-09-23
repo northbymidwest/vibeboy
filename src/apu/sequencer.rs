@@ -1,14 +1,15 @@
 /// Frame sequencer (DIV-coupled) and channel trigger logic.
-
 use super::Apu;
-use super::channels::{SquareCh, Sweep, WaveCh, NoiseCh, set_envelope_clock};
+use super::channels::{NoiseCh, SquareCh, Sweep, WaveCh, set_envelope_clock};
 
 impl Apu {
     // ── DIV-coupled frame sequencer ─────────────────────────────────────────
 
     /// Called by Bus when DIV bit 12 (or 13 in double speed) has a falling edge.
     pub fn div_event(&mut self) {
-        if !self.power { return; }
+        if !self.power {
+            return;
+        }
 
         // Handle skip_div_event state machine
         if self.skip_div_event == 1 {
@@ -66,7 +67,9 @@ impl Apu {
 
     /// Called by Bus when DIV bit 12 (or 13 in double speed) has a rising edge.
     pub fn div_secondary_event(&mut self) {
-        if !self.power { return; }
+        if !self.power {
+            return;
+        }
 
         // Reset PCM mask
         self.pcm_mask = [0xFF, 0xFF];
@@ -75,15 +78,30 @@ impl Apu {
         // reload countdown from env_period and set envelope clock
         if self.ch1.enabled && self.ch1.volume_countdown == 0 {
             self.ch1.volume_countdown = self.ch1.env_period;
-            set_envelope_clock(&mut self.ch1.envelope_clock, self.ch1.env_period != 0, self.ch1.env_add, self.ch1.volume);
+            set_envelope_clock(
+                &mut self.ch1.envelope_clock,
+                self.ch1.env_period != 0,
+                self.ch1.env_add,
+                self.ch1.volume,
+            );
         }
         if self.ch2.enabled && self.ch2.volume_countdown == 0 {
             self.ch2.volume_countdown = self.ch2.env_period;
-            set_envelope_clock(&mut self.ch2.envelope_clock, self.ch2.env_period != 0, self.ch2.env_add, self.ch2.volume);
+            set_envelope_clock(
+                &mut self.ch2.envelope_clock,
+                self.ch2.env_period != 0,
+                self.ch2.env_add,
+                self.ch2.volume,
+            );
         }
         if self.ch4.enabled && self.ch4.volume_countdown == 0 {
             self.ch4.volume_countdown = self.ch4.env_period;
-            set_envelope_clock(&mut self.ch4.envelope_clock, self.ch4.env_period != 0, self.ch4.env_add, self.ch4.volume);
+            set_envelope_clock(
+                &mut self.ch4.envelope_clock,
+                self.ch4.env_period != 0,
+                self.ch4.env_add,
+                self.ch4.volume,
+            );
         }
     }
 
@@ -98,7 +116,7 @@ impl Apu {
                 self.ch1.length_counter -= 1;
             }
         }
-        self.ch1.volume    = self.ch1.env_init_vol;
+        self.ch1.volume = self.ch1.env_init_vol;
         self.ch1.env_timer = self.ch1.env_period;
         self.ch1.volume_countdown = self.ch1.env_period;
         self.ch1.envelope_clock.locked = false;
@@ -111,7 +129,14 @@ impl Apu {
         if !was_active {
             // Retrigger duty advance (not active → active)
             if val & 4 == 0
-                && ((self.ch1.freq_timer.wrapping_sub(self.ch1.delay).wrapping_sub(2)) / 4) & 0x400 == 0
+                && ((self
+                    .ch1
+                    .freq_timer
+                    .wrapping_sub(self.ch1.delay)
+                    .wrapping_sub(2))
+                    / 4)
+                    & 0x400
+                    == 0
             {
                 self.ch1.duty_pos = (self.ch1.duty_pos + 1) & 7;
                 force_unsuppressed = true;
@@ -124,7 +149,14 @@ impl Apu {
             let old_freq = self.ch1.freq;
             if !self.ch1.just_reloaded
                 && val & 4 == 0
-                && ((self.ch1.freq_timer.wrapping_sub(self.ch1.delay).wrapping_sub(4)) / 4) & 0x400 == 0
+                && ((self
+                    .ch1
+                    .freq_timer
+                    .wrapping_sub(self.ch1.delay)
+                    .wrapping_sub(4))
+                    / 4)
+                    & 0x400
+                    == 0
             {
                 self.ch1.duty_pos = (self.ch1.duty_pos + 1) & 7;
                 self.ch1.sample_suppressed = false;
@@ -155,7 +187,7 @@ impl Apu {
                 self.ch2.length_counter -= 1;
             }
         }
-        self.ch2.volume    = self.ch2.env_init_vol;
+        self.ch2.volume = self.ch2.env_init_vol;
         self.ch2.env_timer = self.ch2.env_period;
         self.ch2.volume_countdown = self.ch2.env_period;
         self.ch2.envelope_clock.locked = false;
@@ -166,7 +198,14 @@ impl Apu {
         let mut force_unsuppressed = false;
         if !was_active {
             if val & 4 == 0
-                && ((self.ch2.freq_timer.wrapping_sub(self.ch2.delay).wrapping_sub(2)) / 4) & 0x400 == 0
+                && ((self
+                    .ch2
+                    .freq_timer
+                    .wrapping_sub(self.ch2.delay)
+                    .wrapping_sub(2))
+                    / 4)
+                    & 0x400
+                    == 0
             {
                 self.ch2.duty_pos = (self.ch2.duty_pos + 1) & 7;
                 force_unsuppressed = true;
@@ -178,7 +217,14 @@ impl Apu {
             let old_freq = self.ch2.freq;
             if !self.ch2.just_reloaded
                 && val & 4 == 0
-                && ((self.ch2.freq_timer.wrapping_sub(self.ch2.delay).wrapping_sub(4)) / 4) & 0x400 == 0
+                && ((self
+                    .ch2
+                    .freq_timer
+                    .wrapping_sub(self.ch2.delay)
+                    .wrapping_sub(4))
+                    / 4)
+                    & 0x400
+                    == 0
             {
                 self.ch2.duty_pos = (self.ch2.duty_pos + 1) & 7;
                 self.ch2.sample_suppressed = false;
@@ -227,8 +273,8 @@ impl Apu {
                 self.ch3.wave_ram[3] = src[3];
             }
         }
-        self.ch3.freq_timer  = self.ch3.reload_period() + 6;
-        self.ch3.sample_pos  = 0;
+        self.ch3.freq_timer = self.ch3.reload_period() + 6;
+        self.ch3.sample_pos = 0;
         if !self.ch3.dac_on {
             self.ch3.enabled = false;
         }
@@ -242,7 +288,7 @@ impl Apu {
                 self.ch4.length_counter -= 1;
             }
         }
-        self.ch4.volume    = self.ch4.env_init_vol;
+        self.ch4.volume = self.ch4.env_init_vol;
         self.ch4.env_timer = self.ch4.env_period;
         self.ch4.volume_countdown = self.ch4.env_period;
         self.ch4.envelope_clock.locked = false;

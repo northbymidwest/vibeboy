@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 // Boot ROM generators (build-time only, not part of the runtime library).
 #[path = "build_support/bootrom/mod.rs"]
@@ -101,27 +101,36 @@ fn main() {
         println!("cargo:rerun-if-changed={}", src.display());
 
         jobs.push(ShaderJob {
-            src: src.clone(), target: "spirv",
+            src: src.clone(),
+            target: "spirv",
             out: Path::new(&out_dir).join(format!("{name}_comp.spv")),
-            profile: None, define: None,
+            profile: None,
+            define: None,
         });
         jobs.push(ShaderJob {
-            src: src.clone(), target: "metal",
+            src: src.clone(),
+            target: "metal",
             out: Path::new(&out_dir).join(format!("{name}_comp.metal")),
-            profile: None, define: None,
+            profile: None,
+            define: None,
         });
         jobs.push(ShaderJob {
-            src: src.clone(), target: "wgsl",
+            src: src.clone(),
+            target: "wgsl",
             out: Path::new(&out_dir).join(format!("{name}_comp.wgsl")),
-            profile: None, define: None,
+            profile: None,
+            define: None,
         });
 
         // DXIL (requires dxc, only available on Windows).
         let dxil = Path::new(&out_dir).join(format!("{name}_comp.dxil"));
         if has_dxc {
             jobs.push(ShaderJob {
-                src: src.clone(), target: "dxil", out: dxil,
-                profile: Some("cs_6_0"), define: Some("DXIL_TARGET"),
+                src: src.clone(),
+                target: "dxil",
+                out: dxil,
+                profile: Some("cs_6_0"),
+                define: Some("DXIL_TARGET"),
             });
         } else {
             let _ = std::fs::write(&dxil, b"");
@@ -136,36 +145,46 @@ fn main() {
     let max_parallel = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let results: Vec<_> = jobs.chunks(max_parallel).flat_map(|chunk| {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = chunk.iter().map(|job| {
-                scope.spawn(|| {
-                    let mut cmd = Command::new("slangc");
-                    cmd.arg(job.src.to_str().unwrap())
-                        .arg("-I").arg("src/shaders")
-                        .arg("-target").arg(job.target);
-                    if let Some(profile) = job.profile {
-                        cmd.arg("-profile").arg(profile);
-                    }
-                    if let Some(define) = job.define {
-                        cmd.arg(format!("-D{define}"));
-                    }
-                    if shader_debug {
-                        cmd.arg("-g");
-                    }
-                    cmd.arg("-o").arg(job.out.to_str().unwrap());
-                    cmd.output()
-                })
-            }).collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+    let results: Vec<_> = jobs
+        .chunks(max_parallel)
+        .flat_map(|chunk| {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|job| {
+                        scope.spawn(|| {
+                            let mut cmd = Command::new("slangc");
+                            cmd.arg(job.src.to_str().unwrap())
+                                .arg("-I")
+                                .arg("src/shaders")
+                                .arg("-target")
+                                .arg(job.target);
+                            if let Some(profile) = job.profile {
+                                cmd.arg("-profile").arg(profile);
+                            }
+                            if let Some(define) = job.define {
+                                cmd.arg(format!("-D{define}"));
+                            }
+                            if shader_debug {
+                                cmd.arg("-g");
+                            }
+                            cmd.arg("-o").arg(job.out.to_str().unwrap());
+                            cmd.output()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            })
         })
-    }).collect();
+        .collect();
 
     for (job, output) in jobs.iter().zip(results) {
         match output {
             Ok(o) if !o.status.success() => {
-                eprintln!("slangc failed for {} -> {}:",
-                    job.src.display(), job.target);
+                eprintln!("slangc failed for {} -> {}:", job.src.display(), job.target);
                 eprintln!("{}", String::from_utf8_lossy(&o.stderr));
                 panic!("Shader compilation failed");
             }
@@ -174,7 +193,6 @@ fn main() {
         }
     }
 }
-
 
 fn generate_boot_roms(out_dir: &str) {
     let boot_dir = Path::new(out_dir).join("bootroms");

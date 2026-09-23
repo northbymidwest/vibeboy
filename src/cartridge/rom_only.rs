@@ -1,12 +1,14 @@
-use std::sync::Arc;
 use super::Cartridge;
+use std::sync::Arc;
 
 pub struct RomOnly {
     rom: Arc<[u8]>,
 }
 
 impl RomOnly {
-    pub(super) fn new(rom: Arc<[u8]>) -> Self { RomOnly { rom } }
+    pub(super) fn new(rom: Arc<[u8]>) -> Self {
+        RomOnly { rom }
+    }
 }
 
 impl Cartridge for RomOnly {
@@ -14,6 +16,8 @@ impl Cartridge for RomOnly {
         self.rom.get(addr as usize).copied().unwrap_or(0xFF)
     }
     fn write_rom(&mut self, _addr: u16, _val: u8) {}
-    fn read_ram(&self, _addr: u16) -> u8 { 0xFF }
+    fn read_ram(&self, _addr: u16) -> u8 {
+        0xFF
+    }
     fn write_ram(&mut self, _addr: u16, _val: u8) {}
 }

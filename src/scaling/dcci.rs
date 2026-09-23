@@ -131,7 +131,12 @@ fn diamond_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
                 get(src, w, h, x + 1, y + 1),
                 get(src, w, h, x + 2, y + 1),
             ];
-            let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+            let wt = [
+                cubic_weight(1.5),
+                cubic_weight(0.5),
+                cubic_weight(0.5),
+                cubic_weight(1.5),
+            ];
             let top = cubic_blend4(c, wt);
             let bot = cubic_blend4(c2, wt);
             blend2(top, bot, 0.5)
@@ -150,7 +155,12 @@ fn diamond_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
                 get(src, w, h, x + 1, y + 1),
                 get(src, w, h, x + 1, y + 2),
             ];
-            let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+            let wt = [
+                cubic_weight(1.5),
+                cubic_weight(0.5),
+                cubic_weight(0.5),
+                cubic_weight(1.5),
+            ];
             let left = cubic_blend4(c, wt);
             let right = cubic_blend4(c2, wt);
             blend2(left, right, 0.5)
@@ -161,7 +171,12 @@ fn diamond_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
             let d1 = get(src, w, h, x, y);
             let d2 = get(src, w, h, x + 1, y + 1);
             let d3 = get(src, w, h, x + 2, y + 2);
-            let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+            let wt = [
+                cubic_weight(1.5),
+                cubic_weight(0.5),
+                cubic_weight(0.5),
+                cubic_weight(1.5),
+            ];
             cubic_blend4([d0, d1, d2, d3], wt)
         }
         4 => {
@@ -170,7 +185,12 @@ fn diamond_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
             let d1 = get(src, w, h, x + 1, y);
             let d2 = get(src, w, h, x, y + 1);
             let d3 = get(src, w, h, x - 1, y + 2);
-            let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+            let wt = [
+                cubic_weight(1.5),
+                cubic_weight(0.5),
+                cubic_weight(0.5),
+                cubic_weight(1.5),
+            ];
             cubic_blend4([d0, d1, d2, d3], wt)
         }
         _ => {
@@ -195,7 +215,12 @@ fn hedge_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
         get(src, w, h, x + 1, y),
         get(src, w, h, x + 2, y),
     ];
-    let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+    let wt = [
+        cubic_weight(1.5),
+        cubic_weight(0.5),
+        cubic_weight(0.5),
+        cubic_weight(1.5),
+    ];
     cubic_blend4(c, wt)
 }
 
@@ -208,7 +233,12 @@ fn vedge_interp(src: &[u32], w: usize, h: usize, x: isize, y: isize) -> u32 {
         get(src, w, h, x, y + 1),
         get(src, w, h, x, y + 2),
     ];
-    let wt = [cubic_weight(1.5), cubic_weight(0.5), cubic_weight(0.5), cubic_weight(1.5)];
+    let wt = [
+        cubic_weight(1.5),
+        cubic_weight(0.5),
+        cubic_weight(0.5),
+        cubic_weight(1.5),
+    ];
     cubic_blend4(c, wt)
 }
 
