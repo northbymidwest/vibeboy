@@ -130,6 +130,9 @@ fn main() {
 
     // Run slangc invocations in parallel, limited to available CPUs to avoid
     // hitting the open file descriptor limit (~112 simultaneous processes).
+    // VIBEBOY_SHADER_DEBUG=1 emits shader debug info (RenderDoc, validation layers).
+    println!("cargo:rerun-if-env-changed=VIBEBOY_SHADER_DEBUG");
+    let shader_debug = std::env::var("VIBEBOY_SHADER_DEBUG").is_ok();
     let max_parallel = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -146,6 +149,9 @@ fn main() {
                     }
                     if let Some(define) = job.define {
                         cmd.arg(format!("-D{define}"));
+                    }
+                    if shader_debug {
+                        cmd.arg("-g");
                     }
                     cmd.arg("-o").arg(job.out.to_str().unwrap());
                     cmd.output()

@@ -53,12 +53,17 @@ pub struct GpuPipelines {
 impl GpuPipelines {
     /// Create a new GPU pipeline manager for the given window and source dimensions.
     pub fn new(window: &sdl3::video::Window, src_w: u32, src_h: u32) -> Self {
-        let all_formats = gpu::ShaderFormat::PRIVATE
-            | gpu::ShaderFormat::SPIRV
-            | gpu::ShaderFormat::MSL
-            | gpu::ShaderFormat::DXBC
-            | gpu::ShaderFormat::DXIL;
-        let dev = gpu::Device::new(all_formats, false)
+        let formats = if std::env::var("VIBEBOY_FORCE_VULKAN").is_ok() {
+            // Request only SPIRV to force Vulkan backend on Windows
+            gpu::ShaderFormat::SPIRV
+        } else {
+            gpu::ShaderFormat::PRIVATE
+                | gpu::ShaderFormat::SPIRV
+                | gpu::ShaderFormat::MSL
+                | gpu::ShaderFormat::DXBC
+                | gpu::ShaderFormat::DXIL
+        };
+        let dev = gpu::Device::new(formats, false)
             .expect("Failed to create GPU device")
             .with_window(window)
             .expect("Failed to claim window for GPU device");
