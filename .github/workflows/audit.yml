@@ -1,0 +1,73 @@
+name: audit
+# `cargo audit` checks the resolved lockfile against the RustSec database.
+#
+# On a push or pull request only when the manifest or the lockfile change,
+# since nothing else can alter the answer; weekly regardless, because the
+# database changes without a commit here. Off the hour, and after CI's own
+# Monday run, for the reason `ci.yml` gives.
+#
+# "Unmaintained" and "unsound" notices are warnings and do not fail this;
+# a vulnerability does. bincode is one of those warnings and stays: 3.0.0 is
+# a tombstone release, so 2.0.1 is the last usable version.
+on:
+  push:
+    paths: ['Cargo.toml', 'Cargo.lock']
+  pull_request:
+    paths: ['Cargo.toml', 'Cargo.lock']
+  schedule:
+    - cron: '53 9 * * 1'
+  workflow_dispatch:
+# `issues: write` is for the reporting step: an advisory that lands on a
+# Monday and is never read about is the same as no job at all. Only the
+# unattended runs file anything; a push or pull request has a red check that
+# somebody is already looking at.
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'schedule' }}
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-audit@0.22.2
+      - id: audit
+        run: |
+          set -o pipefail
+          cargo audit --color never 2>&1 | tee audit.log
+      # Only for an advisory. A database that would not download, or a runner
+      # that died, is not a finding about the dependencies.
+      - name: File the advisory
+        if: failure() && steps.audit.outcome == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="audit: an advisory against a dependency"
+          export TITLE
+          {
+            printf '%s\n\n' '`cargo audit` found a vulnerability in the resolved dependency tree. Dependabot should open the matching update, since its `cargo` entry covers security updates.'
+            printf 'Run: %s\n\n' "$RUN"
+            printf '%s\n' '```'
+            cat audit.log
+            printf '%s\n' '```'
+          } > /tmp/audit-issue.md
+          # One rolling issue: an unresolved advisory is a single ongoing
+          # condition, not a fresh bug each week.
+          existing=$(gh issue list --state open --label ci-failure --limit 100 \
+            --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file /tmp/audit-issue.md
+          else
+            gh issue create --title "$TITLE" --label ci-failure --body-file /tmp/audit-issue.md
+          fi

@@ -1,0 +1,63 @@
+name: codeql
+
+# `actions` because a scheduled workflow holds `issues: write`, and the bug
+# that matters there is a `${{ }}` expanded into the source of a `run:`
+# block. Per-language notes are on the matrix entries below.
+#
+# Off the hour, and after CI's own Monday run, for the reason `ci.yml` gives.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '7 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Same rule as `ci.yml`: a second push to a branch makes the first answer
+# irrelevant, but main keeps a result for every commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The only scope that does anything here, and the reason the actions
+      # below are pinned by commit rather than by a tag somebody else can move.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      # One language failing should not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # Interpreted; `none` is the only build mode it has.
+          - language: actions
+            build-mode: none
+          # Also the only mode Rust has: CodeQL rejects `autobuild` for Rust.
+          # With no build, call targets into dependencies resolve poorly, so
+          # expect a standing "low analysis quality" note.
+          - language: rust
+            build-mode: none
+          # The browser frontend's ES modules and AudioWorklet in `web/`.
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          category: /language:${{ matrix.language }}

@@ -1,0 +1,47 @@
+# Monthly, grouped, with a week's cooldown: a release is not offered until it
+# has been out that long, which is the window in which a compromised or
+# broken release tends to be noticed and pulled. Security updates ignore the
+# cooldown.
+#
+# Every action is pinned to a commit, with the tag in a comment, so this is
+# the only thing that ever moves one of those pins. `dtolnay/rust-toolchain`
+# chooses the compiler through its `toolchain:` input, never through the
+# ref, so a bump here moves the action and not the toolchain.
+#
+# Cargo gets version updates as well as security ones: dependencies here
+# track the newest release rather than a floor. The exception is bincode,
+# whose 3.0.0 is a tombstone release; 2.x is the last usable line.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # The composite action in .github/actions pins actions too.
+    directories: ["/", "/.github/actions/*"]
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"
+    labels: []
+    # One PR for all action bumps, so multi-`uses:` actions (codeql-action
+    # init + analyze) move together rather than in mismatched PRs.
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps"
+    labels: []
+    ignore:
+      - dependency-name: bincode
+        versions: [">= 3"]
+    groups:
+      cargo:
+        patterns:
+          - "*"

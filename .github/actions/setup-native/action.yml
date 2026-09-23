@@ -1,0 +1,61 @@
+name: Set up native build dependencies
+description: >
+  SDL3 and slangc, the two things build.rs needs that a stock runner lacks.
+  SDL3 is found through pkg-config (`[package.metadata.system-deps]`), and
+  slangc compiles every shader at build time, so nothing builds without both.
+
+runs:
+  using: composite
+  steps:
+    # No distribution package on the runner images is new enough: the floor is
+    # 3.4, and Ubuntu 24.04 ships no SDL3 at all. This builds the pinned
+    # release from source, caches it, and puts its sdl3.pc on
+    # PKG_CONFIG_PATH. `add-to-environment` puts the shared library on the
+    # loader path too, which the test binaries need to start at all.
+    - uses: libsdl-org/setup-sdl@30cb786f3595c27d05018cd374b679f2313c59d3 # v1.0.1
+      with:
+        version: 3.4.16
+        build-type: Release
+        install-linux-dependencies: true
+        add-to-environment: true
+
+    # Pinned by version and by the digest GitHub records for each release
+    # asset. A different slangc can emit different SPIR-V, MSL or WGSL, so
+    # moving this is a deliberate change like any other.
+    # The GITHUB_PATH write adds a fixed directory under RUNNER_TEMP; nothing
+    # in it comes from the triggering event.
+    - name: Install slangc
+      shell: bash
+      env:
+        SLANG_VERSION: 2026.18.2
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux)
+            asset="slang-$SLANG_VERSION-linux-x86_64.tar.gz"
+            sha=8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816 ;;
+          macOS)
+            asset="slang-$SLANG_VERSION-macos-aarch64.tar.gz"
+            sha=410c0ed14e231089a58437bb0d8e00389c48e29ed9ffe23e3b04a5c74f1ce809 ;;
+          Windows)
+            asset="slang-$SLANG_VERSION-windows-x86_64.zip"
+            sha=747602aec6b3623658d55fea87492d71828e15d16802d7941204fde418ceee8e ;;
+          *)
+            echo "::error::no slangc for $RUNNER_OS"; exit 1 ;;
+        esac
+        dest="$RUNNER_TEMP/slang"
+        mkdir -p "$dest"
+        curl -fsSL --retry 3 -o "$RUNNER_TEMP/$asset" \
+          "https://github.com/shader-slang/slang/releases/download/v$SLANG_VERSION/$asset"
+        # sha256sum on Linux and Git Bash, shasum on macOS.
+        if command -v sha256sum >/dev/null; then
+          echo "$sha  $RUNNER_TEMP/$asset" | sha256sum -c -
+        else
+          echo "$sha  $RUNNER_TEMP/$asset" | shasum -a 256 -c -
+        fi
+        case "$asset" in
+          *.zip) unzip -q "$RUNNER_TEMP/$asset" -d "$dest" ;;
+          *) tar -xzf "$RUNNER_TEMP/$asset" -C "$dest" ;;
+        esac
+        echo "$dest/bin" >> "$GITHUB_PATH"
+        "$dest/bin/slangc" -v

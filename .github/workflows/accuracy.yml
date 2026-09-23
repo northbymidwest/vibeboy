@@ -1,0 +1,103 @@
+name: accuracy
+
+# The test ROM suites, through `test_runner`. Informational only: accuracy
+# work routinely trades a few tests for a better model, so a lower count is
+# a number to read, not a red check. The job reports counts and failing test
+# names in the run summary and never fails on results.
+#
+# c-sp/game-boy-test-roms is fetched by the same script a developer uses
+# and cached by its release tag, which is pinned inside that script.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  accuracy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # A build or download failure is not a result about accuracy either.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: roms
+        with:
+          path: game-boy-test-roms
+          key: game-boy-test-roms-${{ hashFiles('scripts/fetch-test-roms.sh') }}
+      - if: steps.roms.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-test-roms.sh
+
+      - run: cargo build --release --locked --bin test_runner
+
+      - name: Run the suites
+        run: |
+          set -uo pipefail
+          tr=target/release/test_runner
+          roms=game-boy-test-roms
+          mkdir -p results
+          run() {
+            name=$1; shift
+            echo "::group::$name"
+            "$tr" test "$@" 2>&1 | grep -v '^1M iters' | tee "results/$name.txt"
+            echo "::endgroup::"
+          }
+          run mooneye-acceptance mooneye "$roms/mooneye-test-suite/acceptance/"
+          run blargg blargg "$roms/blargg/"
+          run samesuite-apu mooneye "$roms/same-suite/apu/"
+          run gambatte gambatte "$roms/gambatte/" --quiet
+
+      - name: Summarise
+        if: always()
+        run: |
+          set -u
+          {
+            echo '## Test ROM accuracy'
+            echo
+            echo '| Suite | Result |'
+            echo '| --- | --- |'
+            for f in results/*.txt; do
+              [ -e "$f" ] || continue
+              line=$(grep -E '^--- .* ---$' "$f" | tail -1 | sed 's/^--- //; s/ ---$//')
+              echo "| $(basename "$f" .txt) | ${line:-no summary} |"
+            done
+            echo
+            # gambatte fails by the hundred; its names are in the artifact.
+            for s in mooneye-acceptance blargg samesuite-apu; do
+              f="results/$s.txt"
+              [ -e "$f" ] || continue
+              if grep -qE '^(FAIL|TIMEOUT) ' "$f"; then
+                echo "<details><summary>$s: not passing</summary>"
+                echo
+                echo '```'
+                grep -E '^(FAIL|TIMEOUT) ' "$f"
+                echo '```'
+                echo '</details>'
+                echo
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: accuracy-results
+          path: results/
+          if-no-files-found: warn

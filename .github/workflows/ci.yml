@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Nothing here is pinned to this repository's own activity: `stable` moves
+  # every six weeks and `beta` every day it is rebuilt. Between pushes a
+  # toolchain change that breaks the build would sit unseen until the next
+  # commit, which is the worst moment to learn about it. Once a week,
+  # unprompted, is the point.
+  #
+  # Off the hour: scheduled jobs queue behind everyone else's :00 cron.
+  #
+  # GitHub disables a schedule in a public repository after 60 days without
+  # a commit, and mails the owner. Treat that mail as a prompt to re-enable it.
+  schedule:
+    - cron: '37 6 * * 1'
+  workflow_dispatch:
+
+# No job here writes anything back: they build, test and lint a checkout. The
+# default token is read-write, so this drops it to what is actually used.
+permissions:
+  contents: read
+
+# A second push to the same branch makes the first run's answer irrelevant.
+# Cancel it rather than queue behind it. Not on main, though: commits land
+# there directly, and every one of them should keep a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    strategy:
+      # One platform failing should not hide the others' results.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every binary, including test_runner and the SDL frontend, so a change
+      # that only breaks one of them still fails here.
+      - run: cargo build --all-targets --locked
+      - run: cargo test --locked
+
+  # `test` above already runs the newest stable. This is the release that has
+  # not happened yet: a regression caught here is six weeks from reaching
+  # anyone. Add `continue-on-error: true` if a beta ever breaks for reasons
+  # that are not this repository's and the red becomes noise.
+  beta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: beta
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked
+
+  # The floor is `rust-version` in Cargo.toml, read from there rather than
+  # repeated here: a bump that touched one and not the other would leave this
+  # job testing a compiler the manifest no longer admits.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: floor
+        run: |
+          v=$(sed -n 's/^rust-version = "\([0-9.]*\)"$/\1/p' Cargo.toml)
+          [ -n "$v" ] || { echo 'no rust-version in Cargo.toml' >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: ${{ steps.floor.outputs.version }}
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # The libretro core and the browser build share the core with the SDL
+      # frontend but compile different halves of `ui_util` and `scaling`, so
+      # a default-feature run cannot see what breaks them.
+      - run: cargo clippy --lib --no-default-features --features libretro --locked -- -D warnings
+      - run: cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features web --locked -- -D warnings
+
+  # The Cocoa frontend only builds on macOS, and winit's dependencies are
+  # lighter there than on Linux, so both frontends are linted here.
+  lint_macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: $/.github/actions/setup-native
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --all-targets --features macos-ui,winit-ui,libretro --locked -- -D warnings
+
+  # Licenses, bans and sources, against `deny.toml`. The policy is no
+  # copyleft; advisories are `audit.yml`'s.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check licenses bans sources
+
+  # The workflows themselves. actionlint reads the YAML against GitHub's
+  # schema and runs shellcheck over every script; zizmor is the security
+  # half: template injection, an action not pinned to a commit, a checkout
+  # that leaves its credential on disk, a permission a job does not use.
+  # zizmor runs twice on purpose: the action uploads to code scanning and
+  # does not fail the job in that mode; the plain run is the one that fails.
+  # `.github`, not `.github/workflows`: the composite action and
+  # `dependabot.yml` have audits of their own.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # SC2016 is "expressions don't expand in single quotes": the issue
+      # bodies quote markdown code fences in single quotes on purpose.
+      # The -ignore is for GitHub's `uses: $/...` self-repository syntax
+      # (July 2026), which actionlint 1.7.12 does not parse yet. Drop it once
+      # a release does.
+      - run: actionlint -ignore 'specifying action "\$/'
+        env:
+          SHELLCHECK_OPTS: -e SC2016
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          inputs: .github
+          advanced-security: true
+      - run: pipx install zizmor==1.30.1
+      - run: zizmor --no-progress .github
+        env:
+          GH_TOKEN: ${{ github.token }}
