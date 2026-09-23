@@ -4,6 +4,11 @@ description: >
   SDL3 is found through pkg-config (`[package.metadata.system-deps]`), and
   slangc compiles every shader at build time, so nothing builds without both.
 
+inputs:
+  sdl:
+    description: Set up SDL3. The web build compiles shaders but links no SDL.
+    default: 'true'
+
 runs:
   using: composite
   steps:
@@ -13,6 +18,7 @@ runs:
     # PKG_CONFIG_PATH. `add-to-environment` puts the shared library on the
     # loader path too, which the test binaries need to start at all.
     - uses: libsdl-org/setup-sdl@30cb786f3595c27d05018cd374b679f2313c59d3 # v1.0.1
+      if: inputs.sdl == 'true'
       with:
         version: 3.4.16
         build-type: Release
@@ -22,7 +28,7 @@ runs:
     # system-deps shells out to pkg-config to read sdl3.pc, and the Windows
     # images ship none. Chocolatey is preinstalled there.
     - name: Install pkg-config
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.sdl == 'true'
       shell: pwsh
       run: choco install pkgconfiglite --version 0.28 --no-progress -y
 

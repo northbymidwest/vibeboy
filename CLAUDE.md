@@ -17,10 +17,11 @@ Rust 1.98+ (2024 edition), SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup
 cargo build --release
 cargo run --release -- path/to/rom.gbc
 
-# WebAssembly browser build (requires wasm-pack + nightly toolchain)
-PATH="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin:$PATH" \
-  wasm-pack build --target web --features web --no-default-features
-# Serve web/index.html with any static file server
+# WebAssembly browser build into web/pkg (requires wasm-pack); --roms also
+# fetches the public-domain ROMs. .github/workflows/pages.yml runs the same
+# script on every push to main and deploys web/ to GitHub Pages.
+./scripts/build-web.sh --roms
+python3 -m http.server -d web 8080
 
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --bootrom bootroms/dmg_boot.bin

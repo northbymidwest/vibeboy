@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the VibeBoy WebAssembly frontend.
+# Build the VibeBoy WebAssembly frontend into web/, ready to serve as is.
+# The Pages workflow runs this same script and publishes web/.
 #
 # Usage:
 #   ./scripts/build-web.sh              # build wasm only
@@ -10,7 +11,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-WEB_DIR="$PROJECT_DIR/web"
 
 BUILD_WASM=true
 FETCH_ROMS=false
@@ -25,22 +25,15 @@ done
 
 if [ "$BUILD_WASM" = true ]; then
   echo "==> Building WebAssembly..."
-  # Use nightly toolchain for wasm-pack (required for some features)
-  NIGHTLY_BIN="$HOME/.rustup/toolchains/nightly-$(rustc -vV | grep host | awk '{print $2}')/bin"
-  if [ -d "$NIGHTLY_BIN" ]; then
-    export PATH="$NIGHTLY_BIN:$PATH"
-  fi
-  (cd "$PROJECT_DIR" && wasm-pack build --target web --features web --no-default-features)
-  # Copy wasm output to web/pkg/
-  mkdir -p "$WEB_DIR/pkg"
-  cp "$PROJECT_DIR/pkg/vibeboy_core.js" "$WEB_DIR/pkg/"
-  cp "$PROJECT_DIR/pkg/vibeboy_core_bg.wasm" "$WEB_DIR/pkg/"
+  # Straight into web/pkg, where web/emu.js imports it from.
+  (cd "$PROJECT_DIR" && wasm-pack build --target web --out-dir web/pkg \
+    --features web --no-default-features)
   echo "==> WASM build complete: web/pkg/"
 fi
 
 if [ "$FETCH_ROMS" = true ]; then
   echo "==> Fetching public domain ROMs..."
-  bash "$SCRIPT_DIR/fetch-pdroms.sh"
+  (cd "$PROJECT_DIR" && bash "$SCRIPT_DIR/fetch-pdroms.sh")
 fi
 
 echo ""

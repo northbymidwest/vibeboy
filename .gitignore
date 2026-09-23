@@ -32,5 +32,3 @@ sample data/
 screenshot_*.json
 *.pdf
 
-# Local symlink to the wasm-pack output (../pkg); not committed.
-/web/pkg

@@ -18,8 +18,8 @@ cargo build --release --bin vibeboy_cocoa --features macos-ui    # Native macOS 
 cargo build --release --bin vibeboy_winit --features winit-ui    # Cross-platform winit/wgpu
 cargo build --release --bin vibeboy_gtk   --features gtk-ui      # GTK4
 
-# WebAssembly (browser)
-wasm-pack build --target web --features web --no-default-features
+# WebAssembly (browser): builds into web/pkg, then serve web/
+./scripts/build-web.sh
 
 # libretro core (for RetroArch)
 cargo build --release --features libretro --no-default-features --lib
