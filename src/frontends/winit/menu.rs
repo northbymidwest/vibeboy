@@ -87,14 +87,14 @@ pub(super) fn build_menu(
                 ID_OPEN,
                 "Open ROM...",
                 true,
-                Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyO)),
+                Some(Accelerator::new(Modifiers::META, Code::KeyO)),
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(
                 ID_QUIT,
                 "Quit",
                 true,
-                Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyQ)),
+                Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
             ),
         ])
         .unwrap();
@@ -114,7 +114,7 @@ pub(super) fn build_menu(
                 ID_PAUSE,
                 "Pause",
                 true,
-                Some(Accelerator::new(None, Code::F6)),
+                Some(Accelerator::new(Modifiers::empty(), Code::F6)),
             ),
             &MenuItem::with_id(ID_RESET, "Reset", true, None::<Accelerator>),
             &PredefinedMenuItem::separator(),
@@ -145,7 +145,7 @@ pub(super) fn build_menu(
                 format!("Slot {}", i),
                 true,
                 if i == 0 {
-                    Some(Accelerator::new(None, Code::F5))
+                    Some(Accelerator::new(Modifiers::empty(), Code::F5))
                 } else {
                     None
                 },
@@ -157,7 +157,7 @@ pub(super) fn build_menu(
                 format!("Slot {}", i),
                 true,
                 if i == 0 {
-                    Some(Accelerator::new(None, Code::F7))
+                    Some(Accelerator::new(Modifiers::empty(), Code::F7))
                 } else {
                     None
                 },

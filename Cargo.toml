@@ -31,7 +31,7 @@ wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "1", optional = true }
 winit = { version = "0.30", optional = true }
-muda = { version = "0.19", optional = true }
+muda = { version = "0.20", optional = true, default-features = false, features = ["gtk4"] }
 cpal = { version = "0.18", optional = true }
 rfd = { version = "0.17", optional = true }
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"], optional = true }
