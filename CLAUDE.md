@@ -19,7 +19,8 @@ cargo run --release -- path/to/rom.gbc
 
 # WebAssembly browser build into web/pkg (requires wasm-pack); --roms also
 # fetches the public-domain ROMs. .github/workflows/pages.yml runs the same
-# script on every push to main and deploys web/ to GitHub Pages.
+# script and deploys web/ to GitHub Pages; it is manual only
+# (`gh workflow run pages.yml`).
 ./scripts/build-web.sh --roms
 python3 -m http.server -d web 8080
 

@@ -1,28 +1,16 @@
 name: pages
 
 # Builds the WebAssembly frontend and publishes web/ to GitHub Pages, with
-# the same script a developer runs locally. Every push to main that can
-# change the page deploys it; nothing is committed anywhere.
+# the same script a developer runs locally. Manual only: a release of the
+# page is a decision, not a side effect of pushing to main. Run it from the
+# Actions tab or with `gh workflow run pages.yml`.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'web/**'
-      - 'build.rs'
-      - 'build_support/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/build-web.sh'
-      - 'scripts/fetch-pdroms.sh'
-      - '.github/workflows/pages.yml'
-      - '.github/actions/setup-native/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One deployment at a time, and never cancel one halfway: the newest push
+# One deployment at a time, and never cancel one halfway: a second run
 # queues behind it and publishes next.
 concurrency:
   group: pages
