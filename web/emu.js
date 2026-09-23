@@ -104,7 +104,7 @@ async function ensureWasm() {
   if (wasmReady) return;
   showLoading('Loading VibeBoy...');
   try {
-    const mod = await import('./pkg/vibeboy.js');
+    const mod = await import('./pkg/vibeboy_core.js');
     wasmMod = mod.default;       // init()
     WasmEmulator = mod.WasmEmulator;
     wasm_memory = mod.wasm_memory;

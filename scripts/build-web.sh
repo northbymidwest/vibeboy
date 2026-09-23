@@ -33,8 +33,8 @@ if [ "$BUILD_WASM" = true ]; then
   (cd "$PROJECT_DIR" && wasm-pack build --target web --features web --no-default-features)
   # Copy wasm output to web/pkg/
   mkdir -p "$WEB_DIR/pkg"
-  cp "$PROJECT_DIR/pkg/vibeboy.js" "$WEB_DIR/pkg/"
-  cp "$PROJECT_DIR/pkg/vibeboy_bg.wasm" "$WEB_DIR/pkg/"
+  cp "$PROJECT_DIR/pkg/vibeboy_core.js" "$WEB_DIR/pkg/"
+  cp "$PROJECT_DIR/pkg/vibeboy_core_bg.wasm" "$WEB_DIR/pkg/"
   echo "==> WASM build complete: web/pkg/"
 fi
 

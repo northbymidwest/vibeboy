@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::{TestHarness, TestResult};
 use crate::util::make_emu;
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 pub struct GbMicrotestHarness {
     pub force_model: Option<GbModel>,

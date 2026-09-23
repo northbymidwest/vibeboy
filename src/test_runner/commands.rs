@@ -3,11 +3,11 @@ use std::path::Path;
 
 use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
 use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu, parse_keys};
-use vibeboy::model::GbModel;
-use vibeboy::scaling;
+use vibeboy_core::model::GbModel;
+use vibeboy_core::scaling;
 
 fn vectorize_to_svg(pixels: &[u32], width: usize, height: usize) -> String {
-    let data = vibeboy::scaling::vectorize::vectorize(pixels, width, height);
+    let data = vibeboy_core::scaling::vectorize::vectorize(pixels, width, height);
     crate::gpu_svg::render_svg(&data, pixels)
 }
 
@@ -95,7 +95,7 @@ fn vectorize_and_save(
     let cpu_fallback = || {
         let ow = (width as f32 * scale_f).round() as usize;
         let oh = (height as f32 * scale_f).round() as usize;
-        let r = vibeboy::scaling::vectorize::scale(pixels, width, height, scale_f);
+        let r = vibeboy_core::scaling::vectorize::scale(pixels, width, height, scale_f);
         (r, ow, oh)
     };
     let (raster_pixels, out_w, out_h) = gpu_with_cpu_fallback(
@@ -104,7 +104,9 @@ fn vectorize_and_save(
         || {
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
-                vibeboy::scaling::sdl::gpu_full_pipeline_screenshot(pixels, width, height, scale)
+                vibeboy_core::scaling::sdl::gpu_full_pipeline_screenshot(
+                    pixels, width, height, scale,
+                )
             }
             #[cfg(not(feature = "sdl3-gpu-shaders"))]
             {
@@ -275,7 +277,7 @@ pub fn cmd_vectorize(input: &Path, out: &str, scale: usize, gpu: bool, dump_cps:
     }
 }
 
-use vibeboy::scaling::vectorize::{IS_CORNER, IS_CROSSING, IS_ENDPOINT, IS_TJUNCTION};
+use vibeboy_core::scaling::vectorize::{IS_CORNER, IS_CROSSING, IS_ENDPOINT, IS_TJUNCTION};
 
 /// Decode a flag bitfield to a JSON array of named bits. Returns "[]" if no
 /// known bits are set. Slot bits (1=junction, 2=interior) are emitted as
@@ -330,7 +332,7 @@ fn edge_colors_json(pixels: &[u32], w: usize, h: usize, icx: i32, icy: i32, dir:
     if dir < 0 {
         return String::from("null");
     }
-    let (l, r) = vibeboy::scaling::vectorize::get_edge_colors(pixels, w, h, icx, icy, dir);
+    let (l, r) = vibeboy_core::scaling::vectorize::get_edge_colors(pixels, w, h, icx, icy, dir);
     format!("[{}, {}]", argb_hex(l), argb_hex(r))
 }
 
@@ -343,7 +345,7 @@ fn edge_colors_json(pixels: &[u32], w: usize, h: usize, icx: i32, icy: i32, dir:
 /// `VectorizeData.positions[ci*2..]` 1:1.
 fn dump_cp_data(pixels: &[u32], w: usize, h: usize, path: &str) {
     use std::io::Write;
-    let data = vibeboy::scaling::vectorize::vectorize(pixels, w, h);
+    let data = vibeboy_core::scaling::vectorize::vectorize(pixels, w, h);
     let num_cps = data.flags.len();
     let corners_w = data.img_w + 1;
 
@@ -421,7 +423,7 @@ fn dump_cp_data(pixels: &[u32], w: usize, h: usize, path: &str) {
 /// in that case let only the lower-indexed endpoint own the span). Returns
 /// (prev_pos, ghost-adjusted pp, ghost-adjusted np) when the CP renders.
 fn cp_render_geometry(
-    data: &vibeboy::scaling::vectorize::VectorizeData,
+    data: &vibeboy_core::scaling::vectorize::VectorizeData,
     ci: usize,
 ) -> Option<((f32, f32), (f32, f32), (f32, f32), (f32, f32), (f32, f32))> {
     let flag = data.flags[ci];
@@ -510,7 +512,7 @@ fn write_curve_overlay(
     }
 
     // Get CPs
-    let data = vibeboy::scaling::vectorize::vectorize(pixels, w, h);
+    let data = vibeboy_core::scaling::vectorize::vectorize(pixels, w, h);
     let num_cps = data.flags.len();
 
     // pixels-per-source-unit on the final image
@@ -693,7 +695,7 @@ fn write_focus_overlay(
         }
     }
 
-    let data = vibeboy::scaling::vectorize::vectorize(pixels, w, h);
+    let data = vibeboy_core::scaling::vectorize::vectorize(pixels, w, h);
     let num_cps = data.flags.len();
 
     let to_disp = |sx: f32, sy: f32| -> (f32, f32) { ((sx - src_x0) * pps, (sy - src_y0) * pps) };

@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::test_model::{detect_model_with_rom, load_boot_rom, resolve_boot_rom};
 use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu};
-use vibeboy::emulator::Emulator;
-use vibeboy::model::GbModel;
+use vibeboy_core::emulator::Emulator;
+use vibeboy_core::model::GbModel;
 
 pub fn cmd_analyze(
     path: &Path,
@@ -154,8 +154,8 @@ pub fn cmd_calibrate(path: &Path) {
                 Some(br),
                 *model,
                 None,
-                vibeboy::clock::default_clock(),
-                vibeboy::apu::DEFAULT_SAMPLE_RATE,
+                vibeboy_core::clock::default_clock(),
+                vibeboy_core::apu::DEFAULT_SAMPLE_RATE,
             );
             emu.set_headless(true);
             for _ in 0..100_000_000u64 {

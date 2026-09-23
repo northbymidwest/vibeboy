@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use vibeboy::emulator::Emulator;
-use vibeboy::joypad;
-use vibeboy::model::GbModel;
+use vibeboy_core::emulator::Emulator;
+use vibeboy_core::joypad;
+use vibeboy_core::model::GbModel;
 
 /// Game Boy frame buffer width in pixels.
 pub const GB_FB_WIDTH: usize = 160;
@@ -15,8 +15,8 @@ pub fn make_emu(rom: Vec<u8>, boot_rom: Option<Vec<u8>>, model: GbModel) -> Emul
         boot_rom,
         model,
         None,
-        vibeboy::clock::default_clock(),
-        vibeboy::apu::DEFAULT_SAMPLE_RATE,
+        vibeboy_core::clock::default_clock(),
+        vibeboy_core::apu::DEFAULT_SAMPLE_RATE,
     );
     emu.set_headless(true);
     emu

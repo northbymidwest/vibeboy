@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, btree_map};
 use svg::node::element::path::{Command, Data, Position};
-use vibeboy::scaling::vectorize::VectorizeData;
+use vibeboy_core::scaling::vectorize::VectorizeData;
 
 /// Sentinel color for the void outside the image boundary.
 const VOID_COLOR: u32 = 0x01000000;

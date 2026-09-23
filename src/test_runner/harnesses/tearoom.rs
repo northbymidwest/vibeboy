@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::{TestHarness, TestResult};
 use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu};
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 pub struct TearoomHarness {
     pub force_model: Option<GbModel>,

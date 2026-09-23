@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 pub fn detect_model_with_rom(path: &Path, rom: Option<&[u8]>) -> GbModel {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::harness::{TestHarness, TestResult};
 use crate::util::{GB_FB_WIDTH, make_emu};
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 // Gambatte hex digit tile patterns (8x8 pixels each, bit 7=leftmost pixel)
 // 1 = black (0x000000), 0 = white (0xF8F8F8)

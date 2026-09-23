@@ -9,7 +9,7 @@ mod util;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 use harness::run_tests;
 use harnesses::blargg::BlarggHarness;
@@ -189,7 +189,7 @@ enum TestCommand {
     Tearoom(TestArgs),
 }
 
-use vibeboy::ui_util::parse_model;
+use vibeboy_core::ui_util::parse_model;
 
 fn main() {
     env_logger::init();
@@ -229,10 +229,10 @@ fn main() {
         }
         Command::GenBootrom { out, model } => {
             let rom: &[u8] = match model.as_str() {
-                "dmg" => vibeboy::bootrom::DMG,
-                "mgb" => vibeboy::bootrom::MGB,
-                "cgb" => vibeboy::bootrom::CGB,
-                "agb" | "gba" => vibeboy::bootrom::AGB,
+                "dmg" => vibeboy_core::bootrom::DMG,
+                "mgb" => vibeboy_core::bootrom::MGB,
+                "cgb" => vibeboy_core::bootrom::CGB,
+                "agb" | "gba" => vibeboy_core::bootrom::AGB,
                 other => {
                     eprintln!("Unknown boot ROM model: {other}. Available: dmg, mgb, cgb, agb");
                     std::process::exit(1);

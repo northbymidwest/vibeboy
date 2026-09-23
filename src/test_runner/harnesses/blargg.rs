@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::harness::{TestHarness, TestResult};
 use crate::test_model::detect_model_with_rom;
 use crate::util::make_emu;
-use vibeboy::model::GbModel;
+use vibeboy_core::model::GbModel;
 
 pub struct BlarggHarness {
     pub force_model: Option<GbModel>,

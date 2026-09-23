@@ -1,4 +1,4 @@
-use vibeboy::*;
+use vibeboy_core::*;
 
 mod audio;
 #[cfg(target_os = "linux")]

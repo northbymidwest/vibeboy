@@ -4,7 +4,7 @@
 //! For pure (no-I/O) utilities, see `crate::util`.
 
 // Re-export pure utility functions for backwards compatibility.
-// New code should use `vibeboy::util::*` directly.
+// New code should use `vibeboy_core::util::*` directly.
 pub use crate::util::{
     auto_detect_model, downsample_audio, fade_frame_boundaries, frame_duration, parse_model,
     reverse_audio,

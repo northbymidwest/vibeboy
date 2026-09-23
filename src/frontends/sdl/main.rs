@@ -1,4 +1,4 @@
-use vibeboy::*;
+use vibeboy_core::*;
 
 mod accel;
 mod camera;

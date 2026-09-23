@@ -9,6 +9,7 @@ repository = "https://github.com/northbymidwest/vibeboy"
 license = "0BSD"
 
 [lib]
+name = "vibeboy_core"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
