@@ -19,6 +19,13 @@ runs:
         install-linux-dependencies: true
         add-to-environment: true
 
+    # system-deps shells out to pkg-config to read sdl3.pc, and the Windows
+    # images ship none. Chocolatey is preinstalled there.
+    - name: Install pkg-config
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: choco install pkgconfiglite --version 0.28 --no-progress -y
+
     # Pinned by version and by the digest GitHub records for each release
     # asset. A different slangc can emit different SPIR-V, MSL or WGSL, so
     # moving this is a deliberate change like any other.
