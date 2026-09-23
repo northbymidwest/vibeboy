@@ -32,11 +32,11 @@ pub(super) fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
         }
     };
     for id in ids {
-        if let Ok(sensor) = sensor_sys.open(id) {
-            if sensor.sensor_type() == SensorType::Accelerometer {
-                eprintln!("Accelerometer: SDL3 ({})", sensor.name());
-                return AccelSource::Sdl(sensor);
-            }
+        if let Ok(sensor) = sensor_sys.open(id)
+            && sensor.sensor_type() == SensorType::Accelerometer
+        {
+            eprintln!("Accelerometer: SDL3 ({})", sensor.name());
+            return AccelSource::Sdl(sensor);
         }
     }
     log::info!("No accelerometer found — MBC7 will use center values");
@@ -45,12 +45,11 @@ pub(super) fn init_accel(sdl: &sdl3::Sdl) -> AccelSource {
 
 /// Open a gamepad and enable its accelerometer if present. Logs the result.
 pub(super) fn enable_gamepad_sensors(gp: &sdl3::gamepad::Gamepad) {
-    if unsafe { gp.has_sensor(SensorType::Accelerometer) } {
-        if gp
+    if unsafe { gp.has_sensor(SensorType::Accelerometer) }
+        && gp
             .sensor_set_enabled(SensorType::Accelerometer, true)
             .is_ok()
-        {
-            eprintln!("  Accelerometer enabled");
-        }
+    {
+        eprintln!("  Accelerometer enabled");
     }
 }

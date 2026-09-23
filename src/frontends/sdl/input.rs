@@ -40,7 +40,7 @@ pub(super) fn handle_input(
             let gp_btn = gp_map
                 .iter()
                 .find(|(_, b)| b == btn)
-                .map_or(false, |(gb, _)| gp.button(*gb));
+                .is_some_and(|(gb, _)| gp.button(*gb));
             let stick = match *btn {
                 b if b == Emulator::BTN_RIGHT => lx > STICK_DEADZONE,
                 b if b == Emulator::BTN_LEFT => lx < -STICK_DEADZONE,

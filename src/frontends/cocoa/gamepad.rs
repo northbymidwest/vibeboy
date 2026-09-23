@@ -74,98 +74,94 @@ impl GamepadState {
 
     /// Set up CoreHaptics engine and continuous rumble player for the given controller.
     unsafe fn ensure_haptics(&mut self, controller: &GCController) {
-        if let Some(ref hc) = self.haptic_controller {
-            if std::ptr::eq(
-                hc.as_ref() as *const GCController,
-                controller as *const GCController,
-            ) && self.haptic_engine.is_some()
+        unsafe {
+            if let Some(ref hc) = self.haptic_controller
+                && std::ptr::eq(
+                    hc.as_ref() as *const GCController,
+                    controller as *const GCController,
+                )
+                && self.haptic_engine.is_some()
             {
                 return;
             }
-        }
-        self.teardown_haptics();
+            self.teardown_haptics();
 
-        let Some(haptics) = controller.haptics() else {
-            return;
-        };
+            let Some(haptics) = controller.haptics() else {
+                return;
+            };
 
-        // GCDeviceHaptics::createEngineWithLocality is not available on macOS in the typed
-        // bindings (gated behind iOS/tvOS/visionOS cfg). Use msg_send! for this one call.
-        let engine_ptr: *mut AnyObject =
-            msg_send![&*haptics, createEngineWithLocality: &**GCHapticsLocalityDefault];
-        if engine_ptr.is_null() {
-            return;
-        }
-        let engine: Retained<CHHapticEngine> =
-            unsafe { Retained::retain(engine_ptr as *mut CHHapticEngine).unwrap() };
+            // GCDeviceHaptics::createEngineWithLocality is not available on macOS in the typed
+            // bindings (gated behind iOS/tvOS/visionOS cfg). Use msg_send! for this one call.
+            let engine_ptr: *mut AnyObject =
+                msg_send![&*haptics, createEngineWithLocality: &**GCHapticsLocalityDefault];
+            if engine_ptr.is_null() {
+                return;
+            }
+            let engine: Retained<CHHapticEngine> =
+                Retained::retain(engine_ptr as *mut CHHapticEngine).unwrap();
 
-        if engine.startAndReturnError().is_err() {
-            return;
-        }
+            if engine.startAndReturnError().is_err() {
+                return;
+            }
 
-        let intensity_param = unsafe {
-            CHHapticEventParameter::initWithParameterID_value(
+            let intensity_param = CHHapticEventParameter::initWithParameterID_value(
                 CHHapticEventParameter::alloc(),
                 CHHapticEventParameterIDHapticIntensity,
                 0.6,
-            )
-        };
+            );
 
-        let sharpness_param = unsafe {
-            CHHapticEventParameter::initWithParameterID_value(
+            let sharpness_param = CHHapticEventParameter::initWithParameterID_value(
                 CHHapticEventParameter::alloc(),
                 CHHapticEventParameterIDHapticSharpness,
                 0.4,
-            )
-        };
+            );
 
-        let params = NSArray::from_retained_slice(&[intensity_param, sharpness_param]);
+            let params = NSArray::from_retained_slice(&[intensity_param, sharpness_param]);
 
-        let event = unsafe {
-            CHHapticEvent::initWithEventType_parameters_relativeTime_duration(
+            let event = CHHapticEvent::initWithEventType_parameters_relativeTime_duration(
                 CHHapticEvent::alloc(),
                 CHHapticEventTypeHapticContinuous,
                 &params,
                 0.0,
                 30.0,
-            )
-        };
+            );
 
-        let events: Retained<NSArray<CHHapticEvent>> = NSArray::from_retained_slice(&[event]);
-        let empty_params = NSArray::new();
+            let events: Retained<NSArray<CHHapticEvent>> = NSArray::from_retained_slice(&[event]);
+            let empty_params = NSArray::new();
 
-        let Ok(pattern) = (unsafe {
-            CHHapticPattern::initWithEvents_parameters_error(
+            let Ok(pattern) = CHHapticPattern::initWithEvents_parameters_error(
                 CHHapticPattern::alloc(),
                 &events,
                 &empty_params,
-            )
-        }) else {
-            return;
-        };
+            ) else {
+                return;
+            };
 
-        let Ok(player) = (unsafe { engine.createPlayerWithPattern_error(&pattern) }) else {
-            return;
-        };
+            let Ok(player) = engine.createPlayerWithPattern_error(&pattern) else {
+                return;
+            };
 
-        self.haptic_engine = Some(engine);
-        self.haptic_player = Some(player);
-        self.haptic_controller = Some(controller.retain());
+            self.haptic_engine = Some(engine);
+            self.haptic_player = Some(player);
+            self.haptic_controller = Some(controller.retain());
+        }
     }
 
     unsafe fn teardown_haptics(&mut self) {
-        if let Some(ref player) = self.haptic_player {
-            if self.rumble_on {
+        unsafe {
+            if let Some(ref player) = self.haptic_player
+                && self.rumble_on
+            {
                 let _ = player.stopAtTime_error(0.0);
             }
+            self.haptic_player = None;
+            if let Some(ref engine) = self.haptic_engine {
+                engine.stopWithCompletionHandler(std::ptr::null_mut());
+            }
+            self.haptic_engine = None;
+            self.haptic_controller = None;
+            self.rumble_on = false;
         }
-        self.haptic_player = None;
-        if let Some(ref engine) = self.haptic_engine {
-            engine.stopWithCompletionHandler(std::ptr::null_mut());
-        }
-        self.haptic_engine = None;
-        self.haptic_controller = None;
-        self.rumble_on = false;
     }
 
     /// Start or stop rumble. Only sends commands on state transitions.

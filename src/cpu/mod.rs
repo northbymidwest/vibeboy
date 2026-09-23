@@ -74,6 +74,12 @@ pub struct Cpu {
     finishing: bool,
 }
 
+impl Default for Cpu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Cpu {
     pub fn new() -> Self {
         Cpu {
@@ -1962,7 +1968,7 @@ impl Cpu {
                     }
                     6 => {
                         // SWAP
-                        let r = (val >> 4) | (val << 4);
+                        let r = val.rotate_left(4);
                         self.regs.set_flags(r == 0, false, false, false);
                         r
                     }
@@ -2079,7 +2085,7 @@ impl Cpu {
                         r
                     }
                     6 => {
-                        let r = (val >> 4) | (val << 4);
+                        let r = val.rotate_left(4);
                         self.regs.set_flags(r == 0, false, false, false);
                         r
                     }

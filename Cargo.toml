@@ -104,6 +104,15 @@ gdk4-wayland = ["dep:gdk4-wayland"]
 gdk4-x11 = ["dep:gdk4-x11"]
 glow = ["dep:glow"]
 
+# CI runs clippy with -D warnings. These three are style lints that fight the
+# shape of this code: GPU dispatch helpers take one argument per binding, and
+# the CPU vectorizer and scalers index arrays exactly as the shaders they mirror
+# do, which is what keeps them pixel-identical.
+[lints.clippy]
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+
 # sdl3-sys declares #[link(name = "SDL3")] but emits no link search path.
 [package.metadata.system-deps]
 sdl3 = { version = "3.4", feature = "sdl3" }

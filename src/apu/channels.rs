@@ -1,4 +1,4 @@
-/// Channel structs: SquareCh (CH1/CH2), Sweep (CH1), WaveCh (CH3), NoiseCh (CH4).
+//! Channel structs: SquareCh (CH1/CH2), Sweep (CH1), WaveCh (CH3), NoiseCh (CH4).
 
 pub(super) const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%

@@ -110,7 +110,7 @@ impl Ppu {
                     && self.wy_triggered
                     && self.position_in_line >= 0
                 {
-                    let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
+                    let wx_screen = self.wx.saturating_sub(7);
                     let tolerance = if self.double_speed { 0 } else { 1 };
                     let px = self.position_in_line as u8;
                     if px >= wx_screen && px <= wx_screen + tolerance {
@@ -165,7 +165,7 @@ impl Ppu {
                     self.accessed_oam_row = 0xFF;
                     self.dot = 0;
                     self.mode = 0;
-                    self.stat = self.stat & !0x03; // mode bits = 0
+                    self.stat &= !0x03; // mode bits = 0
                     self.oam_accessible = true;
                     self.oam_write_accessible = true;
                     self.vram_accessible = true;
@@ -288,7 +288,7 @@ impl Ppu {
                     && self.wy_triggered
                     && self.position_in_line >= 0
                 {
-                    let wx_screen = if val >= 7 { val - 7 } else { 0 };
+                    let wx_screen = val.saturating_sub(7);
                     let tolerance = if self.double_speed { 0 } else { 1 };
                     let px = self.position_in_line as u8;
                     if px >= wx_screen && px <= wx_screen + tolerance {

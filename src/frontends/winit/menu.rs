@@ -211,7 +211,7 @@ pub(super) fn build_menu(
         filter_menu
             .append(&PredefinedMenuItem::separator())
             .unwrap();
-        for (_, sub) in &sub_menus {
+        for sub in sub_menus.values() {
             filter_menu.append(sub).unwrap();
         }
     }

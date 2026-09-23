@@ -127,7 +127,7 @@ pub fn make_cartridge(rom: Arc<[u8]>, clock: Arc<dyn Clock>) -> Box<dyn Cartridg
         }
         0x19..=0x1E => {
             let battery = matches!(cart_type, 0x1B | 0x1E);
-            let has_rumble = matches!(cart_type, 0x1C | 0x1D | 0x1E);
+            let has_rumble = matches!(cart_type, 0x1C..=0x1E);
             Box::new(Mbc5::new(rom, ram_size, battery, has_rumble))
         }
         0x20 => Box::new(Mbc6::new(rom, ram_size)),

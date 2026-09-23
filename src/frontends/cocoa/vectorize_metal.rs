@@ -1,5 +1,3 @@
-use std::ptr::NonNull;
-
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, ns_string};
@@ -134,7 +132,7 @@ impl MetalVectorizePipeline {
         if self
             .bufs
             .as_ref()
-            .map_or(true, |b| b.img_w != img_w || b.img_h != img_h)
+            .is_none_or(|b| b.img_w != img_w || b.img_h != img_h)
         {
             self.bufs = Some(MetalVecBufs {
                 img_w,
@@ -163,8 +161,8 @@ impl MetalVectorizePipeline {
             );
         }
 
-        let tiles_w = (img_w + 1) / 2;
-        let tiles_h = (img_h + 1) / 2;
+        let tiles_w = img_w.div_ceil(2);
+        let tiles_h = img_h.div_ceil(2);
 
         // Helper to create uniform buffer
         let mk_uni = |data: &[u32]| -> Buffer {
@@ -212,8 +210,8 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.valence_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize {
-                        width: ((img_w + 15) / 16) as usize,
-                        height: ((img_h + 15) / 16) as usize,
+                        width: img_w.div_ceil(16) as usize,
+                        height: img_h.div_ceil(16) as usize,
                         depth: 1,
                     },
                     MTLSize {
@@ -254,20 +252,18 @@ impl MetalVectorizePipeline {
             }
             let rw = img_w.saturating_sub(1);
             let rh = img_h.saturating_sub(1);
-            unsafe {
-                enc.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize {
-                        width: ((rw + 15) / 16) as usize,
-                        height: ((rh + 15) / 16) as usize,
-                        depth: 1,
-                    },
-                    MTLSize {
-                        width: 16,
-                        height: 16,
-                        depth: 1,
-                    },
-                );
-            }
+            enc.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: rw.div_ceil(16) as usize,
+                    height: rh.div_ceil(16) as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
             enc.endEncoding();
         }
 
@@ -284,8 +280,8 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.flag_buf), 0, 4);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize {
-                        width: ((corners_w + 15) / 16) as usize,
-                        height: ((corners_h + 15) / 16) as usize,
+                        width: corners_w.div_ceil(16) as usize,
+                        height: corners_h.div_ceil(16) as usize,
                         depth: 1,
                     },
                     MTLSize {
@@ -332,7 +328,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(out_buf), 0, 5);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize {
-                        width: ((num_cps + 255) / 256) as usize,
+                        width: num_cps.div_ceil(256) as usize,
                         height: 1,
                         depth: 1,
                     },
@@ -385,7 +381,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.pos_buf), 0, 3);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize {
-                        width: ((num_cps + 255) / 256) as usize,
+                        width: num_cps.div_ceil(256) as usize,
                         height: 1,
                         depth: 1,
                     },
@@ -415,7 +411,7 @@ impl MetalVectorizePipeline {
                 enc.setBuffer_offset_atIndex(Some(&b.crossing_t_buf), 0, 4);
                 enc.dispatchThreadgroups_threadsPerThreadgroup(
                     MTLSize {
-                        width: ((num_cps + 255) / 256) as usize,
+                        width: num_cps.div_ceil(256) as usize,
                         height: 1,
                         depth: 1,
                     },

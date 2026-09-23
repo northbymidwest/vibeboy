@@ -129,8 +129,9 @@ impl Mbc7 {
                                     }
                                     self.eeprom_state = EepromState::Idle;
                                 }
-                                0b11 | _ => {
-                                    self.eeprom_write_enable = true; // EWEN
+                                _ => {
+                                    // 0b11: EWEN
+                                    self.eeprom_write_enable = true;
                                     self.eeprom_state = EepromState::Idle;
                                 }
                             }

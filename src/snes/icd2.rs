@@ -52,6 +52,12 @@ pub struct Icd2 {
     pub current_tile_row: u8,
 }
 
+impl Default for Icd2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Icd2 {
     pub fn new() -> Self {
         Icd2 {
@@ -173,7 +179,7 @@ impl Icd2 {
                 // Bits 7-3: current GB tile row (0-17 during active, $11 during VBlank)
                 // Bits 1-0: writeBank (slot currently being filled)
                 let tile_row = self.current_tile_row;
-                let wb = (tile_row as u8) & 3; // writeBank tracks which slot is being filled
+                let wb = tile_row & 3; // writeBank tracks which slot is being filled
                 (tile_row << 3) | wb
             }
             0x6002 => {

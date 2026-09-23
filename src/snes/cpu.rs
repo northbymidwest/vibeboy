@@ -1,7 +1,7 @@
-/// WDC 65C816 CPU core for SGB SNES-side emulation.
-///
-/// Implements all 256 opcodes in both emulation and native modes,
-/// 24 addressing modes, NMI/IRQ handling, and WAI instruction.
+//! WDC 65C816 CPU core for SGB SNES-side emulation.
+//!
+//! Implements all 256 opcodes in both emulation and native modes,
+//! 24 addressing modes, NMI/IRQ handling, and WAI instruction.
 
 /// Status register flag bits.
 const FLAG_C: u8 = 0x01; // Carry
@@ -32,6 +32,12 @@ pub struct Cpu65816 {
     nmi_prev: bool,     // Previous NMI line level
     pub irq_line: bool, // IRQ line level (active low)
     pub cycles: u64,    // Master cycles consumed
+}
+
+impl Default for Cpu65816 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cpu65816 {
@@ -244,19 +250,6 @@ impl Cpu65816 {
     // ── Addressing mode helpers ──
     // Each returns a 24-bit linear address.
 
-    fn addr_imm8(&mut self, _read: &dyn Fn(u32) -> u8) -> u32 {
-        let addr = (self.pbr as u32) << 16 | self.pc as u32;
-        self.pc = self.pc.wrapping_add(1);
-        self.cycles += 6;
-        addr
-    }
-    fn addr_imm16(&mut self, _read: &dyn Fn(u32) -> u8) -> u32 {
-        let addr = (self.pbr as u32) << 16 | self.pc as u32;
-        self.pc = self.pc.wrapping_add(2);
-        self.cycles += 6;
-        addr
-    }
-
     fn addr_dp(&mut self, read: &dyn Fn(u32) -> u8) -> u32 {
         let off = self.fetch8(read) as u16;
         self.cycles += 6;
@@ -397,7 +390,7 @@ impl Cpu65816 {
             let mut hi = (a >> 4) + (v >> 4) + if lo > 0x0F { 1 } else { 0 };
             let result = ((hi & 0x0F) << 4) | (lo & 0x0F);
             // Set V before BCD adjust
-            let signed = !(a ^ v) & (a ^ (result as u16)) & 0x80;
+            let signed = !(a ^ v) & (a ^ result) & 0x80;
             self.p = (self.p & !FLAG_V) | if signed != 0 { FLAG_V } else { 0 };
             if hi > 9 {
                 hi += 6;
@@ -2049,16 +2042,6 @@ impl Cpu65816 {
                 self.a = (lo as u16) << 8 | hi as u16;
                 self.set_nz8(hi); // Sets flags based on new low byte
                 self.cycles += 6;
-            }
-
-            _ => {
-                // Unknown opcode — treat as 1-byte NOP
-                log::warn!(
-                    "65C816: unknown opcode ${:02X} at {:02X}:{:04X}",
-                    op,
-                    self.pbr,
-                    self.pc.wrapping_sub(1)
-                );
             }
         }
     }

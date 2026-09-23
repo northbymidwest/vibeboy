@@ -49,7 +49,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     static kIOMainPortDefault: MachPort;
 
-    fn IOServiceMatching(name: *const u8) -> CFMutableDictionaryRef;
+    fn IOServiceMatching(name: *const std::ffi::c_char) -> CFMutableDictionaryRef;
     fn IOServiceGetMatchingServices(
         main_port: MachPort,
         matching: CFMutableDictionaryRef,
@@ -169,7 +169,7 @@ unsafe extern "C" fn report_callback(
 /// Wake SPU drivers so they start producing reports.
 unsafe fn wake_spu_drivers() -> bool {
     unsafe {
-        let match_dict = IOServiceMatching(b"AppleSPUHIDDriver\0".as_ptr());
+        let match_dict = IOServiceMatching(c"AppleSPUHIDDriver".as_ptr());
         if match_dict.is_null() {
             return false;
         }
@@ -233,7 +233,7 @@ pub fn init() -> bool {
     unsafe {
         wake_spu_drivers();
 
-        let match_dict = IOServiceMatching(b"AppleSPUHIDDevice\0".as_ptr());
+        let match_dict = IOServiceMatching(c"AppleSPUHIDDevice".as_ptr());
         if match_dict.is_null() {
             return false;
         }

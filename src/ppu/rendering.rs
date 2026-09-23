@@ -68,16 +68,17 @@ impl Ppu {
 
         // Check sprite trigger (only in visible pixel zone, after SCX
         // discard is complete — sprites use absolute screen positions)
-        if self.lcdc & 0x02 != 0 && self.position_in_line >= 0 {
-            if let Some(sprite_idx) = self.find_sprite_at_pixel_x() {
-                self.start_sprite_fetch(sprite_idx);
-                if self.sprite_alignment_delay > 0 {
-                    self.sprite_alignment_delay -= 1;
-                } else {
-                    self.tick_sprite_fetch();
-                }
-                return;
+        if self.lcdc & 0x02 != 0
+            && self.position_in_line >= 0
+            && let Some(sprite_idx) = self.find_sprite_at_pixel_x()
+        {
+            self.start_sprite_fetch(sprite_idx);
+            if self.sprite_alignment_delay > 0 {
+                self.sprite_alignment_delay -= 1;
+            } else {
+                self.tick_sprite_fetch();
             }
+            return;
         }
 
         // Window trigger check (only in visible pixel zone).
@@ -152,16 +153,15 @@ impl Ppu {
         // WX=0..166 maps to screen pixel (WX-7)..
         // Window triggers when position == WX-7 (for WX >= 7)
         // For WX < 7, window triggers at position == 0
-        let wx_screen = if self.wx >= 7 { self.wx - 7 } else { 0 };
+        let wx_screen = self.wx.saturating_sub(7);
         if px == wx_screen {
             return true;
         }
         // DMG LCD-PPU horizontal desync: window also triggers 1 pixel late
         // (WX == position + 6), unless WX was just written this T-cycle.
-        if !self.cgb_mode && !self.wx_just_changed && self.wx >= 7 {
-            if px == self.wx.wrapping_sub(6) {
-                return true;
-            }
+        if !self.cgb_mode && !self.wx_just_changed && self.wx >= 7 && px == self.wx.wrapping_sub(6)
+        {
+            return true;
         }
         false
     }
@@ -186,7 +186,7 @@ impl Ppu {
             }
             // Sprite triggers when position reaches sprite_x - 8
             // For sprites with X < 8, they trigger at position == 0
-            let trigger_x = if x >= 8 { x - 8 } else { 0 };
+            let trigger_x = x.saturating_sub(8);
             if px == trigger_x {
                 return Some(i);
             }
@@ -248,7 +248,7 @@ impl Ppu {
             if slot == self.last_sprite_slot {
                 self.sprite_alignment_delay = 0;
             } else {
-                let alignment = (adjusted & 7) as u8;
+                let alignment = adjusted & 7;
                 self.sprite_alignment_delay = 5 - std::cmp::min(5, alignment);
                 if sprite_x == 0 {
                     self.sprite_alignment_delay = 5;
@@ -321,10 +321,10 @@ impl Ppu {
                 self.sprite_fetch_active = false;
 
                 // Check if another sprite triggers at the same pixel_x
-                if self.lcdc & 0x02 != 0 {
-                    if let Some(next_idx) = self.find_sprite_at_pixel_x() {
-                        self.start_sprite_fetch(next_idx);
-                    }
+                if self.lcdc & 0x02 != 0
+                    && let Some(next_idx) = self.find_sprite_at_pixel_x()
+                {
+                    self.start_sprite_fetch(next_idx);
                 }
             }
             _ => {}
@@ -359,7 +359,7 @@ impl Ppu {
         // clipped. FIFO pos 0 = next pixel to output (leftmost on screen).
         // Non-flipped: fifo[p] gets bit (7 - tile_pixel), where tile_pixel 0=left
         // Flipped:     fifo[p] gets bit (tile_pixel)
-        let skip = if sprite_x >= 8 { 0u8 } else { 8 - sprite_x };
+        let skip = 8_u8.saturating_sub(sprite_x);
         let num_visible = 8 - skip;
 
         for p in 0..num_visible {
@@ -413,7 +413,7 @@ impl Ppu {
                 // CGB (≥CGB-D): latch registers at T1
                 if self.cgb_mode {
                     self.fetcher.fetcher_y = if self.fetcher.fetching_window {
-                        self.window_line_counter as u8
+                        self.window_line_counter
                     } else {
                         self.scy.wrapping_add(self.ly)
                     };
@@ -560,7 +560,7 @@ impl Ppu {
         let pixel_y = if self.cgb_mode {
             self.fetcher.fetcher_y & 7
         } else if self.fetcher.fetching_window {
-            (self.window_line_counter & 7) as u8
+            self.window_line_counter & 7
         } else {
             self.scy.wrapping_add(self.ly) & 7
         };
@@ -633,6 +633,8 @@ impl Ppu {
     }
 
     /// Output one pixel to the framebuffer, resolving BG/OAM priority.
+    // Each branch of the priority cascade is a distinct hardware rule.
+    #[allow(clippy::if_same_then_else)]
     fn output_pixel(&mut self, bg: FifoPixel, oam: Option<FifoPixel>) {
         if self.position_in_line < 0 || self.position_in_line >= 160 {
             return;

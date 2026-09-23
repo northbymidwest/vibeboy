@@ -1,4 +1,3 @@
-use objc2::rc::Retained;
 use objc2_core_motion::CMMotionManager;
 
 use super::AccelSource;

@@ -46,12 +46,9 @@ pub fn run_tests(path: &Path, harness: &dyn TestHarness, verbose: bool, quiet: b
     for rom in &roms {
         let result = harness.run_test(rom, verbose);
         let label = rom.strip_prefix(path).unwrap_or(rom).display().to_string();
-        match result {
-            TestResult::Skip => {
-                skipped += 1;
-                continue;
-            }
-            _ => {}
+        if result == TestResult::Skip {
+            skipped += 1;
+            continue;
         }
         if !quiet {
             println!("{:<12} {}", result, label);

@@ -1,5 +1,4 @@
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::apu;
 use crate::clock;
@@ -320,12 +319,11 @@ impl WasmEmulator {
             .emu
             .serial_device_as_any_mut()
             .downcast_mut::<Printer>()
+            && let Some((rgba, w, h)) = printer.take_print()
         {
-            if let Some((rgba, w, h)) = printer.take_print() {
-                self.last_print_w = w;
-                self.last_print_h = h;
-                return rgba;
-            }
+            self.last_print_w = w;
+            self.last_print_h = h;
+            return rgba;
         }
         Vec::new()
     }

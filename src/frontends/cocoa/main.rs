@@ -119,7 +119,6 @@ struct Cli {
 unsafe extern "C" {
     fn CFRunLoopGetMain() -> *mut c_void;
     fn CFRunLoopAddTimer(rl: *mut c_void, timer: *mut c_void, mode: *const c_void);
-    fn CFRunLoopRemoveTimer(rl: *mut c_void, timer: *mut c_void, mode: *const c_void);
     fn CFRunLoopTimerCreate(
         allocator: *const c_void,
         fireDate: f64,
@@ -157,30 +156,32 @@ struct FrameTimerInfo {
 /// FPS, and flushes saves. Fires on kCFRunLoopCommonModes so it continues
 /// during menu tracking, keeping audio-driven emulation smooth.
 unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void) {
-    let ctx = &mut *(info as *mut FrameTimerInfo);
-    if !ctx.running {
-        return;
+    unsafe {
+        let ctx = &mut *(info as *mut FrameTimerInfo);
+        if !ctx.running {
+            return;
+        }
+        let state = &mut *ctx.state;
+        let window = &*ctx.window;
+        let frame_start = &mut *ctx.frame_start;
+
+        let _pool = objc2_foundation::NSAutoreleasePool::new();
+
+        state.update_input();
+        state.step_emulation(frame_start);
+
+        if let Some(content_view) = window.contentView() {
+            state.render(window, &content_view);
+        }
+
+        let emu_time = frame_start.elapsed();
+        if let Some((f, ms)) = state.fps.update(1, emu_time) {
+            state.overlay_fps = f;
+            state.overlay_emu_ms = ms;
+        }
+
+        state.sav_flusher.poll(&state.emu);
     }
-    let state = &mut *ctx.state;
-    let window = &*ctx.window;
-    let frame_start = &mut *ctx.frame_start;
-
-    let _pool = objc2_foundation::NSAutoreleasePool::new();
-
-    state.update_input();
-    state.step_emulation(frame_start);
-
-    if let Some(content_view) = window.contentView() {
-        state.render(window, &content_view);
-    }
-
-    let emu_time = frame_start.elapsed();
-    if let Some((f, ms)) = state.fps.update(1, emu_time) {
-        state.overlay_fps = f;
-        state.overlay_emu_ms = ms;
-    }
-
-    state.sav_flusher.poll(&state.emu);
 }
 
 // ── AppState ─────────────────────────────────────────────────────────────────
@@ -196,7 +197,9 @@ struct AppState {
     key_map: std::collections::HashMap<u16, u8>,
     keys_down: HashSet<u16>,
     gamepad: GamepadState,
-    // audio_unit must be declared before audio_ring so it's dropped first
+    // audio_unit must be declared before audio_ring so it's dropped first.
+    // Held only for its Drop.
+    #[allow(dead_code)]
     // (stops the callback before the ring buffer is freed)
     audio_unit: Option<audio::AudioUnitHandle>,
     audio_ring: SharedAudioBuffer,
@@ -281,62 +284,61 @@ impl AppState {
         app: &NSApplication,
         window: &NSWindow,
     ) {
-        if actions.open_rom {
-            if let Some(path) = open_rom_dialog() {
-                if let Ok(rom_data) = fs::read(&path) {
-                    self.load_rom(path, rom_data, mtm, app, window);
+        unsafe {
+            if actions.open_rom
+                && let Some(path) = open_rom_dialog()
+                && let Ok(rom_data) = fs::read(&path)
+            {
+                self.load_rom(path, rom_data, mtm, app, window);
+            }
+
+            if actions.pause_toggle {
+                self.paused = !self.paused;
+                eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
+                if let Some(main_menu) = app.mainMenu()
+                    && let Some(emu_menu) = main_menu.itemAtIndex(3)
+                    && let Some(submenu) = emu_menu.submenu()
+                    && let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE)
+                {
+                    let label = if self.paused { "Resume" } else { "Pause" };
+                    pause_item.setTitle(&NSString::from_str(label));
                 }
             }
-        }
 
-        if actions.pause_toggle {
-            self.paused = !self.paused;
-            eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
-            if let Some(main_menu) = app.mainMenu() {
-                if let Some(emu_menu) = main_menu.itemAtIndex(3) {
-                    if let Some(submenu) = emu_menu.submenu() {
-                        if let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE) {
-                            let label = if self.paused { "Resume" } else { "Pause" };
-                            pause_item.setTitle(&NSString::from_str(label));
-                        }
-                    }
-                }
+            if actions.reset {
+                let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+                self.emu = Emulator::new(
+                    self.rom.clone(),
+                    boot_rom,
+                    self.model,
+                    None,
+                    clock::default_clock(),
+                    AUDIO_SAMPLE_RATE,
+                );
+                self.update_src_dims();
+                ui_util::load_sav(&mut self.emu, &self.rom_path);
+                self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+                self.paused = false;
+                eprintln!("Reset");
             }
-        }
 
-        if actions.reset {
-            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-            self.emu = Emulator::new(
-                self.rom.clone(),
-                boot_rom,
-                self.model,
-                None,
-                clock::default_clock(),
-                AUDIO_SAMPLE_RATE,
-            );
-            self.update_src_dims();
-            ui_util::load_sav(&mut self.emu, &self.rom_path);
-            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
-            self.paused = false;
-            eprintln!("Reset");
-        }
+            if actions.save_state {
+                ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
+            }
 
-        if actions.save_state {
-            ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
-        }
+            if actions.load_state {
+                ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
+            }
 
-        if actions.load_state {
-            ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
-        }
+            if let Some(slot) = actions.select_slot {
+                self.current_slot = slot;
+                eprintln!("Slot {} selected", self.current_slot);
+                update_slot_checkmarks(app, slot);
+            }
 
-        if let Some(slot) = actions.select_slot {
-            self.current_slot = slot;
-            eprintln!("Slot {} selected", self.current_slot);
-            update_slot_checkmarks(app, slot);
-        }
-
-        if let Some(tag) = actions.select_model {
-            if let Some(new_model) = model_tag_to_model(tag) {
+            if let Some(tag) = actions.select_model
+                && let Some(new_model) = model_tag_to_model(tag)
+            {
                 self.forced_model = new_model;
                 self.model = self
                     .forced_model
@@ -366,89 +368,85 @@ impl AppState {
                 update_model_checkmarks(app, tag);
                 self.paused = false;
             }
-        }
 
-        if let Some(tag) = actions.select_filter {
-            if let Some(new_filter) = filter_tag_to_filter(tag) {
+            if let Some(tag) = actions.select_filter
+                && let Some(new_filter) = filter_tag_to_filter(tag)
+            {
                 self.scale_filter = new_filter;
                 update_filter_checkmarks(app, tag);
                 eprintln!("Filter: {:?}", self.scale_filter);
             }
-        }
 
-        if actions.toggle_force_cpu {
-            self.force_cpu = !self.force_cpu;
-            update_force_cpu_checkmark(app, self.force_cpu);
-            eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
-        }
-
-        if actions.toggle_printer {
-            let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
-            if is_printer {
-                self.emu
-                    .attach_serial_device(Box::new(serial::Disconnected));
-                eprintln!("Game Boy Printer disconnected");
-            } else {
-                self.emu
-                    .attach_serial_device(Box::new(printer::Printer::new(
-                        self.model.cpu_clock_rate(),
-                    )));
-                eprintln!("Game Boy Printer connected");
+            if actions.toggle_force_cpu {
+                self.force_cpu = !self.force_cpu;
+                update_force_cpu_checkmark(app, self.force_cpu);
+                eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
             }
-            if let Some(main_menu) = app.mainMenu() {
-                if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
-                    if let Some(emu_submenu) = emu_menu_item.submenu() {
-                        if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
-                            let state = if !is_printer {
-                                NSControlStateValueOn
-                            } else {
-                                NSControlStateValueOff
-                            };
-                            printer_menu_item.setState(state);
-                        }
-                    }
-                }
-            }
-        }
 
-        if actions.toggle_fps {
-            self.show_fps_overlay = !self.show_fps_overlay;
-            if let Some(main_menu) = app.mainMenu() {
-                if let Some(view_menu_item) = main_menu.itemAtIndex(2) {
-                    if let Some(view_submenu) = view_menu_item.submenu() {
-                        if let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS) {
-                            let state = if self.show_fps_overlay {
-                                NSControlStateValueOn
-                            } else {
-                                NSControlStateValueOff
-                            };
-                            fps_item.setState(state);
-                        }
-                    }
-                }
-            }
-        }
-
-        if actions.open_controls {
-            show_controls_panel(&mut self.key_map);
-        }
-
-        if let Some(idx) = actions.open_recent {
-            let recents = load_recent_roms();
-            if let Some(path_str) = recents.get(idx) {
-                let path = PathBuf::from(path_str);
-                if let Ok(rom_data) = fs::read(&path) {
-                    self.load_rom(path, rom_data, mtm, app, window);
+            if actions.toggle_printer {
+                let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
+                if is_printer {
+                    self.emu
+                        .attach_serial_device(Box::new(serial::Disconnected));
+                    eprintln!("Game Boy Printer disconnected");
                 } else {
-                    eprintln!("Failed to read: {}", path_str);
+                    self.emu
+                        .attach_serial_device(Box::new(printer::Printer::new(
+                            self.model.cpu_clock_rate(),
+                        )));
+                    eprintln!("Game Boy Printer connected");
+                }
+                if let Some(main_menu) = app.mainMenu()
+                    && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
+                    && let Some(emu_submenu) = emu_menu_item.submenu()
+                    && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
+                {
+                    let state = if !is_printer {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    };
+                    printer_menu_item.setState(state);
                 }
             }
-        }
 
-        if actions.clear_recent {
-            save_recent_roms(&[]);
-            rebuild_recent_menu(mtm, app, &[]);
-            eprintln!("Recent ROMs cleared");
+            if actions.toggle_fps {
+                self.show_fps_overlay = !self.show_fps_overlay;
+                if let Some(main_menu) = app.mainMenu()
+                    && let Some(view_menu_item) = main_menu.itemAtIndex(2)
+                    && let Some(view_submenu) = view_menu_item.submenu()
+                    && let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS)
+                {
+                    let state = if self.show_fps_overlay {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    };
+                    fps_item.setState(state);
+                }
+            }
+
+            if actions.open_controls {
+                show_controls_panel(&mut self.key_map);
+            }
+
+            if let Some(idx) = actions.open_recent {
+                let recents = load_recent_roms();
+                if let Some(path_str) = recents.get(idx) {
+                    let path = PathBuf::from(path_str);
+                    if let Ok(rom_data) = fs::read(&path) {
+                        self.load_rom(path, rom_data, mtm, app, window);
+                    } else {
+                        eprintln!("Failed to read: {}", path_str);
+                    }
+                }
+            }
+
+            if actions.clear_recent {
+                save_recent_roms(&[]);
+                rebuild_recent_menu(mtm, app, &[]);
+                eprintln!("Recent ROMs cleared");
+            }
         }
     }
 
@@ -463,16 +461,16 @@ impl AppState {
             .apply_to_emu(&mut self.emu, &self.key_map, &self.keys_down);
 
         // Camera
-        if let Some(ref cam) = self.camera {
-            if cam.read_frame(&mut self.camera_buf) {
-                self.emu.set_camera_image(&self.camera_buf);
-            }
+        if let Some(ref cam) = self.camera
+            && cam.read_frame(&mut self.camera_buf)
+        {
+            self.emu.set_camera_image(&self.camera_buf);
         }
 
         // Accelerometer: prioritize gamepad, fall back to MacBook built-in
         {
-            const CENTER: f32 = 0x81D0 as u16 as f32;
-            const RANGE: f32 = 0x70 as u16 as f32;
+            const CENTER: f32 = 0x81D0_u16 as f32;
+            const RANGE: f32 = 0x70_u16 as f32;
             let reading = if let Some((x, y, _z)) = self.gamepad.accel {
                 // GCMotion uses Apple coordinate system: negate X for MBC7
                 Some((-x, y))
@@ -590,119 +588,123 @@ impl AppState {
 
     /// Render the current frame. Handles occlusion check, filter dispatch, and Metal rendering.
     unsafe fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
-        let occluded = !window
-            .occlusionState()
-            .contains(objc2_app_kit::NSWindowOcclusionState::Visible);
+        unsafe {
+            let occluded = !window
+                .occlusionState()
+                .contains(objc2_app_kit::NSWindowOcclusionState::Visible);
 
-        // Update drawable size on resize (use backing pixels for Retina)
-        let (disp_w, disp_h);
-        {
-            let bounds = content_view.bounds();
-            let scale = window.backingScaleFactor();
-            disp_w = (bounds.size.width * scale) as usize;
-            disp_h = (bounds.size.height * scale) as usize;
-            if !occluded {
-                self.renderer.layer.setContentsScale(scale);
-                self.renderer.layer.setDrawableSize(NSSize::new(
-                    bounds.size.width * scale,
-                    bounds.size.height * scale,
-                ));
+            // Update drawable size on resize (use backing pixels for Retina)
+            let (disp_w, disp_h);
+            {
+                let bounds = content_view.bounds();
+                let scale = window.backingScaleFactor();
+                disp_w = (bounds.size.width * scale) as usize;
+                disp_h = (bounds.size.height * scale) as usize;
+                if !occluded {
+                    self.renderer.layer.setContentsScale(scale);
+                    self.renderer.layer.setDrawableSize(NSSize::new(
+                        bounds.size.width * scale,
+                        bounds.size.height * scale,
+                    ));
+                }
             }
+
+            if occluded {
+                return;
+            }
+
+            // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
+            let src_len = self.src_w * self.src_h;
+            let raw_src: &[u32] = if self.is_sgb {
+                self.emu.sgb_composited_frame()
+            } else {
+                self.emu.frame_buffer()
+            };
+            self.frame_copy.clear();
+            self.frame_copy.extend_from_slice(&raw_src[..src_len]);
+
+            // Take frame_copy out of self to avoid borrow conflict with &mut self methods
+            let frame_copy = std::mem::take(&mut self.frame_copy);
+
+            let gpu_rendered = if self.force_cpu {
+                false
+            } else {
+                self.render_with_filter(&frame_copy, disp_w, disp_h)
+            };
+
+            if !gpu_rendered {
+                self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
+            }
+
+            // Put it back for reuse next frame
+            self.frame_copy = frame_copy;
         }
-
-        if occluded {
-            return;
-        }
-
-        // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
-        let src_len = self.src_w * self.src_h;
-        let raw_src: &[u32] = if self.is_sgb {
-            self.emu.sgb_composited_frame()
-        } else {
-            self.emu.frame_buffer()
-        };
-        self.frame_copy.clear();
-        self.frame_copy.extend_from_slice(&raw_src[..src_len]);
-
-        // Take frame_copy out of self to avoid borrow conflict with &mut self methods
-        let frame_copy = std::mem::take(&mut self.frame_copy);
-
-        let gpu_rendered = if self.force_cpu {
-            false
-        } else {
-            self.render_with_filter(&frame_copy, disp_w, disp_h)
-        };
-
-        if !gpu_rendered {
-            self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
-        }
-
-        // Put it back for reuse next frame
-        self.frame_copy = frame_copy;
     }
 
     /// Try GPU-accelerated rendering for the current filter.
     /// Returns true if GPU-rendered (so CPU fallback can be skipped).
     unsafe fn render_with_filter(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) -> bool {
-        let src_w = self.src_w;
-        let src_h = self.src_h;
+        unsafe {
+            let src_w = self.src_w;
+            let src_h = self.src_h;
 
-        // Vectorize: full 6-stage Metal compute pipeline
-        if self.scale_filter == scaling::ScaleFilter::Vectorize {
-            if self.renderer.vectorize_pipeline.is_none() {
-                self.renderer.vectorize_pipeline =
-                    MetalVectorizePipeline::new(&self.renderer.device);
-            }
-            if let Some(ref mut vp) = self.renderer.vectorize_pipeline {
-                let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
-                let gw = (src_w as f32 * s).round() as u32;
-                let gh = (src_h as f32 * s).round() as u32;
-                if self.renderer.compute_out_w != gw || self.renderer.compute_out_h != gh {
-                    let desc = MTLTextureDescriptor::new();
-                    desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                    desc.setWidth(gw as usize);
-                    desc.setHeight(gh as usize);
-                    desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-                    self.renderer.compute_out_tex = Some(
-                        self.renderer
-                            .device
-                            .newTextureWithDescriptor(&desc)
-                            .unwrap(),
-                    );
-                    self.renderer.compute_out_w = gw;
-                    self.renderer.compute_out_h = gh;
+            // Vectorize: full 6-stage Metal compute pipeline
+            if self.scale_filter == scaling::ScaleFilter::Vectorize {
+                if self.renderer.vectorize_pipeline.is_none() {
+                    self.renderer.vectorize_pipeline =
+                        MetalVectorizePipeline::new(&self.renderer.device);
                 }
-                let out_tex = self.renderer.compute_out_tex.as_ref().unwrap();
-                vp.run(
-                    &self.renderer.device,
-                    &self.renderer.command_queue,
+                if let Some(ref mut vp) = self.renderer.vectorize_pipeline {
+                    let s = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64) as f32;
+                    let gw = (src_w as f32 * s).round() as u32;
+                    let gh = (src_h as f32 * s).round() as u32;
+                    if self.renderer.compute_out_w != gw || self.renderer.compute_out_h != gh {
+                        let desc = MTLTextureDescriptor::new();
+                        desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                        desc.setWidth(gw as usize);
+                        desc.setHeight(gh as usize);
+                        desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+                        self.renderer.compute_out_tex = Some(
+                            self.renderer
+                                .device
+                                .newTextureWithDescriptor(&desc)
+                                .unwrap(),
+                        );
+                        self.renderer.compute_out_w = gw;
+                        self.renderer.compute_out_h = gh;
+                    }
+                    let out_tex = self.renderer.compute_out_tex.as_ref().unwrap();
+                    vp.run(
+                        &self.renderer.device,
+                        &self.renderer.command_queue,
+                        raw_src,
+                        src_w as u32,
+                        src_h as u32,
+                        gw,
+                        gh,
+                        s,
+                        out_tex,
+                    );
+                    self.renderer.tex_w = gw;
+                    self.renderer.tex_h = gh;
+                    self.renderer.texture = out_tex.clone();
+                    self.renderer.use_linear_blit = true;
+                    self.renderer.render();
+                    return true;
+                }
+            }
+
+            // GPU compute scaling filters (Vectorize handled above)
+            if self.scale_filter != scaling::ScaleFilter::Vectorize
+                && let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
+                    self.scale_filter,
                     raw_src,
                     src_w as u32,
                     src_h as u32,
-                    gw,
-                    gh,
-                    s,
-                    out_tex,
-                );
-                self.renderer.tex_w = gw;
-                self.renderer.tex_h = gh;
-                self.renderer.texture = out_tex.clone();
-                self.renderer.use_linear_blit = true;
-                self.renderer.render();
-                return true;
-            }
-        }
-
-        // GPU compute scaling filters (Vectorize handled above)
-        if self.scale_filter != scaling::ScaleFilter::Vectorize {
-            if let Some((_tex, gw, gh)) = self.renderer.run_scale_compute(
-                self.scale_filter,
-                raw_src,
-                src_w as u32,
-                src_h as u32,
-                disp_w as u32,
-                disp_h as u32,
-            ) {
+                    disp_w as u32,
+                    disp_h as u32,
+                )
+            {
                 self.renderer.tex_w = gw;
                 self.renderer.tex_h = gh;
                 self.renderer.texture = self.renderer.compute_out_tex.as_ref().unwrap().clone();
@@ -710,84 +712,86 @@ impl AppState {
                 self.renderer.render();
                 return true;
             }
-        }
 
-        false
+            false
+        }
     }
 
     /// CPU fallback rendering path for filters not handled by the GPU.
     unsafe fn render_cpu_fallback(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) {
-        let src_w = self.src_w;
-        let src_h = self.src_h;
-        let mut gpu_rendered = false;
+        unsafe {
+            let src_w = self.src_w;
+            let src_h = self.src_h;
+            let gpu_rendered = false;
 
-        let mut vec_scaled: Vec<u32>;
-        let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
-            if self.scale_filter == scaling::ScaleFilter::Nearest {
-                (raw_src, src_w, src_h)
-            } else {
-                // Compute aspect-correct dimensions for adaptive filters
-                let scale = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
-                let fit_w = (src_w as f64 * scale).round() as usize;
-                let fit_h = (src_h as f64 * scale).round() as usize;
-                if let Some((s, w, h)) =
-                    scaling::cpu_scale(self.scale_filter, raw_src, src_w, src_h, fit_w, fit_h)
-                {
-                    vec_scaled = s;
-                    (&vec_scaled, w as usize, h as usize)
-                } else {
+            let vec_scaled: Vec<u32>;
+            let (frame_pixels, frame_w, frame_h): (&[u32], usize, usize) =
+                if self.scale_filter == scaling::ScaleFilter::Nearest {
                     (raw_src, src_w, src_h)
-                }
-            };
+                } else {
+                    // Compute aspect-correct dimensions for adaptive filters
+                    let scale = (disp_w as f64 / src_w as f64).min(disp_h as f64 / src_h as f64);
+                    let fit_w = (src_w as f64 * scale).round() as usize;
+                    let fit_h = (src_h as f64 * scale).round() as usize;
+                    if let Some((s, w, h)) =
+                        scaling::cpu_scale(self.scale_filter, raw_src, src_w, src_h, fit_w, fit_h)
+                    {
+                        vec_scaled = s;
+                        (&vec_scaled, w as usize, h as usize)
+                    } else {
+                        (raw_src, src_w, src_h)
+                    }
+                };
 
-        if gpu_rendered {
-            return;
+            if gpu_rendered {
+                return;
+            }
+
+            // Resize texture if dimensions changed
+            if frame_w as u32 != self.renderer.tex_w || frame_h as u32 != self.renderer.tex_h {
+                let tex_desc = MTLTextureDescriptor::new();
+                tex_desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                tex_desc.setWidth(frame_w);
+                tex_desc.setHeight(frame_h);
+                tex_desc.setUsage(MTLTextureUsage::ShaderRead);
+                self.renderer.texture = self
+                    .renderer
+                    .device
+                    .newTextureWithDescriptor(&tex_desc)
+                    .unwrap();
+                self.renderer.tex_w = frame_w as u32;
+                self.renderer.tex_h = frame_h as u32;
+            }
+
+            // Convert 0x00RRGGBB -> BGRA8Unorm (set alpha to 0xFF)
+            self.bgra_buf.resize(frame_w * frame_h, 0u32);
+            for i in 0..(frame_w * frame_h) {
+                self.bgra_buf[i] = 0xFF00_0000 | frame_pixels[i];
+            }
+
+            // Draw FPS overlay into pixel buffer
+            if self.show_fps_overlay {
+                let text = format!("FPS: {:.1}  {:.2}ms", self.overlay_fps, self.overlay_emu_ms);
+                let scale = (frame_w / 160).clamp(1, 4);
+                let fg = 0xFF00FF00;
+                let bg = 0xC0000000;
+                tiny_font::draw_string(
+                    &mut self.bgra_buf,
+                    frame_w,
+                    frame_h,
+                    &text,
+                    2 * scale,
+                    2 * scale,
+                    fg,
+                    bg,
+                    scale,
+                );
+            }
+
+            self.renderer.update_texture(&self.bgra_buf);
+            self.renderer.use_linear_blit = false;
+            self.renderer.render();
         }
-
-        // Resize texture if dimensions changed
-        if frame_w as u32 != self.renderer.tex_w || frame_h as u32 != self.renderer.tex_h {
-            let tex_desc = MTLTextureDescriptor::new();
-            tex_desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            tex_desc.setWidth(frame_w as usize);
-            tex_desc.setHeight(frame_h as usize);
-            tex_desc.setUsage(MTLTextureUsage::ShaderRead);
-            self.renderer.texture = self
-                .renderer
-                .device
-                .newTextureWithDescriptor(&tex_desc)
-                .unwrap();
-            self.renderer.tex_w = frame_w as u32;
-            self.renderer.tex_h = frame_h as u32;
-        }
-
-        // Convert 0x00RRGGBB -> BGRA8Unorm (set alpha to 0xFF)
-        self.bgra_buf.resize(frame_w * frame_h, 0u32);
-        for i in 0..(frame_w * frame_h) {
-            self.bgra_buf[i] = 0xFF00_0000 | frame_pixels[i];
-        }
-
-        // Draw FPS overlay into pixel buffer
-        if self.show_fps_overlay {
-            let text = format!("FPS: {:.1}  {:.2}ms", self.overlay_fps, self.overlay_emu_ms);
-            let scale = ((frame_w / 160).max(1)).min(4);
-            let fg = 0xFF00FF00;
-            let bg = 0xC0000000;
-            tiny_font::draw_string(
-                &mut self.bgra_buf,
-                frame_w,
-                frame_h,
-                &text,
-                2 * scale,
-                2 * scale,
-                fg,
-                bg,
-                scale,
-            );
-        }
-
-        self.renderer.update_texture(&self.bgra_buf);
-        self.renderer.use_linear_blit = false;
-        self.renderer.render();
     }
 }
 
@@ -815,6 +819,7 @@ fn main() {
         let rom_path: PathBuf = if let Some(ref p) = cli.rom {
             p.clone()
         } else {
+            #[allow(deprecated)] // NSApp.activate() needs macOS 14
             app.activateIgnoringOtherApps(true);
             open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
@@ -883,14 +888,12 @@ fn main() {
             emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
             eprintln!("Game Boy Printer connected — images will be saved to prints/");
             // Set checkmark on printer menu item
-            if let Some(main_menu) = app.mainMenu() {
-                if let Some(emu_menu_item) = main_menu.itemAtIndex(3) {
-                    if let Some(emu_submenu) = emu_menu_item.submenu() {
-                        if let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER) {
-                            printer_menu_item.setState(NSControlStateValueOn);
-                        }
-                    }
-                }
+            if let Some(main_menu) = app.mainMenu()
+                && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
+                && let Some(emu_submenu) = emu_menu_item.submenu()
+                && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
+            {
+                printer_menu_item.setState(NSControlStateValueOn);
             }
         }
 
@@ -1004,6 +1007,7 @@ fn main() {
         ));
 
         window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)] // NSApp.activate() needs macOS 14
         app.activateIgnoringOtherApps(true);
 
         // ── Audio ────────────────────────────────────────────────────────────
@@ -1028,7 +1032,7 @@ fn main() {
         // ── Build AppState ───────────────────────────────────────────────────
         let mut state = AppState {
             emu,
-            rom: rom,
+            rom,
             rom_path,
             model,
             forced_model,
@@ -1053,7 +1057,7 @@ fn main() {
             overlay_emu_ms: 0.0,
             emu_time_debt: Duration::ZERO,
             frame_dur,
-            frame_copy: Vec::with_capacity((src_w * src_h) as usize),
+            frame_copy: Vec::with_capacity(src_w * src_h),
             bgra_buf: Vec::with_capacity((tex_w * tex_h) as usize),
             src_w,
             src_h,
@@ -1074,10 +1078,12 @@ fn main() {
             frame_start: &mut frame_start as *mut Instant,
             running: true,
         };
+        // The timer callback only ever sees timer_info through this pointer.
+        let timer_info_ptr = &raw mut timer_info;
         let timer = {
             let mut ctx = CFRunLoopTimerContext {
                 version: 0,
-                info: &mut timer_info as *mut FrameTimerInfo as *mut c_void,
+                info: timer_info_ptr as *mut c_void,
                 retain: None,
                 release: None,
                 copy_description: None,
@@ -1183,7 +1189,7 @@ fn main() {
         }
 
         // Cleanup
-        timer_info.running = false;
+        (*timer_info_ptr).running = false;
         CFRunLoopTimerInvalidate(timer);
         CFRelease(timer);
 

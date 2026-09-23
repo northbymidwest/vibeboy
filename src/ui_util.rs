@@ -10,6 +10,7 @@ pub use crate::util::{
     reverse_audio,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::model::GbModel;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::scaling;
@@ -89,6 +90,12 @@ pub struct FpsCounter {
     timer: Instant,
     count: u32,
     emu_total: Duration,
+}
+
+impl Default for FpsCounter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FpsCounter {
@@ -206,14 +213,12 @@ impl GamepadPoller {
                         eprintln!("Gamepad connected: {}", self.gilrs.gamepad(ev.id).name());
                     }
                 }
-                gilrs::EventType::Disconnected => {
-                    if self.active_gamepad == Some(ev.id) {
-                        self.active_gamepad = None;
-                        self.rumble_effect = None;
-                        self.rumble_gamepad = None;
-                        self.rumble_on = false;
-                        eprintln!("Gamepad disconnected");
-                    }
+                gilrs::EventType::Disconnected if self.active_gamepad == Some(ev.id) => {
+                    self.active_gamepad = None;
+                    self.rumble_effect = None;
+                    self.rumble_gamepad = None;
+                    self.rumble_on = false;
+                    eprintln!("Gamepad disconnected");
                 }
                 _ => {}
             }

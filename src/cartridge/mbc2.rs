@@ -35,16 +35,13 @@ impl Cartridge for Mbc2 {
     }
 
     fn write_rom(&mut self, addr: u16, val: u8) {
-        match addr {
-            0x0000..=0x3FFF => {
-                if addr & 0x0100 == 0 {
-                    self.ram_enabled = (val & 0x0F) == 0x0A;
-                } else {
-                    let b = (val & 0x0F) as usize;
-                    self.rom_bank = if b == 0 { 1 } else { b };
-                }
+        if let 0x0000..=0x3FFF = addr {
+            if addr & 0x0100 == 0 {
+                self.ram_enabled = (val & 0x0F) == 0x0A;
+            } else {
+                let b = (val & 0x0F) as usize;
+                self.rom_bank = if b == 0 { 1 } else { b };
             }
-            _ => {}
         }
     }
 

@@ -8,7 +8,7 @@ impl Bus {
         if self.model.is_cgb() {
             return;
         }
-        if addr < 0xFE00 || addr > 0xFEFF {
+        if !(0xFE00..=0xFEFF).contains(&addr) {
             return;
         }
         self.flush_ppu_deferred();
@@ -19,7 +19,7 @@ impl Bus {
         if self.model.is_cgb() {
             return;
         }
-        if addr < 0xFE00 || addr > 0xFEFF {
+        if !(0xFE00..=0xFEFF).contains(&addr) {
             return;
         }
         self.flush_ppu_deferred();
@@ -55,7 +55,7 @@ impl Bus {
         if self.model.is_cgb() {
             return;
         }
-        if addr < 0xFE00 || addr > 0xFEFF {
+        if !(0xFE00..=0xFEFF).contains(&addr) {
             return;
         }
         self.flush_ppu_deferred();

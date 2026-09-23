@@ -55,7 +55,6 @@ impl PartialOrd for CommandState {
 
 /// All prints are queued in memory as (RGBA pixels, width, height) tuples.
 /// Frontends are responsible for saving to disk or presenting to the user.
-
 pub struct Printer {
     command_state: CommandState,
     command_id: u8,
@@ -263,32 +262,30 @@ impl Printer {
                     self.image_offset = 0;
                 }
             }
-            COMMAND_DATA => {
-                if self.command_length == PRINTER_DATA_SIZE {
-                    self.image_offset %= PRINTER_IMAGE_SIZE;
-                    self.status = 8; // Received full data block
+            COMMAND_DATA if self.command_length == PRINTER_DATA_SIZE => {
+                self.image_offset %= PRINTER_IMAGE_SIZE;
+                self.status = 8; // Received full data block
 
-                    // Decode 2bpp tile data into image buffer
-                    // 0x280 bytes = 2 rows of 20 tiles (each tile 8x8, 16 bytes)
-                    let mut byte_idx = 0usize;
-                    for _row in 0..2 {
-                        for tile_x in 0..20 {
-                            for y in 0..8 {
-                                let lo = self.command_data[byte_idx];
-                                let hi = self.command_data[byte_idx + 1];
-                                byte_idx += 2;
-                                for x_pixel in 0..8 {
-                                    let shift = 7 - x_pixel;
-                                    let color = ((lo >> shift) & 1) | (((hi >> shift) & 1) << 1);
-                                    let idx = self.image_offset + tile_x * 8 + x_pixel + y * 160;
-                                    if idx < PRINTER_IMAGE_SIZE {
-                                        self.image[idx] = color;
-                                    }
+                // Decode 2bpp tile data into image buffer
+                // 0x280 bytes = 2 rows of 20 tiles (each tile 8x8, 16 bytes)
+                let mut byte_idx = 0usize;
+                for _row in 0..2 {
+                    for tile_x in 0..20 {
+                        for y in 0..8 {
+                            let lo = self.command_data[byte_idx];
+                            let hi = self.command_data[byte_idx + 1];
+                            byte_idx += 2;
+                            for x_pixel in 0..8 {
+                                let shift = 7 - x_pixel;
+                                let color = ((lo >> shift) & 1) | (((hi >> shift) & 1) << 1);
+                                let idx = self.image_offset + tile_x * 8 + x_pixel + y * 160;
+                                if idx < PRINTER_IMAGE_SIZE {
+                                    self.image[idx] = color;
                                 }
                             }
                         }
-                        self.image_offset += 8 * 160;
                     }
+                    self.image_offset += 8 * 160;
                 }
             }
             _ => {} // NOP and unknown

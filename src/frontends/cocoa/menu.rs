@@ -5,8 +5,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
-    NSMenuItem,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem,
 };
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString};
 
@@ -105,7 +104,7 @@ pub(super) fn update_slot_checkmarks(app: &NSApplication, selected_slot: usize) 
     for i in 0..count {
         if let Some(item) = state_submenu.itemAtIndex(i) {
             let tag = item.tag();
-            if tag >= MENU_TAG_SLOT_BASE && tag < MENU_TAG_SLOT_BASE + 10 {
+            if (MENU_TAG_SLOT_BASE..MENU_TAG_SLOT_BASE + 10).contains(&tag) {
                 let slot_idx = (tag - MENU_TAG_SLOT_BASE) as usize;
                 set_checkmark(&item, slot_idx == selected_slot);
             }
@@ -125,10 +124,10 @@ pub(super) fn update_force_cpu_checkmark(app: &NSApplication, force_cpu: bool) {
         return;
     };
     // Force CPU item is the first item in the filter menu
-    if let Some(item) = filter_submenu.itemAtIndex(0) {
-        if item.tag() == MENU_TAG_FORCE_CPU {
-            set_checkmark(&item, force_cpu);
-        }
+    if let Some(item) = filter_submenu.itemAtIndex(0)
+        && item.tag() == MENU_TAG_FORCE_CPU
+    {
+        set_checkmark(&item, force_cpu);
     }
 }
 
@@ -301,20 +300,20 @@ define_class!(
                 MENU_TAG_RESET => actions.reset = true,
                 MENU_TAG_SAVE_STATE => actions.save_state = true,
                 MENU_TAG_LOAD_STATE => actions.load_state = true,
-                t if t >= MENU_TAG_SLOT_BASE && t < MENU_TAG_SLOT_BASE + 10 => {
+                t if (MENU_TAG_SLOT_BASE..MENU_TAG_SLOT_BASE + 10).contains(&t) => {
                     actions.select_slot = Some((t - MENU_TAG_SLOT_BASE) as usize);
                 }
                 MENU_TAG_FORCE_CPU => actions.toggle_force_cpu = true,
-                t if t >= MENU_TAG_MODEL_AUTO && t <= MENU_TAG_MODEL_AGB => {
+                t if (MENU_TAG_MODEL_AUTO..=MENU_TAG_MODEL_AGB).contains(&t) => {
                     actions.select_model = Some(t);
                 }
                 MENU_TAG_CONTROLS => actions.open_controls = true,
-                t if t >= MENU_TAG_FILTER_BASE && t < MENU_TAG_FILTER_BASE + 100 => {
+                t if (MENU_TAG_FILTER_BASE..MENU_TAG_FILTER_BASE + 100).contains(&t) => {
                     actions.select_filter = Some(t);
                 }
                 MENU_TAG_SHOW_FPS => actions.toggle_fps = true,
                 MENU_TAG_PRINTER => actions.toggle_printer = true,
-                t if t >= MENU_TAG_RECENT_BASE && t < MENU_TAG_RECENT_BASE + 10 => {
+                t if (MENU_TAG_RECENT_BASE..MENU_TAG_RECENT_BASE + 10).contains(&t) => {
                     actions.open_recent = Some((t - MENU_TAG_RECENT_BASE) as usize);
                 }
                 MENU_TAG_CLEAR_RECENT => actions.clear_recent = true,
@@ -395,10 +394,6 @@ pub(super) mod menu_handler {
 
 // ── Menu item helpers ────────────────────────────────────────────────────────
 
-// Function key equivalents use Unicode private-use characters
-pub(super) const K_F5_EQUIV: &str = "\u{F708}"; // NSF5FunctionKey
-pub(super) const K_F7_EQUIV: &str = "\u{F70A}"; // NSF7FunctionKey
-
 pub(super) fn menu_item(
     mtm: MainThreadMarker,
     title: &str,
@@ -431,27 +426,6 @@ pub(super) fn menu_item_with_tag(
         )
     };
     item.setTag(tag);
-    item
-}
-
-pub(super) fn menu_item_with_tag_and_key(
-    mtm: MainThreadMarker,
-    title: &str,
-    action: Sel,
-    tag: isize,
-    key: &str,
-) -> Retained<NSMenuItem> {
-    let item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(title),
-            Some(action),
-            &NSString::from_str(key),
-        )
-    };
-    item.setTag(tag);
-    // Function keys need NSEventModifierFlagFunction
-    item.setKeyEquivalentModifierMask(NSEventModifierFlags::Function);
     item
 }
 

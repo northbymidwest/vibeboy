@@ -166,6 +166,8 @@ fn build_similarity_graph(pixels: &[u32], img_w: usize, img_h: usize) -> Vec<u32
 // Stage 2: Resolve crossings
 // ============================================================================
 
+// Mirrors resolve_crossings.slang branch for branch.
+#[allow(clippy::if_same_then_else)]
 fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
     let graph_stride = 2 * img_w + 1;
     let graph_height = 2 * img_h + 1;
@@ -351,7 +353,7 @@ fn resolve_crossings(graph_in: &[u32], img_w: usize, img_h: usize) -> Vec<u32> {
                 }
                 let nc = col + dcol[d];
                 let nr = row + drow[d];
-                if nc < 0 || nc >= 8 || nr < 0 || nr >= 8 {
+                if !(0..8).contains(&nc) || !(0..8).contains(&nr) {
                     continue;
                 }
                 if get_label(&labels, nr, nc) != 0 {
@@ -682,16 +684,15 @@ fn build_cell_graph(graph: &[u32], img_w: usize, img_h: usize) -> (Vec<f32>, Vec
             return base;
         }
 
-        let slot;
-        if from_dir == 0 {
-            slot = if is_llur { 1 } else { 0 };
+        let slot = if from_dir == 0 {
+            if is_llur { 1 } else { 0 }
         } else if from_dir == 1 {
-            slot = 0;
+            0
         } else if from_dir == 2 {
-            slot = if is_ullr { 1 } else { 0 };
+            if is_ullr { 1 } else { 0 }
         } else {
-            slot = 1;
-        }
+            1
+        };
 
         base + slot
     };
@@ -713,16 +714,15 @@ fn build_cell_graph(graph: &[u32], img_w: usize, img_h: usize) -> (Vec<f32>, Vec
             return (base_x, base_y);
         }
 
-        let slot;
-        if from_dir == 0 {
-            slot = if is_llur { 1 } else { 0 };
+        let slot = if from_dir == 0 {
+            if is_llur { 1 } else { 0 }
         } else if from_dir == 2 {
-            slot = if is_ullr { 1 } else { 0 };
+            if is_ullr { 1 } else { 0 }
         } else if from_dir == 3 {
-            slot = 1;
+            1
         } else {
-            slot = 0;
-        }
+            0
+        };
 
         if is_ullr {
             if slot == 0 {
@@ -1521,7 +1521,7 @@ fn optimize_energy_cg(
     // synthesize the ghost position from T's through-pair on-the-fly:
     //   ghost = sp·T_prev + st·T + sn·T_next
     // For all other CPs, returns the raw buffer position.
-    let read_neighbor_pos = |buf: &[f32], i: usize| -> (f32, f32) {
+    let _read_neighbor_pos = |buf: &[f32], i: usize| -> (f32, f32) {
         if i > 0 && (flags[i] & 1) != 0 && (flags[i - 1] & IS_TJUNCTION) != 0 {
             let t = i - 1;
             let t_prev = neighbors[t * 4];
@@ -2461,21 +2461,23 @@ fn optimize_energy(
                 };
 
                 // Case A: i is the T-junction itself. p substitutes for T.
-                if (f & IS_TJUNCTION) != 0 && prev_idx >= 0 && next_idx >= 0 {
-                    if let Some((s_pos, so_pos)) = stem_endpoints(i) {
-                        let prev_is_end = (flags_prev & IS_ENDPOINT) != 0;
-                        let next_is_end = (flags_next & IS_ENDPOINT) != 0;
-                        let (st, sp, sn) = ghost_weights(prev_is_end, next_is_end);
-                        let pp = read_neighbor_pos(pos_in, prev_idx as usize);
-                        let pn = read_neighbor_pos(pos_in, next_idx as usize);
-                        let ghost = (
-                            sp * pp.0 + st * p.0 + sn * pn.0,
-                            sp * pp.1 + st * p.1 + sn * pn.1,
-                        );
-                        let va = (s_pos.0 - so_pos.0, s_pos.1 - so_pos.1);
-                        let vb = (ghost.0 - s_pos.0, ghost.1 - s_pos.1);
-                        add_segment(va, vb, 0.0, st, &mut e, &mut g, &mut h);
-                    }
+                if (f & IS_TJUNCTION) != 0
+                    && prev_idx >= 0
+                    && next_idx >= 0
+                    && let Some((s_pos, so_pos)) = stem_endpoints(i)
+                {
+                    let prev_is_end = (flags_prev & IS_ENDPOINT) != 0;
+                    let next_is_end = (flags_next & IS_ENDPOINT) != 0;
+                    let (st, sp, sn) = ghost_weights(prev_is_end, next_is_end);
+                    let pp = read_neighbor_pos(pos_in, prev_idx as usize);
+                    let pn = read_neighbor_pos(pos_in, next_idx as usize);
+                    let ghost = (
+                        sp * pp.0 + st * p.0 + sn * pn.0,
+                        sp * pp.1 + st * p.1 + sn * pn.1,
+                    );
+                    let va = (s_pos.0 - so_pos.0, s_pos.1 - so_pos.1);
+                    let vb = (ghost.0 - s_pos.0, ghost.1 - s_pos.1);
+                    add_segment(va, vb, 0.0, st, &mut e, &mut g, &mut h);
                 }
 
                 // Case B: one of i's neighbors is a T-junction j with i in
@@ -3042,6 +3044,7 @@ fn optimize_energy(
 
 /// Real roots of c4·t⁴ + c3·t³ + c2·t² + c1·t + c0 = 0 in [0, 1].
 /// Ferrari's method via the resolvent cubic. Returns at most 4 roots.
+#[cfg(test)]
 fn solve_quartic_in_unit(c4: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
     let mut out: [Option<f32>; 4] = [None; 4];
 
@@ -3138,6 +3141,7 @@ fn solve_quartic_in_unit(c4: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> [Option
 }
 
 /// Solve c3·t³ + c2·t² + c1·t + c0 = 0 in [0,1]; returns at most 3 roots.
+#[cfg(test)]
 fn solve_cubic_in_unit(c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
     let mut out = [None; 4];
     let scale = c0.abs().max(c1.abs()).max(c2.abs()).max(c3.abs());
@@ -3207,6 +3211,7 @@ fn solve_cubic_in_unit(c3: f32, c2: f32, c1: f32, c0: f32) -> [Option<f32>; 4] {
 /// Returns one real root of c3·y³ + c2·y² + c1·y + c0 = 0. Used by the
 /// quartic resolvent — we only need a single real root, which is guaranteed
 /// to exist for any real cubic.
+#[cfg(test)]
 fn solve_cubic_real_root(c3: f32, c2: f32, c1: f32, c0: f32) -> f32 {
     let a = c2 / c3;
     let b = c1 / c3;
@@ -4369,12 +4374,12 @@ fn rasterize(
         // Per-fragment span test: insert into a top-3 hit array if close
         // enough. `cp_i` is the all_cps array position (matches the slot
         // returned by the wedge-AA dual-curve hit lookup).
-        let mut try_cp = |cp_i: u32,
-                          center: (f32, f32),
-                          hit_d2: &mut [f32; 3],
-                          hit_t: &mut [f32; 3],
-                          hit_idx: &mut [u32; 3],
-                          num_hits: &mut usize| {
+        let try_cp = |cp_i: u32,
+                      center: (f32, f32),
+                      hit_d2: &mut [f32; 3],
+                      hit_t: &mut [f32; 3],
+                      hit_idx: &mut [u32; 3],
+                      num_hits: &mut usize| {
             let sc = &all_cps[cp_i as usize];
 
             // Sound spline-AABB cull: spline ⊆ AABB → dist(pt, spline) ≥
@@ -4476,7 +4481,7 @@ fn rasterize(
                     for cdx in 0..2 {
                         let cx = cell_x + cdx;
                         let cy = cell_y + cdy;
-                        if cx >= corners_w || cy >= img_h + 1 {
+                        if cx >= corners_w || cy > img_h {
                             continue;
                         }
                         let slot0_ci = (cy * corners_w + cx) * 2;
@@ -4551,29 +4556,29 @@ fn rasterize(
                 let mut resolved_h: i32 = -1;
                 // Try each hit in order — unrolled across constant indices
                 // for consistency with the GPU rasterizer.
-                if num_hits >= 1 && resolved_h < 0 {
-                    if let Some(c) =
+                if num_hits >= 1
+                    && resolved_h < 0
+                    && let Some(c) =
                         resolve_from_cp(center, &all_cps[hit_idx[0] as usize], hit_t[0])
-                    {
-                        center_color = c;
-                        resolved_h = 0;
-                    }
+                {
+                    center_color = c;
+                    resolved_h = 0;
                 }
-                if num_hits >= 2 && resolved_h < 0 {
-                    if let Some(c) =
+                if num_hits >= 2
+                    && resolved_h < 0
+                    && let Some(c) =
                         resolve_from_cp(center, &all_cps[hit_idx[1] as usize], hit_t[1])
-                    {
-                        center_color = c;
-                        resolved_h = 1;
-                    }
+                {
+                    center_color = c;
+                    resolved_h = 1;
                 }
-                if num_hits >= 3 && resolved_h < 0 {
-                    if let Some(c) =
+                if num_hits >= 3
+                    && resolved_h < 0
+                    && let Some(c) =
                         resolve_from_cp(center, &all_cps[hit_idx[2] as usize], hit_t[2])
-                    {
-                        center_color = c;
-                        resolved_h = 2;
-                    }
+                {
+                    center_color = c;
+                    resolved_h = 2;
                 }
 
                 // For AA, use the hit that actually resolved to a valid color
@@ -4932,7 +4937,7 @@ fn rasterize(
                     } else {
                         pack_color(center_color)
                     };
-                } else if let Some(packed) = ({
+                } else if let Some(packed) = {
                     // Dual-curve AA: two distinct-chain curves passing through
                     // the pixel without an actual junction inside it.
                     //
@@ -5064,7 +5069,7 @@ fn rasterize(
                             Some(srgb_encode_argb(r, g, b))
                         })
                     }
-                }) {
+                } {
                     chunk[local_y * out_w + opx] = packed;
                 } else {
                     // Single-curve AA fallback: tangent line + pixel coverage

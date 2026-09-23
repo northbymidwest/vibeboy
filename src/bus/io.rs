@@ -5,13 +5,13 @@ impl Bus {
     pub(super) fn read_io(&self, addr: u16) -> u8 {
         match addr {
             0xFF00 => {
-                if let Some(ref sgb) = self.sgb {
-                    if sgb.player_count > 1 {
-                        // When both select lines high, return player ID
-                        let p1_select = self.joypad.read() & 0x30;
-                        if p1_select == 0x30 {
-                            return 0xC0 | 0x30 | sgb.read_p1_id();
-                        }
+                if let Some(ref sgb) = self.sgb
+                    && sgb.player_count > 1
+                {
+                    // When both select lines high, return player ID
+                    let p1_select = self.joypad.read() & 0x30;
+                    if p1_select == 0x30 {
+                        return 0xC0 | 0x30 | sgb.read_p1_id();
                     }
                 }
                 self.joypad.read()
@@ -112,13 +112,7 @@ impl Bus {
                     0xFF
                 }
             }
-            0xFF77 => {
-                if self.model.is_cgb() {
-                    self.apu.pcm34()
-                } else {
-                    0xFF
-                }
-            }
+            0xFF77 if self.model.is_cgb() => self.apu.pcm34(),
             _ => 0xFF,
         }
     }

@@ -16,8 +16,6 @@ use cpu::Cpu65816;
 const SNES_CYCLES_PER_FRAME: u64 = 357_366;
 /// Master cycles per scanline (~1364).
 const CYCLES_PER_SCANLINE: u64 = 1364;
-/// Scanline where VBlank starts (NTSC).
-const VBLANK_START_LINE: u64 = 225;
 
 #[derive(Clone)]
 pub struct SnesSys {
@@ -105,15 +103,15 @@ impl SnesSys {
             let row_target = row_end.min(target);
 
             // Check for IRQ in this chunk
-            if !irq_fired {
-                if let Some(irq_at) = irq_cycle {
-                    if irq_at <= row_target && irq_at > self.cpu.cycles {
-                        self.run_until(irq_at);
-                        self.bus.timeup = 0x80;
-                        self.cpu.irq_line = true;
-                        irq_fired = true;
-                    }
-                }
+            if !irq_fired
+                && let Some(irq_at) = irq_cycle
+                && irq_at <= row_target
+                && irq_at > self.cpu.cycles
+            {
+                self.run_until(irq_at);
+                self.bus.timeup = 0x80;
+                self.cpu.irq_line = true;
+                irq_fired = true;
             }
 
             self.run_until(row_target);
@@ -123,15 +121,15 @@ impl SnesSys {
         self.bus.icd2.set_tile_row(0x11); // Back to VBlank indicator
 
         // Check for IRQ in the remaining display period (scanlines 144-224)
-        if !irq_fired {
-            if let Some(irq_at) = irq_cycle {
-                if irq_at <= target && irq_at > self.cpu.cycles {
-                    self.run_until(irq_at);
-                    self.bus.timeup = 0x80;
-                    self.cpu.irq_line = true;
-                    irq_fired = true;
-                }
-            }
+        if !irq_fired
+            && let Some(irq_at) = irq_cycle
+            && irq_at <= target
+            && irq_at > self.cpu.cycles
+        {
+            self.run_until(irq_at);
+            self.bus.timeup = 0x80;
+            self.cpu.irq_line = true;
+            irq_fired = true;
         }
 
         self.run_until(target);

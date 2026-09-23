@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSString, ns_string};
 use objc2_metal::*;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
@@ -78,22 +78,6 @@ pub(super) struct MetalRenderer {
     pub compute_out_h: u32,
     // Full GPU vectorize pipeline
     pub vectorize_pipeline: Option<MetalVectorizePipeline>,
-}
-
-fn safe_buf(dev: &ProtocolObject<dyn MTLDevice>, data: &[u8]) -> Buffer {
-    unsafe {
-        if data.is_empty() {
-            dev.newBufferWithLength_options(4, MTLResourceOptions::StorageModeShared)
-                .expect("failed to create buffer")
-        } else {
-            dev.newBufferWithBytes_length_options(
-                NonNull::new_unchecked(data.as_ptr() as *mut _),
-                data.len(),
-                MTLResourceOptions::StorageModeShared,
-            )
-            .expect("failed to create buffer")
-        }
-    }
 }
 
 fn make_buf(dev: &ProtocolObject<dyn MTLDevice>, data: *const u8, len: usize) -> Buffer {
@@ -382,7 +366,7 @@ impl MetalRenderer {
         let px_buf = make_buf(&self.device, pixels.as_ptr() as *const u8, pixels.len() * 4);
 
         // Build uniforms
-        let iscale = if src_w > 0 { out_w / src_w } else { 1 };
+        let iscale = out_w.checked_div(src_w).unwrap_or(1);
         let extra = match filter {
             ScaleFilter::OmniScale => {
                 let sx = src_w as f32 / out_w as f32;
@@ -415,8 +399,8 @@ impl MetalRenderer {
             encoder.setTexture_atIndex(Some(out_tex), 0);
             encoder.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize {
-                    width: ((out_w + 15) / 16) as usize,
-                    height: ((out_h + 15) / 16) as usize,
+                    width: out_w.div_ceil(16) as usize,
+                    height: out_h.div_ceil(16) as usize,
                     depth: 1,
                 },
                 MTLSize {
@@ -473,8 +457,8 @@ impl MetalRenderer {
         }
 
         let cmd = self.command_queue.commandBuffer()?;
-        let dispatch_x = ((out_w + 15) / 16) as usize;
-        let dispatch_y = ((out_h + 15) / 16) as usize;
+        let dispatch_x = out_w.div_ceil(16) as usize;
+        let dispatch_y = out_h.div_ceil(16) as usize;
 
         for pass_idx in 0u32..3 {
             let unis = Uniforms {
@@ -612,9 +596,9 @@ impl MetalRenderer {
                     encoder.setBuffer_offset_atIndex(Some(px_dst), 0, 6);
                     encoder.setTexture_atIndex(Some(out_tex), 0);
                     let (dx, dy) = if pass_idx < 4 {
-                        (((sw + 15) / 16) as usize, ((sh + 15) / 16) as usize)
+                        (sw.div_ceil(16) as usize, sh.div_ceil(16) as usize)
                     } else {
-                        (((ow + 15) / 16) as usize, ((oh + 15) / 16) as usize)
+                        (ow.div_ceil(16) as usize, oh.div_ceil(16) as usize)
                     };
                     encoder.dispatchThreadgroups_threadsPerThreadgroup(
                         MTLSize {

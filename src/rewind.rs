@@ -46,6 +46,10 @@ impl RewindBuffer {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.head.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.deltas.clear();
         self.head.clear();

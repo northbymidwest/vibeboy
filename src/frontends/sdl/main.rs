@@ -420,56 +420,53 @@ fn main() {
                                 .with_usage(sdl3::sys::gpu::SDL_GPUTransferBufferUsage::DOWNLOAD)
                                 .with_size(dl_size)
                                 .build()
+                                && let Ok(cmd) = gpu.device.acquire_command_buffer()
+                                && let Ok(cp) = gpu.device.begin_copy_pass(&cmd)
                             {
-                                if let Ok(cmd) = gpu.device.acquire_command_buffer() {
-                                    if let Ok(cp) = gpu.device.begin_copy_pass(&cmd) {
-                                        unsafe {
-                                            let mut src =
-                                                sdl3::sys::gpu::SDL_GPUTextureRegion::default();
-                                            src.texture = gpu.tex.raw();
-                                            src.w = ow;
-                                            src.h = oh;
-                                            src.d = 1;
-                                            let mut dst =
-                                                sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default(
-                                                );
-                                            dst.transfer_buffer = dl_buf.raw();
-                                            sdl3::sys::gpu::SDL_DownloadFromGPUTexture(
-                                                cp.raw(),
-                                                &src,
-                                                &dst,
-                                            );
-                                        }
-                                        gpu.device.end_copy_pass(cp);
-                                        if let Ok(f) = cmd.submit_and_acquire_fence(&gpu.device) {
-                                            let _ = gpu.device.wait_fences(true, &[f]);
-                                            let map = dl_buf.map::<u32>(&gpu.device, false);
-                                            let px = map.mem();
-                                            let mut rgb2 = vec![0u8; (ow * oh) as usize * 3];
-                                            for (i, &c) in
-                                                px.iter().take((ow * oh) as usize).enumerate()
-                                            {
-                                                rgb2[i * 3] = ((c >> 16) & 0xff) as u8;
-                                                rgb2[i * 3 + 1] = ((c >> 8) & 0xff) as u8;
-                                                rgb2[i * 3 + 2] = (c & 0xff) as u8;
-                                            }
-                                            drop(map);
-                                            let scaled_path = "screenshot_scaled.png";
-                                            if image::save_buffer(
-                                                scaled_path,
-                                                &rgb2,
-                                                ow,
-                                                oh,
-                                                image::ColorType::Rgb8,
-                                            )
-                                            .is_ok()
-                                            {
-                                                eprintln!(
-                                                    "Scaled screenshot saved to {} ({}x{})",
-                                                    scaled_path, ow, oh
-                                                );
-                                            }
-                                        }
+                                unsafe {
+                                    let src = sdl3::sys::gpu::SDL_GPUTextureRegion {
+                                        texture: gpu.tex.raw(),
+                                        w: ow,
+                                        h: oh,
+                                        d: 1,
+                                        ..Default::default()
+                                    };
+                                    let dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo {
+                                        transfer_buffer: dl_buf.raw(),
+                                        ..Default::default()
+                                    };
+                                    sdl3::sys::gpu::SDL_DownloadFromGPUTexture(
+                                        cp.raw(),
+                                        &src,
+                                        &dst,
+                                    );
+                                }
+                                gpu.device.end_copy_pass(cp);
+                                if let Ok(f) = cmd.submit_and_acquire_fence(&gpu.device) {
+                                    let _ = gpu.device.wait_fences(true, &[f]);
+                                    let map = dl_buf.map::<u32>(&gpu.device, false);
+                                    let px = map.mem();
+                                    let mut rgb2 = vec![0u8; (ow * oh) as usize * 3];
+                                    for (i, &c) in px.iter().take((ow * oh) as usize).enumerate() {
+                                        rgb2[i * 3] = ((c >> 16) & 0xff) as u8;
+                                        rgb2[i * 3 + 1] = ((c >> 8) & 0xff) as u8;
+                                        rgb2[i * 3 + 2] = (c & 0xff) as u8;
+                                    }
+                                    map.unmap();
+                                    let scaled_path = "screenshot_scaled.png";
+                                    if image::save_buffer(
+                                        scaled_path,
+                                        &rgb2,
+                                        ow,
+                                        oh,
+                                        image::ColorType::Rgb8,
+                                    )
+                                    .is_ok()
+                                    {
+                                        eprintln!(
+                                            "Scaled screenshot saved to {} ({}x{})",
+                                            scaled_path, ow, oh
+                                        );
                                     }
                                 }
                             }
@@ -524,33 +521,29 @@ fn main() {
                     }
                 }
                 Event::ControllerDeviceAdded { which, .. } => {
-                    if gamepad.is_none() {
-                        if let Ok(gp) = gamepad_sys.open(SDL_JoystickID(which)) {
-                            eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
-                            enable_gamepad_sensors(&gp);
-                            gamepad = Some(gp);
-                        }
+                    if gamepad.is_none()
+                        && let Ok(gp) = gamepad_sys.open(SDL_JoystickID(which))
+                    {
+                        eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                        enable_gamepad_sensors(&gp);
+                        gamepad = Some(gp);
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
+                Event::ControllerDeviceRemoved { which, .. }
                     if gamepad
                         .as_ref()
-                        .is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which)))
-                    {
-                        eprintln!("Gamepad disconnected");
-                        gamepad = None;
-                        // Try to pick up another connected gamepad
-                        if let Ok(ids) = gamepad_sys.gamepads() {
-                            for id in ids {
-                                if let Ok(gp) = gamepad_sys.open(id) {
-                                    eprintln!(
-                                        "Gamepad connected: {}",
-                                        gp.name().unwrap_or_default()
-                                    );
-                                    enable_gamepad_sensors(&gp);
-                                    gamepad = Some(gp);
-                                    break;
-                                }
+                        .is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which))) =>
+                {
+                    eprintln!("Gamepad disconnected");
+                    gamepad = None;
+                    // Try to pick up another connected gamepad
+                    if let Ok(ids) = gamepad_sys.gamepads() {
+                        for id in ids {
+                            if let Ok(gp) = gamepad_sys.open(id) {
+                                eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+                                enable_gamepad_sensors(&gp);
+                                gamepad = Some(gp);
+                                break;
                             }
                         }
                     }
@@ -563,10 +556,10 @@ fn main() {
         handle_input(&mut emu, &event_pump.keyboard_state(), gamepad.as_ref());
 
         // ── Webcam → Pocket Camera ────────────────────────────────────────────
-        if let Some(ref ct) = camera_thread {
-            if ct.read_frame(&mut camera_buf) {
-                emu.set_camera_image(&camera_buf);
-            }
+        if let Some(ref ct) = camera_thread
+            && ct.read_frame(&mut camera_buf)
+        {
+            emu.set_camera_image(&camera_buf);
         }
 
         // ── Accelerometer → MBC7 ─────────────────────────────────────────────
@@ -624,7 +617,6 @@ fn main() {
         let mut backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
         let mut fast_forward = ks.is_scancode_pressed(Scancode::Tab);
         let slow_motion = ks.is_scancode_pressed(Scancode::Minus);
-        drop(ks);
         // Left shoulder = rewind, right shoulder = fast forward
         if let Some(ref gp) = gamepad {
             if gp.button(GpButton::LeftShoulder) {

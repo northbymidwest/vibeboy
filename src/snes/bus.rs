@@ -286,11 +286,11 @@ impl SnesBus {
                             }
                         }
                     }
-                    2 => {
+                    2
                         // SPC program "running" — the SPC program always presents
                         // $AA on port 0 when ready. Only $CC starts a new upload.
-                        if port == 0 {
-                            if val == 0xCC {
+                        if port == 0
+                            && val == 0xCC => {
                                 log::debug!("APU: new upload to SPC program ($CC)");
                                 self.apu_state = 1;
                                 self.apu_in[0] = 0xCC;
@@ -298,8 +298,6 @@ impl SnesBus {
                                 self.apu_port1_val = 1;
                             }
                             // Don't echo other port 0 writes — keep $AA
-                        }
-                    }
                     _ => {}
                 }
             }

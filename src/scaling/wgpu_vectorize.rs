@@ -37,6 +37,9 @@ pub struct WgpuVectorizePipeline {
     bufs: Option<VecBufs>,
 }
 
+// Some buffers are only reached through the cached bind groups; they are
+// held here so their lifetime is explicit.
+#[allow(dead_code)]
 struct VecBufs {
     img_w: u32,
     img_h: u32,
@@ -150,14 +153,13 @@ impl WgpuVectorizePipeline {
         out_w: u32,
         out_h: u32,
     ) {
-        if let Some(b) = &self.bufs {
-            if b.img_w == img_w
-                && b.img_h == img_h
-                && b.output_tex_w == out_w
-                && b.output_tex_h == out_h
-            {
-                return;
-            }
+        if let Some(b) = &self.bufs
+            && b.img_w == img_w
+            && b.img_h == img_h
+            && b.output_tex_w == out_w
+            && b.output_tex_h == out_h
+        {
+            return;
         }
         let corners_w = img_w + 1;
         let corners_h = img_h + 1;
@@ -770,8 +772,8 @@ impl WgpuVectorizePipeline {
         write_uniform(queue, &b.uni_grad, &uni_grad_data);
         write_uniform(queue, &b.uni_tjunc, &[num_cps, 0, 0, 0]);
         write_uniform(queue, &b.uni_xpack, &[num_cps, 0, 0, 0]);
-        let tiles_w = (img_w + 1) / 2;
-        let tiles_h = (img_h + 1) / 2;
+        let tiles_w = img_w.div_ceil(2);
+        let tiles_h = img_h.div_ceil(2);
         let uni_rast: [u32; 8] = [
             img_w,
             img_h,
@@ -794,7 +796,7 @@ impl WgpuVectorizePipeline {
             cp.set_bind_group(0, &b.bg_sim[0], &[]);
             cp.set_bind_group(1, &b.bg_sim[1], &[]);
             cp.set_bind_group(2, &b.bg_sim[2], &[]);
-            cp.dispatch_workgroups((img_w + 15) / 16, (img_h + 15) / 16, 1);
+            cp.dispatch_workgroups(img_w.div_ceil(16), img_h.div_ceil(16), 1);
         }
 
         // Buffer copy: graph → snapshot
@@ -812,15 +814,15 @@ impl WgpuVectorizePipeline {
             cp.set_bind_group(1, &b.bg_resolve[1], &[]);
             cp.set_bind_group(2, &b.bg_resolve[2], &[]);
             cp.dispatch_workgroups(
-                (img_w.saturating_sub(1) + 15) / 16,
-                (img_h.saturating_sub(1) + 15) / 16,
+                img_w.saturating_sub(1).div_ceil(16),
+                img_h.saturating_sub(1).div_ceil(16),
                 1,
             );
             cp.set_pipeline(&self.cell_graph);
             cp.set_bind_group(0, &b.bg_cell[0], &[]);
             cp.set_bind_group(1, &b.bg_cell[1], &[]);
             cp.set_bind_group(2, &b.bg_cell[2], &[]);
-            cp.dispatch_workgroups((corners_w + 15) / 16, (corners_h + 15) / 16, 1);
+            cp.dispatch_workgroups(corners_w.div_ceil(16), corners_h.div_ceil(16), 1);
         }
 
         // Buffer copy: positions → orig_pos
@@ -840,7 +842,7 @@ impl WgpuVectorizePipeline {
                 label: Some("optimizer"),
                 timestamp_writes: None,
             });
-            let nworkgroups = (num_cps + 255) / 256;
+            let nworkgroups = num_cps.div_ceil(256);
             for pass in 0..outer_passes {
                 let even = pass % 2 == 0;
                 let (bg_picard, bg_grad) = if even {
@@ -863,7 +865,7 @@ impl WgpuVectorizePipeline {
         // Even outer_passes: final grad pass wrote to opt_out_buf.
         // Odd outer_passes: final grad pass wrote to pos_buf.
         // Downstream stages read pos_buf — copy if needed.
-        if outer_passes % 2 == 0 && outer_passes > 0 {
+        if outer_passes.is_multiple_of(2) && outer_passes > 0 {
             encoder.copy_buffer_to_buffer(&b.opt_out_buf, 0, &b.pos_buf, 0, pos_size);
         }
 
@@ -882,13 +884,13 @@ impl WgpuVectorizePipeline {
             cp.set_bind_group(1, &b.bg_tjunc[1], &[]);
             cp.set_bind_group(2, &b.bg_tjunc[2], &[]);
             for _ in 0..3 {
-                cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+                cp.dispatch_workgroups(num_cps.div_ceil(256), 1, 1);
             }
             cp.set_pipeline(&self.crossing_pack);
             cp.set_bind_group(0, &b.bg_xpack[0], &[]);
             cp.set_bind_group(1, &b.bg_xpack[1], &[]);
             cp.set_bind_group(2, &b.bg_xpack[2], &[]);
-            cp.dispatch_workgroups((num_cps + 255) / 256, 1, 1);
+            cp.dispatch_workgroups(num_cps.div_ceil(256), 1, 1);
             cp.set_pipeline(&self.rasterizer);
             cp.set_bind_group(0, &b.bg_rast[0], &[]);
             cp.set_bind_group(1, &b.bg_rast[1], &[]);

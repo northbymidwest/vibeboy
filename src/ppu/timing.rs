@@ -155,13 +155,13 @@ impl Ppu {
                         // CGB normal speed: STAT mode bits clear immediately,
                         // OAM/VRAM stay blocked for 1T. hblank_entered fires
                         // immediately for HDMA.
-                        self.stat = self.stat & !0x03;
+                        self.stat &= !0x03;
                         self.hblank_entered = true;
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
                         // DMG: STAT mode bits and accessibility change
                         // immediately. STAT interrupt fires 1T later.
-                        self.stat = self.stat & !0x03;
+                        self.stat &= !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
                         self.vram_accessible = true;
@@ -185,7 +185,7 @@ impl Ppu {
                     self.mode0_stat_dot = 0;
                     if self.cgb_mode {
                         // CGB: STAT bits and accessibility also deferred
-                        self.stat = self.stat & !0x03;
+                        self.stat &= !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
                         self.vram_accessible = true;
@@ -384,10 +384,8 @@ impl Ppu {
                     // (dot 2), before the mode transition at dot 5. Hardware
                     // briefly pulses the Mode 2 source as the line-start
                     // state machine begins, even on VBlank lines.
-                    if self.ly == 144 {
-                        if !self.stat_irq_line && self.stat & 0x20 != 0 {
-                            self.if_flags |= 0x02;
-                        }
+                    if self.ly == 144 && !self.stat_irq_line && self.stat & 0x20 != 0 {
+                        self.if_flags |= 0x02;
                     }
                 }
                 3 => {} // idle
@@ -631,22 +629,6 @@ impl Ppu {
 
     // ---- Mode transitions ----
 
-    pub(super) fn transition_to_mode2(&mut self) {
-        self.mode = 2;
-        self.mode_for_interrupt = 2;
-        self.stat = (self.stat & !0x03) | 0x02;
-        self.oam_accessible = false;
-        self.oam_write_accessible = false;
-        self.vram_accessible = true;
-        self.vram_write_accessible = true;
-        self.accessed_oam_row = 0;
-        self.oam_scan();
-        if self.lcdc & 0x20 != 0 && self.ly == self.wy {
-            self.wy_triggered = true;
-        }
-        self.update_stat_irq();
-    }
-
     pub(super) fn transition_to_mode3(&mut self) {
         self.mode3_dot = self.dot;
         self.mode = 3;
@@ -661,25 +643,6 @@ impl Ppu {
         // Run the first mode 3 tick on the transition dot itself.
         // The 5T priming includes this dot as tick 1.
         self.tick_mode3();
-    }
-
-    fn transition_to_mode1(&mut self) {
-        self.mode = 1;
-        self.mode_for_interrupt = 1;
-        self.stat = (self.stat & !0x03) | 0x01;
-        self.oam_accessible = true;
-        self.oam_write_accessible = true;
-        self.vram_accessible = true;
-        self.vram_write_accessible = true;
-        // VBlank interrupt always fires
-        self.if_flags |= 0x01;
-        // CGB: Hardware quirk: Mode 2 source also fires at VBlank entry (one-shot)
-        // DMG: handled by mode_for_interrupt priming in handle_dmg_line_start
-        self.update_stat_irq_with_mode2(true);
-        // Immediately re-evaluate without forced mode 2 so stat_irq_line reflects
-        // the normal mode 1 state. Without this, the forced mode 2 signal lingers
-        // until the next update_stat_irq call (dot 456 of next VBlank line).
-        self.update_stat_irq();
     }
 
     // ---- Edge-triggered STAT interrupt ----
@@ -718,45 +681,6 @@ impl Ppu {
         self.stat_irq_line = mode_signal || (self.stat & 0x40 != 0 && coincidence);
     }
 
-    /// CGB-only: STAT IRQ check with Mode 2 source forced on (VBlank entry quirk).
-    fn update_stat_irq_with_mode2(&mut self, force_mode2: bool) {
-        let coincidence = self.stat & 0x04 != 0;
-        let signal = (self.stat & 0x08 != 0 && self.mode_for_interrupt == 0)
-            || (self.stat & 0x10 != 0 && self.mode_for_interrupt == 1)
-            || (self.stat & 0x20 != 0 && (self.mode_for_interrupt == 2 || force_mode2))
-            || (self.stat & 0x40 != 0 && coincidence);
-
-        if signal && !self.stat_irq_line {
-            self.if_flags |= 0x02;
-        }
-        self.stat_irq_line = signal;
-    }
-
-    /// CGB-only: STAT IRQ re-evaluation triggered by a CPU write to STAT.
-    /// Mode sources (bits 3-5) are suppressed during mode 2/3; only LYC
-    /// source (bit 6) can trigger during those modes.
-    pub(super) fn update_stat_irq_on_write(&mut self) {
-        let coincidence = self.stat & 0x04 != 0;
-        // Full signal: used to update stat_irq_line (prevents spurious
-        // rising edges on the next normal PPU tick).
-        let full_signal = (self.stat & 0x08 != 0 && self.mode == 0)
-            || (self.stat & 0x10 != 0 && self.mode == 1)
-            || (self.stat & 0x20 != 0 && self.mode == 2)
-            || (self.stat & 0x40 != 0 && coincidence);
-        // Write signal: during mode 2/3, only LYC source can trigger an
-        // interrupt from a STAT write. Mode sources are suppressed.
-        let write_signal = if self.mode <= 1 {
-            full_signal
-        } else {
-            self.stat & 0x40 != 0 && coincidence
-        };
-
-        if write_signal && !self.stat_irq_line {
-            self.if_flags |= 0x02;
-        }
-        self.stat_irq_line = full_signal;
-    }
-
     pub(super) fn update_coincidence(&mut self) {
         if self.ly_for_comparison >= 0 && self.ly_for_comparison as u8 == self.lyc {
             self.stat |= 0x04;
@@ -775,32 +699,6 @@ impl Ppu {
             b
         } else {
             self.oam[addr]
-        }
-    }
-
-    pub(super) fn oam_scan(&mut self) {
-        self.scanline_sprites.clear();
-        let sprite_height: i16 = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
-        let ly = self.ly as i16;
-
-        for i in 0..40usize {
-            let sprite_y = self.oam_read(i * 4) as i16 - 16;
-            let sprite_x = self.oam_read(i * 4 + 1);
-            let tile_idx = self.oam_read(i * 4 + 2);
-            let attrs = self.oam_read(i * 4 + 3);
-
-            if ly >= sprite_y && ly < sprite_y + sprite_height {
-                self.scanline_sprites.push((
-                    self.oam_read(i * 4),
-                    sprite_x,
-                    tile_idx,
-                    attrs,
-                    i as u8,
-                ));
-                if self.scanline_sprites.len() >= 10 {
-                    break;
-                }
-            }
         }
     }
 

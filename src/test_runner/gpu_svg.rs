@@ -518,12 +518,12 @@ fn build_node_map(data: &VectorizeData) -> NodeMap {
 /// `(prev_loop, next_loop)` in either direction) — meaning the face follows
 /// that chain smoothly through this node. `None` means the face kinks here
 /// and the curve must land on the junction position.
-fn match_chain<'a>(
+fn match_chain(
     nid: u64,
     prev_loop: u64,
     next_loop: u64,
-    chains: &'a BTreeMap<u64, Vec<ChainNeighbors>>,
-) -> Option<&'a ChainNeighbors> {
+    chains: &BTreeMap<u64, Vec<ChainNeighbors>>,
+) -> Option<&ChainNeighbors> {
     chains.get(&nid)?.iter().find(|ch| {
         (ch.prev == Some(prev_loop) && ch.next == Some(next_loop))
             || (ch.prev == Some(next_loop) && ch.next == Some(prev_loop))
@@ -648,15 +648,15 @@ fn append_face_path(nodes: &[u64], map: &NodeMap, data: &mut Data) {
             //    kink→kink branch moves the pen there)
             //  * otherwise → this kink_pos
             let next_loop = next_nid;
-            if let Some(part) = partial_chain(nid, next_loop) {
-                if let Some(p) = chain_partner(nid, next_loop) {
-                    let partner_interior = p.prev.is_some() && p.next.is_some();
-                    return if partner_interior {
-                        mid(part.pos, p.pos)
-                    } else {
-                        p.pos
-                    };
-                }
+            if let Some(part) = partial_chain(nid, next_loop)
+                && let Some(p) = chain_partner(nid, next_loop)
+            {
+                let partner_interior = p.prev.is_some() && p.next.is_some();
+                return if partner_interior {
+                    mid(part.pos, p.pos)
+                } else {
+                    p.pos
+                };
             }
             if is_kink(next_idx) {
                 return map

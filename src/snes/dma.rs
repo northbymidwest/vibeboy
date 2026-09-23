@@ -13,6 +13,12 @@ pub struct DmaChannel {
     pub unused: u8, // $43xB: unused
 }
 
+impl Default for DmaChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DmaChannel {
     pub fn new() -> Self {
         DmaChannel {
@@ -31,6 +37,12 @@ impl DmaChannel {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct DmaController {
     pub channels: [DmaChannel; 8],
+}
+
+impl Default for DmaController {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DmaController {

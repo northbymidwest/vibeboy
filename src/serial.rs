@@ -1,9 +1,9 @@
-/// Serial port emulation with pluggable device interface.
-///
-/// The serial clock is derived from the DIV counter (bit 7 normal speed,
-/// bit 1 CGB fast mode). Each falling edge on that bit calls
-/// `serial_master_edge()`, which toggles an internal clock and, on
-/// the falling half, shifts one bit through SB.
+//! Serial port emulation with pluggable device interface.
+//!
+//! The serial clock is derived from the DIV counter (bit 7 normal speed,
+//! bit 1 CGB fast mode). Each falling edge on that bit calls
+//! `serial_master_edge()`, which toggles an internal clock and, on
+//! the falling half, shifts one bit through SB.
 
 /// Trait for devices attached to the serial port (printer, link cable, etc.).
 pub trait SerialDevice {

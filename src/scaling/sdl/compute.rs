@@ -367,7 +367,7 @@ pub fn scalefx_compute_and_blit(
                 )
                 .expect("compute pass");
             cp.bind_compute_pipeline(pipeline);
-            cp.bind_compute_storage_buffers(0, &[px_src.clone()]);
+            cp.bind_compute_storage_buffers(0, std::slice::from_ref(px_src));
             cmd.push_compute_uniform_data(
                 0,
                 &Uniforms {
@@ -600,7 +600,7 @@ pub fn super_xbr_compute_and_blit(
             )
             .expect("compute pass");
         cp.bind_compute_pipeline(pipeline);
-        cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, std::slice::from_ref(&px_buf));
         cmd.push_compute_uniform_data(
             0,
             &Uniforms {
@@ -880,8 +880,8 @@ fn dispatch_stages_1_5b(
     let corners_w = img_w + 1;
     let corners_h = img_h + 1;
     let num_cps = corners_w * corners_h * 2;
-    let graph_size = (graph_stride * (2 * img_h + 1) * 4).max(4) as u32;
-    let pos_size = (num_cps * 2 * 4).max(4) as u32;
+    let graph_size = (graph_stride * (2 * img_h + 1) * 4).max(4);
+    let pos_size = (num_cps * 2 * 4).max(4);
 
     // Stage 1: Similarity graph (also writes per-pixel valence mask)
     {
@@ -900,7 +900,7 @@ fn dispatch_stages_1_5b(
             )
             .expect("sim pass");
         cp.bind_compute_pipeline(&pipelines.sim_graph);
-        cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, std::slice::from_ref(px_buf));
         #[repr(C)]
         struct U {
             img_w: u32,
@@ -993,7 +993,7 @@ fn dispatch_stages_1_5b(
             )
             .expect("cell pass");
         cp.bind_compute_pipeline(&pipelines.cell_graph);
-        cp.bind_compute_storage_buffers(0, &[graph_buf.clone()]);
+        cp.bind_compute_storage_buffers(0, std::slice::from_ref(graph_buf));
         #[repr(C)]
         struct U {
             img_w: u32,
@@ -1216,7 +1216,7 @@ pub fn gpu_vectorize_full_pipeline(
     if pipelines
         .buf_cache
         .as_ref()
-        .map_or(true, |c| c.img_w != img_w || c.img_h != img_h)
+        .is_none_or(|c| c.img_w != img_w || c.img_h != img_h)
     {
         let rw = gpu::BufferUsageFlags::COMPUTE_STORAGE_READ
             | gpu::BufferUsageFlags::COMPUTE_STORAGE_WRITE;
@@ -1890,7 +1890,7 @@ fn cpu_rasterize_debug(
             output[(opy * out_w + opx) as usize] = final_color;
 
             // Debug output for specific pixel or all suspicious pixels
-            let is_target = debug_px.map_or(false, |(dx, dy)| opx == dx && opy == dy);
+            let is_target = debug_px.is_some_and(|(dx, dy)| opx == dx && opy == dy);
             let is_suspicious = resolved && final_color != nn_color;
             if (is_target || (debug_all && is_suspicious)) && !debug_info.is_empty() {
                 eprintln!(
@@ -2137,22 +2137,30 @@ pub fn gpu_full_pipeline_screenshot(
     {
         let cp = device.begin_copy_pass(&cmd).ok()?;
         unsafe {
-            let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-            src.buffer = pos_buf.raw();
-            src.size = pos_dl_size;
-            let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-            dst.transfer_buffer = pos_dl.raw();
+            let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion {
+                buffer: pos_buf.raw(),
+                size: pos_dl_size,
+                ..Default::default()
+            };
+            let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation {
+                transfer_buffer: pos_dl.raw(),
+                ..Default::default()
+            };
             sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
             src.buffer = opt_out_buf.raw();
             dst.transfer_buffer = opt_dl.raw();
             sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
-            let mut src2 = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-            src2.buffer = nbr_buf.raw();
-            src2.size = num_cps * 4 * 4;
-            let mut dst2 = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-            dst2.transfer_buffer = nbr_dl.raw();
+            let src2 = sdl3::sys::gpu::SDL_GPUBufferRegion {
+                buffer: nbr_buf.raw(),
+                size: num_cps * 4 * 4,
+                ..Default::default()
+            };
+            let dst2 = sdl3::sys::gpu::SDL_GPUTransferBufferLocation {
+                transfer_buffer: nbr_dl.raw(),
+                ..Default::default()
+            };
             sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src2, &dst2);
         }
         device.end_copy_pass(cp);
@@ -2200,11 +2208,15 @@ pub fn gpu_full_pipeline_screenshot(
             let cmd2 = device.acquire_command_buffer().ok().unwrap();
             let cp2 = device.begin_copy_pass(&cmd2).ok().unwrap();
             unsafe {
-                let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-                src.buffer = flag_buf.raw();
-                src.size = num_cps * 4;
-                let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-                dst.transfer_buffer = fdl.raw();
+                let src = sdl3::sys::gpu::SDL_GPUBufferRegion {
+                    buffer: flag_buf.raw(),
+                    size: num_cps * 4,
+                    ..Default::default()
+                };
+                let dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation {
+                    transfer_buffer: fdl.raw(),
+                    ..Default::default()
+                };
                 sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp2.raw(), &src, &dst);
             }
             device.end_copy_pass(cp2);
@@ -2218,7 +2230,7 @@ pub fn gpu_full_pipeline_screenshot(
                 "GPU debug: flags: {} pinned, {} with any flag set",
                 pinned_count, active_count
             );
-            drop(fmap);
+            fmap.unmap();
         }
 
         let nonzero_opt = opt_data
@@ -2249,7 +2261,7 @@ pub fn gpu_full_pipeline_screenshot(
                 let flag = if let Some(ref fdl) = flag_dl {
                     let fmap = fdl.map::<u32>(&device, false);
                     let f = fmap.mem()[i];
-                    drop(fmap);
+                    fmap.unmap();
                     f
                 } else {
                     0
@@ -2275,7 +2287,7 @@ pub fn gpu_full_pipeline_screenshot(
             let flag = if let Some(ref fdl) = flag_dl {
                 let fmap = fdl.map::<u32>(&device, false);
                 let f = fmap.mem()[i];
-                drop(fmap);
+                fmap.unmap();
                 f
             } else {
                 0
@@ -2306,11 +2318,15 @@ pub fn gpu_full_pipeline_screenshot(
                 let cmd3 = device.acquire_command_buffer().ok().unwrap();
                 let cp3 = device.begin_copy_pass(&cmd3).ok().unwrap();
                 unsafe {
-                    let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion::default();
-                    src.buffer = orig_pos_buf.raw();
-                    src.size = orig_dl_size;
-                    let mut dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation::default();
-                    dst.transfer_buffer = odl.raw();
+                    let src = sdl3::sys::gpu::SDL_GPUBufferRegion {
+                        buffer: orig_pos_buf.raw(),
+                        size: orig_dl_size,
+                        ..Default::default()
+                    };
+                    let dst = sdl3::sys::gpu::SDL_GPUTransferBufferLocation {
+                        transfer_buffer: odl.raw(),
+                        ..Default::default()
+                    };
                     sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp3.raw(), &src, &dst);
                 }
                 device.end_copy_pass(cp3);
@@ -2318,11 +2334,7 @@ pub fn gpu_full_pipeline_screenshot(
                 let _ = device.wait_fences(true, &[f3]);
 
                 let omap = odl.map::<f32>(&device, false);
-                let fmap2 = if let Some(ref fdl) = flag_dl {
-                    Some(fdl.map::<u32>(&device, false))
-                } else {
-                    None
-                };
+                let fmap2 = flag_dl.as_ref().map(|fdl| fdl.map::<u32>(&device, false));
 
                 let orig_pos = omap.mem();
                 let flags_slice = fmap2.as_ref().map(|m| m.mem());
@@ -2340,14 +2352,16 @@ pub fn gpu_full_pipeline_screenshot(
                     scale as f32,
                     corners_w,
                 );
-                drop(omap);
-                drop(fmap2);
+                omap.unmap();
+                if let Some(m) = fmap2 {
+                    m.unmap();
+                }
             }
         }
 
-        drop(pos_map);
-        drop(opt_map);
-        drop(nbr_map);
+        pos_map.unmap();
+        opt_map.unmap();
+        nbr_map.unmap();
     }
 
     // New command buffer for rasterizer
@@ -2418,13 +2432,17 @@ pub fn gpu_full_pipeline_screenshot(
     {
         let cp = device.begin_copy_pass(&cmd).ok()?;
         unsafe {
-            let mut src_r = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
-            src_r.texture = out_tex.raw();
-            src_r.w = out_w;
-            src_r.h = out_h;
-            src_r.d = 1;
-            let mut dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
-            dst.transfer_buffer = dl_buf.raw();
+            let src_r = sdl3::sys::gpu::SDL_GPUTextureRegion {
+                texture: out_tex.raw(),
+                w: out_w,
+                h: out_h,
+                d: 1,
+                ..Default::default()
+            };
+            let dst = sdl3::sys::gpu::SDL_GPUTextureTransferInfo {
+                transfer_buffer: dl_buf.raw(),
+                ..Default::default()
+            };
             sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_r, &dst);
         }
         device.end_copy_pass(cp);
@@ -2443,6 +2461,6 @@ pub fn gpu_full_pipeline_screenshot(
         let r = bytes[off + 2] as u32;
         pixels[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
     }
-    drop(map);
+    map.unmap();
     Some((pixels, out_w, out_h))
 }

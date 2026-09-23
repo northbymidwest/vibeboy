@@ -208,11 +208,9 @@ pub fn cmd_screenshot(
         });
 
         // Try GPU path if requested
-        if use_gpu {
-            if let Some((pixels, w, h)) = try_gpu_filter(raw_fb, f, sf, scale) {
-                scaled_buf = pixels;
-                return save_pixels(&scaled_buf, w, h, out, format, frames);
-            }
+        if use_gpu && let Some((pixels, w, h)) = try_gpu_filter(raw_fb, f, sf, scale) {
+            scaled_buf = pixels;
+            return save_pixels(&scaled_buf, w, h, out, format, frames);
         }
 
         // CPU path

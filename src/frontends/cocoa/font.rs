@@ -136,7 +136,7 @@ pub(super) mod tiny_font {
         }
 
         for ch in text.chars() {
-            let idx = if ch >= ' ' && ch <= '~' {
+            let idx = if (' '..='~').contains(&ch) {
                 (ch as u8 - b' ') as usize
             } else {
                 0 // space for non-printable

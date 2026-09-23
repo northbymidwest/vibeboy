@@ -59,12 +59,6 @@ const EDGE_DOMINANT: u8 = 2;
 /// Ratio threshold for dominant vs normal edges.
 const DOMINANT_THRESHOLD: f32 = 3.6;
 
-/// Pack four 2-bit edge values into a single byte.
-/// Layout: corner0=[1:0], corner1=[3:2], corner2=[5:4], corner3=[7:6]
-#[inline(always)]
-fn pack_edge(c0: u8, c1: u8, c2: u8, c3: u8) -> u8 {
-    c0 | (c1 << 2) | (c2 << 4) | (c3 << 6)
-}
 #[inline(always)]
 fn read_edge(packed: u8, corner: u8) -> u8 {
     (packed >> (corner * 2)) & 3
@@ -90,7 +84,7 @@ fn rotate_edges(packed: u8) -> u8 {
 /// with edge strengths for all 4 corners of the junction.
 ///
 /// The 4×4 neighborhood centered on the junction:
-/// ```
+/// ```text
 ///       b  c
 ///   e   f  g  h
 ///   i   j  k  l

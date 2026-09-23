@@ -1,8 +1,8 @@
-/// Super Game Boy command protocol, palettes, attributes, border & VRAM transfers.
-///
-/// The SGB receives commands through the P1 register (0xFF00) using a serial
-/// bit-bang protocol: RESET(0x00) → 128 data bits → STOP(0x30), repeated for
-/// multi-packet commands.
+//! Super Game Boy command protocol, palettes, attributes, border & VRAM transfers.
+//!
+//! The SGB receives commands through the P1 register (0xFF00) using a serial
+//! bit-bang protocol: RESET(0x00) → 128 data bits → STOP(0x30), repeated for
+//! multi-packet commands.
 
 /// Default SGB palette (RGB555) — matches the first built-in palette used by
 /// the SGB BIOS after the boot animation completes.
@@ -11,6 +11,7 @@ const DEFAULT_PALETTE: [u16; 4] = [0x67BF, 0x265B, 0x10B5, 0x2866];
 /// Serde helpers for large boxed arrays that exceed serde's default array limit.
 mod serde_boxed_u16_2048 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[allow(clippy::borrowed_box)] // serde `with` passes &FieldType
     pub fn serialize<S: Serializer>(data: &Box<[u16; 2048]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
@@ -27,6 +28,7 @@ mod serde_boxed_u16_2048 {
 
 mod serde_boxed_attr_files {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[allow(clippy::borrowed_box)] // serde `with` passes &FieldType
     pub fn serialize<S: Serializer>(data: &Box<[[u8; 90]; 45]>, ser: S) -> Result<S::Ok, S::Error> {
         let flat: Vec<u8> = data.iter().flat_map(|a| a.iter().copied()).collect();
         flat.serialize(ser)
@@ -37,7 +39,7 @@ mod serde_boxed_attr_files {
             return Err(serde::de::Error::custom("expected 4050 bytes"));
         }
         let mut arr = Box::new([[0u8; 90]; 45]);
-        for (i, chunk) in flat.chunks_exact(90).enumerate() {
+        for (i, chunk) in flat.as_chunks::<90>().0.iter().enumerate() {
             arr[i].copy_from_slice(chunk);
         }
         Ok(arr)
@@ -46,6 +48,7 @@ mod serde_boxed_attr_files {
 
 mod serde_boxed_u8_8192 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[allow(clippy::borrowed_box)] // serde `with` passes &FieldType
     pub fn serialize<S: Serializer>(data: &Box<[u8; 8192]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
@@ -62,6 +65,7 @@ mod serde_boxed_u8_8192 {
 
 mod serde_boxed_u16_896 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[allow(clippy::borrowed_box)] // serde `with` passes &FieldType
     pub fn serialize<S: Serializer>(data: &Box<[u16; 896]>, ser: S) -> Result<S::Ok, S::Error> {
         data.as_ref().as_slice().serialize(ser)
     }
@@ -167,6 +171,12 @@ pub struct Sgb {
     pending_transfer_data: u8,
     /// Frames remaining before executing the pending transfer (SGB hardware delays ~2 frames)
     transfer_countdown: u8,
+}
+
+impl Default for Sgb {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sgb {
@@ -290,8 +300,8 @@ impl Sgb {
         }
         // When game reads P1 with both select lines high, return player ID
         // Player 0: 0x0F, Player 1: 0x0E, Player 2: 0x0D, Player 3: 0x0C
-        let id = 0x0F - self.current_player;
-        id
+
+        0x0F - self.current_player
     }
 
     /// Finish the current packet and either execute the command or wait for more packets.
@@ -841,9 +851,7 @@ impl Sgb {
         // some games may not use SGB commands at all on SGB hardware.
         if self.boot_pending {
             self.boot_frames = self.boot_frames.saturating_add(1);
-            if self.got_first_command && self.boot_frames >= 180 {
-                self.boot_pending = false;
-            } else if self.boot_frames >= 300 {
+            if (self.got_first_command && self.boot_frames >= 180) || self.boot_frames >= 300 {
                 self.boot_pending = false;
             }
         }

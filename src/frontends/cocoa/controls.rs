@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSControl, NSEventMask, NSEventType,
-    NSFont, NSModalResponseOK, NSOpenPanel, NSPanel, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSEventMask, NSEventType, NSFont,
+    NSModalResponseOK, NSOpenPanel, NSPanel, NSTextField, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAutoreleasePool, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect,
@@ -179,7 +178,7 @@ pub(super) fn show_controls_panel(key_map: &mut HashMap<u16, u8>) {
                 break;
             }
         } else if event_type == NSEventType::LeftMouseUp {
-            let location = unsafe { event.locationInWindow() };
+            let location = event.locationInWindow();
             for &(btn, ref label) in &key_labels {
                 let frame: NSRect = label.frame();
                 if location.x >= frame.origin.x

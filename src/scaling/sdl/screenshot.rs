@@ -165,7 +165,7 @@ pub fn gpu_screenshot(
                 )
                 .ok()?;
             cp.bind_compute_pipeline(&pipeline);
-            cp.bind_compute_storage_buffers(0, &[px_buf.clone()]);
+            cp.bind_compute_storage_buffers(0, std::slice::from_ref(&px_buf));
             cmd.push_compute_uniform_data(
                 0,
                 &SxbrUniforms {
@@ -210,13 +210,17 @@ pub fn gpu_screenshot(
     {
         let cp = device.begin_copy_pass(&cmd).ok()?;
         unsafe {
-            let mut src_region = sdl3::sys::gpu::SDL_GPUTextureRegion::default();
-            src_region.texture = out_tex.raw();
-            src_region.w = out_w;
-            src_region.h = out_h;
-            src_region.d = 1;
-            let mut dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo::default();
-            dst_info.transfer_buffer = dl_buf.raw();
+            let src_region = sdl3::sys::gpu::SDL_GPUTextureRegion {
+                texture: out_tex.raw(),
+                w: out_w,
+                h: out_h,
+                d: 1,
+                ..Default::default()
+            };
+            let dst_info = sdl3::sys::gpu::SDL_GPUTextureTransferInfo {
+                transfer_buffer: dl_buf.raw(),
+                ..Default::default()
+            };
             sdl3::sys::gpu::SDL_DownloadFromGPUTexture(cp.raw(), &src_region, &dst_info);
         }
         device.end_copy_pass(cp);
@@ -235,7 +239,7 @@ pub fn gpu_screenshot(
         let r = bytes[off + 2] as u32;
         pixels[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
     }
-    drop(map);
+    map.unmap();
 
     Some((pixels, out_w, out_h))
 }

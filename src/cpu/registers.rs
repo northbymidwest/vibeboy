@@ -28,6 +28,12 @@ pub struct Registers {
     pub pc: u16,
 }
 
+impl Default for Registers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registers {
     /// Post-boot-ROM state for CGB (default).
     pub fn new() -> Self {

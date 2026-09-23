@@ -161,6 +161,8 @@ pub fn scale_2xsai(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
 // ── Super 2xSaI ─────────────────────────────────────────────────────────────
 
 /// Super 2xSaI by Kreed — smoother variant that interpolates all four output pixels.
+// One branch per case of the reference algorithm, kept separate on purpose.
+#[allow(clippy::if_same_then_else)]
 pub fn scale_super2xsai(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
     let dst_w = src_w * 2;
     let dst_h = src_h * 2;

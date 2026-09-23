@@ -301,7 +301,7 @@ impl WgpuScalePipeline {
             unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
 
         // Reallocate buffers if dimensions changed
-        let need_realloc = self.bufs.as_ref().map_or(true, |b| {
+        let need_realloc = self.bufs.as_ref().is_none_or(|b| {
             b.src_w != src_w || b.src_h != src_h || b.out_w != out_w || b.out_h != out_h
         });
 
@@ -387,8 +387,8 @@ impl WgpuScalePipeline {
 
         let pipeline = self.pipeline_for(filter);
         let tex_view = bufs.output_tex.create_view(&Default::default());
-        let dispatch_x = (out_w + 15) / 16;
-        let dispatch_y = (out_h + 15) / 16;
+        let dispatch_x = out_w.div_ceil(16);
+        let dispatch_y = out_h.div_ceil(16);
 
         if filter == WgpuScaleFilter::ScaleFx {
             // ScaleFX: 5-pass pipeline with 4 intermediate float4 buffers + px_out for 9x chaining.
@@ -506,10 +506,10 @@ impl WgpuScalePipeline {
                     }));
                 }
 
-                let sd_x = (sw + 15) / 16;
-                let sd_y = (sh + 15) / 16;
-                let od_x = (ow + 15) / 16;
-                let od_y = (oh + 15) / 16;
+                let sd_x = sw.div_ceil(16);
+                let sd_y = sh.div_ceil(16);
+                let od_x = ow.div_ceil(16);
+                let od_y = oh.div_ceil(16);
 
                 for pass_idx in 0..5u32 {
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -525,7 +525,7 @@ pub fn cpu_scale(
     Some(match filter {
         ScaleFilter::Hqx(mode) => {
             let s = hqx::scale(src, sw, sh, mode);
-            let f = mode.factor() as u32;
+            let f = mode.factor();
             (s, sw as u32 * f, sh as u32 * f)
         }
         ScaleFilter::Epx | ScaleFilter::Scale2x => {
@@ -566,12 +566,12 @@ pub fn cpu_scale(
         }
         ScaleFilter::Xbr(mode) => {
             let s = xbr::scale(src, sw, sh, mode);
-            let f = mode.factor() as u32;
+            let f = mode.factor();
             (s, sw as u32 * f, sh as u32 * f)
         }
         ScaleFilter::Xbrz(mode) => {
             let s = xbrz::scale(src, sw, sh, mode);
-            let f = mode.factor() as u32;
+            let f = mode.factor();
             (s, sw as u32 * f, sh as u32 * f)
         }
         ScaleFilter::SuperXbr => {
@@ -636,6 +636,5 @@ pub fn cpu_scale(
             }
             (out, disp_w as u32, disp_h as u32)
         }
-        _ => return None,
     })
 }

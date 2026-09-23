@@ -1,7 +1,7 @@
-/// Snapshot infrastructure for rewind and save states.
-///
-/// A `Snapshot` captures the entire emulator state at one point in time.
-/// It can be restored to rewind gameplay or load a save state.
+//! Snapshot infrastructure for rewind and save states.
+//!
+//! A `Snapshot` captures the entire emulator state at one point in time.
+//! It can be restored to rewind gameplay or load a save state.
 
 /// Serde helper for WRAM: [[u8; 0x1000]; 8] (8 banks of 4KB).
 mod serde_wram {
@@ -16,7 +16,7 @@ mod serde_wram {
             return Err(serde::de::Error::custom("expected 32768 bytes for WRAM"));
         }
         let mut result = [[0u8; 0x1000]; 8];
-        for (i, chunk) in flat.chunks_exact(0x1000).enumerate() {
+        for (i, chunk) in flat.as_chunks::<0x1000>().0.iter().enumerate() {
             result[i].copy_from_slice(chunk);
         }
         Ok(result)

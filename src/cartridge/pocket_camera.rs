@@ -61,7 +61,6 @@ impl PocketCamera {
 
         // Apply gain
         let gain_idx = (self.camera_regs[4] & 0x1F) as usize;
-        #[expect(clippy::excessive_precision)]
         const GAIN: [f64; 32] = [
             0.881, 0.915, 0.946, 0.974, 1.000, 1.024, 1.047, 1.068, 1.088, 1.124, 1.157, 1.187,
             1.214, 1.240, 1.274, 1.316, 1.353, 1.386, 1.416, 1.443, 1.469, 1.493, 1.515, 1.536,
@@ -160,7 +159,7 @@ impl Cartridge for PocketCamera {
 
         // Bank 0, $A100-$AEFF: generate image on the fly
         let ram_bank = self.ram_bank & 0x0F;
-        if self.image_ready && ram_bank == 0 && addr >= 0xA100 && addr < 0xAF00 {
+        if self.image_ready && ram_bank == 0 && (0xA100..0xAF00).contains(&addr) {
             return self.read_image_byte(addr - 0xA100);
         }
 

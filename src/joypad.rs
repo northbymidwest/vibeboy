@@ -22,6 +22,12 @@ pub struct Joypad {
     pub interrupt: bool,
 }
 
+impl Default for Joypad {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Joypad {
     pub fn new() -> Self {
         Joypad {

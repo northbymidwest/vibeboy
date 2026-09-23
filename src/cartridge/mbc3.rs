@@ -118,17 +118,15 @@ impl Cartridge for Mbc3 {
                 // 0x00-0x03 = RAM bank, 0x08-0x0C = RTC register select
                 self.ram_bank = v;
             }
-            0x6000..=0x7FFF => {
-                if self.has_rtc {
-                    if val == 0x00 {
-                        self.rtc_latch_ready = true;
-                    } else if val == 0x01 && self.rtc_latch_ready {
-                        self.advance_rtc();
-                        self.rtc_latched = self.rtc_regs;
-                        self.rtc_latch_ready = false;
-                    } else {
-                        self.rtc_latch_ready = false;
-                    }
+            0x6000..=0x7FFF if self.has_rtc => {
+                if val == 0x00 {
+                    self.rtc_latch_ready = true;
+                } else if val == 0x01 && self.rtc_latch_ready {
+                    self.advance_rtc();
+                    self.rtc_latched = self.rtc_regs;
+                    self.rtc_latch_ready = false;
+                } else {
+                    self.rtc_latch_ready = false;
                 }
             }
             _ => {}
@@ -207,12 +205,8 @@ impl Cartridge for Mbc3 {
         // Load RTC state from 48-byte footer after RAM data
         if self.has_rtc && data.len() >= ram_len + 48 {
             let rtc = &data[ram_len..];
-            for i in 0..5 {
-                self.rtc_regs[i] = rtc[i];
-            }
-            for i in 0..5 {
-                self.rtc_latched[i] = rtc[5 + i];
-            }
+            self.rtc_regs.copy_from_slice(&rtc[..5]);
+            self.rtc_latched.copy_from_slice(&rtc[5..10]);
             // Bytes 20-27: unix timestamp of last save (i64 LE)
             if rtc.len() >= 28 {
                 let mut ts_bytes = [0u8; 8];

@@ -16,7 +16,7 @@ use super::clock;
 use super::emulator::Emulator;
 use super::gpu::GpuRenderer;
 use super::menu::{
-    ID_FORCE_CPU, ID_OPEN, ID_PAUSE, ID_PRINTER, ID_QUIT, ID_RESET, MODEL_IDS, build_menu,
+    ID_FORCE_CPU, ID_OPEN, ID_PAUSE, ID_PRINTER, ID_QUIT, ID_RESET, build_menu,
     filter_id_to_filter, model_id_to_model, slot_load_id, slot_save_id,
 };
 use super::model::GbModel;
@@ -285,15 +285,14 @@ impl App {
                 }
 
                 // Slot selection checkmarks
-                if other.starts_with("select_slot_") {
-                    if let Ok(n) = other["select_slot_".len()..].parse::<usize>() {
-                        self.current_slot = n;
-                        for item in &self.slot_items {
-                            item.set_checked(item.id().0 == other);
-                        }
-                        eprintln!("Slot {} selected", n);
-                        return;
+                if other.starts_with("select_slot_")
+                    && let Ok(n) = other["select_slot_".len()..].parse::<usize>()
+                {
+                    self.current_slot = n;
+                    for item in &self.slot_items {
+                        item.set_checked(item.id().0 == other);
                     }
+                    eprintln!("Slot {} selected", n);
                 }
             }
         }
@@ -319,20 +318,20 @@ impl App {
 
         if !skip_step {
             // Feed webcam frames to Pocket Camera
-            if let Some(ref ct) = self.camera_thread {
-                if ct.read_frame(&mut self.camera_buf) {
-                    emu.set_camera_image(&self.camera_buf);
-                }
+            if let Some(ref ct) = self.camera_thread
+                && ct.read_frame(&mut self.camera_buf)
+            {
+                emu.set_camera_image(&self.camera_buf);
             }
 
             if self.step_one_frame {
                 emu.step_frame();
                 self.step_one_frame = false;
                 let samples = emu.drain_audio_samples();
-                if !samples.is_empty() {
-                    if let Ok(mut ring) = self.audio_ring.lock() {
-                        ring.push(&samples);
-                    }
+                if !samples.is_empty()
+                    && let Ok(mut ring) = self.audio_ring.lock()
+                {
+                    ring.push(&samples);
                 }
             } else if self.fast_forward {
                 for _ in 0..4 {
@@ -371,10 +370,10 @@ impl App {
                     emu.step_frame();
                 }
                 let samples = emu.drain_audio_samples();
-                if !samples.is_empty() {
-                    if let Ok(mut ring) = self.audio_ring.lock() {
-                        ring.push(&samples);
-                    }
+                if !samples.is_empty()
+                    && let Ok(mut ring) = self.audio_ring.lock()
+                {
+                    ring.push(&samples);
                 }
             }
         }
@@ -782,10 +781,10 @@ impl ApplicationHandler for App {
                 }
                 ui_util::reverse_audio(&mut all_audio);
                 let resampled = ui_util::downsample_audio(&all_audio, 3);
-                if !resampled.is_empty() {
-                    if let Ok(mut ring) = self.audio_ring.lock() {
-                        ring.push(&resampled);
-                    }
+                if !resampled.is_empty()
+                    && let Ok(mut ring) = self.audio_ring.lock()
+                {
+                    ring.push(&resampled);
                 }
             }
             // Still render the rewound frame

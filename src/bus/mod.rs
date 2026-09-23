@@ -523,18 +523,18 @@ impl Bus {
     /// Raw read bypassing DMA bus-conflict logic (for DMA/HDMA controllers).
     pub(super) fn read_byte_raw(&self, addr: u16) -> u8 {
         // Boot ROM overlay: covers 0x0000-0x00FF and (for CGB) 0x0200-0x08FF.
-        if self.boot_rom_active {
-            if let Some(ref brom) = self.boot_rom {
-                let idx = match addr {
-                    0x0000..=0x00FF => Some(addr as usize),
-                    0x0200..=0x08FF if self.model.is_cgb() => Some(addr as usize),
-                    _ => None,
-                };
-                if let Some(i) = idx {
-                    if i < brom.len() {
-                        return brom[i];
-                    }
-                }
+        if self.boot_rom_active
+            && let Some(ref brom) = self.boot_rom
+        {
+            let idx = match addr {
+                0x0000..=0x00FF => Some(addr as usize),
+                0x0200..=0x08FF if self.model.is_cgb() => Some(addr as usize),
+                _ => None,
+            };
+            if let Some(i) = idx
+                && i < brom.len()
+            {
+                return brom[i];
             }
         }
         match addr {
@@ -610,7 +610,7 @@ impl Bus {
             return;
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
-        if !self.ppu.oam_accessible && addr >= 0xFE00 && addr < 0xFF00 {
+        if !self.ppu.oam_accessible && (0xFE00..0xFF00).contains(&addr) {
             self.trigger_oam_bug_from_write(addr);
         }
         self.write_byte_raw(addr, val);
@@ -1182,7 +1182,7 @@ impl Bus {
         let has_transfer = self
             .sgb
             .as_ref()
-            .map_or(false, |s: &Sgb| s.has_pending_transfer());
+            .is_some_and(|s: &Sgb| s.has_pending_transfer());
         if !has_transfer {
             return;
         }
@@ -1224,15 +1224,15 @@ impl Bus {
 
     /// Capture the current frame for MASK_EN(1) freeze mode.
     pub fn capture_sgb_freeze(&mut self) {
-        if let Some(ref mut sgb) = self.sgb {
-            if sgb.mask_mode == 1 {
-                let len = self.ppu.frame_buffer.len();
-                let buf = sgb.frozen_buffer.get_or_insert_with(|| vec![0u32; len]);
-                if buf.len() != len {
-                    buf.resize(len, 0);
-                }
-                buf.copy_from_slice(&self.ppu.frame_buffer);
+        if let Some(ref mut sgb) = self.sgb
+            && sgb.mask_mode == 1
+        {
+            let len = self.ppu.frame_buffer.len();
+            let buf = sgb.frozen_buffer.get_or_insert_with(|| vec![0u32; len]);
+            if buf.len() != len {
+                buf.resize(len, 0);
             }
+            buf.copy_from_slice(&self.ppu.frame_buffer);
         }
     }
 }

@@ -4,7 +4,7 @@
 //! cdylib (vibeboy_libretro.so/.dll/.dylib) and loaded by RetroArch or other
 //! libretro frontends.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_uint, c_void};
 use std::ptr;
 
@@ -25,7 +25,6 @@ const RETRO_DEVICE_JOYPAD: c_uint = 1;
 
 // Joypad buttons
 const RETRO_DEVICE_ID_JOYPAD_B: c_uint = 0;
-const RETRO_DEVICE_ID_JOYPAD_Y: c_uint = 1;
 const RETRO_DEVICE_ID_JOYPAD_SELECT: c_uint = 2;
 const RETRO_DEVICE_ID_JOYPAD_START: c_uint = 3;
 const RETRO_DEVICE_ID_JOYPAD_UP: c_uint = 4;
@@ -39,7 +38,6 @@ const RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: c_uint = 10;
 const RETRO_ENVIRONMENT_SET_VARIABLES: c_uint = 16;
 const RETRO_ENVIRONMENT_GET_VARIABLE: c_uint = 15;
 const RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY: c_uint = 9;
-const RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY: c_uint = 31;
 
 // Memory types
 const RETRO_MEMORY_SAVE_RAM: c_uint = 0;
@@ -239,8 +237,11 @@ pub extern "C" fn retro_api_version() -> c_uint {
     RETRO_API_VERSION
 }
 
+/// # Safety
+///
+/// `info` must point to a writable `RetroSystemInfo`.
 #[unsafe(no_mangle)]
-pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
+pub unsafe extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
     unsafe {
         (*info).library_name = LIB_NAME.as_ptr() as *const c_char;
         (*info).library_version = LIB_VERSION.as_ptr() as *const c_char;
@@ -250,8 +251,11 @@ pub extern "C" fn retro_get_system_info(info: *mut RetroSystemInfo) {
     }
 }
 
+/// # Safety
+///
+/// `info` must point to a writable `RetroSystemAvInfo`.
 #[unsafe(no_mangle)]
-pub extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
+pub unsafe extern "C" fn retro_get_system_av_info(info: *mut RetroSystemAvInfo) {
     let (w, h) = unsafe {
         if let Some(core) = core_mut() {
             if core.emu.is_sgb() {
@@ -356,8 +360,12 @@ pub extern "C" fn retro_deinit() {
     }
 }
 
+/// # Safety
+///
+/// `game` must be null or point to a valid `RetroGameInfo` whose `data`
+/// is readable for `size` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
+pub unsafe extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
     unsafe {
         if game.is_null() || (*game).data.is_null() || (*game).size == 0 {
             return false;
@@ -474,17 +482,17 @@ pub extern "C" fn retro_run() {
 
         // Audio: drain samples (already at 48kHz), convert to i16
         let samples = core.emu.drain_audio_samples();
-        if !samples.is_empty() {
-            if let Some(batch_cb) = audio_batch_cb() {
-                core.audio_buf_i16.clear();
-                for &s in &samples {
-                    core.audio_buf_i16
-                        .push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
-                }
-
-                let frames = core.audio_buf_i16.len() / 2;
-                batch_cb(core.audio_buf_i16.as_ptr(), frames);
+        if !samples.is_empty()
+            && let Some(batch_cb) = audio_batch_cb()
+        {
+            core.audio_buf_i16.clear();
+            for &s in &samples {
+                core.audio_buf_i16
+                    .push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
             }
+
+            let frames = core.audio_buf_i16.len() / 2;
+            batch_cb(core.audio_buf_i16.as_ptr(), frames);
         }
     }
 }

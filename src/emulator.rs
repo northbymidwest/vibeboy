@@ -86,11 +86,13 @@ impl Emulator {
         }
 
         // Enable LLE mode if we have a SNES program ROM
-        let snes = if model.is_sgb() && snes_rom.is_some() {
+        let snes = if model.is_sgb()
+            && let Some(snes_rom) = snes_rom
+        {
             if let Some(ref mut sgb) = bus.sgb {
                 sgb.lle_mode = true;
             }
-            let snes_sys = SnesSys::new(snes_rom.unwrap());
+            let snes_sys = SnesSys::new(snes_rom);
             log::info!("SGB LLE: SNES CPU active (PC=${:04X})", snes_sys.cpu.pc);
             Some(snes_sys)
         } else {
@@ -225,10 +227,10 @@ impl Emulator {
         self.cpu = snap.cpu.clone();
         self.bus.apply_snapshot(&snap.bus);
         self.frame_count = snap.frame_count;
-        if let Some(ref snes_snap) = snap.snes {
-            if let Some(ref mut snes) = self.snes {
-                snes.apply_snapshot(snes_snap);
-            }
+        if let Some(ref snes_snap) = snap.snes
+            && let Some(ref mut snes) = self.snes
+        {
+            snes.apply_snapshot(snes_snap);
         }
         self.snes_packet_queue.clear();
     }
@@ -293,14 +295,14 @@ impl Emulator {
 
     /// Load state from the given slot. Returns true if a state was loaded.
     pub fn load_state(&mut self, slot: usize) -> bool {
-        if slot < 10 {
-            if let Some(snap) = self.save_slots[slot].take() {
-                self.restore_snapshot(&snap);
-                self.save_slots[slot] = Some(snap);
-                self.rewind_buffer.clear();
-                log::info!("State loaded from slot {}", (slot + 1) % 10);
-                return true;
-            }
+        if slot < 10
+            && let Some(snap) = self.save_slots[slot].take()
+        {
+            self.restore_snapshot(&snap);
+            self.save_slots[slot] = Some(snap);
+            self.rewind_buffer.clear();
+            log::info!("State loaded from slot {}", (slot + 1) % 10);
+            return true;
         }
         false
     }
@@ -308,10 +310,10 @@ impl Emulator {
     /// Serialize the given slot to bytes for disk/network storage.
     /// Returns None if the slot is empty.
     pub fn save_state_to_bytes(&mut self, slot: usize) -> Option<Vec<u8>> {
-        if slot < 10 {
-            if let Some(ref snap) = self.save_slots[slot] {
-                return Some(crate::savestate::serialize(snap));
-            }
+        if slot < 10
+            && let Some(ref snap) = self.save_slots[slot]
+        {
+            return Some(crate::savestate::serialize(snap));
         }
         None
     }
@@ -649,12 +651,11 @@ impl Emulator {
     /// Return the current frame buffer (160 × 144 pixels, 0x00RRGGBB).
     pub fn frame_buffer(&self) -> &[u32] {
         // For SGB with freeze mask, return frozen buffer
-        if let Some(ref sgb) = self.bus.sgb {
-            if sgb.mask_mode == 1 {
-                if let Some(ref frozen) = sgb.frozen_buffer {
-                    return frozen;
-                }
-            }
+        if let Some(ref sgb) = self.bus.sgb
+            && sgb.mask_mode == 1
+            && let Some(ref frozen) = sgb.frozen_buffer
+        {
+            return frozen;
         }
         self.bus.ppu.frame_buffer()
     }
@@ -671,17 +672,17 @@ impl Emulator {
     pub fn sgb_composited_frame(&mut self) -> &[u32] {
         // Re-render border directly into sgb_output only when dirty.
         // The border pixels persist across frames, avoiding a 230KB memcpy.
-        if let Some(ref sgb) = self.bus.sgb {
-            if sgb.border_dirty {
-                sgb.render_border(&mut self.sgb_output);
-            }
+        if let Some(ref sgb) = self.bus.sgb
+            && sgb.border_dirty
+        {
+            sgb.render_border(&mut self.sgb_output);
         }
         if let Some(ref mut sgb) = self.bus.sgb {
             sgb.border_dirty = false;
         }
 
         // Composite game frame into the game area (48,40)-(208,184)
-        let boot_pending = self.bus.sgb.as_ref().map_or(false, |s| s.boot_pending);
+        let boot_pending = self.bus.sgb.as_ref().is_some_and(|s| s.boot_pending);
         if !boot_pending {
             let game_buf = if let Some(ref sgb) = self.bus.sgb {
                 if sgb.mask_mode == 1 {

@@ -138,7 +138,8 @@ fn parse_gambatte_test(path: &Path) -> Option<GambatteExpected> {
         }
         dmg_hex = None;
         cgb_hex = Some(hex.to_uppercase());
-    } else if let Some(pos) = stem.rfind("_out") {
+    } else {
+        let pos = stem.rfind("_out")?;
         let hex = &stem[pos + 4..];
         let hex_end = hex.find('_').unwrap_or(hex.len());
         let hex = &hex[..hex_end];
@@ -147,8 +148,6 @@ fn parse_gambatte_test(path: &Path) -> Option<GambatteExpected> {
         }
         dmg_hex = None;
         cgb_hex = Some(hex.to_uppercase());
-    } else {
-        return None;
     }
 
     if dmg_hex.is_none() && cgb_hex.is_none() {

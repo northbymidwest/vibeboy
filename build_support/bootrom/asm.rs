@@ -27,6 +27,8 @@ pub struct Asm {
     fixups: Vec<Fixup>,
 }
 
+// A small instruction set; the boot ROM uses only some of it.
+#[allow(dead_code)]
 impl Asm {
     pub fn new() -> Self {
         Self {

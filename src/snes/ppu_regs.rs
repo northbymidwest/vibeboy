@@ -33,6 +33,12 @@ pub struct SnesPpuRegs {
     pub setini: u8,      // $2133
 }
 
+impl Default for SnesPpuRegs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SnesPpuRegs {
     pub fn new() -> Self {
         SnesPpuRegs {

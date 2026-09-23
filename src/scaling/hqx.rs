@@ -226,6 +226,8 @@ fn hq2x_corner(v: &CornerView) -> u32 {
 
 // ── hq3x ────────────────────────────────────────────────────────────────────
 
+// One branch per case of the reference algorithm, kept separate on purpose.
+#[allow(clippy::if_same_then_else)]
 fn hq3x_corner_and_edge(v: &CornerView) -> (u32, u32) {
     let CornerView {
         diag,

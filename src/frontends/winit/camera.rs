@@ -11,9 +11,6 @@ pub(super) struct CameraThread {
 
 impl CameraThread {
     pub fn start() -> Option<Self> {
-        use nokhwa::pixel_format::RgbFormat;
-        use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
-
         // Check if any camera is available
         let devices = nokhwa::query(nokhwa::utils::ApiBackend::Auto).ok()?;
         if devices.is_empty() {
