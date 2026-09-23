@@ -18,7 +18,6 @@ use sdl3::sys::camera::{
     SDL_AcquireCameraFrame, SDL_CameraSpec, SDL_CloseCamera, SDL_GetCameras, SDL_OpenCamera,
     SDL_ReleaseCameraFrame,
 };
-use sdl3::sys::joystick::SDL_JoystickID;
 use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
 use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
@@ -520,19 +519,17 @@ fn main() {
                         eprintln!("Slot {} selected", current_slot);
                     }
                 }
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     if gamepad.is_none()
-                        && let Ok(gp) = gamepad_sys.open(SDL_JoystickID(which))
+                        && let Ok(gp) = gamepad_sys.open(which)
                     {
                         eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
                         enable_gamepad_sensors(&gp);
                         gamepad = Some(gp);
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. }
-                    if gamepad
-                        .as_ref()
-                        .is_some_and(|g| g.id().ok() == Some(SDL_JoystickID(which))) =>
+                Event::GamepadRemoved { which, .. }
+                    if gamepad.as_ref().is_some_and(|g| g.id().ok() == Some(which)) =>
                 {
                     eprintln!("Gamepad disconnected");
                     gamepad = None;
