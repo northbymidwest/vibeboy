@@ -28,6 +28,11 @@
                 sdl3
                 # gtk-ui
                 gtk4
+                # winit-ui: bindgen (v4l2-sys-mit) needs libclang
+                rustPlatform.bindgenHook
+                # scripts/build-web.sh; also needs
+                # `rustup target add wasm32-unknown-unknown`
+                wasm-pack
               ]
               ++ lib.optionals stdenv.hostPlatform.isLinux [
                 alsa-lib
