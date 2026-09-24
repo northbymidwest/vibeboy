@@ -537,10 +537,16 @@ impl Emulator {
                     self.bus.ie = 0;
                 }
 
-                // HALT with IME=false: detect halt_bug (pending interrupt skips next opcode fetch).
-                // This only triggers when HALT is first executed with an interrupt already
-                // pending, NOT when the CPU wakes from halt later.
-                if self.cpu.halted && !self.cpu.ime {
+                // HALT executed with an interrupt already pending never halts,
+                // and the next opcode fetch fails to increment PC (halt bug).
+                // With IME=0 the byte after HALT is read twice. With IME=1
+                // (only reachable via EI; HALT) the interrupt is dispatched
+                // next and, because of the missed increment, returns to the
+                // HALT itself (see Cpu::begin_interrupt_dispatch). This only
+                // triggers when HALT is first executed with an interrupt
+                // already pending, NOT when the CPU wakes from halt later.
+                // Undefined opcodes also set `halted` but have cleared IE above.
+                if self.cpu.halted && self.cpu.opcode == 0x76 {
                     self.bus.flush_ppu_deferred();
                     let pending = self.bus.ie & self.bus.if_ & 0x1F;
                     if pending != 0 {

@@ -162,6 +162,15 @@ impl Cpu {
     /// Signal that an interrupt should be dispatched. Called by the emulator
     /// when it detects a pending interrupt (IME=true, IE & IF != 0).
     pub fn begin_interrupt_dispatch(&mut self) {
+        // On hardware the dispatch replaces an opcode fetch that already
+        // incremented PC, and its first cycle decrements PC back. When the
+        // HALT bug is armed that fetch did not increment PC, so the decrement
+        // lands on the HALT itself: EI; HALT with an interrupt pending returns
+        // from the handler to the HALT, which then executes again.
+        if self.halt_bug {
+            self.halt_bug = false;
+            self.regs.pc = self.regs.pc.wrapping_sub(1);
+        }
         self.in_interrupt = true;
         self.interrupt_phase = 0;
         self.ime = false;
