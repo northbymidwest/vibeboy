@@ -62,6 +62,15 @@ impl Ppu {
         }
     }
 
+    /// True once the PPU is in HBlank as seen by the HDMA engine: mode 0
+    /// and past the point where the HBlank HDMA request is raised (on CGB
+    /// that is mode0_stat_dot, 1T after mode 3 ends). An HDMA started
+    /// before that point is served by the upcoming request instead, so a
+    /// start in that 1T window must not also copy a block immediately.
+    pub fn in_hdma_hblank(&self) -> bool {
+        self.mode == 0 && self.mode0_stat_dot == 0
+    }
+
     pub fn fetcher_is_window(&self) -> bool {
         self.fetcher.fetching_window
     }

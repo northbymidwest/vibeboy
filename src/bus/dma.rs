@@ -107,7 +107,7 @@ impl Bus {
             // H-Blank DMA: if PPU is already in mode 0 (HBlank), transfer
             // the first block immediately per hardware behavior (jsgroth tests).
             self.ppu.hblank_entered = false;
-            if self.ppu.mode == 0 {
+            if self.ppu.in_hdma_hblank() {
                 self.do_hdma_one_block();
             }
         }

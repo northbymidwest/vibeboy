@@ -133,17 +133,14 @@ impl Ppu {
                     self.mode = 0;
                     self.mode_for_interrupt = 0;
                     if self.cgb_mode && self.double_speed {
-                        // CGB double-speed: STAT bits, accessibility deferred
-                        // by 1T. hblank_entered fires immediately so HDMA
-                        // transfer detection isn't delayed.
-                        self.hblank_entered = true;
+                        // CGB double-speed: STAT bits, accessibility and the
+                        // HBlank HDMA trigger deferred by 1T (mode0_stat_dot).
                         self.mode0_stat_dot = self.dot + 1;
                     } else if self.cgb_mode {
                         // CGB normal speed: STAT mode bits clear immediately,
-                        // OAM/VRAM stay blocked for 1T. hblank_entered fires
-                        // immediately for HDMA.
+                        // OAM/VRAM and the HBlank HDMA trigger are deferred
+                        // 1T (mode0_stat_dot).
                         self.stat &= !0x03;
-                        self.hblank_entered = true;
                         self.mode0_stat_dot = self.dot + 1;
                     } else {
                         // DMG: STAT mode bits and accessibility change
@@ -171,7 +168,14 @@ impl Ppu {
                 if self.mode0_stat_dot > 0 && self.dot >= self.mode0_stat_dot {
                     self.mode0_stat_dot = 0;
                     if self.cgb_mode {
-                        // CGB: STAT bits and accessibility also deferred
+                        // CGB: STAT bits and accessibility also deferred.
+                        // The HBlank HDMA request is raised here, once per
+                        // HBlank, when VRAM is released to the DMA engine.
+                        // Pan Docs (HDMA5): exactly one $10-byte block is
+                        // transferred per HBlank. Raising it at mode 3 end
+                        // too let a flush boundary between the two dots
+                        // re-arm the flag during the first transfer and
+                        // copy a second block in the same HBlank.
                         self.stat &= !0x03;
                         self.oam_accessible = true;
                         self.oam_write_accessible = true;
