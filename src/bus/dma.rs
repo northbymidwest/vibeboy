@@ -206,6 +206,10 @@ impl Bus {
     /// Transfer one HDMA block with per-M-cycle interleaving.
     /// Used by both the HBlank trigger path and the immediate-mode-0 path.
     fn do_hdma_one_block(&mut self) {
+        // Bring the PPU up to the end of the triggering M-cycle before the
+        // transfer M-cycles step it directly; otherwise the deferred dots of
+        // that M-cycle would run after the transfer, out of order.
+        self.flush_ppu_deferred();
         self.hdma.in_transfer = true;
         for _ in 0..Self::HDMA_SETUP_MCYCLES {
             self.tick_dma_mcycle();
