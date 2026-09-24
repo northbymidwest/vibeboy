@@ -214,19 +214,13 @@ impl Ppu {
         // with X=0 always getting 5. Uses tile slot grouping where
         // consecutive sprites in the same slot skip the alignment penalty.
         if self.cgb_mode {
-            // Wait for BG fetcher to reach GetTileDataHighT2 (the end of its
-            // 6-state tile fetch cycle), then 1 extra T for the post-loop
-            // fetcher advance + setup. A mod-6 dot counter would be
-            // unreliable here because the fetcher cycle is 7+ T when Push
-            // stalls, so use the state itself.
-            //
-            // Push state is special: it stalls until the fifo drains, then
-            // transitions to GetTileT1 to start a new cycle. From Push we
-            // need: (drain time, unknown) + 5 advances to H_T2. We use the
-            // worst case (1 + 5 = 6) which mostly self-corrects on real
-            // input — see if it hurts.
-            // Wait to reach end-of-cycle + post-loop advance, expressed as
-            // a single per-state constant.
+            // Hardware waits until the BG fetcher has reached the second
+            // half of its high-byte read (GetTileDataHighT2) or has already
+            // finished the tile and is stalled in Push, then advances the
+            // fetcher once more before starting the sprite data read. The
+            // wait is one dot per state still to go, plus that extra dot.
+            // A fetcher stalled in Push already holds a finished tile, so it
+            // needs no wait beyond the extra dot, the same as HighT2.
             let total_wait = match self.fetcher.state {
                 super::FetcherState::GetTileT1 => 6,
                 super::FetcherState::GetTileT2 => 5,
@@ -234,7 +228,7 @@ impl Ppu {
                 super::FetcherState::GetTileDataLowT2 => 3,
                 super::FetcherState::GetTileDataHighT1 => 2,
                 super::FetcherState::GetTileDataHighT2 => 1,
-                super::FetcherState::Push => 7,
+                super::FetcherState::Push => 1,
             };
             self.sprite_alignment_delay = total_wait as u8;
         } else {
