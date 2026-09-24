@@ -7,6 +7,7 @@
 //!
 //! All shaders are loaded from WGSL (cross-compiled from Slang via slangc).
 
+use crate::scaling::vectorize::{OPT_GRAD_ETA, OPT_GRAD_MAX_STEP, OPT_OUTER_PASSES};
 use wgpu;
 
 /// Cached wgpu compute pipelines and buffers for the vectorize pipeline.
@@ -138,9 +139,9 @@ impl WgpuVectorizePipeline {
             tjunction: create_compute_pipeline(device, tjunc_wgsl, "update_tjunction"),
             crossing_pack: create_compute_pipeline(device, xpack_wgsl, "crossing_pack"),
             rasterizer: create_compute_pipeline(device, rast_wgsl, "cell_rasterizer"),
-            outer_passes: 3,
-            eta: 0.05,
-            max_step: 0.25,
+            outer_passes: OPT_OUTER_PASSES,
+            eta: OPT_GRAD_ETA,
+            max_step: OPT_GRAD_MAX_STEP,
             bufs: None,
         }
     }
@@ -862,10 +863,12 @@ impl WgpuVectorizePipeline {
                 cp.dispatch_workgroups(nworkgroups, 1, 1);
             }
         }
-        // Even outer_passes: final grad pass wrote to opt_out_buf.
-        // Odd outer_passes: final grad pass wrote to pos_buf.
-        // Downstream stages read pos_buf — copy if needed.
-        if outer_passes.is_multiple_of(2) && outer_passes > 0 {
+        // Even iters (bg_grad_a) write opt_out_buf, odd iters (bg_grad_b)
+        // write pos_buf. The last iter is index outer_passes - 1, so an odd
+        // pass count leaves the final result in opt_out_buf and an even one
+        // leaves it in pos_buf. Downstream stages read pos_buf, so copy when
+        // the count is odd.
+        if !outer_passes.is_multiple_of(2) {
             encoder.copy_buffer_to_buffer(&b.opt_out_buf, 0, &b.pos_buf, 0, pos_size);
         }
 
@@ -873,7 +876,6 @@ impl WgpuVectorizePipeline {
         // tjunction now writes only stem CPs (legacy IS_CROSSING branch
         // dropped); crossing_pack runs once after the snap loop converges
         // so neighbor stem positions are visible to the quartic solve.
-        let _ = pos_size; // kept in scope for clarity, no longer copied
         {
             let mut cp = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("tjunc+xpack+rast"),

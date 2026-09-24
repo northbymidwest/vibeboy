@@ -19,6 +19,20 @@ pub const IS_CROSSING: u32 = 64;
 /// real quadratic curve instead of a degenerate straight tail.
 pub const IS_ENDPOINT: u32 = 128;
 
+/// Optimizer parameters shared by every GPU backend (SDL3, Metal, wgpu) so
+/// the (Picard -> gradient correction) chain cannot drift between them.
+/// These are also the CPU `optimize_energy` defaults.
+///
+/// Number of outer (Picard -> gradient correction) iterations. 3 lands
+/// within ~1.7% of the converged-CG energy on standard pixel-art sprites,
+/// visually indistinguishable from fully converged.
+pub const OPT_OUTER_PASSES: u32 = 3;
+/// Gradient-correction step size. CPU sweeps showed 0.05 is the sweet spot:
+/// larger values diverge, smaller values undershoot.
+pub const OPT_GRAD_ETA: f32 = 0.05;
+/// Per-CP gradient-correction step magnitude cap.
+pub const OPT_GRAD_MAX_STEP: f32 = 0.25;
+
 // Direction bitmask encoding (matches reference)
 const DIR_NW: u32 = 1;
 const DIR_W: u32 = 2;
@@ -2964,15 +2978,15 @@ fn optimize_energy(
     let outer_passes: usize = std::env::var("VBY_OUTER")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3);
+        .unwrap_or(OPT_OUTER_PASSES as usize);
     let eta: f32 = std::env::var("VBY_ETA")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0.05);
+        .unwrap_or(OPT_GRAD_ETA);
     let max_step: f32 = std::env::var("VBY_MAXSTEP")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0.25);
+        .unwrap_or(OPT_GRAD_MAX_STEP);
     // GPU-faithful topology, matching vectorscale's optimize-energy +
     // gradient-correction chain and vibeboy's wgpu Picard → grad pipeline.
     //   Pass A (picard, optimize-energy.slang in vectorscale / picard_step.slang in wgpu):

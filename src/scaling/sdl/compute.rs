@@ -1,6 +1,7 @@
 //! Compute pipeline init and dispatch for scaling filters and full GPU vectorize.
 
 use super::common::*;
+use crate::scaling::vectorize::{OPT_GRAD_ETA, OPT_GRAD_MAX_STEP, OPT_OUTER_PASSES};
 use sdl3::gpu;
 
 // ── OmniScale compute pipeline ──────────────────────────────────────────────
@@ -644,11 +645,6 @@ pub fn super_xbr_compute_and_blit(
 // with no CPU readback between stages. Buffers are cached between frames
 // for zero per-frame allocation.
 
-/// Number of outer (Picard → grad) iterations. 3 lands ~1.7% above the
-/// converged-CG energy on standard pixel-art sprites; visually
-/// indistinguishable from fully-converged.
-const OPT_OUTER_PASSES: u32 = 3;
-
 /// Cached GPU buffers for the cell rasterizer pipeline.
 /// Allocated once and reused each frame (GB image dimensions never change).
 struct CellRastBufCache {
@@ -857,7 +853,11 @@ pub fn init_full_gpu_pipeline(device: &gpu::Device) -> Option<GpuVectorizePipeli
 
 /// Dispatch stages 1-5b (similarity graph through crossing intersection pack).
 /// Shared between live pipeline and screenshot pipeline.
-/// Returns the buffer containing the optimized+snapped positions.
+/// Returns the buffer containing the optimized+snapped positions. The
+/// optimizer ping-pongs between `pos_buf` and `opt_out_buf`, so which one
+/// holds the final result depends on the pass count; callers must bind the
+/// returned buffer, not either input.
+#[must_use = "the optimizer result may live in opt_out_buf, not pos_buf"]
 fn dispatch_stages_1_5b(
     device: &gpu::Device,
     cmd: &gpu::CommandBuffer,
@@ -1039,18 +1039,35 @@ fn dispatch_stages_1_5b(
     // sees the latest result as input. The pair converges to ∇E = 0 (the
     // exact local minimum) — Picard alone reaches a biased Gauss-Seidel
     // fixed point; the grad pass debiases it.
+    //
+    // The two shaders take different uniform layouts: picard_step reads
+    // { num_nodes, pad x3 }, gradient_correction reads
+    // { num_nodes, eta, max_step, pad }.
     #[repr(C)]
-    struct U {
+    struct PicardU {
         num_nodes: u32,
         _pad0: u32,
         _pad1: u32,
         _pad2: u32,
     }
-    let uni = U {
+    #[repr(C)]
+    struct GradU {
+        num_nodes: u32,
+        eta: f32,
+        max_step: f32,
+        _pad0: u32,
+    }
+    let picard_uni = PicardU {
         num_nodes: num_cps,
         _pad0: 0,
         _pad1: 0,
         _pad2: 0,
+    };
+    let grad_uni = GradU {
+        num_nodes: num_cps,
+        eta: OPT_GRAD_ETA,
+        max_step: OPT_GRAD_MAX_STEP,
+        _pad0: 0,
     };
     let mut cur_in = pos_buf.clone();
     let mut cur_out = opt_out_buf.clone();
@@ -1076,7 +1093,7 @@ fn dispatch_stages_1_5b(
                     flag_buf.clone(),
                 ],
             );
-            cmd.push_compute_uniform_data(0, &uni);
+            cmd.push_compute_uniform_data(0, &picard_uni);
             cp.dispatch(num_cps.div_ceil(256), 1, 1);
             device.end_compute_pass(cp);
         }
@@ -1101,7 +1118,7 @@ fn dispatch_stages_1_5b(
                     flag_buf.clone(),
                 ],
             );
-            cmd.push_compute_uniform_data(0, &uni);
+            cmd.push_compute_uniform_data(0, &grad_uni);
             cp.dispatch(num_cps.div_ceil(256), 1, 1);
             device.end_compute_pass(cp);
         }
@@ -2095,7 +2112,7 @@ pub fn gpu_full_pipeline_screenshot(
         .ok()?;
 
     // Stages 1-5b: shared vectorize pipeline dispatch
-    dispatch_stages_1_5b(
+    let optimized_pos = dispatch_stages_1_5b(
         &device,
         &cmd,
         &pipelines,
@@ -2114,7 +2131,9 @@ pub fn gpu_full_pipeline_screenshot(
         img_h,
     );
 
-    // Debug: download positions before and after optimizer
+    // Debug: download positions before (orig_pos_buf, the cell graph output
+    // snapshotted ahead of the optimizer) and after (optimizer + T-junction
+    // snap) optimization.
     let pos_dl_size = num_cps * 2 * 4;
     let pos_dl = device
         .create_transfer_buffer()
@@ -2138,7 +2157,7 @@ pub fn gpu_full_pipeline_screenshot(
         let cp = device.begin_copy_pass(&cmd).ok()?;
         unsafe {
             let mut src = sdl3::sys::gpu::SDL_GPUBufferRegion {
-                buffer: pos_buf.raw(),
+                buffer: orig_pos_buf.raw(),
                 size: pos_dl_size,
                 ..Default::default()
             };
@@ -2148,7 +2167,7 @@ pub fn gpu_full_pipeline_screenshot(
             };
             sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
-            src.buffer = opt_out_buf.raw();
+            src.buffer = optimized_pos.raw();
             dst.transfer_buffer = opt_dl.raw();
             sdl3::sys::gpu::SDL_DownloadFromGPUBuffer(cp.raw(), &src, &dst);
 
@@ -2343,7 +2362,7 @@ pub fn gpu_full_pipeline_screenshot(
                     src,
                     img_w,
                     img_h,
-                    pos_data,
+                    opt_data,
                     orig_pos,
                     flags_slice.unwrap_or(&[]),
                     nbr_data,
@@ -2388,7 +2407,7 @@ pub fn gpu_full_pipeline_screenshot(
             0,
             &[
                 px_buf.clone(),
-                pos_buf.clone(),
+                optimized_pos.clone(),
                 orig_pos_buf.clone(),
                 flag_buf.clone(),
                 nbr_buf.clone(),

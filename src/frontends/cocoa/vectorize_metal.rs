@@ -2,6 +2,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, ns_string};
 use objc2_metal::*;
+use vibeboy_core::scaling::vectorize::{OPT_GRAD_ETA, OPT_GRAD_MAX_STEP, OPT_OUTER_PASSES};
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type CmdQueue = ProtocolObject<dyn MTLCommandQueue>;
@@ -45,11 +46,6 @@ pub(super) struct MetalVecBufs {
     /// from here. Lives across iters as a fixed buffer (no ping-pong).
     opt_picard_buf: Buffer,
 }
-
-/// Number of outer (Picard → grad) iterations. 3 lands ~1.7% above the
-/// converged-CG energy on standard pixel-art sprites; visually
-/// indistinguishable from fully-converged.
-const OPT_OUTER_PASSES: u32 = 3;
 
 fn load_msl(device: &Device, msl: &[u8]) -> Option<ComputePipeline> {
     let src = std::str::from_utf8(msl).ok()?;
@@ -315,12 +311,21 @@ impl MetalVectorizePipeline {
         // Newton step). Grad reads opt_picard_buf, writes `dst` (-η · ∇E
         // debias). Then ping-pong src/dst between pos_buf and opt_out_buf
         // so the next iter sees the latest result as input.
-        let uni = mk_uni(&[num_cps, 0, 0, 0]);
-        let dispatch = |pipe: &ComputePipeline, in_buf: &Buffer, out_buf: &Buffer| {
+        //
+        // picard_step reads { num_nodes, pad x3 }; gradient_correction reads
+        // { num_nodes, eta, max_step, pad }.
+        let picard_uni = mk_uni(&[num_cps, 0, 0, 0]);
+        let grad_uni = mk_uni(&[
+            num_cps,
+            OPT_GRAD_ETA.to_bits(),
+            OPT_GRAD_MAX_STEP.to_bits(),
+            0,
+        ]);
+        let dispatch = |pipe: &ComputePipeline, uni: &Buffer, in_buf: &Buffer, out_buf: &Buffer| {
             let enc = cmd.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(pipe);
             unsafe {
-                enc.setBuffer_offset_atIndex(Some(&uni), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(uni), 0, 0);
                 enc.setBuffer_offset_atIndex(Some(in_buf), 0, 1);
                 enc.setBuffer_offset_atIndex(Some(&b.orig_pos_buf), 0, 2);
                 enc.setBuffer_offset_atIndex(Some(&b.nbr_buf), 0, 3);
@@ -347,8 +352,8 @@ impl MetalVectorizePipeline {
             } else {
                 (&b.opt_out_buf, &b.pos_buf)
             };
-            dispatch(&self.picard, src, &b.opt_picard_buf);
-            dispatch(&self.grad, &b.opt_picard_buf, dst);
+            dispatch(&self.picard, &picard_uni, src, &b.opt_picard_buf);
+            dispatch(&self.grad, &grad_uni, &b.opt_picard_buf, dst);
         }
         // For odd OPT_OUTER_PASSES, the final result lands in opt_out_buf;
         // copy it back into pos_buf so downstream stages can hardcode
