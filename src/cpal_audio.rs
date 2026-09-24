@@ -144,12 +144,15 @@ pub fn start_audio(ring: Arc<Mutex<AudioRing>>, source_rate: u32) -> Option<(cpa
 
     let err_fn = |err: cpal::Error| eprintln!("Audio error: {err}");
 
-    // Try 96kHz with fixed buffer, then default buffer, then device default sample rate
+    // Try 96kHz with fixed buffer, then default buffer, then device default sample rate.
+    // 1024 frames (~10.7ms at 96kHz): 512 underran continuously through ALSA's
+    // PipeWire plugin, while much larger buffers drain in bursts that upset the
+    // frontends' fill-level frame pacing.
     let configs = [
         cpal::StreamConfig {
             channels: 2,
             sample_rate: source_rate,
-            buffer_size: cpal::BufferSize::Fixed(512),
+            buffer_size: cpal::BufferSize::Fixed(1024),
         },
         cpal::StreamConfig {
             channels: 2,
