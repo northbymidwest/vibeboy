@@ -518,7 +518,16 @@ impl NoiseCh {
     }
 }
 
-// ── NRx2 glitch helper (CGB-D/E behavior) ────────────────────────────────
+// ── NRx2 glitch helper ("zombie mode") ────────────────────────────────────
+//
+// Writing NRx2 while the channel is active adjusts the volume. This models
+// CPU-CGB-E, the only revision whose behaviour is tested and documented
+// (SameSuite channel_*_nrx2_glitch). It is applied on every model because
+// no other revision has a documented model to switch to: Pan Docs gives
+// simpler rules for CGB-02/04 boards only and describes DMG units as
+// behaving erratically, and the emulator does not distinguish CGB
+// revisions. Only "increase mode with period 0 adds 1" is consistent
+// across all hardware.
 
 pub(super) fn nrx2_glitch(
     volume: &mut u8,
