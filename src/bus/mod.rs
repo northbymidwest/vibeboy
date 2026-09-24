@@ -264,6 +264,9 @@ impl Bus {
             ppu.sync_dmg_palette_to_cgb(0xFC, false, 0);
             ppu.sync_dmg_palette_to_cgb(0xFF, true, 0);
             ppu.sync_dmg_palette_to_cgb(0xFF, true, 1);
+            // The CGB boot ROM writes OPRI=1 for DMG carts (next to KEY0=$04),
+            // selecting DMG-style X-coordinate object priority.
+            ppu.opri = 1;
         }
 
         let mut joypad = Joypad::new();

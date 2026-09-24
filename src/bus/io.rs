@@ -91,8 +91,10 @@ impl Bus {
                     0xFF
                 }
             }
+            // FF74 is readable/writable only in CGB mode; in DMG-compat
+            // mode it is locked and reads $FF.
             0xFF74 => {
-                if self.model.is_cgb() {
+                if self.model.is_cgb() && !self.dmg_compat {
                     self.ff74
                 } else {
                     0xFF
@@ -384,7 +386,7 @@ impl Bus {
             0xFF73 if self.model.is_cgb() => {
                 self.ff73 = val;
             }
-            0xFF74 if self.model.is_cgb() => {
+            0xFF74 if self.model.is_cgb() && !self.dmg_compat => {
                 self.ff74 = val;
             }
             0xFF75 if self.model.is_cgb() => {
