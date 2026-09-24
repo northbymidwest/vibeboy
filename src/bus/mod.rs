@@ -39,10 +39,6 @@ pub struct OamDma {
     /// and writes it to OAM in the NEXT. This models the 1-cycle delay
     /// between bus read and OAM latch observed on hardware.
     pending_write: Option<(usize, u8)>,
-    /// Bus conflict latch: when the CPU writes to the same bus as DMA,
-    /// the write value appears on the data bus and DMA copies it instead
-    /// of the source byte. Set by write_byte, consumed by step_oam_dma.
-    pub(super) bus_conflict_value: Option<u8>,
     /// Last byte read from the DMA source, used for PPU bus-byte override.
     last_bus_byte: u8,
     /// After DMA deactivates, the OAM bus takes a few dots to release.
@@ -61,7 +57,6 @@ impl OamDma {
             was_blocking: false,
             blocking: false,
             pending_write: None,
-            bus_conflict_value: None,
             last_bus_byte: 0xFF,
             bus_release_dots: 0,
         }
@@ -164,13 +159,13 @@ pub struct Bus {
     pub(crate) dmg_compat: bool,
 
     /// PPU T-cycle debt from mid-M-cycle glitch handling (e.g. tile_sel_glitch).
-    /// Next tick_mcycle advances PPU by (4 - debt) T-cycles instead of 4.
+    /// The next M-cycle tick advances PPU by (4 - debt) T-cycles instead of 4.
     ppu_tick_debt: u32,
 
     /// Deferred PPU T-cycles from the lazy tick model.
     /// Each M-cycle ticks PPU immediately for the first half, deferring the
     /// second half. Deferred ticks are flushed before any PPU-state-sensitive
-    /// read or write, or at the start of the next tick_mcycle.
+    /// read or write, or at the start of the next M-cycle tick.
     ppu_deferred: u32,
 
     /// Extra T-cycles consumed by GDMA/HDMA that the CPU must account for.
@@ -449,13 +444,6 @@ impl Bus {
     pub fn ie(&self) -> u8 {
         self.ie
     }
-    pub fn if_reg(&mut self) -> u8 {
-        self.flush_ppu_deferred();
-        self.if_
-    }
-    pub fn if_mut(&mut self) -> &mut u8 {
-        &mut self.if_
-    }
 
     // ── Memory read ───────────────────────────────────────────────────────────
 
@@ -640,7 +628,7 @@ impl Bus {
         }
         // DMG OAM bug: writes to OAM range during Mode 2 trigger corruption
         if !self.ppu.oam_accessible && (0xFE00..0xFF00).contains(&addr) {
-            self.trigger_oam_bug_from_write(addr);
+            self.trigger_oam_bug(addr);
         }
         self.write_byte_raw(addr, val);
     }
@@ -680,14 +668,14 @@ impl Bus {
 
     // ── Eager M-cycle tick methods (used by emulator mcycle loop) ─────────────
 
-    /// Read, then tick. Matches old model exactly:
+    /// Read, then tick:
     /// 1. read_byte (which flushes deferred PPU internally)
-    /// 2. tick_mcycle (compute blocking, tick timer/serial/APU, defer PPU, hdma, oam_dma)
+    /// 2. the M-cycle tick (compute blocking, tick timer/serial/APU, defer PPU, hdma, oam_dma)
     pub fn tick_read(&mut self, addr: u16) -> u8 {
         // Read first (read_byte handles flush_ppu_deferred internally)
         let val = self.read_byte(addr);
 
-        // Then tick_mcycle equivalent
+        // Then the M-cycle tick
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let bus_cycles = if self.double_speed { 2u32 } else { 4 };
         let debt = self.ppu_tick_debt;
@@ -722,7 +710,7 @@ impl Bus {
         // and write_io handles PPU conflict timing for PPU registers)
         self.write_byte(addr, val);
 
-        // Then tick_mcycle equivalent
+        // Then the M-cycle tick
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let bus_cycles = if self.double_speed { 2u32 } else { 4 };
         let debt = self.ppu_tick_debt;
@@ -745,7 +733,7 @@ impl Bus {
     }
 
     /// Tick one internal M-cycle (no bus access).
-    /// Equivalent to tick_mcycle without any memory access.
+    /// The M-cycle tick without any memory access.
     pub fn tick_internal(&mut self) {
         self.oam_dma.blocking = self.oam_dma.compute_blocking();
         let bus_cycles = if self.double_speed { 2u32 } else { 4 };
@@ -805,229 +793,6 @@ impl Bus {
         self.step_oam_dma();
     }
 
-    /// Check if this address is a PPU conflict register needing special write timing.
-    /// Reserved for future eager PPU ticking model.
-    #[allow(dead_code)]
-    fn is_ppu_conflict_register(&self, addr: u16) -> bool {
-        match addr {
-            // CGB LCDC tile_sel_glitch (normal speed)
-            0xFF40 if self.model.is_cgb() && !self.double_speed => true,
-            // DMG LCDC complex glitch
-            0xFF40 if !self.model.is_cgb() => true,
-            // DMG SCY READ_NEW
-            0xFF42 if !self.model.is_cgb() => true,
-            // DMG/CGB-double SCX (2T early)
-            0xFF43 if !self.model.is_cgb() || self.double_speed => true,
-            // CGB LYC WRITE_CPU (normal speed)
-            0xFF45 if self.model.is_cgb() && !self.double_speed => true,
-            // CGB palette (normal speed, 2T early)
-            0xFF47..=0xFF49 if self.model.is_cgb() && !self.double_speed => true,
-            // DMG palette glitch
-            0xFF47..=0xFF49 if !self.model.is_cgb() => true,
-            // DMG WX wx_just_changed
-            0xFF4B if !self.model.is_cgb() => true,
-            _ => false,
-        }
-    }
-
-    /// Handle PPU timing around a write for PPU conflict registers.
-    /// Ticks PPU with per-register split, then performs the write.
-    /// `ppu_cycles` is the total PPU budget for this M-cycle (after debt).
-    /// Reserved for future eager PPU ticking model.
-    #[allow(dead_code)]
-    fn tick_write_ppu_conflict(&mut self, addr: u16, val: u8, ppu_cycles: u32) {
-        match addr {
-            // DMG palette writes: 2T old, 1T (old|new) glitch, write, 1T new
-            0xFF47..=0xFF49 if !self.model.is_cgb() && ppu_cycles >= 4 => {
-                // 2T with old palette value
-                let flags = self.ppu.step(2);
-                self.if_ |= flags;
-                // 1T with glitch palette (old | new)
-                let old_val = match addr {
-                    0xFF47 => self.ppu.bgp_rendering,
-                    0xFF48 => self.ppu.obp0_rendering,
-                    _ => self.ppu.obp1_rendering,
-                };
-                let glitch = old_val | val;
-                match addr {
-                    0xFF47 => self.ppu.bgp_rendering = glitch,
-                    0xFF48 => self.ppu.obp0_rendering = glitch,
-                    _ => self.ppu.obp1_rendering = glitch,
-                }
-                let flags = self.ppu.step(1);
-                self.if_ |= flags;
-                // Write real value, remaining 1T uses it
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                let flags = self.ppu.step(1);
-                self.if_ |= flags;
-            }
-            // DMG palette: not enough PPU budget for full conflict
-            0xFF47..=0xFF49 if !self.model.is_cgb() => {
-                if ppu_cycles > 0 {
-                    let flags = self.ppu.step(ppu_cycles);
-                    self.if_ |= flags;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-            }
-            // DMG SCY: READ_NEW — (ppu_cycles-1)T old, write, 1T new
-            0xFF42 if !self.model.is_cgb() => {
-                if ppu_cycles > 1 {
-                    let flags = self.ppu.step(ppu_cycles - 1);
-                    self.if_ |= flags;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                if ppu_cycles >= 1 {
-                    let flags = self.ppu.step(1);
-                    self.if_ |= flags;
-                }
-            }
-            // DMG/CGB-double SCX: write takes effect 2T early
-            0xFF43 if !self.model.is_cgb() || self.double_speed => {
-                if ppu_cycles > 2 {
-                    let flags = self.ppu.step(ppu_cycles - 2);
-                    self.if_ |= flags;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                let remaining = ppu_cycles.min(2);
-                if remaining > 0 {
-                    let flags = self.ppu.step(remaining);
-                    self.if_ |= flags;
-                }
-            }
-            // CGB LCDC: tile_sel_glitch when TILE_SEL transitions 1→0
-            0xFF40 if self.model.is_cgb() && !self.double_speed => {
-                if ppu_cycles > 0 {
-                    let flags = self.ppu.step(ppu_cycles);
-                    self.if_ |= flags;
-                }
-                let old_lcdc = self.ppu.lcdc;
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                // TILE_SEL (bit 4) transition 1→0: 1T glitch window
-                if (old_lcdc & 0x10) != 0 && (val & 0x10) == 0 {
-                    self.ppu.tile_sel_glitch = true;
-                    let flags = self.ppu.step(1);
-                    self.if_ |= flags;
-                    self.ppu.tile_sel_glitch = false;
-                    self.ppu_tick_debt = 1; // borrow 1T from next M-cycle
-                    if self.ppu.if_flags != 0 {
-                        self.if_ |= self.ppu.if_flags;
-                        self.ppu.if_flags = 0;
-                    }
-                }
-            }
-            // DMG LCDC: complex glitch handler
-            0xFF40 if !self.model.is_cgb() => {
-                let in_mode3 = self.ppu.mode == 3;
-                if in_mode3 && ppu_cycles >= 4 {
-                    // OBJ_EN takes effect immediately when cleared
-                    if (val & 0x02) == 0 {
-                        self.ppu.lcdc &= !0x02;
-                    }
-                    // 2T old
-                    let flags = self.ppu.step(2);
-                    self.if_ |= flags;
-                    let old_lcdc = self.ppu.lcdc;
-                    // 1T glitch: old | (new & BG_EN)
-                    let glitch = old_lcdc | (val & 0x01);
-                    let saved_lcdc = self.ppu.lcdc;
-                    self.ppu.lcdc = glitch;
-                    let flags = self.ppu.step(1);
-                    self.if_ |= flags;
-                    self.ppu.lcdc = saved_lcdc;
-                    // Window disable glitch
-                    if (saved_lcdc & 0x20) != 0 && (val & 0x20) == 0 && self.ppu.fetcher_is_window()
-                    {
-                        self.ppu.disable_window_pixel_insertion_glitch = true;
-                    }
-                    // Write real value, remaining 1T
-                    self.ppu.write(addr, val);
-                    if self.ppu.if_flags != 0 {
-                        self.if_ |= self.ppu.if_flags;
-                        self.ppu.if_flags = 0;
-                    }
-                    let flags = self.ppu.step(1);
-                    self.if_ |= flags;
-                } else {
-                    if ppu_cycles > 0 {
-                        let flags = self.ppu.step(ppu_cycles);
-                        self.if_ |= flags;
-                    }
-                    self.ppu.write(addr, val);
-                    if self.ppu.if_flags != 0 {
-                        self.if_ |= self.ppu.if_flags;
-                        self.ppu.if_flags = 0;
-                    }
-                }
-            }
-            // WY: READ_NEW — write takes effect 1T before end of M-cycle
-            0xFF4A => {
-                if ppu_cycles > 1 {
-                    let flags = self.ppu.step(ppu_cycles - 1);
-                    self.if_ |= flags;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                if ppu_cycles >= 1 {
-                    let flags = self.ppu.step(1);
-                    self.if_ |= flags;
-                }
-            }
-            // DMG WX: READ_OLD + wx_just_changed flag for 1T after write
-            0xFF4B if !self.model.is_cgb() => {
-                if ppu_cycles > 0 {
-                    let flags = self.ppu.step(ppu_cycles);
-                    self.if_ |= flags;
-                }
-                self.ppu.write(addr, val);
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-                // 1T with wx_just_changed to suppress window trigger
-                self.ppu.wx_just_changed = true;
-                let flags = self.ppu.step(1);
-                self.if_ |= flags;
-                self.ppu.wx_just_changed = false;
-                self.ppu_tick_debt = 1; // compensate for the extra 1T
-                if self.ppu.if_flags != 0 {
-                    self.if_ |= self.ppu.if_flags;
-                    self.ppu.if_flags = 0;
-                }
-            }
-            // Fallback (should not be reached if is_ppu_conflict_register is correct)
-            _ => {
-                if ppu_cycles > 0 {
-                    let flags = self.ppu.step(ppu_cycles);
-                    self.if_ |= flags;
-                }
-                self.write_byte(addr, val);
-            }
-        }
-    }
-
     // ── PPU deferred tick flush ───────────────────────────────────────────────
 
     /// Update the PPU's DMA bus byte state before stepping the PPU.
@@ -1050,7 +815,7 @@ impl Bus {
             let flags = self.ppu.step(d);
             self.if_ |= flags;
 
-            // Don't trigger HDMA during flush — defer to tick_mcycle.
+            // Don't trigger HDMA during flush — defer to the next M-cycle tick.
             // Hardware detects mode 0 during tick (after CPU read), pauses
             // the CPU, and transfers during the pause. Data only becomes
             // visible at the next CPU read after the pause completes.

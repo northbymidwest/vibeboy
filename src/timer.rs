@@ -130,7 +130,7 @@ impl Timer {
     /// Glitch-triggered TIMA increment (from DIV or TAC writes).
     /// On real hardware, the write occurs mid-M-cycle (T2). Since our model
     /// applies the full M-cycle tick before the write, and the 4-cycle overflow
-    /// delay would start counting from the next tick_mcycle (too late), we fire
+    /// delay would start counting from the next M-cycle tick (too late), we fire
     /// the interrupt immediately for write-triggered overflows.
     pub fn increment_tima_glitch(&mut self) {
         self.tima = self.tima.wrapping_add(1);

@@ -192,10 +192,6 @@ impl Bus {
                     self.if_ |= flags;
                     self.ppu.tile_sel_glitch = false;
                     self.ppu_tick_debt += 1;
-                    if self.ppu.if_flags != 0 {
-                        self.if_ |= self.ppu.if_flags;
-                        self.ppu.if_flags = 0;
-                    }
                 }
             }
             // CGB palette writes (normal speed): write takes effect 2 PPU T
@@ -270,7 +266,6 @@ impl Bus {
                     // OBJ_EN takes effect immediately when cleared —
                     // apply it before the 2T pre-write ticks so sprite
                     // pixels are suppressed during the entire write sequence.
-                    let _saved_obj_en = self.ppu.lcdc & 0x02;
                     if (val & 0x02) == 0 {
                         self.ppu.lcdc &= !0x02;
                     }

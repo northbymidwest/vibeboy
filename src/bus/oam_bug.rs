@@ -15,17 +15,6 @@ impl Bus {
         self.trigger_oam_bug_inner();
     }
 
-    pub fn trigger_oam_bug_from_write(&mut self, addr: u16) {
-        if self.model.is_cgb() {
-            return;
-        }
-        if !(0xFE00..=0xFEFF).contains(&addr) {
-            return;
-        }
-        self.flush_ppu_deferred();
-        self.trigger_oam_bug_inner();
-    }
-
     fn trigger_oam_bug_inner(&mut self) {
         let row = self.ppu.oam_bug_row;
 

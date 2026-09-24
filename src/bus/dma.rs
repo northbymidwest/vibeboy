@@ -18,13 +18,12 @@ impl Bus {
             was_blocking,
             blocking: was_blocking,
             pending_write: None,
-            bus_conflict_value: None,
             last_bus_byte: 0xFF,
             bus_release_dots: 0,
         };
     }
 
-    /// Advance OAM DMA by one M-cycle. Called from tick_mcycle().
+    /// Advance OAM DMA by one M-cycle. Called from each M-cycle tick.
     ///
     /// Pipelined model: DMA reads a byte from the bus in one M-cycle,
     /// then writes it to OAM in the NEXT M-cycle. This matches the
@@ -44,7 +43,6 @@ impl Bus {
         }
         if self.oam_dma.delay > 0 {
             self.oam_dma.delay -= 1;
-            self.oam_dma.bus_conflict_value = None;
             return;
         }
 
@@ -53,26 +51,21 @@ impl Bus {
             self.ppu.oam[idx] = byte;
         }
 
-        // Read CURRENT byte from bus (or conflict latch) for next cycle
+        // Read CURRENT byte from bus for next cycle
         if self.oam_dma.progress < 160 {
-            let byte = if let Some(v) = self.oam_dma.bus_conflict_value.take() {
-                v
+            let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
+            let byte = if self.model.is_cgb() && src >= 0xE000 {
+                0xFF
             } else {
-                let mut src = self.oam_dma.source + self.oam_dma.progress as u16;
-                if self.model.is_cgb() && src >= 0xE000 {
-                    0xFF
-                } else {
-                    if !self.model.is_cgb() && src >= 0xFE00 {
-                        src -= 0x2000;
-                    }
-                    self.read_byte_raw(src)
+                if !self.model.is_cgb() && src >= 0xFE00 {
+                    src -= 0x2000;
                 }
+                self.read_byte_raw(src)
             };
             self.oam_dma.pending_write = Some((self.oam_dma.progress as usize, byte));
             self.oam_dma.last_bus_byte = byte;
         }
 
-        self.oam_dma.bus_conflict_value = None;
         self.oam_dma.progress += 1;
         // Keep original end conditions — blocking timing must not change.
         // CGB teardown at progress=160 naturally flushes the last pending byte.
@@ -189,36 +182,8 @@ impl Bus {
         self.if_ |= ppu_flags;
     }
 
-    /// Tick the bus by one M-cycle (4 T-cycles normal speed, 2 in double-speed).
-    /// Call this once per CPU M-cycle (memory access or internal cycle).
-    pub fn tick_mcycle(&mut self) {
-        // Capture blocking state BEFORE advancing DMA so CPU accesses in this M-cycle
-        // see the correct blocking state (e.g. last DMA copy still blocks OAM).
-        self.oam_dma.blocking = self.oam_dma.compute_blocking();
-
-        // Timer is clocked by the CPU, so always 4 T-cycles per M-cycle.
-        // PPU/APU run at fixed 4MHz, so 2 T-cycles per M-cycle in double-speed.
-        let bus_cycles = if self.double_speed { 2u32 } else { 4 };
-
-        // Apply any PPU tick debt from mid-M-cycle glitch handling
-        let debt = self.ppu_tick_debt;
-        self.ppu_tick_debt = 0;
-        let ppu_cycles = bus_cycles.saturating_sub(debt);
-
-        // Accumulate PPU cycles for lazy flushing. PPU ticks are deferred
-        // until the next read_byte/if_reg/write_byte, allowing register writes
-        // to take effect at the correct mid-M-cycle point.
-        self.ppu_deferred += ppu_cycles;
-
-        // Tick everything except PPU
-        self.tick_split(4, bus_cycles, 0);
-
-        self.check_hdma_hblank();
-        self.step_oam_dma();
-    }
-
     /// Check if a prior PPU flush detected mode 0 entry and trigger
-    /// HDMA mode 1 transfer. Called from tick_mcycle (after CPU read)
+    /// HDMA mode 1 transfer. Called from each M-cycle tick (after the CPU access)
     /// so transfer data isn't visible until the next read.
     pub fn check_hdma_hblank(&mut self) {
         if self.ppu.hblank_entered && !self.hdma.in_transfer {
@@ -256,17 +221,6 @@ impl Bus {
         if self.hdma.blocks == 0 {
             self.hdma.active = false;
         }
-    }
-
-    /// Tick the bus by half an M-cycle (2 T-cycles normal speed, 1 in double-speed).
-    /// Used for HALT wake timing: hardware checks IF at the midpoint of the HALT NOP.
-    pub fn tick_half_mcycle(&mut self) {
-        self.oam_dma.blocking = self.oam_dma.compute_blocking();
-        let bus_cycles = if self.double_speed { 1 } else { 2 };
-        // Accumulate PPU cycles lazily (flushed at if_reg check between halves)
-        self.ppu_deferred += bus_cycles;
-        self.tick_split(2, bus_cycles, 0);
-        // OAM DMA step deferred to the next half or full M-cycle
     }
 
     /// Advance all bus components. `timer_cycles` is CPU-clock T-cycles (always 4 per M-cycle).
@@ -320,7 +274,7 @@ impl Bus {
             self.joypad.clear_interrupt();
         }
 
-        // Note: HBlank HDMA is handled by check_hdma_hblank() in tick_mcycle(),
+        // Note: HBlank HDMA is handled by check_hdma_hblank() in the M-cycle tick,
         // not here. This avoids recursive tick() calls during DMA transfers.
     }
 }
