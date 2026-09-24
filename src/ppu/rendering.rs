@@ -177,18 +177,22 @@ impl Ppu {
             return None;
         }
         let px = self.position_in_line as u8;
+        // Sprite triggers when position reaches sprite_x - 8. Sprites with
+        // X < 8 all trigger at position 0; among sprites triggering together
+        // the one with the smallest X is fetched first (ties by OAM order,
+        // which is the scan order of scanline_sprites). On DMG the first
+        // sprite fetched into a FIFO slot keeps it, so this gives smaller X
+        // priority there too.
+        let mut best: Option<(usize, u8)> = None;
         for (i, &(_y, x, _tile, _attrs, _oam_idx)) in self.scanline_sprites.iter().enumerate() {
             if self.sprites_fetched & (1 << i) != 0 {
                 continue; // already fetched
             }
-            // Sprite triggers when position reaches sprite_x - 8
-            // For sprites with X < 8, they trigger at position == 0
-            let trigger_x = x.saturating_sub(8);
-            if px == trigger_x {
-                return Some(i);
+            if px == x.saturating_sub(8) && best.is_none_or(|(_, bx)| x < bx) {
+                best = Some((i, x));
             }
         }
-        None
+        best.map(|(i, _)| i)
     }
 
     /// Start a sprite fetch for the given sprite index.
