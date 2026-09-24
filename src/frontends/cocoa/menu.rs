@@ -1,5 +1,6 @@
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
@@ -262,13 +263,11 @@ impl MenuActions {
 // ── ObjC class for menu handler using define_class! ──────────────────────────
 
 /// Ivars for the VBMenuHandler ObjC class.
+/// The actions are shared with the main loop, which drains them with
+/// `take_all`; each side only borrows them briefly.
 pub(super) struct VBMenuHandlerIvars {
-    actions: Cell<*mut MenuActions>,
+    actions: Rc<RefCell<MenuActions>>,
 }
-
-// SAFETY: Only accessed from the main thread (MainThreadOnly).
-unsafe impl Send for VBMenuHandlerIvars {}
-unsafe impl Sync for VBMenuHandlerIvars {}
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements. We do not implement Drop.
@@ -282,14 +281,6 @@ define_class!(
         /// Handle menu item action dispatch. The sender is the NSMenuItem that was clicked.
         #[unsafe(method(menuAction:))]
         fn handle_menu_action(&self, sender: &AnyObject) {
-            let ctx_ptr = self.ivars().actions.get();
-            if ctx_ptr.is_null() {
-                return;
-            }
-            // SAFETY: The pointer was created from Box::into_raw and is valid for the
-            // lifetime of the handler. Only accessed on the main thread.
-            let actions = unsafe { &mut *ctx_ptr };
-
             // Downcast sender to NSMenuItem for typed tag access
             let tag = if let Some(menu_item) = sender.downcast_ref::<NSMenuItem>() {
                 menu_item.tag()
@@ -297,6 +288,7 @@ define_class!(
                 return;
             };
 
+            let mut actions = self.ivars().actions.borrow_mut();
             match tag {
                 MENU_TAG_QUIT => actions.quit = true,
                 MENU_TAG_OPEN => actions.open_rom = true,
@@ -362,14 +354,14 @@ define_class!(
 );
 
 impl VBMenuHandler {
-    fn new_with_actions(mtm: MainThreadMarker) -> (Retained<Self>, *mut MenuActions) {
-        let actions_ptr = Box::into_raw(Box::new(MenuActions::new()));
+    fn new_with_actions(mtm: MainThreadMarker) -> (Retained<Self>, Rc<RefCell<MenuActions>>) {
+        let actions = Rc::new(RefCell::new(MenuActions::new()));
         let this = Self::alloc(mtm).set_ivars(VBMenuHandlerIvars {
-            actions: Cell::new(actions_ptr),
+            actions: Rc::clone(&actions),
         });
         // SAFETY: NSObject's init has no special requirements.
         let handler: Retained<Self> = unsafe { msg_send![super(this), init] };
-        (handler, actions_ptr)
+        (handler, actions)
     }
 }
 
@@ -378,12 +370,14 @@ pub(super) mod menu_handler {
 
     /// Create the menu handler and register it as the application delegate.
     ///
-    /// Returns a retained handler (preventing deallocation) and a raw pointer
-    /// to the shared MenuActions struct.
-    pub unsafe fn create(app: &NSApplication) -> (Retained<VBMenuHandler>, *mut MenuActions) {
+    /// Returns a retained handler (preventing deallocation) and the
+    /// MenuActions it records into, shared with the caller.
+    pub unsafe fn create(
+        app: &NSApplication,
+    ) -> (Retained<VBMenuHandler>, Rc<RefCell<MenuActions>>) {
         // SAFETY: We are on the main thread (NSApplication requires it).
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        let (handler, actions_ptr) = VBMenuHandler::new_with_actions(mtm);
+        let (handler, actions) = VBMenuHandler::new_with_actions(mtm);
 
         // Set as app delegate via msg_send because the typed setDelegate()
         // requires ProtocolObject<dyn NSApplicationDelegate>, but our class
@@ -392,7 +386,7 @@ pub(super) mod menu_handler {
             let _: () = msg_send![app, setDelegate: &*handler];
         }
 
-        (handler, actions_ptr)
+        (handler, actions)
     }
 }
 

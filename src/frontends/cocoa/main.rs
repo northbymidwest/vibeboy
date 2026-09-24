@@ -14,10 +14,12 @@ mod vectorize_metal;
 use clap::Parser;
 use emulator::Emulator;
 use model::GbModel;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -163,44 +165,52 @@ struct CFRunLoopTimerContext {
     copy_description: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
 }
 
-/// Context passed to the frame timer callback.
+/// Context passed to the frame timer callback. The callback only ever takes a
+/// shared reference to it; mutable pieces use interior mutability.
 struct FrameTimerInfo {
-    state: *mut AppState,
-    window: *const NSWindow,
-    frame_start: *mut Instant,
-    running: bool,
+    /// Shared with the main loop. The timer also fires inside nested run
+    /// loops (menu tracking, the Open dialog, the controls panel), so the
+    /// main loop must never hold a borrow across anything that spins the
+    /// run loop unless it is fine for the timer to skip those ticks.
+    state: Rc<RefCell<AppState>>,
+    window: Retained<NSWindow>,
+    frame_start: Cell<Instant>,
 }
 
 /// Called by CFRunLoopTimer at frame rate. Steps emulation, renders, updates
 /// FPS, and flushes saves. Fires on kCFRunLoopCommonModes so it continues
 /// during menu tracking, keeping audio-driven emulation smooth.
 unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void) {
-    unsafe {
-        let ctx = &mut *(info as *mut FrameTimerInfo);
-        if !ctx.running {
-            return;
-        }
-        let state = &mut *ctx.state;
-        let window = &*ctx.window;
-        let frame_start = &mut *ctx.frame_start;
+    // SAFETY: `info` points to the FrameTimerInfo owned by main(), which
+    // outlives the timer (invalidated before it is dropped). Only shared
+    // references are ever created from it, and only on the main thread.
+    let ctx = unsafe { &*(info as *const FrameTimerInfo) };
+    // Already borrowed means the main loop is inside a modal dialog or
+    // panel; skip the tick so emulation pauses until it returns.
+    let Ok(mut guard) = ctx.state.try_borrow_mut() else {
+        return;
+    };
+    let state = &mut *guard;
+    let window = &*ctx.window;
+    let mut frame_start = ctx.frame_start.get();
 
-        let _pool = objc2_foundation::NSAutoreleasePool::new();
+    let _pool = unsafe { objc2_foundation::NSAutoreleasePool::new() };
 
-        state.update_input();
-        state.step_emulation(frame_start);
+    state.update_input();
+    state.step_emulation(&mut frame_start);
 
-        if let Some(content_view) = window.contentView() {
-            state.render(window, &content_view);
-        }
-
-        let emu_time = frame_start.elapsed();
-        if let Some((f, ms)) = state.fps.update(1, emu_time) {
-            state.overlay_fps = f;
-            state.overlay_emu_ms = ms;
-        }
-
-        state.sav_flusher.poll(&state.emu);
+    if let Some(content_view) = window.contentView() {
+        state.render(window, &content_view);
     }
+
+    let emu_time = frame_start.elapsed();
+    ctx.frame_start.set(frame_start);
+    if let Some((f, ms)) = state.fps.update(1, emu_time) {
+        state.overlay_fps = f;
+        state.overlay_emu_ms = ms;
+    }
+
+    state.sav_flusher.poll(&state.emu);
 }
 
 // ── AppState ─────────────────────────────────────────────────────────────────
@@ -258,7 +268,7 @@ impl AppState {
     }
 
     /// Load a new ROM, resetting emulator state. Updates window title and recent ROMs.
-    unsafe fn load_rom(
+    fn load_rom(
         &mut self,
         path: PathBuf,
         rom_data: impl Into<std::sync::Arc<[u8]>>,
@@ -298,189 +308,187 @@ impl AppState {
     }
 
     /// Handle all pending menu actions.
-    unsafe fn handle_menu_actions(
+    fn handle_menu_actions(
         &mut self,
         actions: MenuActions,
         mtm: MainThreadMarker,
         app: &NSApplication,
         window: &NSWindow,
     ) {
-        unsafe {
-            if actions.open_rom
-                && let Some(path) = open_rom_dialog()
-                && let Ok(rom_data) = fs::read(&path)
+        if actions.open_rom
+            && let Some(path) = open_rom_dialog()
+            && let Ok(rom_data) = fs::read(&path)
+        {
+            self.load_rom(path, rom_data, mtm, app, window);
+        }
+
+        if actions.pause_toggle {
+            self.paused = !self.paused;
+            eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
+            if let Some(main_menu) = app.mainMenu()
+                && let Some(emu_menu) = main_menu.itemAtIndex(3)
+                && let Some(submenu) = emu_menu.submenu()
+                && let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE)
             {
-                self.load_rom(path, rom_data, mtm, app, window);
+                let label = if self.paused { "Resume" } else { "Pause" };
+                pause_item.setTitle(&NSString::from_str(label));
             }
+        }
 
-            if actions.pause_toggle {
-                self.paused = !self.paused;
-                eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
-                if let Some(main_menu) = app.mainMenu()
-                    && let Some(emu_menu) = main_menu.itemAtIndex(3)
-                    && let Some(submenu) = emu_menu.submenu()
-                    && let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE)
-                {
-                    let label = if self.paused { "Resume" } else { "Pause" };
-                    pause_item.setTitle(&NSString::from_str(label));
-                }
+        if actions.reset {
+            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+            // Persist the outgoing battery save before replacing the emulator.
+            self.sav_flusher.flush(&self.emu);
+            // Persist the outgoing battery save before replacing the emulator.
+            self.sav_flusher.flush(&self.emu);
+            self.emu = Emulator::new(
+                self.rom.clone(),
+                boot_rom,
+                self.model,
+                None,
+                clock::default_clock(),
+                AUDIO_SAMPLE_RATE,
+            );
+            self.update_src_dims();
+            ui_util::load_sav(&mut self.emu, &self.rom_path);
+            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+            self.paused = false;
+            eprintln!("Reset");
+        }
+
+        if actions.save_state {
+            ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
+        }
+
+        if actions.load_state {
+            ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
+        }
+
+        if let Some(slot) = actions.select_slot {
+            self.current_slot = slot;
+            eprintln!("Slot {} selected", self.current_slot);
+            update_slot_checkmarks(app, slot);
+        }
+
+        if let Some(tag) = actions.select_model
+            && let Some(new_model) = model_tag_to_model(tag)
+        {
+            self.forced_model = new_model;
+            self.model = self
+                .forced_model
+                .unwrap_or_else(|| auto_detect_model(&self.rom));
+            // Use auto-detected boot ROM for the new model (ignore explicit --bootrom)
+            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+            let model_name = self
+                .forced_model
+                .map(|m| format!("{}", m))
+                .unwrap_or_else(|| "Auto".to_string());
+            eprintln!(
+                "Hardware model: {} (boot ROM: {})",
+                model_name,
+                if boot_rom.is_some() { "loaded" } else { "none" }
+            );
+            // Persist the outgoing battery save before replacing the emulator.
+            self.sav_flusher.flush(&self.emu);
+            // Persist the outgoing battery save before replacing the emulator.
+            self.sav_flusher.flush(&self.emu);
+            self.emu = Emulator::new(
+                self.rom.clone(),
+                boot_rom,
+                self.model,
+                None,
+                clock::default_clock(),
+                AUDIO_SAMPLE_RATE,
+            );
+            self.update_src_dims();
+            ui_util::load_sav(&mut self.emu, &self.rom_path);
+            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+            update_model_checkmarks(app, tag);
+            self.paused = false;
+        }
+
+        if let Some(tag) = actions.select_filter
+            && let Some(new_filter) = filter_tag_to_filter(tag)
+        {
+            self.scale_filter = new_filter;
+            update_filter_checkmarks(app, tag);
+            eprintln!("Filter: {:?}", self.scale_filter);
+        }
+
+        if actions.toggle_force_cpu {
+            self.force_cpu = !self.force_cpu;
+            update_force_cpu_checkmark(app, self.force_cpu);
+            eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
+        }
+
+        if actions.toggle_printer {
+            let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
+            if is_printer {
+                self.emu
+                    .attach_serial_device(Box::new(serial::Disconnected));
+                eprintln!("Game Boy Printer disconnected");
+            } else {
+                self.emu
+                    .attach_serial_device(Box::new(printer::Printer::new(
+                        self.model.cpu_clock_rate(),
+                    )));
+                eprintln!("Game Boy Printer connected");
             }
-
-            if actions.reset {
-                let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-                // Persist the outgoing battery save before replacing the emulator.
-                self.sav_flusher.flush(&self.emu);
-                // Persist the outgoing battery save before replacing the emulator.
-                self.sav_flusher.flush(&self.emu);
-                self.emu = Emulator::new(
-                    self.rom.clone(),
-                    boot_rom,
-                    self.model,
-                    None,
-                    clock::default_clock(),
-                    AUDIO_SAMPLE_RATE,
-                );
-                self.update_src_dims();
-                ui_util::load_sav(&mut self.emu, &self.rom_path);
-                self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
-                self.paused = false;
-                eprintln!("Reset");
-            }
-
-            if actions.save_state {
-                ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
-            }
-
-            if actions.load_state {
-                ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
-            }
-
-            if let Some(slot) = actions.select_slot {
-                self.current_slot = slot;
-                eprintln!("Slot {} selected", self.current_slot);
-                update_slot_checkmarks(app, slot);
-            }
-
-            if let Some(tag) = actions.select_model
-                && let Some(new_model) = model_tag_to_model(tag)
+            if let Some(main_menu) = app.mainMenu()
+                && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
+                && let Some(emu_submenu) = emu_menu_item.submenu()
+                && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
             {
-                self.forced_model = new_model;
-                self.model = self
-                    .forced_model
-                    .unwrap_or_else(|| auto_detect_model(&self.rom));
-                // Use auto-detected boot ROM for the new model (ignore explicit --bootrom)
-                let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-                let model_name = self
-                    .forced_model
-                    .map(|m| format!("{}", m))
-                    .unwrap_or_else(|| "Auto".to_string());
-                eprintln!(
-                    "Hardware model: {} (boot ROM: {})",
-                    model_name,
-                    if boot_rom.is_some() { "loaded" } else { "none" }
-                );
-                // Persist the outgoing battery save before replacing the emulator.
-                self.sav_flusher.flush(&self.emu);
-                // Persist the outgoing battery save before replacing the emulator.
-                self.sav_flusher.flush(&self.emu);
-                self.emu = Emulator::new(
-                    self.rom.clone(),
-                    boot_rom,
-                    self.model,
-                    None,
-                    clock::default_clock(),
-                    AUDIO_SAMPLE_RATE,
-                );
-                self.update_src_dims();
-                ui_util::load_sav(&mut self.emu, &self.rom_path);
-                self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
-                update_model_checkmarks(app, tag);
-                self.paused = false;
-            }
-
-            if let Some(tag) = actions.select_filter
-                && let Some(new_filter) = filter_tag_to_filter(tag)
-            {
-                self.scale_filter = new_filter;
-                update_filter_checkmarks(app, tag);
-                eprintln!("Filter: {:?}", self.scale_filter);
-            }
-
-            if actions.toggle_force_cpu {
-                self.force_cpu = !self.force_cpu;
-                update_force_cpu_checkmark(app, self.force_cpu);
-                eprintln!("Force CPU: {}", if self.force_cpu { "on" } else { "off" });
-            }
-
-            if actions.toggle_printer {
-                let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
-                if is_printer {
-                    self.emu
-                        .attach_serial_device(Box::new(serial::Disconnected));
-                    eprintln!("Game Boy Printer disconnected");
+                let state = if !is_printer {
+                    NSControlStateValueOn
                 } else {
-                    self.emu
-                        .attach_serial_device(Box::new(printer::Printer::new(
-                            self.model.cpu_clock_rate(),
-                        )));
-                    eprintln!("Game Boy Printer connected");
-                }
-                if let Some(main_menu) = app.mainMenu()
-                    && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
-                    && let Some(emu_submenu) = emu_menu_item.submenu()
-                    && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
-                {
-                    let state = if !is_printer {
-                        NSControlStateValueOn
-                    } else {
-                        NSControlStateValueOff
-                    };
-                    printer_menu_item.setState(state);
-                }
+                    NSControlStateValueOff
+                };
+                printer_menu_item.setState(state);
             }
+        }
 
-            if actions.toggle_fps {
-                self.show_fps_overlay = !self.show_fps_overlay;
-                if let Some(main_menu) = app.mainMenu()
-                    && let Some(view_menu_item) = main_menu.itemAtIndex(2)
-                    && let Some(view_submenu) = view_menu_item.submenu()
-                    && let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS)
-                {
-                    let state = if self.show_fps_overlay {
-                        NSControlStateValueOn
-                    } else {
-                        NSControlStateValueOff
-                    };
-                    fps_item.setState(state);
-                }
+        if actions.toggle_fps {
+            self.show_fps_overlay = !self.show_fps_overlay;
+            if let Some(main_menu) = app.mainMenu()
+                && let Some(view_menu_item) = main_menu.itemAtIndex(2)
+                && let Some(view_submenu) = view_menu_item.submenu()
+                && let Some(fps_item) = view_submenu.itemWithTag(MENU_TAG_SHOW_FPS)
+            {
+                let state = if self.show_fps_overlay {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                };
+                fps_item.setState(state);
             }
+        }
 
-            if actions.open_controls {
-                show_controls_panel(&mut self.key_map);
-            }
+        if actions.open_controls {
+            show_controls_panel(&mut self.key_map);
+        }
 
-            if let Some(idx) = actions.open_recent {
-                let recents = load_recent_roms();
-                if let Some(path_str) = recents.get(idx) {
-                    let path = PathBuf::from(path_str);
-                    if let Ok(rom_data) = fs::read(&path) {
-                        self.load_rom(path, rom_data, mtm, app, window);
-                    } else {
-                        eprintln!("Failed to read: {}", path_str);
-                    }
+        if let Some(idx) = actions.open_recent {
+            let recents = load_recent_roms();
+            if let Some(path_str) = recents.get(idx) {
+                let path = PathBuf::from(path_str);
+                if let Ok(rom_data) = fs::read(&path) {
+                    self.load_rom(path, rom_data, mtm, app, window);
+                } else {
+                    eprintln!("Failed to read: {}", path_str);
                 }
             }
+        }
 
-            if actions.clear_recent {
-                save_recent_roms(&[]);
-                rebuild_recent_menu(mtm, app, &[]);
-                eprintln!("Recent ROMs cleared");
-            }
+        if actions.clear_recent {
+            save_recent_roms(&[]);
+            rebuild_recent_menu(mtm, app, &[]);
+            eprintln!("Recent ROMs cleared");
         }
     }
 
     /// Update gamepad, camera, and accelerometer input.
-    unsafe fn update_input(&mut self) {
+    fn update_input(&mut self) {
         // Gamepad
         self.gamepad.poll();
         if self.emu.has_rumble() {
@@ -518,7 +526,7 @@ impl AppState {
     }
 
     /// Step emulation: rewind, fast-forward, or normal frame stepping + audio drain.
-    unsafe fn step_emulation(&mut self, frame_start: &mut Instant) {
+    fn step_emulation(&mut self, frame_start: &mut Instant) {
         let backspace_held = self.keys_down.contains(&K_DELETE) || self.gamepad.l_shoulder;
         let fast_forward = self.keys_down.contains(&K_TAB) || self.gamepad.r_shoulder;
         let slow_motion = self.keys_down.contains(&K_MINUS);
@@ -616,63 +624,61 @@ impl AppState {
     }
 
     /// Render the current frame. Handles occlusion check, filter dispatch, and Metal rendering.
-    unsafe fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
-        unsafe {
-            let occluded = !window
-                .occlusionState()
-                .contains(objc2_app_kit::NSWindowOcclusionState::Visible);
+    fn render(&mut self, window: &NSWindow, content_view: &objc2_app_kit::NSView) {
+        let occluded = !window
+            .occlusionState()
+            .contains(objc2_app_kit::NSWindowOcclusionState::Visible);
 
-            // Update drawable size on resize (use backing pixels for Retina)
-            let (disp_w, disp_h);
-            {
-                let bounds = content_view.bounds();
-                let scale = window.backingScaleFactor();
-                disp_w = (bounds.size.width * scale) as usize;
-                disp_h = (bounds.size.height * scale) as usize;
-                if !occluded {
-                    self.renderer.layer.setContentsScale(scale);
-                    self.renderer.layer.setDrawableSize(NSSize::new(
-                        bounds.size.width * scale,
-                        bounds.size.height * scale,
-                    ));
-                }
+        // Update drawable size on resize (use backing pixels for Retina)
+        let (disp_w, disp_h);
+        {
+            let bounds = content_view.bounds();
+            let scale = window.backingScaleFactor();
+            disp_w = (bounds.size.width * scale) as usize;
+            disp_h = (bounds.size.height * scale) as usize;
+            if !occluded {
+                self.renderer.layer.setContentsScale(scale);
+                self.renderer.layer.setDrawableSize(NSSize::new(
+                    bounds.size.width * scale,
+                    bounds.size.height * scale,
+                ));
             }
-
-            if occluded {
-                return;
-            }
-
-            // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
-            let src_len = self.src_w * self.src_h;
-            let raw_src: &[u32] = if self.is_sgb {
-                self.emu.sgb_composited_frame()
-            } else {
-                self.emu.frame_buffer()
-            };
-            self.frame_copy.clear();
-            self.frame_copy.extend_from_slice(&raw_src[..src_len]);
-
-            // Take frame_copy out of self to avoid borrow conflict with &mut self methods
-            let frame_copy = std::mem::take(&mut self.frame_copy);
-
-            let gpu_rendered = if self.force_cpu {
-                false
-            } else {
-                self.render_with_filter(&frame_copy, disp_w, disp_h)
-            };
-
-            if !gpu_rendered {
-                self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
-            }
-
-            // Put it back for reuse next frame
-            self.frame_copy = frame_copy;
         }
+
+        if occluded {
+            return;
+        }
+
+        // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
+        let src_len = self.src_w * self.src_h;
+        let raw_src: &[u32] = if self.is_sgb {
+            self.emu.sgb_composited_frame()
+        } else {
+            self.emu.frame_buffer()
+        };
+        self.frame_copy.clear();
+        self.frame_copy.extend_from_slice(&raw_src[..src_len]);
+
+        // Take frame_copy out of self to avoid borrow conflict with &mut self methods
+        let frame_copy = std::mem::take(&mut self.frame_copy);
+
+        let gpu_rendered = if self.force_cpu {
+            false
+        } else {
+            self.render_with_filter(&frame_copy, disp_w, disp_h)
+        };
+
+        if !gpu_rendered {
+            self.render_cpu_fallback(&frame_copy, disp_w, disp_h);
+        }
+
+        // Put it back for reuse next frame
+        self.frame_copy = frame_copy;
     }
 
     /// Try GPU-accelerated rendering for the current filter.
     /// Returns true if GPU-rendered (so CPU fallback can be skipped).
-    unsafe fn render_with_filter(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) -> bool {
+    fn render_with_filter(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) -> bool {
         unsafe {
             let src_w = self.src_w;
             let src_h = self.src_h;
@@ -747,7 +753,7 @@ impl AppState {
     }
 
     /// CPU fallback rendering path for filters not handled by the GPU.
-    unsafe fn render_cpu_fallback(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) {
+    fn render_cpu_fallback(&mut self, raw_src: &[u32], disp_w: usize, disp_h: usize) {
         unsafe {
             let src_w = self.src_w;
             let src_h = self.src_h;
@@ -841,8 +847,7 @@ fn main() {
 
         // Set up menu bar and action handler
         create_menu_bar(mtm, &app);
-        let (_menu_handler, menu_actions_ptr) = menu_handler::create(&app);
-        let menu_actions = &mut *menu_actions_ptr;
+        let (_menu_handler, menu_actions) = menu_handler::create(&app);
 
         // Resolve ROM path
         let rom_path: PathBuf = if let Some(ref p) = cli.rom {
@@ -968,6 +973,9 @@ fn main() {
             NSBackingStoreType::Buffered,
             false,
         );
+        // `window` is an owning Retained; stop AppKit from also releasing
+        // the window when the user closes it from the title bar.
+        window.setReleasedWhenClosed(false);
 
         let title_str = format!(
             "VibeBoy \u{2014} {}",
@@ -1059,7 +1067,7 @@ fn main() {
         };
 
         // ── Build AppState ───────────────────────────────────────────────────
-        let mut state = AppState {
+        let state = Rc::new(RefCell::new(AppState {
             emu,
             rom,
             rom_path,
@@ -1092,27 +1100,22 @@ fn main() {
             src_h,
             is_sgb,
             no_boot: cli.no_boot,
-        };
-
-        let mut frame_start = Instant::now();
+        }));
 
         // ── Frame timer ─────────────────────────────────────────────────────
         // A CFRunLoopTimer on kCFRunLoopCommonModes drives emulation + render.
         // This fires during both normal operation and menu tracking, keeping
         // audio-driven emulation smooth when macOS blocks the main thread for
         // modal menu interaction.
-        let mut timer_info = FrameTimerInfo {
-            state: &mut state as *mut AppState,
-            window: &*window as *const NSWindow,
-            frame_start: &mut frame_start as *mut Instant,
-            running: true,
+        let timer_info = FrameTimerInfo {
+            state: Rc::clone(&state),
+            window: window.clone(),
+            frame_start: Cell::new(Instant::now()),
         };
-        // The timer callback only ever sees timer_info through this pointer.
-        let timer_info_ptr = &raw mut timer_info;
         let timer = {
             let mut ctx = CFRunLoopTimerContext {
                 version: 0,
-                info: timer_info_ptr as *mut c_void,
+                info: &raw const timer_info as *mut c_void,
                 retain: None,
                 release: None,
                 copy_description: None,
@@ -1159,6 +1162,11 @@ fn main() {
                     0
                 };
 
+                // Released before sendEvent below: menu tracking runs inside
+                // it and the frame timer must be able to borrow the state
+                // meanwhile.
+                let mut guard = state.borrow_mut();
+                let state = &mut *guard;
                 if event_type == NSEventType::KeyDown {
                     if keycode == K_ESCAPE {
                         break 'running;
@@ -1213,6 +1221,7 @@ fn main() {
                         state.emu.set_button(btn, down);
                     }
                 }
+                drop(guard);
 
                 // Dispatch events so menus and window chrome work.
                 // During menu tracking, sendEvent blocks — but the frame timer
@@ -1221,11 +1230,15 @@ fn main() {
             }
 
             // Handle menu actions
-            let actions = menu_actions.take_all();
+            let actions = menu_actions.borrow_mut().take_all();
             if actions.quit {
                 break 'running;
             }
-            state.handle_menu_actions(actions, mtm, &app, &window);
+            // The Open dialog and controls panel run nested modal loops
+            // inside this call; the frame timer skips its ticks meanwhile.
+            state
+                .borrow_mut()
+                .handle_menu_actions(actions, mtm, &app, &window);
 
             // Check if window was closed
             if !window.isVisible() {
@@ -1234,14 +1247,15 @@ fn main() {
         }
 
         // Cleanup
-        (*timer_info_ptr).running = false;
         CFRunLoopTimerInvalidate(timer);
         CFRelease(timer);
+        drop(timer_info);
 
+        let mut guard = state.borrow_mut();
+        let state = &mut *guard;
         close_accel(&state.accel_source);
         drop(state.camera.take());
 
         state.sav_flusher.flush(&state.emu);
-        drop(Box::from_raw(menu_actions_ptr));
     }
 }

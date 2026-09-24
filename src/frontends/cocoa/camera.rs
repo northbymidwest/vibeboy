@@ -5,7 +5,7 @@ pub(super) mod avf_camera {
     use super::*;
     use std::os::raw::c_void;
 
-    use dispatch2::DispatchQueue;
+    use dispatch2::{DispatchQueue, DispatchRetained};
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, ProtocolObject, Sel};
     use objc2::{ClassType, msg_send, sel};
@@ -183,11 +183,13 @@ pub(super) mod avf_camera {
         buffer: Arc<Mutex<[u8; 128 * 112]>>,
         has_new_frame: Arc<AtomicBool>,
         session: Retained<AVCaptureSession>,
+        output: Retained<AVCaptureVideoDataOutput>,
+        /// Serial queue the delegate runs on; drained in Drop before
+        /// `_context` is freed.
+        queue: DispatchRetained<DispatchQueue>,
         _delegate: Retained<AnyObject>,
         _context: *mut DelegateContext, // leaked; freed on drop
     }
-
-    unsafe impl Send for CameraCapture {}
 
     impl CameraCapture {
         pub fn start() -> Option<Self> {
@@ -276,6 +278,9 @@ pub(super) mod avf_camera {
                 let output_as_capture_output: &AVCaptureOutput = output.as_super();
                 if !session.canAddOutput(output_as_capture_output) {
                     log::warn!("Cannot add video output to session");
+                    // Not running, so no callbacks are in flight; detach the
+                    // delegate so it no longer references the freed context.
+                    output.setSampleBufferDelegate_queue(None, None);
                     drop(Box::from_raw(context));
                     return None;
                 }
@@ -290,6 +295,8 @@ pub(super) mod avf_camera {
                     buffer,
                     has_new_frame,
                     session,
+                    output,
+                    queue,
                     _delegate: delegate,
                     _context: context,
                 })
@@ -314,6 +321,11 @@ pub(super) mod avf_camera {
         fn drop(&mut self) {
             unsafe {
                 self.session.stopRunning();
+                // A callback may still be running or queued on the delegate
+                // queue. Detach the delegate so no new ones are scheduled,
+                // then drain the serial queue so none can outlive the context.
+                self.output.setSampleBufferDelegate_queue(None, None);
+                self.queue.exec_sync(|| {});
                 drop(Box::from_raw(self._context));
             }
             log::info!("AVFoundation camera capture stopped");
