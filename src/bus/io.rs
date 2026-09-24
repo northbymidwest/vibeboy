@@ -346,7 +346,9 @@ impl Bus {
             0xFF55 => self.start_hdma(val),
             0xFF50 => {
                 // Writing any non-zero value permanently disables the boot ROM.
-                if val != 0 {
+                // The register is write-once: after the lock, further writes
+                // are ignored (and must not re-run the compat-mode setup).
+                if val != 0 && self.boot_rom_active {
                     self.boot_rom_active = false;
                     // Activate SGB protocol now that boot ROM is done
                     if let Some(ref mut sgb) = self.sgb {
@@ -394,5 +396,25 @@ impl Bus {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Bus;
+    use crate::model::GbModel;
+
+    #[test]
+    fn ff50_is_write_once() {
+        // DMG cart (CGB flag $00) on CGB hardware, started without a boot ROM.
+        let rom: std::sync::Arc<[u8]> = vec![0u8; 0x8000].into();
+        let clock = std::sync::Arc::new(crate::clock::SystemClock);
+        let mut bus = Bus::new(rom, None, GbModel::Cgb, clock, 48_000);
+        let refs = (bus.ppu.dmg_bg_ref, bus.ppu.dmg_obj_ref);
+        // A non-identity BGP rewrites BG palette 0 in palette RAM; a later
+        // FF50 write must not re-capture the compat reference colours from it.
+        bus.write_io(0xFF47, 0x1B);
+        bus.write_io(0xFF50, 0x01);
+        assert_eq!((bus.ppu.dmg_bg_ref, bus.ppu.dmg_obj_ref), refs);
     }
 }
