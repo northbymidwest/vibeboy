@@ -2,8 +2,8 @@
 //!
 //! Seven-stage pipeline matching the SDL3 GPU version:
 //! 1. similarity_graph → 2. resolve_crossings → 3. cell_graph →
-//! 4. optimize_energy → 5. update_tjunction → 5b. crossing_pack →
-//! 6. cell_rasterizer
+//! 4. picard_step + gradient_correction → 5. update_tjunction →
+//!    5b. crossing_pack → 6. cell_rasterizer
 //!
 //! All shaders are loaded from WGSL (cross-compiled from Slang via slangc).
 

@@ -127,12 +127,7 @@ impl GpuPipelines {
     /// Lazily initialize the GPU pipeline for the given filter.
     /// Returns true if the filter has a GPU pipeline available.
     /// `force_cpu` prevents initialization of shader-based pipelines.
-    pub fn ensure_pipeline(
-        &mut self,
-        filter: ScaleFilter,
-        _window: &sdl3::video::Window,
-        force_cpu: bool,
-    ) -> GpuRenderMode {
+    pub fn ensure_pipeline(&mut self, filter: ScaleFilter, force_cpu: bool) -> GpuRenderMode {
         if force_cpu {
             return GpuRenderMode::Cpu;
         }
@@ -343,31 +338,7 @@ impl GpuPipelines {
         );
     }
 
-    /// Render with simple texture blit (nearest/bilinear).
-    pub fn render_blit(
-        &mut self,
-        pixels: &[u32],
-        src_w: u32,
-        src_h: u32,
-        window: &sdl3::video::Window,
-        filter_mode: gpu::Filter,
-    ) {
-        self.resize_texture(src_w, src_h);
-        let needed = src_w * src_h * 4;
-        self.ensure_transfer_buf(needed);
-        super::upload_and_blit(
-            &self.device,
-            window,
-            &self.tex,
-            &self.transfer_buf,
-            pixels,
-            src_w,
-            src_h,
-            filter_mode,
-        );
-    }
-
-    /// Run the full GPU vectorize pipeline (all 6 stages on GPU, no CPU readback).
+    /// Run the full GPU vectorize pipeline (all stages on GPU, no CPU readback).
     pub fn render_full_vectorize_to_window(
         &mut self,
         window: &sdl3::video::Window,
@@ -425,8 +396,6 @@ impl GpuPipelines {
 /// Result of `ensure_pipeline` — tells the caller which render path to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuRenderMode {
-    /// Use GPU texture blit (nearest/bilinear — no shader).
-    Native,
     /// Use GPU compute scaling filter pipeline.
     ScaleCompute,
     /// Full GPU vectorize pipeline (all stages on GPU).

@@ -1,4 +1,4 @@
-//! Bicubic interpolation — 2x smooth scaling.
+//! Bicubic interpolation to arbitrary output dimensions.
 //!
 //! Uses Catmull-Rom spline interpolation over a 4x4 neighborhood for
 //! each output sub-pixel. Produces sharper results than bilinear while
@@ -72,29 +72,6 @@ pub fn scale_to(src: &[u32], src_w: usize, src_h: usize, dst_w: usize, dst_h: us
             let fx = (src_x - ix as f64) as f32;
 
             dst[oy * dst_w + ox] = bicubic_sample(src, src_w, src_h, ix, iy, fx, fy);
-        }
-    }
-    dst
-}
-
-/// Fixed 2x bicubic scale (fast path).
-pub fn scale(src: &[u32], src_w: usize, src_h: usize) -> Vec<u32> {
-    let dst_w = src_w * 2;
-    let dst_h = src_h * 2;
-    let mut dst = vec![0u32; dst_w * dst_h];
-
-    for y in 0..src_h {
-        for x in 0..src_w {
-            let ix = x as isize;
-            let iy = y as isize;
-
-            let dx = x * 2;
-            let dy = y * 2;
-            // Sub-pixel offsets: (0,0), (0.5,0), (0,0.5), (0.5,0.5)
-            dst[dy * dst_w + dx] = bicubic_sample(src, src_w, src_h, ix, iy, 0.0, 0.0);
-            dst[dy * dst_w + dx + 1] = bicubic_sample(src, src_w, src_h, ix, iy, 0.5, 0.0);
-            dst[(dy + 1) * dst_w + dx] = bicubic_sample(src, src_w, src_h, ix, iy, 0.0, 0.5);
-            dst[(dy + 1) * dst_w + dx + 1] = bicubic_sample(src, src_w, src_h, ix, iy, 0.5, 0.5);
         }
     }
     dst

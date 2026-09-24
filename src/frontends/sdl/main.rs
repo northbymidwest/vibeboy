@@ -759,7 +759,7 @@ fn main() {
             #[cfg(feature = "sdl3-gpu-shaders")]
             {
                 use scaling::sdl::pipelines::GpuRenderMode;
-                let mode = gpu.ensure_pipeline(scale_filter, &window, cli.cpu_filter);
+                let mode = gpu.ensure_pipeline(scale_filter, cli.cpu_filter);
 
                 match mode {
                     GpuRenderMode::FullGpuVectorize => {
@@ -788,9 +788,6 @@ fn main() {
                             disp_w as u32,
                             disp_h as u32,
                         );
-                    }
-                    GpuRenderMode::Native => {
-                        gpu.render_blit(raw_src, src_w, src_h, &window, sdl3::gpu::Filter::Nearest);
                     }
                     GpuRenderMode::Cpu => {
                         let (disp_w, disp_h) = display_size(&window, src_w, src_h);

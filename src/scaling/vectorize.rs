@@ -5,7 +5,7 @@
 //!   2. resolve_crossings.comp -> resolve_crossings()
 //!   3. cell_graph.comp        -> build_cell_graph()
 //!   4. update_tjunction.comp  -> update_tjunctions()
-//!   5. optimize_energy.comp   -> optimize_energy()
+//!   5. picard_step.comp + gradient_correction.comp -> optimize_energy()
 //!   6. cell_rasterizer.comp   -> rasterize()
 //!
 //! Output is pixel-identical to the GPU pipeline.
@@ -43,6 +43,63 @@ const DIR_E: u32 = 32;
 const DIR_NE: u32 = 64;
 const DIR_N: u32 = 128;
 
+/// Optimizer experiment knobs, read from `VBY_*` environment variables once
+/// per process so the per-CP hot loops never query the environment. Unset
+/// (or unparsable) variables give the production defaults.
+struct OptEnv {
+    /// VBY_CG: use the Newton-CG optimizer instead of Picard + gradient.
+    cg: bool,
+    /// VBY_DEBUG_CG: print Newton-CG convergence.
+    debug_cg: bool,
+    /// VBY_NEWTON: Newton iterations per CP in the Picard step.
+    newton_iters: i32,
+    /// VBY_LS: backtracking line search instead of the clamped Newton step.
+    line_search: bool,
+    /// VBY_NOLS_CAP: step-length cap when line search is off.
+    no_ls_cap: f32,
+    /// VBY_OUTER: outer (Picard -> gradient correction) iterations.
+    outer_passes: usize,
+    /// VBY_ETA: gradient-correction step size.
+    eta: f32,
+    /// VBY_MAXSTEP: gradient-correction per-CP step cap.
+    max_step: f32,
+    /// VBY_DEBUG_LS: print energy after each outer iteration.
+    debug_ls: bool,
+    /// VBY_NOPICARD: skip the Picard step (pure gradient descent).
+    no_picard: bool,
+    /// VBY_NOGRAD: skip the gradient-correction pass.
+    no_grad: bool,
+    /// VBY_FUSED: evaluate the gradient at the pre-Picard positions.
+    fused: bool,
+}
+
+fn opt_env() -> &'static OptEnv {
+    fn flag(name: &str) -> bool {
+        std::env::var(name).is_ok()
+    }
+    fn parse<T: std::str::FromStr>(name: &str, default: T) -> T {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    }
+    static ENV: std::sync::OnceLock<OptEnv> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| OptEnv {
+        cg: flag("VBY_CG"),
+        debug_cg: flag("VBY_DEBUG_CG"),
+        newton_iters: parse("VBY_NEWTON", 1),
+        line_search: flag("VBY_LS"),
+        no_ls_cap: parse("VBY_NOLS_CAP", 0.10),
+        outer_passes: parse("VBY_OUTER", OPT_OUTER_PASSES as usize),
+        eta: parse("VBY_ETA", OPT_GRAD_ETA),
+        max_step: parse("VBY_MAXSTEP", OPT_GRAD_MAX_STEP),
+        debug_ls: flag("VBY_DEBUG_LS"),
+        no_picard: flag("VBY_NOPICARD"),
+        no_grad: flag("VBY_NOGRAD"),
+        fused: flag("VBY_FUSED"),
+    })
+}
+
 /// Intermediate output from the vectorize-gpu pipeline (stages 1-5).
 /// Contains optimized B-spline control points with connectivity and flags.
 ///
@@ -74,7 +131,7 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     let num_cps = corners_w * corners_h * 2;
 
     let orig_positions = positions.clone();
-    let positions = if std::env::var("VBY_CG").is_ok() {
+    let positions = if opt_env().cg {
         optimize_energy_cg(&positions, &orig_positions, &neighbors, &flags, num_cps)
     } else {
         optimize_energy(&positions, &orig_positions, &neighbors, &flags, num_cps)
@@ -2012,7 +2069,7 @@ fn optimize_energy_cg(
 
     // Newton outer with backtracking line search.
     const N_NEWTON: usize = 15;
-    let debug_cg = std::env::var("VBY_DEBUG_CG").is_ok();
+    let debug_cg = opt_env().debug_cg;
     for iter in 0..N_NEWTON {
         let g = compute_g(&p);
         let g_norm: f32 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -2065,6 +2122,7 @@ fn optimize_energy(
     flags: &[u32],
     num_cps: usize,
 ) -> Vec<f32> {
+    let env = opt_env();
     let positional_scale: f32 = 2.5;
     let s4 = positional_scale * positional_scale * positional_scale * positional_scale;
 
@@ -2329,10 +2387,7 @@ fn optimize_energy(
             // NEWTON=2 e=271.87 (NEWTON=1 converges to a slightly lower
             // final energy because a smaller Picard step leaves room for
             // the gradient correction to debias). Halves picard inner ALU.
-            let newton_iters: i32 = std::env::var("VBY_NEWTON")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1);
+            let newton_iters = env.newton_iters;
 
             let add_segment = |va: (f32, f32),
                                vb: (f32, f32),
@@ -2589,12 +2644,8 @@ fn optimize_energy(
                 // rule — CPU sweep showed it converges to a slightly LOWER
                 // final energy at every N with no per-iter backtrack work.
                 // VBY_LS=1 reverts to the old backtracking line search.
-                let use_ls = std::env::var("VBY_LS").is_ok();
-                if !use_ls {
-                    let cap: f32 = std::env::var("VBY_NOLS_CAP")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.10);
+                if !env.line_search {
+                    let cap = env.no_ls_cap;
                     let len2 = dx * dx + dy * dy;
                     let (mut sx, mut sy) = (dx, dy);
                     if len2 > cap * cap {
@@ -2975,18 +3026,9 @@ fn optimize_energy(
     // search) → gradient correction. No IFT pass. CPU sweep at N=100
     // showed this converges to e=271.79 (0.4% above CG true min) and is
     // stable at high N. Env vars override for experimentation.
-    let outer_passes: usize = std::env::var("VBY_OUTER")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(OPT_OUTER_PASSES as usize);
-    let eta: f32 = std::env::var("VBY_ETA")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(OPT_GRAD_ETA);
-    let max_step: f32 = std::env::var("VBY_MAXSTEP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(OPT_GRAD_MAX_STEP);
+    let outer_passes = env.outer_passes;
+    let eta = env.eta;
+    let max_step = env.max_step;
     // GPU-faithful topology, matching vectorscale's optimize-energy +
     // gradient-correction chain and vibeboy's wgpu Picard → grad pipeline.
     //   Pass A (picard, optimize-energy.slang in vectorscale / picard_step.slang in wgpu):
@@ -2997,14 +3039,14 @@ fn optimize_energy(
     let mut buf_a = positions.to_vec();
     let mut buf_picard = vec![0.0f32; num_cps * 2];
     let mut buf_b = vec![0.0f32; num_cps * 2];
-    let debug_ls = std::env::var("VBY_DEBUG_LS").is_ok();
+    let debug_ls = env.debug_ls;
     // VBY_NOPICARD=1 skips the Picard step entirely — pure gradient
     // descent ablation. Used to characterize how much of the convergence
     // is doing by the per-CP Newton inner solver vs the outer-loop
     // gradient correction. Pure gradient descent at η=0.05, MAX_STEP=0.25
     // converges very slowly because the step is tiny relative to the
     // Newton step's adaptive scale.
-    let no_picard = std::env::var("VBY_NOPICARD").is_ok();
+    let no_picard = env.no_picard;
     for iter in 0..outer_passes {
         // Pass A: Picard step. buf_picard = Picard(buf_a).
         if no_picard {
@@ -3018,8 +3060,8 @@ fn optimize_energy(
         // VBY_FUSED=1 evaluates ∇E at the PRE-Picard position (buf_a)
         // instead of post-Picard, simulating a fused picard+grad shader
         // where each fragment can only see neighbors' pre-picard positions.
-        let no_grad = std::env::var("VBY_NOGRAD").is_ok();
-        let fused = std::env::var("VBY_FUSED").is_ok();
+        let no_grad = env.no_grad;
+        let fused = env.fused;
         if no_grad {
             buf_b.copy_from_slice(&buf_picard);
             if debug_ls {
