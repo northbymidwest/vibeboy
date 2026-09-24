@@ -902,6 +902,12 @@ impl Bus {
         self.apu.set_div_counter(0);
     }
 
+    /// Reset DIV as STOP does, with the same timer, serial and APU edge
+    /// effects as a write to 0xFF04.
+    pub fn reset_div(&mut self) {
+        self.write_io(0xFF04, 0);
+    }
+
     /// Toggle the actual speed (called partway through speed switch idle).
     pub fn do_speed_toggle(&mut self) {
         self.double_speed = !self.double_speed;

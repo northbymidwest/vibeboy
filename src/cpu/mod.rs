@@ -27,6 +27,8 @@ pub struct Cpu {
     pub ime_pending: bool,
     pub halted: bool,
     pub halt_bug: bool,
+    /// STOP mode: the system clock is stopped until a P10-P13 line falls.
+    pub stopped: bool,
     /// Remaining M-cycles to idle during a CGB speed switch.
     pub speed_switch_remaining: u32,
     /// M-cycle count at which to toggle the speed (counted down from initial).
@@ -86,6 +88,7 @@ impl Cpu {
             ime_pending: false,
             halted: false,
             halt_bug: false,
+            stopped: false,
             speed_switch_remaining: 0,
             speed_switch_toggle_at: 0,
             opcode: 0,

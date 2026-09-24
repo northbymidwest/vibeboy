@@ -411,7 +411,8 @@ impl Emulator {
             } else {
                 cycles
             };
-            let lcd_on = self.bus.ppu.lcdc & 0x80 != 0;
+            // In STOP mode the PPU is frozen and never reaches VBlank either.
+            let lcd_on = self.bus.ppu.lcdc & 0x80 != 0 && !self.cpu.stopped;
             if (!lcd_on && dots >= CYCLES_PER_FRAME) || dots >= CYCLES_PER_FRAME * 4 {
                 break;
             }
@@ -419,6 +420,18 @@ impl Emulator {
     }
 
     fn step(&mut self) -> u32 {
+        // STOP mode: the system clock is stopped, so the CPU, PPU, timer, APU
+        // and serial all stand still and IE is irrelevant. Only a P10-P13 line
+        // falling (a selected button being pressed) restarts it; that edge
+        // also requests the joypad interrupt on the next tick. Time still
+        // passes for the frontend, one M-cycle per call.
+        if self.cpu.stopped {
+            if !self.bus.joypad.interrupt {
+                return 4;
+            }
+            self.cpu.stopped = false;
+        }
+
         // Check for pending interrupts at the START of each step, matching
         // hardware behavior where the CPU checks IE & IF before fetching
         // the next opcode. This must happen before mcycle() so the CPU
@@ -555,23 +568,34 @@ impl Emulator {
                     }
                 }
 
-                // STOP: handle speed switch or halt-like behavior.
-                // On CGB with speed switch armed: enter 2050-cycle speed switch.
-                // If a button is held during STOP: behave as HALT instead of STOP
-                // (hardware doesn't enter low-power mode when buttons are pressed).
-                // Otherwise: enter low-power STOP mode (halted until button press).
+                // STOP (Pan Docs, "Using the STOP instruction"). The CPU has
+                // already read the byte after STOP; a "1-byte" STOP steps PC
+                // back so that byte executes as the next opcode.
+                // - Button held and selected: no DIV reset. With an interrupt
+                //   pending nothing happens (1 byte); otherwise HALT (2 bytes).
+                // - CGB speed switch armed: DIV reset, 2050-cycle switch.
+                // - Otherwise: DIV reset and STOP mode, 1 byte when an
+                //   interrupt is pending, else 2 bytes.
                 if self.cpu.opcode == 0x10 && self.cpu.speed_switch_remaining == 0 {
-                    if self.bus.speed_switch_armed() {
+                    self.bus.flush_ppu_deferred();
+                    let pending = self.bus.ie & self.bus.if_ & 0x1F != 0;
+                    if self.bus.joypad.any_selected_line_low() {
+                        if pending {
+                            self.cpu.regs.pc = self.cpu.regs.pc.wrapping_sub(1);
+                        } else {
+                            self.cpu.halted = true;
+                        }
+                    } else if self.bus.speed_switch_armed() {
                         self.bus.do_speed_switch_prepare();
                         self.cpu.speed_switch_remaining = 2050;
                         self.cpu.speed_switch_toggle_at = 2050 / 2;
                         self.cpu.halted = true;
-                    } else if self.bus.joypad.any_pressed() {
-                        // Button held: STOP acts as HALT variant
-                        self.cpu.halted = true;
                     } else {
-                        // Normal STOP: halt until button press or interrupt
-                        self.cpu.halted = true;
+                        self.bus.reset_div();
+                        if pending {
+                            self.cpu.regs.pc = self.cpu.regs.pc.wrapping_sub(1);
+                        }
+                        self.cpu.stopped = true;
                     }
                 }
 
@@ -1019,6 +1043,88 @@ mod tests {
         assert!(!take_joypad_irq(&mut emu));
         emu.set_button(BTN_B, true); // P11 falls
         assert!(take_joypad_irq(&mut emu));
+    }
+
+    /// DMG emulator running `code` from 0x100, followed by
+    /// STOP; INC A; INC A; JR -2. A "2-byte" STOP skips the first INC A.
+    fn stop_emu(code: &[u8]) -> Emulator {
+        let mut rom = vec![0u8; 0x8000];
+        let tail = [0x10, 0x3C, 0x3C, 0x18, 0xFE];
+        rom[0x100..0x100 + code.len()].copy_from_slice(code);
+        rom[0x100 + code.len()..0x100 + code.len() + tail.len()].copy_from_slice(&tail);
+        Emulator::new(
+            rom,
+            None,
+            GbModel::Dmg,
+            None,
+            crate::clock::default_clock(),
+            48_000,
+        )
+    }
+
+    #[test]
+    fn stop_freezes_the_system_until_a_selected_line_falls() {
+        // IE=0, IF=0, select both groups, A=0, then STOP.
+        let mut emu = stop_emu(&[
+            0x3E, 0x00, 0xE0, 0x0F, 0xE0, 0xFF, 0xE0, 0x00, // ld a,0; IF, IE, P1
+        ]);
+        emu.step_frame();
+        assert!(emu.cpu.stopped);
+        let div = emu.bus.read_byte(0xFF04);
+        let ly = emu.bus.read_byte(0xFF44);
+        assert_eq!(div, 0, "STOP resets DIV");
+        for _ in 0..3 {
+            emu.step_frame();
+        }
+        assert!(emu.cpu.stopped, "IE is 0, yet nothing but a button exits");
+        assert_eq!(emu.bus.read_byte(0xFF04), div, "timer is stopped");
+        assert_eq!(emu.bus.read_byte(0xFF44), ly, "PPU is stopped");
+        assert_eq!(emu.cpu.regs.a, 0);
+
+        emu.bus.write_byte(0xFF00, 0x20); // only the d-pad selected
+        emu.set_button(BTN_A, true);
+        emu.step_frame();
+        assert!(emu.cpu.stopped, "an unselected button does not exit STOP");
+
+        emu.set_button(BTN_UP, true);
+        emu.step_frame();
+        assert!(!emu.cpu.stopped);
+        assert_eq!(emu.cpu.regs.a, 1, "STOP was 2 bytes: one INC A skipped");
+        assert_ne!(emu.bus.if_ & 0x10, 0, "the falling line requests IRQ 4");
+    }
+
+    #[test]
+    fn stop_with_interrupt_pending_is_one_byte() {
+        // IE=4, IF=4 (timer pending, IME=0), select both groups, A=0, STOP.
+        let mut emu = stop_emu(&[
+            0x3E, 0x04, 0xE0, 0x0F, 0xE0, 0xFF, 0x3E, 0x00, 0xE0, 0x00,
+        ]);
+        emu.step_frame();
+        assert!(emu.cpu.stopped, "STOP mode is still entered");
+        emu.set_button(BTN_START, true);
+        emu.step_frame();
+        assert_eq!(emu.cpu.regs.a, 2, "the byte after STOP executed");
+    }
+
+    #[test]
+    fn stop_with_a_button_held_halts_without_resetting_div() {
+        // IF=0, IE=1 (VBlank), select both groups, A=0, then STOP.
+        let mut emu = stop_emu(&[
+            0x3E, 0x00, 0xE0, 0x0F, 0x3E, 0x01, 0xE0, 0xFF, 0x3E, 0x00, 0xE0, 0x00,
+        ]);
+        emu.set_button(BTN_DOWN, true);
+        // Run to the STOP opcode, then execute it.
+        while emu.cpu.regs.pc != 0x10C || emu.cpu.phase != 0 {
+            emu.step();
+        }
+        let div_before = emu.bus.timer.counter();
+        emu.step();
+        assert!(emu.cpu.halted && !emu.cpu.stopped, "HALT, not STOP");
+        assert!(emu.bus.timer.counter() > div_before, "DIV was not reset");
+        emu.step_frame();
+        emu.step_frame();
+        assert!(!emu.cpu.halted, "VBlank ends the HALT");
+        assert_eq!(emu.cpu.regs.a, 1, "STOP was 2 bytes");
     }
 
     #[test]

@@ -118,8 +118,8 @@ impl Joypad {
         self.buttons = buttons;
     }
 
-    /// Check if any button is currently pressed.
-    pub fn any_pressed(&self) -> bool {
-        self.buttons != 0
+    /// True when a held button in a selected group pulls one of P10-P13 low.
+    pub fn any_selected_line_low(&self) -> bool {
+        self.input_lines() != 0x0F
     }
 }
