@@ -126,15 +126,8 @@ impl Emulator {
             self.rewind_buffer.push(&snap);
         }
 
-        self.bus.clear_frame_ready();
         self.frame_count += 1;
-        let mut cycles = 0u32;
-        while !self.bus.frame_ready() {
-            cycles += self.step();
-            if cycles >= CYCLES_PER_FRAME * 4 {
-                break;
-            }
-        }
+        self.run_one_frame();
 
         // SGB post-processing
         if self.model.is_sgb() {
@@ -170,15 +163,8 @@ impl Emulator {
         let was_headless = self.headless;
         self.headless = true;
         for _ in 0..ahead {
-            self.bus.clear_frame_ready();
             self.frame_count += 1;
-            let mut cycles = 0u32;
-            while !self.bus.frame_ready() {
-                cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 4 {
-                    break;
-                }
-            }
+            self.run_one_frame();
             // SGB: apply palettes so the ahead frame has correct colors
             if self.model.is_sgb() && self.snes.is_none() {
                 self.bus.apply_sgb_palettes();
@@ -264,14 +250,7 @@ impl Emulator {
             // Regenerate frame buffer (and audio) from restored VRAM/PPU state.
             // Use the snapshot's historical button state for this step so the
             // re-emulated audio matches the original frame.
-            self.bus.clear_frame_ready();
-            let mut cycles = 0u32;
-            while !self.bus.frame_ready() {
-                cycles += self.step();
-                if cycles >= CYCLES_PER_FRAME * 4 {
-                    break;
-                }
-            }
+            self.run_one_frame();
             // SGB post-processing: apply palettes to the regenerated frame.
             if self.model.is_sgb() && self.snes.is_none() {
                 self.bus.apply_sgb_palettes();
@@ -396,6 +375,30 @@ impl Emulator {
 
     /// Execute one CPU instruction via the M-cycle state machine.
     /// Returns the total T-cycles consumed (including any DMA halt cycles).
+    /// Emulate until the PPU finishes a frame (enters VBlank).
+    ///
+    /// While the LCD is off the PPU never reaches VBlank, so the frame instead
+    /// ends once one frame's worth of dots has elapsed. Without that, each
+    /// call would run until the safety cap, making games run several times
+    /// too fast on screens that turn the LCD off.
+    fn run_one_frame(&mut self) {
+        self.bus.clear_frame_ready();
+        let mut dots = 0u32;
+        while !self.bus.frame_ready() {
+            // step() counts CPU T-cycles, two per dot in double speed.
+            let cycles = self.step();
+            dots += if self.bus.double_speed {
+                cycles / 2
+            } else {
+                cycles
+            };
+            let lcd_on = self.bus.ppu.lcdc & 0x80 != 0;
+            if (!lcd_on && dots >= CYCLES_PER_FRAME) || dots >= CYCLES_PER_FRAME * 4 {
+                break;
+            }
+        }
+    }
+
     fn step(&mut self) -> u32 {
         // Check for pending interrupts at the START of each step, matching
         // hardware behavior where the CPU checks IE & IF before fetching
@@ -866,6 +869,32 @@ mod tests {
             crate::clock::default_clock(),
             48_000,
         )
+    }
+
+    #[test]
+    fn lcd_off_frame_lasts_one_frame() {
+        // At 0x100: ld a,0 / ldh (0x40),a / jr -2 (turn the LCD off, spin).
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100..0x106].copy_from_slice(&[0x3E, 0x00, 0xE0, 0x40, 0x18, 0xFE]);
+        let mut emu = Emulator::new(
+            rom,
+            None,
+            GbModel::Dmg,
+            None,
+            crate::clock::default_clock(),
+            48_000,
+        );
+        emu.step_frame();
+        assert_eq!(emu.bus.ppu.lcdc & 0x80, 0);
+        let div_before = emu.bus.read_byte(0xFF04);
+        emu.step_frame();
+        let div_ticks = emu.bus.read_byte(0xFF04).wrapping_sub(div_before) as u32;
+        // DIV ticks every 256 T-cycles: one frame is ~274 ticks (mod 256).
+        let expected = (CYCLES_PER_FRAME / 256) % 256;
+        assert!(
+            div_ticks.abs_diff(expected) <= 1,
+            "LCD-off frame advanced DIV by {div_ticks}, expected about {expected}"
+        );
     }
 
     #[test]
