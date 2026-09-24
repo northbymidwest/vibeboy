@@ -63,6 +63,7 @@ pub(super) struct App {
     gp_buttons: u8, // bitmask of gamepad-pressed buttons
     fast_forward: bool,
     kb_fast_forward: bool,
+    kb_rewind: bool,
     sav_flusher: Option<ui_util::SavFlusher>,
 }
 
@@ -120,6 +121,7 @@ impl App {
             gp_buttons: 0,
             fast_forward: false,
             kb_fast_forward: false,
+            kb_rewind: false,
             sav_flusher: None,
         }
     }
@@ -659,6 +661,7 @@ impl ApplicationHandler for App {
                         }
 
                         if key == KeyCode::Backspace {
+                            self.kb_rewind = pressed;
                             emu.set_rewinding(pressed);
                         }
                         if key == KeyCode::Tab {
@@ -766,7 +769,9 @@ impl ApplicationHandler for App {
                     let mask = 1 << bit;
                     emu.set_button(mask, combined & mask != 0);
                 }
-                emu.set_rewinding(gs.rewind);
+                // Either source holds rewind; the gamepad poll runs every
+                // tick, so it must not cancel a held Backspace.
+                emu.set_rewinding(self.kb_rewind || gs.rewind);
                 self.fast_forward = self.kb_fast_forward || gs.fast_forward;
 
                 // Rumble

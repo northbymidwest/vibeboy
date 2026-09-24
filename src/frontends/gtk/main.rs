@@ -50,13 +50,27 @@ pub(crate) struct Cli {
     pub printer: bool,
 }
 
+impl EmuState {
+    /// Combine keyboard and gamepad hold inputs, so releasing one source
+    /// does not cancel the other and a gamepad release actually ends it.
+    fn apply_hold_inputs(&mut self) {
+        self.emu.set_rewinding(self.kb_rewind || self.gp_rewind);
+        self.fast_forward = self.kb_fast_forward || self.gp_fast_forward;
+    }
+}
+
 struct EmuState {
     emu: emulator::Emulator,
     model: GbModel,
     src_w: u32,
     src_h: u32,
     paused: bool,
+    /// Effective fast-forward: held on the keyboard or the gamepad.
     fast_forward: bool,
+    kb_fast_forward: bool,
+    gp_fast_forward: bool,
+    kb_rewind: bool,
+    gp_rewind: bool,
     slow_motion: bool,
     step_one_frame: bool,
     current_slot: usize,
@@ -160,6 +174,10 @@ fn create_emu_state(
         src_h,
         paused: false,
         fast_forward: false,
+        kb_fast_forward: false,
+        gp_fast_forward: false,
+        kb_rewind: false,
+        gp_rewind: false,
         slow_motion: false,
         step_one_frame: false,
         current_slot: 0,
@@ -528,10 +546,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     st.emu.set_button(mask, false);
                                 }
                             }
-                            if gs.rewind {
-                                st.emu.set_rewinding(true);
-                            }
-                            st.fast_forward = st.fast_forward || gs.fast_forward;
+                            st.gp_rewind = gs.rewind;
+                            st.gp_fast_forward = gs.fast_forward;
+                            // Inline apply_hold_inputs: `gp` borrows st.gamepad.
+                            st.emu.set_rewinding(st.kb_rewind || st.gp_rewind);
+                            st.fast_forward = st.kb_fast_forward || st.gp_fast_forward;
                             // Rumble
                             if st.emu.has_rumble() {
                                 gp.ensure_rumble();
@@ -551,9 +570,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 let mut ring = st.audio_ring.lock().unwrap();
                                 ring.push(&resampled);
                             }
-                        }
-
-                        if st.paused && !st.step_one_frame {
+                        } else if st.paused && !st.step_one_frame {
                             // Don't step emulation
                         } else if st.step_one_frame {
                             st.emu.step_frame();
@@ -864,10 +881,12 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     std::process::exit(0);
                 }
                 gtk4::gdk::Key::BackSpace => {
-                    st.emu.set_rewinding(true);
+                    st.kb_rewind = true;
+                    st.apply_hold_inputs();
                 }
                 gtk4::gdk::Key::Tab => {
-                    st.fast_forward = true;
+                    st.kb_fast_forward = true;
+                    st.apply_hold_inputs();
                 }
                 gtk4::gdk::Key::minus => {
                     st.slow_motion = true;
@@ -920,10 +939,12 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             }
             match keyval {
                 gtk4::gdk::Key::BackSpace => {
-                    st.emu.set_rewinding(false);
+                    st.kb_rewind = false;
+                    st.apply_hold_inputs();
                 }
                 gtk4::gdk::Key::Tab => {
-                    st.fast_forward = false;
+                    st.kb_fast_forward = false;
+                    st.apply_hold_inputs();
                 }
                 gtk4::gdk::Key::minus => {
                     st.slow_motion = false;
