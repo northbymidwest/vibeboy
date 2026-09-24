@@ -80,12 +80,12 @@ impl Ppu {
             return;
         }
 
-        // Window trigger check (only in visible pixel zone).
+        // Window trigger check (visible zone and SCX discard zone).
         // Activate immediately — on hardware, the window trigger takes
         // effect within the same T-cycle. The previous deferred activation
         // (applied only on the first tick of a step) caused variable dead ticks that made
         // mode 3 duration depend on batch alignment rather than pixel position.
-        if self.position_in_line >= 0 && self.check_window_trigger() {
+        if self.check_window_trigger() {
             self.activate_window();
             return;
         }
@@ -143,21 +143,25 @@ impl Ppu {
         if !self.wy_triggered {
             return false; // WY condition not met
         }
-        if self.position_in_line < 0 {
-            return false; // still in junk/discard zone
+        if self.position_in_line < -8 {
+            return false; // still in the junk zone
         }
-        let px = self.position_in_line as u8;
-        // WX=0..166 maps to screen pixel (WX-7)..
-        // Window triggers when position == WX-7 (for WX >= 7)
-        // For WX < 7, window triggers at position == 0
-        let wx_screen = self.wx.saturating_sub(7);
-        if px == wx_screen {
+        // The window starts when WX == position + 7, compared in 8 bits.
+        // Positions -8..-1 are the SCX discard zone, so WX = 0..6 triggers
+        // there: the window fetch restarts during the discard and its first
+        // 7 - WX pixels are dropped along with the rest of the zone.
+        // WX > 166 never matches: the 8-bit compare would otherwise wrap
+        // into the discard zone (WX = 0xFF at position -8).
+        if self.wx > 166 {
+            return false;
+        }
+        let pos = self.position_in_line;
+        if self.wx == (pos + 7) as u8 {
             return true;
         }
         // DMG LCD-PPU horizontal desync: window also triggers 1 pixel late
         // (WX == position + 6), unless WX was just written this T-cycle.
-        if !self.cgb_mode && !self.wx_just_changed && self.wx >= 7 && px == self.wx.wrapping_sub(6)
-        {
+        if !self.cgb_mode && !self.wx_just_changed && self.wx != 0 && self.wx == (pos + 6) as u8 {
             return true;
         }
         false
