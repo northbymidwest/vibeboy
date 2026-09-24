@@ -360,13 +360,14 @@ impl Sgb {
             self.packet_buf.len()
         );
 
-        if cmd > 0x17 {
-            // Invalid command — likely false positive from joypad polling
+        if cmd > 0x19 {
+            // Invalid command (0x1A-0x1F), likely a false positive from joypad polling
             return;
         }
 
         // Track that we've received a valid command (for boot timeout logic).
         self.got_first_command = true;
+        let old_backdrop = self.palettes[0][0];
 
         match cmd {
             0x00 => self.cmd_pal01(),
@@ -386,13 +387,31 @@ impl Sgb {
             0x16 => self.cmd_attr_set(),
             0x17 => self.cmd_mask_en(),
             0x0F => self.cmd_data_snd(),
-            0x08 | 0x09 | 0x0C | 0x0D | 0x0E | 0x19 => {
-                // OBJ_TRN, ICON_EN, ATRC_EN, TEST_EN, ICON_TRN, SOUND
-                // These commands control SNES-side features we don't emulate
+            0x08 | 0x09 | 0x0C | 0x0D | 0x0E => {
+                // SOUND, SOU_TRN, ATRC_EN, TEST_EN, ICON_EN: SNES-side sound,
+                // attraction mode, test mode and the player's palette/border
+                // menu, none of which are emulated in HLE mode.
+            }
+            0x19 => {
+                // PAL_PRI: gives game palette commands priority over a palette
+                // the player picked in the SGB menu. HLE mode has no player
+                // palette override, so game palettes always apply already.
+            }
+            0x18 => {
+                // OBJ_TRN: SNES OBJ mode (sprites read from the bottom tile row
+                // of the Game Boy screen each frame). Not implemented.
+                log::debug!("SGB: OBJ_TRN (SNES OBJ mode) not implemented");
             }
             _ => {
+                // DATA_TRN (0x10), JUMP (0x12): run SNES code, needs LLE.
                 log::debug!("SGB: unhandled command 0x{:02X}", cmd);
             }
+        }
+
+        // Transparent border pixels show the SNES backdrop, which is the
+        // shared SGB color 0. Re-render the border when it changes.
+        if self.palettes[0][0] != old_backdrop && self.border_tiles.iter().any(|&b| b != 0) {
+            self.border_dirty = true;
         }
     }
 
@@ -903,6 +922,7 @@ impl Sgb {
     /// Render the 256×224 border into `border_buf`.
     /// Uses SNES 4bpp planar tile format.
     pub fn render_border(&self, border_buf: &mut [u32]) {
+        let backdrop = Self::rgb555_to_rgb32(self.palettes[0][0]);
         for map_y in 0..28usize {
             for map_x in 0..32usize {
                 let entry = self.border_map[map_y * 32 + map_x];
@@ -954,8 +974,9 @@ impl Sgb {
                         let screen_y = map_y * 8 + ty;
                         if screen_x < 256 && screen_y < 224 {
                             let pixel = if color_idx == 0 {
-                                // Color 0 = transparent (show game area or black)
-                                0x00000000
+                                // Color 0 is transparent: the SNES backdrop
+                                // (shared SGB color 0) shows through.
+                                backdrop
                             } else {
                                 Self::rgb555_to_rgb32(pal[color_idx as usize])
                             };
