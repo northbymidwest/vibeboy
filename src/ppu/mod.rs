@@ -35,15 +35,12 @@ mod serde_vram {
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct FifoPixel {
-    color_index: u8, // 2-bit tile color (0-3)
-    palette: u8,     // CGB palette (0-7), 0 for DMG
-    is_sprite: bool,
+    color_index: u8,        // 2-bit tile color (0-3)
+    palette: u8,            // CGB palette (0-7), 0 for DMG
     bg_priority: bool,      // CGB BG attr bit 7
     sprite_bg_over: bool,   // sprite OAM attr bit 7
     sprite_dmg_palette: u8, // DMG: 0=OBP0, 1=OBP1 (palette selected at output time)
     sprite_oam_index: u8,   // OAM entry index (0-39) for CGB priority
-    bg_color_index: u8,     // original BG color underneath sprite
-    bg_palette: u8,         // original BG palette underneath sprite
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -126,9 +123,6 @@ struct Fetcher {
     /// CGB: BG map address latched at GetTileT1
     /// (cached at GET_TILE T1, used at T2 for VRAM read)
     latched_map_addr: usize,
-    /// Tick counter modulo 6: tracks position in the 6-dot fetch cycle
-    /// independent of Push stalls. Used for sprite alignment penalty.
-    cycle_tick: u8,
 }
 
 impl Fetcher {
@@ -146,7 +140,6 @@ impl Fetcher {
             fetcher_y: 0,
             latched_tile_sel: false,
             latched_map_addr: 0,
-            cycle_tick: 0,
         }
     }
 
@@ -163,7 +156,6 @@ impl Fetcher {
         self.fetcher_y = 0;
         self.latched_tile_sel = false;
         self.latched_map_addr = 0;
-        self.cycle_tick = 0;
     }
 }
 
@@ -344,14 +336,8 @@ pub struct Ppu {
     /// DMG glitch: when WIN_EN is disabled while window is being fetched,
     /// suppress the phantom window pixel insertion at the fetcher push state.
     pub(crate) disable_window_pixel_insertion_glitch: bool,
-    /// True when processing the last tick of a step() call.
-    last_tick_of_step: bool,
-    /// True when processing the first tick of a step() call.
-    first_tick_of_step: bool,
     /// Startup delay at beginning of Mode 3 (pipeline priming)
     pub(crate) mode3_start_delay: u8,
-    /// Debug: dot when mode 3 started
-    mode3_dot: u32,
     /// Last sprite tile slot for same-slot grouping (or -1 if none)
     last_sprite_slot: i16,
 
@@ -380,7 +366,7 @@ pub struct Ppu {
     pub accessed_oam_row: i16,
 
     /// OAM bug row captured at the end of each step(4) call.
-    /// The CPU checks this value BEFORE the next tick_mcycle(), so it
+    /// The CPU checks this value BEFORE the next M-cycle tick, so it
     /// reflects the PPU state after the previous M-cycle's advancement.
     pub oam_bug_row: i16,
 
@@ -394,9 +380,6 @@ pub struct Ppu {
     pub(crate) obp1_rendering: u8,
     /// WX write conflict: suppresses WX+6 window trigger for 1T after WX write
     pub(crate) wx_just_changed: bool,
-    /// Junk zone: set when position_in_line is in [-16, -9] and SCX alignment
-    /// hasn't matched yet. Used by hardware for mid-scanline SCX glitches.
-    line_has_fractional_scrolling: bool,
     /// True while the fetcher is actively fetching window tiles (set when window
     /// activates, cleared by render_pixel_if_possible after first pixel pop).
     window_is_being_fetched: bool,
@@ -493,10 +476,7 @@ impl Ppu {
             window_trigger_pending: false,
             window_trigger_from_wx_write: false,
             disable_window_pixel_insertion_glitch: false,
-            last_tick_of_step: false,
-            first_tick_of_step: false,
             mode3_start_delay: 0,
-            mode3_dot: 0,
             last_sprite_slot: -1,
             visible_ly: 0,
             ly_for_comparison: 0,
@@ -512,7 +492,6 @@ impl Ppu {
             obp0_rendering: 0xFF,
             obp1_rendering: 0xFF,
             wx_just_changed: false,
-            line_has_fractional_scrolling: false,
             window_is_being_fetched: false,
         }
     }
@@ -683,24 +662,6 @@ impl Ppu {
         }
         // Trademark symbol at row 8, col 16
         self.vram[0][scrn0 + 8 * 32 + 16] = 0x19;
-    }
-
-    /// Compute the accessed OAM row at a given dot position during Mode 2.
-    /// Returns the row byte offset (8, 16, 24, ..., 152) or 0xFF if not in Mode 2
-    /// or if the dot is before OAM search starts.
-    pub fn oam_row_at_dot(&self, dot: u32) -> i16 {
-        if self.mode != 2 || self.cgb_mode {
-            return 0xFF;
-        }
-        if dot < 6 {
-            return 0;
-        }
-        let mode2_end = 84u32; // DMG mode 2 ends at dot 84
-        if dot >= mode2_end {
-            return 0xFF;
-        }
-        let oam_search_index = ((dot - 6) / 2) as i16;
-        (oam_search_index & !1) * 4 + 8
     }
 }
 

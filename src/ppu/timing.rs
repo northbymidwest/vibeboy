@@ -26,27 +26,15 @@ impl Ppu {
             // render_pixel_if_possible, so no re-check needed here.
         }
 
-        self.step_inner(cycles, true)
+        self.step_inner(cycles)
     }
 
-    /// Step the PPU for deferred ticks (from previous M-cycle's lazy flush).
-    /// Unlike step(), this does NOT mark the first tick as a CPU write boundary
-    /// and does NOT capture oam_bug_row. Returns accumulated IF flags.
-    pub fn step_deferred(&mut self, cycles: u32) -> u8 {
-        self.step_inner(cycles, false)
-    }
-
-    fn step_inner(&mut self, cycles: u32, is_cpu_boundary: bool) -> u8 {
-        for i in 0..cycles {
-            self.first_tick_of_step = is_cpu_boundary && i == 0;
-            self.last_tick_of_step = i == cycles - 1;
+    fn step_inner(&mut self, cycles: u32) -> u8 {
+        for _ in 0..cycles {
             self.tick();
         }
 
-        // Only capture oam_bug_row at CPU-boundary steps (not deferred flushes)
-        if is_cpu_boundary {
-            self.oam_bug_row = self.accessed_oam_row;
-        }
+        self.oam_bug_row = self.accessed_oam_row;
 
         let flags = self.if_flags;
         self.if_flags = 0;
@@ -108,7 +96,6 @@ impl Ppu {
                 let mode2_end = 84;
                 if self.dot >= mode2_end {
                     self.accessed_oam_row = 0xFF;
-                    self.mode3_dot = self.dot;
                     self.mode = 3;
                     self.mode_for_interrupt = 3;
                     self.oam_accessible = false;
@@ -255,16 +242,6 @@ impl Ppu {
                 // transition across multiple T-cycles (matching hardware timing).
                 if self.line_153_phase > 0 {
                     self.tick_line_153();
-                }
-
-                // CGB line 153 early handling (non-DMG path)
-                if self.cgb_mode && self.ly == 153 && self.dot == 4 && self.line_153_phase == 0 {
-                    // CGB line 153: ly_for_comparison = 153 at T+4
-                    self.ly_for_comparison = 153;
-                    self.update_coincidence();
-                    self.update_stat_irq();
-                    // Start extended sequence at phase 1 (next event at dot 8)
-                    self.line_153_phase = 1;
                 }
 
                 if self.dot >= 456 {
@@ -572,7 +549,7 @@ impl Ppu {
     ///   dot 12: ly_for_comparison=0; STAT update
     ///
     /// CGB timing (from line 153 start):
-    ///   dot 4: ly_for_comparison=153 (handled in mode 1 handler)
+    ///   dot 4: ly_for_comparison=153 (handled in line_start handler)
     ///   dot 8: LY=0, visible_ly=0; ly_for_comparison stays 153; STAT update
     ///   dot 12: ly_for_comparison=0; STAT update
     fn tick_line_153(&mut self) {
@@ -630,7 +607,6 @@ impl Ppu {
     // ---- Mode transitions ----
 
     pub(super) fn transition_to_mode3(&mut self) {
-        self.mode3_dot = self.dot;
         self.mode = 3;
         self.mode_for_interrupt = 3;
         self.stat = (self.stat & !0x03) | 0x03;

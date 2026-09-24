@@ -26,8 +26,8 @@ const fn layout_hash() -> u32 {
     let desc = concat!(
         // Bump this when changing serialization format, struct layout, or any
         // mapper's snapshot_state byte layout (those are opaque to the hash).
-        // v4: MBC1 upper bank bits, TAMA5 split registers, Pocket Camera SRAM image.
-        "v4;",
+        // v5: dead CPU/APU/PPU/OAM DMA state removed.
+        "v5;",
         "Cpu:regs.a,f,b,c,d,e,h,l,sp,pc,ime,ime_pending,halted,halt_bug,speed_switch;",
         "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites,mgb_mode;",
         "Apu:ch1-4,frame_seq,master,nr50-52,blip;",

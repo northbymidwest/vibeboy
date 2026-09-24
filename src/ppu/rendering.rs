@@ -16,7 +16,6 @@ impl Ppu {
             self.bg_fifo.push_back(FifoPixel::default());
         }
         self.position_in_line = -16;
-        self.line_has_fractional_scrolling = false;
         self.window_is_being_fetched = false;
         self.sprite_fetch_active = false;
         self.sprites_fetched = 0;
@@ -84,7 +83,7 @@ impl Ppu {
         // Window trigger check (only in visible pixel zone).
         // Activate immediately — on hardware, the window trigger takes
         // effect within the same T-cycle. The previous deferred activation
-        // (first_tick_of_step guard) caused variable dead ticks that made
+        // (applied only on the first tick of a step) caused variable dead ticks that made
         // mode 3 duration depend on batch alignment rather than pixel position.
         if self.position_in_line >= 0 && self.check_window_trigger() {
             self.activate_window();
@@ -116,8 +115,6 @@ impl Ppu {
                 // Alignment never matched (safety net), wrap back
                 self.position_in_line = -16;
                 return;
-            } else {
-                self.line_has_fractional_scrolling = true;
             }
             // Fall through to the < 0 discard check below
         }
@@ -212,7 +209,6 @@ impl Ppu {
         //
         // CGB: fetcher-state-based. Hardware pauses pixel output and waits
         // for the BG fetcher to complete its 6-dot tile fetch cycle.
-        // cycle_tick tracks this phase independently of Push stalls.
         //
         // DMG: formula-based. Penalty = 5 - min(5, (sprite_x + SCX) & 7),
         // with X=0 always getting 5. Uses tile slot grouping where
@@ -220,9 +216,9 @@ impl Ppu {
         if self.cgb_mode {
             // Wait for BG fetcher to reach GetTileDataHighT2 (the end of its
             // 6-state tile fetch cycle), then 1 extra T for the post-loop
-            // fetcher advance + setup. cycle_tick is unreliable here because
-            // it wraps mod-6 but the fetcher cycle is 7+ T when Push stalls
-            // — use the state itself.
+            // fetcher advance + setup. A mod-6 dot counter would be
+            // unreliable here because the fetcher cycle is 7+ T when Push
+            // stalls, so use the state itself.
             //
             // Push state is special: it stalls until the fifo drains, then
             // transitions to GetTileT1 to start a new cycle. From Push we
@@ -392,13 +388,10 @@ impl Ppu {
                 FifoPixel {
                     color_index: color_idx,
                     palette: palette_idx,
-                    is_sprite: true,
                     bg_priority: false,
                     sprite_bg_over: bg_over,
                     sprite_dmg_palette: dmg_pal,
                     sprite_oam_index: oam_index,
-                    bg_color_index: 0,
-                    bg_palette: 0,
                 },
             );
         }
@@ -407,12 +400,7 @@ impl Ppu {
     /// Advance the BG/window tile fetcher by one T-cycle.
     /// The fetcher has a 6-dot cycle (T1,T2,LowT1,LowT2,HighT1,HighT2)
     /// plus a Push wait state that stalls when the FIFO is full.
-    /// cycle_tick tracks the 6-dot phase independently of Push stalls.
     fn tick_bg_fetcher(&mut self) {
-        // Track 6-dot cycle phase for sprite alignment. Increments every
-        // tick including Push stalls — on hardware the fetcher's cycle
-        // counter advances continuously regardless of FIFO state.
-        self.fetcher.cycle_tick = (self.fetcher.cycle_tick + 1) % 6;
         match self.fetcher.state {
             super::FetcherState::GetTileT1 => {
                 // CGB (≥CGB-D): latch registers at T1
@@ -626,13 +614,10 @@ impl Ppu {
             self.bg_fifo.push_back(FifoPixel {
                 color_index: color_idx,
                 palette,
-                is_sprite: false,
                 bg_priority: bg_prio,
                 sprite_bg_over: false,
                 sprite_dmg_palette: 0,
                 sprite_oam_index: 0,
-                bg_color_index: 0,
-                bg_palette: 0,
             });
         }
     }
