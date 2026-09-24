@@ -288,7 +288,12 @@ impl Ppu {
                 let y_flip = attrs & 0x40 != 0;
                 let mut row = (self.ly as i16 - sprite_y) as u16;
                 if y_flip {
-                    row = sprite_height as u16 - 1 - row;
+                    // Flip by inverting the row bits. Equal to
+                    // `height - 1 - row` for in-range rows, but the height is
+                    // re-read from LCDC here while the sprite was selected
+                    // during the OAM scan, so an 8x16 -> 8x8 switch mid-line
+                    // can leave row >= height, which must not underflow.
+                    row ^= sprite_height as u16 - 1;
                 }
                 let actual_tile = if sprite_height == 16 {
                     if row < 8 {
