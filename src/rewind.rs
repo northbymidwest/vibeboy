@@ -13,6 +13,15 @@
 use crate::snapshot::Snapshot;
 use std::collections::VecDeque;
 
+/// Fixed-width integers keep every field at the same byte offset from one
+/// frame to the next. With bincode's default variable-length integers, any
+/// value crossing an encoding-size boundary shifts all later bytes, so the
+/// delta against the previous frame would cover most of the snapshot.
+const ENCODING: bincode::config::Configuration<
+    bincode::config::LittleEndian,
+    bincode::config::Fixint,
+> = bincode::config::standard().with_fixed_int_encoding();
+
 /// A reverse delta: applying it to the next frame's bytes recovers this frame.
 /// Stores the old bytes at each changed offset.
 struct ReverseDelta(Vec<u8>);
@@ -57,8 +66,8 @@ impl RewindBuffer {
 
     /// Push a snapshot into the rewind buffer.
     pub fn push(&mut self, snap: &Snapshot) {
-        let serialized = bincode::serde::encode_to_vec(snap, bincode::config::standard())
-            .expect("snapshot serialization failed");
+        let serialized =
+            bincode::serde::encode_to_vec(snap, ENCODING).expect("snapshot serialization failed");
 
         if self.head.is_empty() {
             // First frame — just store as the head
@@ -95,7 +104,7 @@ impl RewindBuffer {
         }
         // else: this was the last frame, head stays empty
 
-        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        bincode::serde::decode_from_slice(&bytes, ENCODING)
             .map(|(snap, _)| snap)
             .ok()
     }
