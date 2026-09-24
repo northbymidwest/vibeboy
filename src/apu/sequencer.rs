@@ -23,9 +23,6 @@ impl Apu {
             self.div_divider = self.div_divider.wrapping_add(1);
         }
 
-        // Reset PCM mask each div event
-        self.pcm_mask = [0xFF, 0xFF];
-
         // Length counters: when div_divider & 1 == 1 (every other event)
         if self.div_divider & 1 == 1 {
             self.ch1.clock_length();
@@ -71,9 +68,6 @@ impl Apu {
             return;
         }
 
-        // Reset PCM mask
-        self.pcm_mask = [0xFF, 0xFF];
-
         // On secondary event: for active channels with volume_countdown == 0,
         // reload countdown from env_period and set envelope clock
         if self.ch1.enabled && self.ch1.volume_countdown == 0 {
@@ -117,7 +111,6 @@ impl Apu {
             }
         }
         self.ch1.volume = self.ch1.env_init_vol;
-        self.ch1.env_timer = self.ch1.env_period;
         self.ch1.volume_countdown = self.ch1.env_period;
         self.ch1.envelope_clock.locked = false;
         self.ch1.envelope_clock.clock = false;
@@ -170,8 +163,7 @@ impl Apu {
         }
         self.ch1.did_tick = false;
 
-        let lf = self.write_lf();
-        self.sweep.trigger(&mut self.ch1, was_active, lf);
+        self.sweep.trigger(&mut self.ch1);
         if !self.ch1.dac_on {
             self.ch1.enabled = false;
         }
@@ -188,7 +180,6 @@ impl Apu {
             }
         }
         self.ch2.volume = self.ch2.env_init_vol;
-        self.ch2.env_timer = self.ch2.env_period;
         self.ch2.volume_countdown = self.ch2.env_period;
         self.ch2.envelope_clock.locked = false;
         self.ch2.envelope_clock.clock = false;
@@ -289,7 +280,6 @@ impl Apu {
             }
         }
         self.ch4.volume = self.ch4.env_init_vol;
-        self.ch4.env_timer = self.ch4.env_period;
         self.ch4.volume_countdown = self.ch4.env_period;
         self.ch4.envelope_clock.locked = false;
         self.ch4.envelope_clock.clock = false;

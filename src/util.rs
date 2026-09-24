@@ -34,24 +34,6 @@ pub fn reverse_audio(samples: &mut [f32]) {
     }
 }
 
-/// Apply a short cosine fade-in to the start of each frame's audio.
-pub fn fade_frame_boundaries(samples: &mut [f32], frame_len: usize) {
-    if frame_len == 0 {
-        return;
-    }
-    let fade_len = 64.min(frame_len);
-    let mut offset = 0;
-    while offset + frame_len * 2 <= samples.len() {
-        for i in 0..fade_len {
-            let t = i as f32 / fade_len as f32;
-            let gain = 0.5 - 0.5 * (std::f32::consts::PI * t).cos();
-            samples[offset + i * 2] *= gain;
-            samples[offset + i * 2 + 1] *= gain;
-        }
-        offset += frame_len * 2;
-    }
-}
-
 /// Downsample stereo interleaved audio by an integer factor using a
 /// Blackman-windowed sinc FIR low-pass filter followed by decimation.
 pub fn downsample_audio(samples: &[f32], factor: usize) -> Vec<f32> {

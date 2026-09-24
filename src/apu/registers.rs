@@ -155,8 +155,6 @@ impl Apu {
                         &mut self.ch1.envelope_clock,
                     );
                     self.ch1.update_sample();
-                    // PCM mask: CH1 is low nibble of pcm_mask[0]
-                    self.pcm_mask[0] &= self.ch1.volume | 0xF0;
                 }
             }
             0xFF13 => {
@@ -216,8 +214,6 @@ impl Apu {
                         &mut self.ch2.envelope_clock,
                     );
                     self.ch2.update_sample();
-                    // PCM mask: CH2 is high nibble of pcm_mask[0]
-                    self.pcm_mask[0] &= (self.ch2.volume << 4) | 0x0F;
                 }
             }
             0xFF18 => {
@@ -294,8 +290,6 @@ impl Apu {
                         &mut self.ch4.volume_countdown,
                         &mut self.ch4.envelope_clock,
                     );
-                    // PCM mask: CH4 is high nibble of pcm_mask[1]
-                    self.pcm_mask[1] &= (self.ch4.volume << 4) | 0x0F;
                 }
             }
             0xFF22 => {

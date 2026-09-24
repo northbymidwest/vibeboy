@@ -6,8 +6,7 @@
 // Re-export pure utility functions for backwards compatibility.
 // New code should use `vibeboy_core::util::*` directly.
 pub use crate::util::{
-    auto_detect_model, downsample_audio, fade_frame_boundaries, frame_duration, parse_model,
-    reverse_audio,
+    auto_detect_model, downsample_audio, frame_duration, parse_model, reverse_audio,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

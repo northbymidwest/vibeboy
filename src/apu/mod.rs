@@ -158,9 +158,6 @@ pub struct Apu {
     // Sub-2MHz phase tracker (toggles each T-cycle)
     lf_div: bool,
 
-    // PCM masking (for envelope glitch behavior)
-    pcm_mask: [u8; 2],
-
     // Sample timing
     sample_accum: u64,
 
@@ -256,7 +253,6 @@ impl Apu {
             div_counter: 0,
             double_speed: false,
             lf_div: true,
-            pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
             headless: false,
@@ -303,7 +299,6 @@ impl Apu {
             div_counter: 0,
             double_speed: false,
             lf_div: true,
-            pcm_mask: [0xFF, 0xFF],
             sample_accum: 0,
             sample_buf: Vec::with_capacity(1024),
             headless: false,
@@ -490,16 +485,6 @@ impl Apu {
         // Only the low 3 bits are read; wrap instead of overflowing.
         self.ch4.alignment = self.ch4.alignment.wrapping_add(cycles);
         self.ch4.tick_counter(cycles);
-
-        // Sweep calculation runs in 1MHz domain (one step per 2 T-cycles).
-        // Only step when there's a pending calculation (avoids unnecessary work
-        // and prevents restart_hold from counting down prematurely).
-        if self.sweep.calc_pending {
-            let sweep_steps = cycles / 2;
-            for _ in 0..sweep_steps {
-                self.sweep.step_1mhz(&mut self.ch1);
-            }
-        }
 
         self.record_mix_delta();
 

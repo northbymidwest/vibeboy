@@ -54,7 +54,6 @@ pub(super) struct SquareCh {
     pub duty_pos: u8,
     pub length_counter: u16,
     pub volume: u8,
-    pub env_timer: u8,
     pub volume_countdown: u8,
     pub current_sample: u8,
     pub sample_suppressed: bool,
@@ -84,7 +83,6 @@ impl SquareCh {
             duty_pos: 0,
             length_counter: 64,
             volume: 0,
-            env_timer: 0,
             volume_countdown: 0,
             current_sample: 0,
             sample_suppressed: false,
@@ -167,28 +165,17 @@ impl SquareCh {
 
 // ── CH1 sweep ──────────────────────────────────────────────────────────────
 //
-// The sweep operates in two domains:
-//   128 Hz (period timer): clocked by the frame sequencer when div_divider & 3 == 3.
-//     When the period timer expires, a new sweep step executes: compute delta,
-//     apply to frequency, then schedule an overflow check.
-//   1 MHz (calculation): the overflow check runs after a short delay (reload_timer)
-//     followed by a countdown equal to the shift value. Both tick in the 1MHz
-//     domain (one step per lf_div toggle).
+// The period timer is clocked by the frame sequencer at 128 Hz
+// (div_divider & 3 == 3). When it expires, a sweep step computes
+// shadow +/- (shadow >> shift), disables CH1 on overflow (> 2047), writes the
+// new frequency back when shift != 0, then runs a second overflow check with
+// the new shadow.
 //
-// On trigger:
-//   shadow = current frequency
-//   addend = shadow >> shift (or 0 if shift == 0)
-//   schedule overflow check via reload_timer + calc_countdown
-//   period timer reloaded
+// On trigger the shadow is loaded from the current frequency and, if shift is
+// nonzero, an overflow check runs immediately.
 //
-// Overflow check:
-//   sum = shadow + addend (with negate: shadow - addend via XOR trick)
-//   if sum > 0x7FF and not negating → disable channel
-//   update shadow from current frequency (unless in restart hold window)
-//
-// NR10 write:
-//   if negate was used and negate bit is now clear → check overflow with
-//   old negate state and completed addend, disable if overflow
+// NR10 write: if a negate-mode calculation has run since the trigger and the
+// negate bit is now cleared, CH1 is disabled.
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Sweep {
@@ -205,24 +192,6 @@ pub(super) struct Sweep {
     /// Period timer: counts down from period (or 8 if period==0). When it
     /// reaches 0, a sweep step executes and the timer reloads.
     timer: u8,
-
-    /// Current sweep addend (shadow >> shift, possibly negated)
-    addend: u16,
-
-    /// Delay before overflow check fires (counts down in 1MHz domain)
-    reload_timer: u8,
-
-    /// Countdown from shift value in 1MHz domain
-    calc_countdown: u8,
-
-    /// True when an overflow check is scheduled
-    pub calc_pending: bool,
-
-    /// Completed addend from last overflow check (for NR10 negate-clear checks)
-    completed_addend: u16,
-
-    /// Restart hold: prevents shadow update on rapid retrigger (counts down in 1MHz)
-    restart_hold: u8,
 }
 
 impl Sweep {
@@ -235,49 +204,30 @@ impl Sweep {
             shadow: 0,
             neg_used: false,
             timer: 0,
-            addend: 0,
-            reload_timer: 0,
-            calc_countdown: 0,
-            calc_pending: false,
-            completed_addend: 0,
-            restart_hold: 0,
         }
     }
 
     /// Initialize sweep on CH1 trigger. May disable the channel via `ch`.
-    pub fn trigger(&mut self, ch: &mut SquareCh, _was_active: bool, _lf_div: u32) {
-        let ch1_freq = ch.freq;
-        self.shadow = ch1_freq;
-        self.completed_addend = 0;
+    pub fn trigger(&mut self, ch: &mut SquareCh) {
+        self.shadow = ch.freq;
         self.neg_used = false;
-        self.restart_hold = 2;
 
         self.enabled = self.period != 0 || self.shift != 0;
         self.timer = if self.period == 0 { 8 } else { self.period };
 
-        if self.shift != 0 {
-            self.addend = ch1_freq >> self.shift;
+        if self.shift != 0 && self.next_freq() > 2047 {
+            ch.enabled = false;
+        }
+    }
 
-            // Immediate overflow check at trigger (required by blargg test 06).
-            // If shadow + delta > 2047, disable immediately.
-            let delta = self.shadow >> self.shift;
-            let check = if self.negate {
-                self.neg_used = true;
-                self.shadow.wrapping_sub(delta)
-            } else {
-                self.shadow + delta
-            };
-            if check > 2047 {
-                ch.enabled = false;
-            }
-
-            // Deferred overflow check disabled for now — the immediate check
-            // above handles the blargg test 06 case. The sample-accurate deferred
-            // model needs more work to not break tests 04/05/07.
-            self.calc_pending = false;
+    /// shadow +/- (shadow >> shift). Marks negate mode as used.
+    fn next_freq(&mut self) -> u16 {
+        let delta = self.shadow >> self.shift;
+        if self.negate {
+            self.neg_used = true;
+            self.shadow.wrapping_sub(delta)
         } else {
-            self.addend = 0;
-            self.calc_pending = false;
+            self.shadow + delta
         }
     }
 
@@ -298,13 +248,7 @@ impl Sweep {
         }
 
         // Sweep step: compute hypothetical new frequency.
-        let delta = self.shadow >> self.shift;
-        let new_freq = if self.negate {
-            self.neg_used = true;
-            self.shadow.wrapping_sub(delta)
-        } else {
-            self.shadow + delta
-        };
+        let new_freq = self.next_freq();
 
         // First overflow check
         if new_freq > 2047 {
@@ -316,66 +260,12 @@ impl Sweep {
         if self.shift != 0 {
             self.shadow = new_freq;
             ch.freq = new_freq;
-            self.addend = new_freq >> self.shift;
             ch.update_sample();
         }
 
         // Second overflow check (always, even if shift == 0)
-        let delta2 = self.shadow >> self.shift;
-        let next_freq = if self.negate {
-            self.shadow.wrapping_sub(delta2)
-        } else {
-            self.shadow + delta2
-        };
-        if next_freq > 2047 {
+        if self.next_freq() > 2047 {
             ch.enabled = false;
-        }
-    }
-
-    /// Perform the overflow check. Computes the hypothetical next frequency
-    /// and disables CH1 if it would overflow (> 2047) in non-negate mode.
-    fn overflow_check(&mut self, ch: &mut SquareCh) {
-        let delta = self.shadow >> self.shift;
-        let next_freq = if self.negate {
-            self.neg_used = true;
-            self.shadow.wrapping_sub(delta)
-        } else {
-            self.shadow + delta
-        };
-        if next_freq > 2047 {
-            ch.enabled = false;
-        }
-        self.completed_addend = delta;
-    }
-
-    /// Step the sweep calculation in the 1MHz domain.
-    /// Called once per lf_div toggle (every 2 T-cycles).
-    pub fn step_1mhz(&mut self, ch: &mut SquareCh) {
-        if self.restart_hold > 0 {
-            self.restart_hold -= 1;
-        }
-
-        if !self.calc_pending {
-            return;
-        }
-
-        // Reload timer must expire first
-        if self.reload_timer > 0 {
-            self.reload_timer -= 1;
-            if self.reload_timer == 0 && self.calc_countdown == 0 {
-                self.overflow_check(ch);
-                self.calc_pending = false;
-            }
-            return;
-        }
-
-        // Calculation countdown
-        if self.calc_countdown > 0 {
-            self.calc_countdown -= 1;
-        }
-        if self.calc_countdown == 0 {
-            self.overflow_check(ch);
-            self.calc_pending = false;
         }
     }
 
@@ -498,7 +388,6 @@ pub(super) struct NoiseCh {
     pub dac_on: bool,
     pub length_counter: u16,
     pub volume: u8,
-    pub env_timer: u8,
     pub volume_countdown: u8,
 
     // Counter-based frequency timing
@@ -533,7 +422,6 @@ impl NoiseCh {
             dac_on: false,
             length_counter: 64,
             volume: 0,
-            env_timer: 0,
             volume_countdown: 0,
             counter: 0,
             counter_countdown: 0,
