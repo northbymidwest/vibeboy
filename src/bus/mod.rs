@@ -602,9 +602,14 @@ impl Bus {
     /// - CGB: writes to the same bus as DMA source are blocked + OAM.
     pub fn write_byte(&mut self, addr: u16, val: u8) {
         // Flush deferred PPU ticks so the write sees correct PPU state
-        // (mode, accessibility). PPU register writes (0xFF40-0xFF6B) handle
-        // flushing in write_byte_raw with conflict-specific timing.
-        if !matches!(addr, 0xFF40..=0xFF6B) {
+        // (mode, accessibility). Only the PPU registers routed to write_io's
+        // per-register conflict handlers (which flush with their own
+        // sub-M-cycle split) skip this. Everything else in the FF4x-FF6x
+        // block (OAM DMA FF46, KEY1 FF4D, boot FF50, HDMA FF51-FF55, ...)
+        // needs the PPU caught up first: HDMA start samples the PPU mode,
+        // and DMA transfers step the PPU directly, which must not happen
+        // while older dots are still deferred.
+        if !Self::is_ppu_conflict_reg(addr) {
             self.flush_ppu_deferred();
         }
         // OAM bus writes blocked during active DMA (both DMG and CGB)
@@ -634,6 +639,12 @@ impl Bus {
             self.trigger_oam_bug(addr);
         }
         self.write_byte_raw(addr, val);
+    }
+
+    /// PPU registers whose writes are handled by write_io's conflict
+    /// handlers, which flush deferred PPU ticks themselves.
+    fn is_ppu_conflict_reg(addr: u16) -> bool {
+        matches!(addr, 0xFF40..=0xFF45 | 0xFF47..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B)
     }
 
     fn write_byte_raw(&mut self, addr: u16, val: u8) {
