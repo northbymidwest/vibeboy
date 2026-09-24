@@ -131,8 +131,11 @@ impl SquareCh {
         }
     }
 
+    /// Digital output fed to the DAC. A channel that has been turned off
+    /// (length expiry, sweep overflow, NR10 negate-clear) outputs 0, even
+    /// though `current_sample` may still hold its last duty/volume value.
     pub fn output(&self) -> u8 {
-        self.current_sample
+        if self.enabled { self.current_sample } else { 0 }
     }
 
     pub fn clock_length(&mut self) {
