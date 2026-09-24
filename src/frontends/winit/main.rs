@@ -1,7 +1,6 @@
 use vibeboy_core::*;
 
 mod app;
-mod audio;
 mod camera;
 mod gpu;
 mod menu;

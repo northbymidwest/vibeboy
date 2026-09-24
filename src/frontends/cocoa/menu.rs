@@ -35,6 +35,7 @@ pub(super) const MENU_TAG_CLEAR_RECENT: isize = 510;
 pub(super) const MENU_TAG_FILTER_BASE: isize = 600; // 600..699 for filters
 pub(super) const MENU_TAG_SHOW_FPS: isize = 700;
 pub(super) const MENU_TAG_PRINTER: isize = 701;
+pub(super) const MENU_TAG_QUIT: isize = 800;
 
 /// Helper to set the check state on a menu item using typed API.
 fn set_checkmark(item: &NSMenuItem, checked: bool) {
@@ -215,6 +216,7 @@ pub(super) fn rebuild_recent_menu(mtm: MainThreadMarker, app: &NSApplication, re
 // ── MenuActions ──────────────────────────────────────────────────────────────
 
 pub(super) struct MenuActions {
+    pub quit: bool,
     pub open_rom: bool,
     pub pause_toggle: bool,
     pub reset: bool,
@@ -234,6 +236,7 @@ pub(super) struct MenuActions {
 impl MenuActions {
     pub fn new() -> Self {
         MenuActions {
+            quit: false,
             open_rom: false,
             pause_toggle: false,
             reset: false,
@@ -295,6 +298,7 @@ define_class!(
             };
 
             match tag {
+                MENU_TAG_QUIT => actions.quit = true,
                 MENU_TAG_OPEN => actions.open_rom = true,
                 MENU_TAG_PAUSE => actions.pause_toggle = true,
                 MENU_TAG_RESET => actions.reset = true,
@@ -447,7 +451,9 @@ pub(super) fn create_menu_bar(mtm: MainThreadMarker, app: &NSApplication) {
     app_menu.addItem(&about_item);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    let quit_item = menu_item(mtm, "Quit VibeBoy", sel!(terminate:), "q");
+    // Routed through the event loop rather than NSApp terminate:, which
+    // calls exit() without returning, skipping the final save flush.
+    let quit_item = menu_item_with_tag(mtm, "Quit VibeBoy", sel!(menuAction:), "q", MENU_TAG_QUIT);
     app_menu.addItem(&quit_item);
 
     let app_menu_item = NSMenuItem::new(mtm);

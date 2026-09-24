@@ -81,9 +81,12 @@ impl Mbc7 {
                 }
             }
             EepromState::Address => {
+                // 8 address-phase bits. In 16-bit mode the 93LC56 ignores the
+                // first one and the low 7 select the word; special commands
+                // (opcode 00) decode the top 2 bits instead.
                 self.eeprom_addr = (self.eeprom_addr << 1) | (self.eeprom_di as u8);
                 self.eeprom_bit_count += 1;
-                if self.eeprom_bit_count == 7 {
+                if self.eeprom_bit_count == 8 {
                     self.eeprom_bit_count = 0;
                     match self.eeprom_cmd {
                         0b10 => {
@@ -111,7 +114,7 @@ impl Mbc7 {
                         }
                         0b00 => {
                             // Special: top 2 bits of address select sub-command
-                            match self.eeprom_addr >> 5 {
+                            match self.eeprom_addr >> 6 {
                                 0b00 => self.eeprom_write_enable = false, // EWDS
                                 0b01 => {
                                     // WRAL
@@ -147,7 +150,7 @@ impl Mbc7 {
                 if self.eeprom_bit_count == 16 {
                     self.eeprom_bit_count = 0;
                     // Auto-increment address for sequential read
-                    self.eeprom_addr = (self.eeprom_addr + 1) & 0x7F;
+                    self.eeprom_addr = self.eeprom_addr.wrapping_add(1) & 0x7F;
                     self.eeprom_shift = self.eeprom[self.eeprom_addr as usize];
                 }
             }
@@ -199,11 +202,12 @@ impl Cartridge for Mbc7 {
     }
 
     fn read_ram(&self, addr: u16) -> u8 {
-        if !self.enable_a || !self.enable_b {
+        // Registers only decode in $A000-$AFFF
+        if !self.enable_a || !self.enable_b || addr >= 0xB000 {
             return 0xFF;
         }
         match (addr >> 4) & 0x0F {
-            0x0 | 0x1 => 0, // write-only
+            0x0 | 0x1 => 0xFF, // write-only
             0x2 => self.accel_x as u8,
             0x3 => (self.accel_x >> 8) as u8,
             0x4 => self.accel_y as u8,
@@ -221,7 +225,7 @@ impl Cartridge for Mbc7 {
     }
 
     fn write_ram(&mut self, addr: u16, val: u8) {
-        if !self.enable_a || !self.enable_b {
+        if !self.enable_a || !self.enable_b || addr >= 0xB000 {
             return;
         }
         match (addr >> 4) & 0x0F {
@@ -347,5 +351,104 @@ impl Cartridge for Mbc7 {
                 self.eeprom_write_enable = r[10] != 0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CS: u8 = 0x80;
+    const CLK: u8 = 0x40;
+    const DI: u8 = 0x02;
+
+    fn cart() -> Mbc7 {
+        let rom: Arc<[u8]> = vec![0u8; 0x8000].into();
+        let mut c = Mbc7::new(rom);
+        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x4000, 0x40);
+        c
+    }
+
+    /// Clock one bit into the EEPROM: CLK low with DI set up, then CLK high.
+    fn clock_bit(c: &mut Mbc7, bit: bool) {
+        let di = if bit { DI } else { 0 };
+        c.write_ram(0xA080, CS | di);
+        c.write_ram(0xA080, CS | CLK | di);
+    }
+
+    /// Send the low `n` bits of `bits`, MSB first.
+    fn send(c: &mut Mbc7, bits: u32, n: u32) {
+        for i in (0..n).rev() {
+            clock_bit(c, (bits >> i) & 1 != 0);
+        }
+    }
+
+    fn read_do(c: &Mbc7) -> bool {
+        c.read_ram(0xA080) & 0x01 != 0
+    }
+
+    /// Start bit, 2-bit opcode and 8 address-phase bits (11 bits total).
+    fn op(opcode: u32, addr: u32) -> u32 {
+        (1 << 10) | (opcode << 8) | addr
+    }
+
+    /// Run one command: select the chip, send a leading 0 plus the command
+    /// bits, then optionally 16 data bits, and deselect.
+    fn command(c: &mut Mbc7, bits: u32, n: u32, data: Option<u16>) {
+        c.write_ram(0xA080, 0x00);
+        c.write_ram(0xA080, CS);
+        clock_bit(c, false);
+        send(c, bits, n);
+        if let Some(d) = data {
+            send(c, d as u32, 16);
+        }
+        c.write_ram(0xA080, 0x00);
+    }
+
+    #[test]
+    fn eeprom_write_then_read_round_trip() {
+        let mut c = cart();
+        // EWEN: 1 00 11xxxxxx
+        command(&mut c, op(0b00, 0xC0), 11, None);
+        // WRITE word 0x05 (1 01 xAAAAAAA) with the don't-care bit 0
+        command(&mut c, op(0b01, 0x05), 11, Some(0xBEEF));
+        assert_eq!(c.eeprom[0x05], 0xBEEF);
+        assert_eq!(c.eeprom[0x04], 0xFFFF);
+        assert_eq!(c.eeprom[0x06], 0xFFFF);
+
+        // READ word 0x05 (1 10 xAAAAAAA) with the don't-care bit set
+        c.write_ram(0xA080, 0x00);
+        c.write_ram(0xA080, CS);
+        clock_bit(&mut c, false);
+        send(&mut c, op(0b10, 0x85), 11);
+        assert!(!read_do(&c), "READ must output a dummy 0 bit first");
+        let mut word = 0u16;
+        for _ in 0..16 {
+            clock_bit(&mut c, false);
+            word = (word << 1) | read_do(&c) as u16;
+        }
+        c.write_ram(0xA080, 0x00);
+        assert_eq!(word, 0xBEEF);
+    }
+
+    #[test]
+    fn write_ignored_without_ewen() {
+        let mut c = cart();
+        command(&mut c, op(0b01, 0x05), 11, Some(0x1234));
+        assert_eq!(c.eeprom[0x05], 0xFFFF);
+        // EWEN then EWDS: writes are locked again
+        command(&mut c, op(0b00, 0xC0), 11, None);
+        command(&mut c, op(0b00, 0x00), 11, None);
+        command(&mut c, op(0b01, 0x05), 11, Some(0x1234));
+        assert_eq!(c.eeprom[0x05], 0xFFFF);
+    }
+
+    #[test]
+    fn registers_do_not_decode_above_afff() {
+        let c = cart();
+        assert_eq!(c.read_ram(0xB080), 0xFF);
+        assert_eq!(c.read_ram(0xB060), 0xFF);
+        assert_eq!(c.read_ram(0xA060), 0x00);
     }
 }

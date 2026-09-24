@@ -111,6 +111,11 @@ impl Hdma {
 
 pub struct Bus {
     pub cart: Box<dyn Cartridge>,
+    /// Counts writes to the cartridge RAM window (0xA000-0xBFFF) plus state
+    /// restores. Everything a mapper persists (SRAM, RTC registers, EEPROM)
+    /// is written through that window, so frontends compare this counter to
+    /// decide when battery saves are dirty. Not part of snapshots.
+    pub(crate) cart_write_count: u64,
     pub ppu: Ppu,
     pub timer: Timer,
     pub joypad: Joypad,
@@ -293,6 +298,7 @@ impl Bus {
 
         Bus {
             cart,
+            cart_write_count: 0,
             ppu,
             timer,
             joypad,
@@ -405,6 +411,7 @@ impl Bus {
         self.boot_rom_active = s.boot_rom_active;
         self.sgb = s.sgb.clone();
         self.cart.restore_state(&s.cart_state);
+        self.cart_write_count = self.cart_write_count.wrapping_add(1);
         self.ff72 = s.ff72;
         self.ff73 = s.ff73;
         self.ff74 = s.ff74;
@@ -624,7 +631,10 @@ impl Bus {
                     self.ppu.write_vram(addr, val);
                 }
             }
-            0xA000..=0xBFFF => self.cart.write_ram(addr, val),
+            0xA000..=0xBFFF => {
+                self.cart_write_count = self.cart_write_count.wrapping_add(1);
+                self.cart.write_ram(addr, val);
+            }
             0xC000..=0xCFFF => self.wram[0][(addr - 0xC000) as usize] = val,
             0xD000..=0xDFFF => self.wram[self.wram_bank][(addr - 0xD000) as usize] = val,
             0xE000..=0xEFFF => self.wram[0][(addr - 0xE000) as usize] = val,

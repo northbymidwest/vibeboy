@@ -5,13 +5,15 @@ use std::sync::Arc;
 pub struct Tama5 {
     rom: Arc<[u8]>,
     rom_bank: usize,
-    tama_ram: [u8; 32], // 32 nybbles internal RAM
+    tama_ram: [u8; 32], // 32 bytes internal RAM
     reg_select: u8,
-    data_in_lo: u8,
-    data_in_hi: u8,
+    data_in_lo: u8, // reg $04: write value low nybble
+    data_in_hi: u8, // reg $05: write value high nybble
+    addr_hi: u8,    // reg $06: bit 0 = address bit 4, bits 1-3 = command
+    addr_lo: u8,    // reg $07: address low nybble, write executes the command
     data_out_lo: u8,
     data_out_hi: u8,
-    // RTC: TC8521AM — simplified
+    // RTC: TC8521AM (simplified)
     rtc_regs: [u8; 52], // 4 pages x 13 nybble registers
     rtc_last_secs: u64,
     rtc_seconds: u32,
@@ -28,6 +30,8 @@ impl Tama5 {
             reg_select: 0,
             data_in_lo: 0,
             data_in_hi: 0,
+            addr_hi: 0,
+            addr_lo: 0,
             data_out_lo: 0,
             data_out_hi: 0,
             rtc_regs: [0; 52],
@@ -39,39 +43,38 @@ impl Tama5 {
 
     fn advance_rtc(&mut self) {
         let now = self.clock.now_secs();
-        let elapsed = now.saturating_sub(self.rtc_last_secs) as u32;
+        let elapsed = now.saturating_sub(self.rtc_last_secs);
         self.rtc_last_secs = now;
-        self.rtc_seconds += elapsed;
+        self.add_seconds(elapsed);
+    }
+
+    fn add_seconds(&mut self, secs: u64) {
+        let secs = u32::try_from(secs).unwrap_or(u32::MAX);
+        self.rtc_seconds = self.rtc_seconds.saturating_add(secs);
     }
 
     fn execute_command(&mut self) {
-        let cmd = (self.data_in_hi as u16) << 4 | (self.data_in_lo as u16);
-        let addr = (cmd & 0x1F) as usize;
-        let cmd_type = cmd >> 5;
+        let addr = (((self.addr_hi & 0x01) << 4) | self.addr_lo) as usize;
+        let cmd_type = self.addr_hi >> 1;
 
         match cmd_type {
             0x00 => {
-                // RAM write: uses data from regs $04/$05
-                let val = self.data_in_lo; // value was written to $04 before command
-                if addr < 32 {
-                    self.tama_ram[addr] = val & 0x0F;
-                }
+                // RAM write: value comes from regs $04/$05
+                self.tama_ram[addr] = (self.data_in_hi << 4) | self.data_in_lo;
             }
             0x01 => {
                 // RAM read
-                if addr < 32 {
-                    let val = self.tama_ram[addr] & 0x0F;
-                    self.data_out_lo = val & 0x0F;
-                    self.data_out_hi = 0;
-                }
+                let val = self.tama_ram[addr];
+                self.data_out_lo = val & 0x0F;
+                self.data_out_hi = val >> 4;
             }
-            0x02..=0x03 => {
-                // MCU commands (time get/set) — simplified
+            0x02 => {
+                // MCU commands (time get/set), simplified
                 self.advance_rtc();
                 self.data_out_lo = 0;
                 self.data_out_hi = 0;
             }
-            0x04..=0x05 => {
+            0x04 => {
                 // RTC register access
                 self.data_out_lo = 0;
                 self.data_out_hi = 0;
@@ -98,7 +101,7 @@ impl Cartridge for Tama5 {
 
     fn read_ram(&self, addr: u16) -> u8 {
         if addr == 0xA000 {
-            // Data port read — return data out based on reg_select
+            // Data port read: return data out based on reg_select
             match self.reg_select {
                 0x0C => self.data_out_lo & 0x0F,
                 0x0D => self.data_out_hi & 0x0F,
@@ -132,13 +135,10 @@ impl Cartridge for Tama5 {
                 }
                 0x04 => self.data_in_lo = val,
                 0x05 => self.data_in_hi = val,
-                0x06 => {
-                    // Command low
-                    self.data_in_lo = val;
-                }
+                0x06 => self.addr_hi = val,
                 0x07 => {
-                    // Command high — triggers execution
-                    self.data_in_hi = val;
+                    // Address low: triggers execution
+                    self.addr_lo = val;
                     self.execute_command();
                 }
                 _ => {}
@@ -169,10 +169,11 @@ impl Cartridge for Tama5 {
         if data.len() >= 32 + 52 + 8 {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&data[84..92]);
-            let saved_ts = i64::from_le_bytes(buf);
-            let now_ts = self.clock.unix_timestamp_secs() as i64;
-            let elapsed = (now_ts - saved_ts).max(0) as u32;
-            self.rtc_seconds += elapsed;
+            let saved_ts = u64::try_from(i64::from_le_bytes(buf)).unwrap_or(0);
+            if saved_ts != 0 {
+                let elapsed = self.clock.unix_timestamp_secs().saturating_sub(saved_ts);
+                self.add_seconds(elapsed);
+            }
         }
         self.rtc_last_secs = self.clock.now_secs();
     }
@@ -183,6 +184,8 @@ impl Cartridge for Tama5 {
         s.push(self.reg_select);
         s.push(self.data_in_lo);
         s.push(self.data_in_hi);
+        s.push(self.addr_hi);
+        s.push(self.addr_lo);
         s.push(self.data_out_lo);
         s.push(self.data_out_hi);
         s.extend_from_slice(&self.rtc_regs);
@@ -190,7 +193,7 @@ impl Cartridge for Tama5 {
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 4 + 32 + 5 + 52 + 4 {
+        if d.len() < 4 + 32 + 7 + 52 + 4 {
             return;
         }
         self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
@@ -198,10 +201,12 @@ impl Cartridge for Tama5 {
         self.reg_select = d[36];
         self.data_in_lo = d[37];
         self.data_in_hi = d[38];
-        self.data_out_lo = d[39];
-        self.data_out_hi = d[40];
-        self.rtc_regs.copy_from_slice(&d[41..93]);
-        self.rtc_seconds = u32::from_le_bytes([d[93], d[94], d[95], d[96]]);
+        self.addr_hi = d[39];
+        self.addr_lo = d[40];
+        self.data_out_lo = d[41];
+        self.data_out_hi = d[42];
+        self.rtc_regs.copy_from_slice(&d[43..95]);
+        self.rtc_seconds = u32::from_le_bytes([d[95], d[96], d[97], d[98]]);
         self.rtc_last_secs = self.clock.now_secs();
     }
 }

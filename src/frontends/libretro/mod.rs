@@ -105,9 +105,64 @@ struct CoreState {
     emu: Emulator,
     rom: std::sync::Arc<[u8]>,
     audio_buf_i16: Vec<i16>,
+    /// Battery save exposed through `retro_get_memory_data(SAVE_RAM)`. The
+    /// frontend holds on to this pointer, so the buffer is allocated once at
+    /// load and afterwards only overwritten in place.
     save_buf: Vec<u8>,
+    /// Whether `save_buf` (possibly filled by the frontend from the `.srm`)
+    /// has been applied to the emulator yet.
     save_loaded: bool,
+    /// `Emulator::save_generation()` at the last copy into `save_buf`.
+    save_synced_generation: u64,
+    /// Value reported by `retro_serialize_size`. The frontend caches it (for
+    /// rewind and runahead), but bincode's variable-length integers make the
+    /// real size vary with emulator state, so this is a fixed upper bound.
+    serialize_size: usize,
     model: GbModel,
+}
+
+/// Headroom added to the initial serialized size when computing the fixed
+/// `retro_serialize_size`. Variable-length integers growing to their widest
+/// encodings account for a few KiB at most.
+const SERIALIZE_SIZE_MARGIN: usize = 64 * 1024;
+
+impl CoreState {
+    fn new(mut emu: Emulator, rom: std::sync::Arc<[u8]>, model: GbModel) -> Self {
+        let save_buf = if emu.has_battery() {
+            emu.save_data()
+        } else {
+            Vec::new()
+        };
+        let serialize_size =
+            crate::savestate::serialize(&emu.save_snapshot()).len() + SERIALIZE_SIZE_MARGIN;
+        let save_synced_generation = emu.save_generation();
+        Self {
+            emu,
+            rom,
+            audio_buf_i16: Vec::with_capacity(4096),
+            save_buf,
+            save_loaded: false,
+            save_synced_generation,
+            serialize_size,
+            model,
+        }
+    }
+
+    /// Copy the emulator's battery save into `save_buf` if it may have
+    /// changed. Keeps the buffer's address stable whenever the length matches.
+    fn sync_save_buf(&mut self) {
+        let generation = self.emu.save_generation();
+        if generation == self.save_synced_generation || !self.emu.has_battery() {
+            return;
+        }
+        let data = self.emu.save_data();
+        if data.len() == self.save_buf.len() {
+            self.save_buf.copy_from_slice(&data);
+        } else {
+            self.save_buf = data;
+        }
+        self.save_synced_generation = generation;
+    }
 }
 
 static LIB_NAME: &[u8] = b"VibeBoy\0";
@@ -389,14 +444,7 @@ pub unsafe extern "C" fn retro_load_game(game: *const RetroGameInfo) -> bool {
             AUDIO_RATE as u32,
         );
 
-        std::ptr::addr_of_mut!(CORE).write(Some(CoreState {
-            emu,
-            rom,
-            audio_buf_i16: Vec::with_capacity(4096),
-            save_buf: Vec::new(),
-            save_loaded: false,
-            model,
-        }));
+        std::ptr::addr_of_mut!(CORE).write(Some(CoreState::new(emu, rom, model)));
 
         true
     }
@@ -426,12 +474,13 @@ pub extern "C" fn retro_run() {
             None => return,
         };
 
-        // On first run, load save RAM that RetroArch wrote to our buffer
+        // On first run, load the save RAM the frontend copied into our buffer
         if !core.save_loaded {
             core.save_loaded = true;
-            if !core.save_buf.is_empty() && core.emu.has_battery() {
+            if !core.save_buf.is_empty() {
                 core.emu.load_ram(&core.save_buf);
             }
+            core.save_synced_generation = core.emu.save_generation();
         }
 
         // Poll input
@@ -494,6 +543,8 @@ pub extern "C" fn retro_run() {
             let frames = core.audio_buf_i16.len() / 2;
             batch_cb(core.audio_buf_i16.as_ptr(), frames);
         }
+
+        core.sync_save_buf();
     }
 }
 
@@ -501,6 +552,12 @@ pub extern "C" fn retro_run() {
 pub extern "C" fn retro_reset() {
     unsafe {
         if let Some(core) = core_mut() {
+            // A reset is a power cycle: battery-backed RAM and RTC survive it.
+            // Before the first retro_run, save_buf still holds the frontend's
+            // unapplied .srm, so only sync from the old emulator after that.
+            if core.save_loaded {
+                core.sync_save_buf();
+            }
             let model = get_model_from_options().unwrap_or_else(|| detect_model(&core.rom));
             let boot_rom = load_boot_rom(model);
             core.emu = Emulator::new(
@@ -512,6 +569,12 @@ pub extern "C" fn retro_reset() {
                 AUDIO_RATE as u32,
             );
             core.model = model;
+            if core.save_loaded {
+                if !core.save_buf.is_empty() {
+                    core.emu.load_ram(&core.save_buf);
+                }
+                core.save_synced_generation = core.emu.save_generation();
+            }
         }
     }
 }
@@ -522,9 +585,7 @@ pub extern "C" fn retro_reset() {
 pub extern "C" fn retro_serialize_size() -> usize {
     unsafe {
         if let Some(core) = core_mut() {
-            // Estimate: serialize to get actual size. Cache if needed.
-            let snap = core.emu.save_snapshot();
-            crate::savestate::serialize(&snap).len()
+            core.serialize_size
         } else {
             0
         }
@@ -541,9 +602,20 @@ pub extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool {
         let snap = core.emu.save_snapshot();
         let bytes = crate::savestate::serialize(&snap);
         if bytes.len() > size {
+            // Grow the reported size so the frontend can retry with a
+            // bigger buffer after it next queries retro_serialize_size.
+            core.serialize_size = core.serialize_size.max(bytes.len() + SERIALIZE_SIZE_MARGIN);
+            log::warn!(
+                "Save state ({} bytes) exceeds frontend buffer ({size})",
+                bytes.len()
+            );
             return false;
         }
-        ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, bytes.len());
+        // The header records the payload length, so zero padding is ignored
+        // on load.
+        let out = std::slice::from_raw_parts_mut(data as *mut u8, size);
+        out[..bytes.len()].copy_from_slice(&bytes);
+        out[bytes.len()..].fill(0);
         true
     }
 }
@@ -578,11 +650,9 @@ pub extern "C" fn retro_get_memory_data(id: c_uint) -> *mut c_void {
             Some(c) => c,
             None => return ptr::null_mut(),
         };
-        if !core.emu.has_battery() {
+        if core.save_buf.is_empty() {
             return ptr::null_mut();
         }
-        // Sync emulator save data (including RTC footer) to buffer
-        core.save_buf = core.emu.save_data();
         core.save_buf.as_mut_ptr() as *mut c_void
     }
 }
@@ -597,13 +667,6 @@ pub extern "C" fn retro_get_memory_size(id: c_uint) -> usize {
             Some(c) => c,
             None => return 0,
         };
-        if !core.emu.has_battery() {
-            return 0;
-        }
-        // Ensure save_buf is populated so size is accurate
-        if core.save_buf.is_empty() {
-            core.save_buf = core.emu.save_data();
-        }
         core.save_buf.len()
     }
 }

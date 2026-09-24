@@ -374,6 +374,13 @@ impl WasmEmulator {
         self.emu.save_data()
     }
 
+    /// Changes whenever battery-backed cart state may have changed. Compare
+    /// against the value at the last flush to decide whether to persist;
+    /// unlike `save_data()` it does not change as an RTC ticks.
+    pub fn save_generation(&self) -> f64 {
+        self.emu.save_generation() as f64
+    }
+
     /// Load save RAM from bytes (from localStorage).
     pub fn load_save(&mut self, data: &[u8]) {
         self.emu.load_ram(data);
@@ -424,7 +431,8 @@ impl WasmEmulator {
 
     /// Set the hardware model and restart emulation.
     /// Valid names: "auto", "dmg0", "dmg", "mgb", "sgb", "sgb2", "cgb0", "cgb", "agb".
-    /// Returns true if the model was recognized.
+    /// Returns true if the model was recognized. Battery RAM and an attached
+    /// printer carry over to the new emulator.
     pub fn set_model(&mut self, name: &str) -> bool {
         let model = match name {
             "auto" => ui_util::auto_detect_model(&self.rom),
@@ -443,6 +451,14 @@ impl WasmEmulator {
         } else {
             crate::bootrom::builtin(model).map(|b| b.to_vec())
         };
+        // Carry battery RAM and the printer over to the rebuilt emulator
+        // directly, so a model change never falls back to a stale copy.
+        let sram = self.emu.has_battery().then(|| self.emu.save_data());
+        let had_printer = self
+            .emu
+            .serial_device_as_any()
+            .downcast_ref::<Printer>()
+            .is_some();
         self.emu = Emulator::new(
             self.rom.clone(),
             boot_rom,
@@ -451,6 +467,12 @@ impl WasmEmulator {
             clock::default_clock(),
             apu::DEFAULT_SAMPLE_RATE,
         );
+        if let Some(sram) = sram {
+            self.emu.load_ram(&sram);
+        }
+        if had_printer {
+            self.attach_printer();
+        }
         let w = if self.emu.is_sgb() { 256 } else { 160 };
         let h = if self.emu.is_sgb() { 224 } else { 144 };
         self.rgba_buf = vec![0u8; w * h * 4];

@@ -243,7 +243,9 @@ pub(super) fn build_menu(
                     }),
                 ),
                 &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::quit(Some("Quit VibeBoy")),
+                // Not PredefinedMenuItem::quit: that calls NSApp terminate:,
+                // which exits without giving the app a chance to flush saves.
+                &MenuItem::with_id(ID_QUIT, "Quit VibeBoy", true, None),
             ])
             .unwrap();
         menu.append(&app_menu).unwrap();

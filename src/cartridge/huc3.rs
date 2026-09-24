@@ -39,14 +39,21 @@ impl HuC3 {
     fn advance_rtc(&mut self) {
         let now = self.clock.now_secs();
         let elapsed = now.saturating_sub(self.rtc_last_secs);
-        self.rtc_last_secs = now;
         let elapsed_mins = elapsed / 60;
         if elapsed_mins == 0 {
             return;
         }
-        self.rtc_minutes += elapsed_mins as u32;
-        self.rtc_days += self.rtc_minutes / 1440;
-        self.rtc_minutes %= 1440;
+        // Advance the base by whole minutes only, so the partial minute keeps
+        // accumulating across frequent polls instead of being discarded.
+        self.rtc_last_secs = self.rtc_last_secs.saturating_add(elapsed_mins * 60);
+        self.add_minutes(elapsed_mins);
+    }
+
+    fn add_minutes(&mut self, mins: u64) {
+        let total = (self.rtc_minutes as u64).saturating_add(mins);
+        let days = u32::try_from(total / 1440).unwrap_or(u32::MAX);
+        self.rtc_days = self.rtc_days.saturating_add(days);
+        self.rtc_minutes = (total % 1440) as u32;
     }
 
     fn latch_time_to_mem(&mut self) {
@@ -205,12 +212,11 @@ impl Cartridge for HuC3 {
             self.rtc_days = u32::from_le_bytes(buf4);
             let mut buf8 = [0u8; 8];
             buf8.copy_from_slice(&data[rtc_start + 136..rtc_start + 144]);
-            let saved_ts = i64::from_le_bytes(buf8);
-            let now_ts = self.clock.unix_timestamp_secs() as i64;
-            let elapsed_mins = ((now_ts - saved_ts).max(0) as u64) / 60;
-            self.rtc_minutes += elapsed_mins as u32;
-            self.rtc_days += self.rtc_minutes / 1440;
-            self.rtc_minutes %= 1440;
+            let saved_ts = u64::try_from(i64::from_le_bytes(buf8)).unwrap_or(0);
+            if saved_ts != 0 {
+                let elapsed = self.clock.unix_timestamp_secs().saturating_sub(saved_ts);
+                self.add_minutes(elapsed / 60);
+            }
             self.rtc_last_secs = self.clock.now_secs();
         }
     }

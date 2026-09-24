@@ -2,6 +2,73 @@ use super::Cartridge;
 use crate::clock::Clock;
 use std::sync::Arc;
 
+/// Standard RTC save footer: five live registers (S, M, H, DL, DH) as u32 LE at
+/// 0..20, the five latched registers at 20..40, and a u64 LE unix timestamp at
+/// 40..48. This is the layout shared by most other emulators.
+const RTC_FOOTER_LEN: usize = 48;
+/// Variant of the standard footer with a u32 LE timestamp at 40..44.
+const RTC_FOOTER_LEN_TS32: usize = 44;
+/// Older vibeboy builds padded MBC3 RAM to at least 8KB in battery saves.
+const LEGACY_MIN_RAM: usize = 0x2000;
+/// Implemented bits of each RTC register: S/M 6 bits, H 5 bits, DL 8 bits,
+/// DH bit 0 (day bit 8), bit 6 (halt) and bit 7 (day carry).
+const RTC_MASKS: [u8; 5] = [0x3F, 0x3F, 0x1F, 0xFF, 0xC1];
+
+/// RTC state decoded from a battery save footer.
+struct RtcFooter {
+    regs: [u8; 5],
+    latched: [u8; 5],
+    /// Unix timestamp of the save, or 0 if unknown.
+    saved_ts: u64,
+}
+
+impl RtcFooter {
+    fn parse(f: &[u8]) -> Option<Self> {
+        let u32_at = |o: usize| u32::from_le_bytes([f[o], f[o + 1], f[o + 2], f[o + 3]]);
+        let mut regs = [0u8; 5];
+        let mut latched = [0u8; 5];
+        let saved_ts = match f.len() {
+            RTC_FOOTER_LEN
+                if f[40..48].iter().all(|&b| b == 0) && f[21..24].iter().any(|&b| b != 0) =>
+            {
+                // Old vibeboy layout: raw register bytes at 0..5 and 5..10, an
+                // i64 LE timestamp at 20..28, and zeros from 28 onward. The
+                // standard layout carries a nonzero timestamp at 40..48, and
+                // bytes 21..24 are the (always zero) upper bytes of latched S,
+                // whereas any real old timestamp has nonzero bytes there.
+                regs.copy_from_slice(&f[..5]);
+                latched.copy_from_slice(&f[5..10]);
+                let mut ts = [0u8; 8];
+                ts.copy_from_slice(&f[20..28]);
+                u64::try_from(i64::from_le_bytes(ts)).unwrap_or(0)
+            }
+            RTC_FOOTER_LEN | RTC_FOOTER_LEN_TS32 => {
+                for i in 0..5 {
+                    regs[i] = u32_at(i * 4) as u8;
+                    latched[i] = u32_at(20 + i * 4) as u8;
+                }
+                if f.len() == RTC_FOOTER_LEN {
+                    let mut ts = [0u8; 8];
+                    ts.copy_from_slice(&f[40..48]);
+                    u64::from_le_bytes(ts)
+                } else {
+                    u32_at(40) as u64
+                }
+            }
+            _ => return None,
+        };
+        for i in 0..5 {
+            regs[i] &= RTC_MASKS[i];
+            latched[i] &= RTC_MASKS[i];
+        }
+        Some(RtcFooter {
+            regs,
+            latched,
+            saved_ts,
+        })
+    }
+}
+
 pub struct Mbc3 {
     rom: Arc<[u8]>,
     ram: Vec<u8>,
@@ -38,7 +105,7 @@ impl Mbc3 {
         let rtc_last_secs = clock.now_secs();
         Mbc3 {
             rom,
-            ram: vec![0u8; ram_size.max(0x2000)],
+            ram: vec![0u8; ram_size],
             rom_bank: 1,
             ram_bank: 0,
             ram_enabled: false,
@@ -71,7 +138,7 @@ impl Mbc3 {
     }
 
     fn add_seconds_to_rtc(&mut self, seconds: u64) {
-        let mut secs = self.rtc_regs[0] as u64 + seconds;
+        let mut secs = (self.rtc_regs[0] as u64).saturating_add(seconds);
         let mut mins = self.rtc_regs[1] as u64 + secs / 60;
         secs %= 60;
         let mut hrs = self.rtc_regs[2] as u64 + mins / 60;
@@ -86,9 +153,10 @@ impl Mbc3 {
         self.rtc_regs[1] = mins as u8;
         self.rtc_regs[2] = hrs as u8;
         self.rtc_regs[3] = days as u8; // low 8 bits
-        // Preserve halt bit, set day bit 8, set carry if >511
+        // Preserve halt bit, set day bit 8. The carry bit is sticky: it is set
+        // when the day counter overflows 511 and only cleared by a DH write.
         let carry = if days > 511 { 0x80 } else { 0 };
-        self.rtc_regs[4] = (self.rtc_regs[4] & 0x40) | ((days >> 8) as u8 & 0x01) | carry;
+        self.rtc_regs[4] = (self.rtc_regs[4] & 0xC0) | ((days >> 8) as u8 & 0x01) | carry;
     }
 }
 
@@ -160,7 +228,9 @@ impl Cartridge for Mbc3 {
             b if b <= max_ram_bank => {
                 let idx = b * 0x2000 + (addr as usize - 0xA000);
                 let len = self.ram.len().max(1);
-                self.ram[idx % len] = val;
+                if let Some(b) = self.ram.get_mut(idx % len) {
+                    *b = val;
+                }
             }
             0x08..=0x0C if self.has_rtc => {
                 let reg = self.ram_bank - 0x08;
@@ -170,7 +240,7 @@ impl Cartridge for Mbc3 {
                 }
                 // Advance RTC before overwriting registers so accumulated time isn't lost
                 self.advance_rtc();
-                self.rtc_regs[reg] = val;
+                self.rtc_regs[reg] = val & RTC_MASKS[reg];
             }
             _ => {}
         }
@@ -187,11 +257,13 @@ impl Cartridge for Mbc3 {
     fn save_data(&self) -> Vec<u8> {
         let mut data = self.ram.clone();
         if self.has_rtc {
-            let mut footer = [0u8; 48];
-            footer[..5].copy_from_slice(&self.rtc_regs);
-            footer[5..10].copy_from_slice(&self.rtc_latched);
-            let ts = self.clock.unix_timestamp_secs() as i64;
-            footer[20..28].copy_from_slice(&ts.to_le_bytes());
+            let mut footer = [0u8; RTC_FOOTER_LEN];
+            for i in 0..5 {
+                footer[i * 4] = self.rtc_regs[i];
+                footer[20 + i * 4] = self.rtc_latched[i];
+            }
+            let ts = self.clock.unix_timestamp_secs();
+            footer[40..48].copy_from_slice(&ts.to_le_bytes());
             data.extend_from_slice(&footer);
         }
         data
@@ -199,27 +271,39 @@ impl Cartridge for Mbc3 {
 
     fn load_ram(&mut self, data: &[u8]) {
         let ram_len = self.ram.len();
-        let copy_len = ram_len.min(data.len());
-        self.ram[..copy_len].copy_from_slice(&data[..copy_len]);
+        // Locate the RTC footer by total length: normally it follows the
+        // header-sized RAM, but older vibeboy saves padded RAM to 8KB.
+        let footer_start = if self.has_rtc {
+            [ram_len, ram_len.max(LEGACY_MIN_RAM)]
+                .into_iter()
+                .find(|&start| {
+                    matches!(
+                        data.len().checked_sub(start),
+                        Some(RTC_FOOTER_LEN | RTC_FOOTER_LEN_TS32)
+                    )
+                })
+        } else {
+            None
+        };
+        let ram_part = &data[..footer_start.unwrap_or(data.len())];
+        let copy_len = ram_len.min(ram_part.len());
+        self.ram[..copy_len].copy_from_slice(&ram_part[..copy_len]);
 
-        // Load RTC state from 48-byte footer after RAM data
-        if self.has_rtc && data.len() >= ram_len + 48 {
-            let rtc = &data[ram_len..];
-            self.rtc_regs.copy_from_slice(&rtc[..5]);
-            self.rtc_latched.copy_from_slice(&rtc[5..10]);
-            // Bytes 20-27: unix timestamp of last save (i64 LE)
-            if rtc.len() >= 28 {
-                let mut ts_bytes = [0u8; 8];
-                ts_bytes.copy_from_slice(&rtc[20..28]);
-                let saved_ts = i64::from_le_bytes(ts_bytes);
-                let now_ts = self.clock.unix_timestamp_secs() as i64;
-                let elapsed = (now_ts - saved_ts).max(0) as u64;
-                if elapsed > 0 && self.rtc_regs[4] & 0x40 == 0 {
-                    self.add_seconds_to_rtc(elapsed);
-                }
+        let Some(footer) = footer_start.and_then(|start| RtcFooter::parse(&data[start..])) else {
+            return;
+        };
+        self.rtc_regs = footer.regs;
+        self.rtc_latched = footer.latched;
+        if footer.saved_ts != 0 && self.rtc_regs[4] & 0x40 == 0 {
+            let elapsed = self
+                .clock
+                .unix_timestamp_secs()
+                .saturating_sub(footer.saved_ts);
+            if elapsed > 0 {
+                self.add_seconds_to_rtc(elapsed);
             }
-            self.rtc_last_secs = self.clock.now_secs();
         }
+        self.rtc_last_secs = self.clock.now_secs();
     }
     fn snapshot_state(&self) -> Vec<u8> {
         let mut s = Vec::new();
@@ -246,5 +330,94 @@ impl Cartridge for Mbc3 {
         let ram = &d[20..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedClock(u64);
+
+    impl Clock for FixedClock {
+        fn now_secs(&self) -> u64 {
+            self.0
+        }
+        fn unix_timestamp_secs(&self) -> u64 {
+            self.0
+        }
+    }
+
+    const NOW: u64 = 1_750_000_000;
+
+    fn cart(ram_size: usize) -> Mbc3 {
+        let rom: Arc<[u8]> = vec![0u8; 0x8000].into();
+        Mbc3::new(rom, ram_size, true, true, Arc::new(FixedClock(NOW)))
+    }
+
+    #[test]
+    fn standard_footer_round_trip() {
+        let mut c = cart(0x2000);
+        c.rtc_regs = [5, 6, 7, 8, 0x01];
+        c.rtc_latched = [1, 2, 3, 4, 0x00];
+        c.ram[0] = 0xAB;
+        let save = c.save_data();
+        assert_eq!(save.len(), 0x2000 + 48);
+        let f = &save[0x2000..];
+        assert_eq!(&f[..8], &[5, 0, 0, 0, 6, 0, 0, 0]);
+        assert_eq!(u64::from_le_bytes(f[40..48].try_into().unwrap()), NOW);
+
+        let mut d = cart(0x2000);
+        d.load_ram(&save);
+        assert_eq!(d.ram[0], 0xAB);
+        assert_eq!(d.rtc_regs, [5, 6, 7, 8, 0x01]);
+        assert_eq!(d.rtc_latched, [1, 2, 3, 4, 0x00]);
+    }
+
+    #[test]
+    fn footer_with_u32_timestamp_advances_time() {
+        let mut data = vec![0u8; 44];
+        data[0] = 10; // S
+        data[40..44].copy_from_slice(&((NOW - 65) as u32).to_le_bytes());
+        let mut c = cart(0);
+        c.load_ram(&data);
+        assert_eq!(c.rtc_regs[..2], [15, 1]);
+    }
+
+    #[test]
+    fn legacy_vibeboy_padded_save_loads() {
+        // RTC-only cart, old writer padded RAM to 8KB and used raw register
+        // bytes plus an i64 timestamp at footer offset 20.
+        let mut data = vec![0u8; 0x2000 + 48];
+        let f = &mut data[0x2000..];
+        f[..5].copy_from_slice(&[1, 2, 3, 4, 0x40]);
+        f[5..10].copy_from_slice(&[9, 9, 9, 9, 0]);
+        f[20..28].copy_from_slice(&((NOW - 1000) as i64).to_le_bytes());
+        let mut c = cart(0);
+        c.load_ram(&data);
+        // Halted, so no time is added
+        assert_eq!(c.rtc_regs, [1, 2, 3, 4, 0x40]);
+        assert_eq!(c.rtc_latched, [9, 9, 9, 9, 0]);
+        assert_eq!(c.save_data().len(), 48);
+    }
+
+    #[test]
+    fn day_carry_is_sticky_and_writes_are_masked() {
+        let mut c = cart(0);
+        c.rtc_regs = [0, 0, 0, 0xFF, 0x01];
+        c.add_seconds_to_rtc(86_400);
+        assert_eq!(c.rtc_regs[3..], [0x00, 0x80]);
+        c.add_seconds_to_rtc(86_400);
+        assert_eq!(c.rtc_regs[3..], [0x01, 0x80]);
+
+        c.write_rom(0x0000, 0x0A);
+        c.write_rom(0x4000, 0x0C);
+        c.write_ram(0xA000, 0xFF);
+        assert_eq!(c.rtc_regs[4], 0xC1);
+        c.write_ram(0xA000, 0x40);
+        assert_eq!(c.rtc_regs[4], 0x40);
+        c.write_rom(0x4000, 0x08);
+        c.write_ram(0xA000, 0xFF);
+        assert_eq!(c.rtc_regs[0], 0x3F);
     }
 }

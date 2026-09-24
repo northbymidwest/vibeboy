@@ -1,6 +1,10 @@
 use super::Cartridge;
 use std::sync::Arc;
 
+/// Captured image location in SRAM bank 0 ($A100) and size (224 tiles).
+const IMAGE_SRAM_OFFSET: usize = 0x100;
+const IMAGE_BYTES: usize = 0xE00;
+
 pub struct PocketCamera {
     rom: Arc<[u8]>,
     ram: Vec<u8>,
@@ -8,7 +12,6 @@ pub struct PocketCamera {
     ram_bank: usize,
     camera_regs_mapped: bool,
     camera_regs: [u8; 0x36],
-    image_ready: bool, // set after capture completes, image can be read
     noise_seed: u32,
     camera_image: Option<Box<[u8; 128 * 112]>>,
 }
@@ -22,7 +25,6 @@ impl PocketCamera {
             ram_bank: 0,
             camera_regs_mapped: false,
             camera_regs: [0; 0x36],
-            image_ready: false,
             noise_seed: 0x1234,
             camera_image: None,
         }
@@ -73,9 +75,10 @@ impl PocketCamera {
         color * exposure / 0x1000
     }
 
-    /// Generate one byte of the 128×112 captured image on-the-fly.
+    /// Generate one byte of the 128×112 captured image from the current
+    /// sensor input and registers.
     /// `offset` is relative to $A100, range 0..0xE00 (3584 bytes = 224 tiles).
-    fn read_image_byte(&self, offset: u16) -> u8 {
+    fn image_byte(&self, offset: u16) -> u8 {
         let tile_x = ((offset / 16) % 16) as u8;
         let tile_y = ((offset / 16) / 16) as u8;
         let row = ((offset >> 1) & 7) as u8;
@@ -109,6 +112,16 @@ impl PocketCamera {
             result |= (pixel >> bit) & 1;
         }
         result
+    }
+
+    /// Process the sensor image with the current gain, exposure and dither
+    /// registers and store it in SRAM bank 0 at $A100-$AEFF, as the camera
+    /// does at the end of a capture.
+    fn capture_to_sram(&mut self) {
+        let image: Vec<u8> = (0..IMAGE_BYTES as u16)
+            .map(|offset| self.image_byte(offset))
+            .collect();
+        self.ram[IMAGE_SRAM_OFFSET..IMAGE_SRAM_OFFSET + IMAGE_BYTES].copy_from_slice(&image);
     }
 }
 
@@ -157,13 +170,8 @@ impl Cartridge for PocketCamera {
             return 0;
         }
 
-        // Bank 0, $A100-$AEFF: generate image on the fly
-        let ram_bank = self.ram_bank & 0x0F;
-        if self.image_ready && ram_bank == 0 && (0xA100..0xAF00).contains(&addr) {
-            return self.read_image_byte(addr - 0xA100);
-        }
-
         // Normal RAM read (camera bypasses ram_enable)
+        let ram_bank = self.ram_bank & 0x0F;
         let idx = ram_bank * 0x2000 + (addr as usize - 0xA000);
         self.ram.get(idx % self.ram.len()).copied().unwrap_or(0xFF)
     }
@@ -179,7 +187,7 @@ impl Cartridge for PocketCamera {
                 if new_val & 1 != 0 && old & 1 == 0 {
                     // Randomize noise seed each capture
                     self.noise_seed = self.noise_seed.wrapping_mul(1103515245).wrapping_add(12345);
-                    self.image_ready = true;
+                    self.capture_to_sram();
                     // Immediately mark capture complete (clear busy bit)
                     self.camera_regs[0] &= !1;
                 }
@@ -227,13 +235,12 @@ impl Cartridge for PocketCamera {
         s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
         s.push(self.camera_regs_mapped as u8);
         s.extend_from_slice(&self.camera_regs);
-        s.push(self.image_ready as u8);
         s.extend_from_slice(&self.noise_seed.to_le_bytes());
         s.extend_from_slice(&self.ram);
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 9 + 0x36 + 1 + 4 {
+        if d.len() < 9 + 0x36 + 4 {
             return;
         }
         self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
@@ -241,9 +248,8 @@ impl Cartridge for PocketCamera {
         self.camera_regs_mapped = d[8] != 0;
         self.camera_regs.copy_from_slice(&d[9..9 + 0x36]);
         let o = 9 + 0x36;
-        self.image_ready = d[o] != 0;
-        self.noise_seed = u32::from_le_bytes([d[o + 1], d[o + 2], d[o + 3], d[o + 4]]);
-        let ram = &d[o + 5..];
+        self.noise_seed = u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+        let ram = &d[o + 4..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);
     }

@@ -32,6 +32,8 @@ const state = {
   gpPrevState: {},
   rumbleWasOn: false,
   saveFlushScheduled: false,
+  lastFlushedGeneration: null,
+  saveErrorShown: false,
 };
 
 // Lazy-loaded wasm module references
@@ -183,28 +185,40 @@ function populateFilterDropdown() {
 
 // ── Audio ─────────────────────────────────────────────────
 
-async function initAudio() {
+function closeAudio() {
   if (state.audioCtx) {
     try { state.audioCtx.close(); } catch (_) {}
-    state.audioCtx = null;
-    state.audioWorklet = null;
   }
+  state.audioCtx = null;
+  state.audioWorklet = null;
+  state.audioBuffered = 0;
+  state._audioReportReceived = false;
+}
+
+// Build an audio context + worklet without touching shared state, so a
+// load that gets superseded mid-await can just close what it made.
+async function createAudio() {
+  let ctx = null;
   try {
-    state.audioCtx = new AudioContext({ sampleRate: 96000, latencyHint: 'interactive' });
-    await state.audioCtx.audioWorklet.addModule('./audio-processor.js');
-    state.audioWorklet = new AudioWorkletNode(state.audioCtx, 'emu-audio', {
+    ctx = new AudioContext({ sampleRate: 96000, latencyHint: 'interactive' });
+    await ctx.audioWorklet.addModule('./audio-processor.js');
+    const node = new AudioWorkletNode(ctx, 'emu-audio', {
       outputChannelCount: [2],
     });
-    state.audioWorklet.port.onmessage = (e) => {
+    node.port.onmessage = (e) => {
+      if (node !== state.audioWorklet) return;
       if (e.data && typeof e.data.buffered === 'number') {
         state.audioBuffered = e.data.buffered;
         state._audioReportReceived = true;
       }
     };
-    state.audioWorklet.connect(state.audioCtx.destination);
-    console.log('AudioWorklet initialized at', state.audioCtx.sampleRate, 'Hz');
+    node.connect(ctx.destination);
+    console.log('AudioWorklet initialized at', ctx.sampleRate, 'Hz');
+    return { ctx, node };
   } catch (e) {
     console.warn('AudioWorklet init failed:', e);
+    if (ctx) { try { ctx.close(); } catch (_) {} }
+    return null;
   }
 }
 
@@ -359,18 +373,29 @@ function saveStateKey(slot) {
   return 'vibeboy_ss_' + state.emu.save_key() + '_' + slot;
 }
 
+function bytesToBase64(data) {
+  let bin = '';
+  for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
+  return btoa(bin);
+}
+
+function isQuotaError(e) {
+  return e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED');
+}
+
 function saveState() {
   if (!state.emu) return;
   const data = state.emu.save_state_to_bytes(state.currentSlot);
   if (data && data.length > 0) {
     const key = saveStateKey(state.currentSlot);
-    let bin = '';
-    for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
     try {
-      localStorage.setItem(key, btoa(bin));
+      localStorage.setItem(key, bytesToBase64(data));
       showToast('State saved to slot ' + state.currentSlot);
     } catch (e) {
-      showToast('Save failed: ' + e.message, 3000);
+      console.warn('Save state write failed:', e);
+      showToast(isQuotaError(e)
+        ? 'Save state failed: browser storage is full. Delete old save states to free space.'
+        : 'Save state failed: ' + e.message, 5000);
     }
   }
 }
@@ -393,16 +418,35 @@ function loadState() {
 
 // ── Save flushing via requestIdleCallback ─────────────────
 
+// Write battery RAM to localStorage now. Skips the write when the save
+// generation (bumped by cart RAM writes, not by RTC ticks) is unchanged since
+// the last successful flush; on failure the marker is left alone so the next
+// flush retries.
+function flushBatterySave(emu = state.emu) {
+  if (!emu || !emu.has_battery()) return;
+  const generation = emu.save_generation();
+  if (generation === state.lastFlushedGeneration) return;
+  try {
+    localStorage.setItem(emu.save_key(), bytesToBase64(emu.save_data()));
+    state.lastFlushedGeneration = generation;
+    state.saveErrorShown = false;
+  } catch (e) {
+    console.warn('Battery save write failed:', e);
+    if (!state.saveErrorShown) {
+      state.saveErrorShown = true;
+      showToast(isQuotaError(e)
+        ? 'Game saves are failing: browser storage is full. Delete old save states to free space.'
+        : 'Game saves are failing: ' + e.message, 6000);
+    }
+  }
+}
+
 function scheduleSaveFlush() {
   if (state.saveFlushScheduled) return;
   state.saveFlushScheduled = true;
   const cb = () => {
     state.saveFlushScheduled = false;
-    if (!state.emu || !state.emu.has_battery()) return;
-    const data = state.emu.save_data();
-    let bin = '';
-    for (let i = 0; i < data.length; i++) bin += String.fromCharCode(data[i]);
-    localStorage.setItem(state.emu.save_key(), btoa(bin));
+    flushBatterySave();
   };
   if (typeof requestIdleCallback === 'function') {
     requestIdleCallback(cb, { timeout: 2000 });
@@ -577,12 +621,14 @@ function frame(timestamp) {
       stepped = true;
       checkForPrint();
       updateRumble();
-      saveFrameCounter++;
-      if (saveFrameCounter >= 60) {
-        saveFrameCounter = 0;
-        scheduleSaveFlush();
-      }
     }
+  }
+
+  // Flush battery RAM about once a second of wall time whenever the game is
+  // running, including fast-forward and rewind.
+  if (stepped && ++saveFrameCounter >= 60) {
+    saveFrameCounter = 0;
+    scheduleSaveFlush();
   }
 
   // Resize GPU surface to match wrapper
@@ -632,17 +678,42 @@ function frame(timestamp) {
 
 // ── Start emulator ────────────────────────────────────────
 
-async function startEmulator(romBytes) {
+// Loads run one at a time (they share the canvas and audio device). Each gets
+// a token; a newer load makes older ones bail out at their next await.
+let loadToken = 0;
+let loadChain = Promise.resolve();
+
+function startEmulator(romBytes) {
+  const token = ++loadToken;
+  const run = loadChain.then(() => loadEmulator(romBytes, token));
+  loadChain = run.catch(e => console.error('ROM load failed:', e));
+  return run;
+}
+
+async function loadEmulator(romBytes, token) {
+  if (token !== loadToken) return;
   await ensureWasm();
+  if (token !== loadToken) return;
+
+  // Build the new emulator before tearing down the old one, so a bad ROM
+  // leaves the current game running. The model dropdown always applies;
+  // with Skip Boot off, set_model boots through the built-in boot ROM.
+  const emu = new WasmEmulator(new Uint8Array(romBytes));
+  emu.set_skip_boot(skipBootCheckbox.checked);
+  emu.set_model(modelSelect.value);
 
   if (state.animFrameId !== null) {
     cancelAnimationFrame(state.animFrameId);
     state.animFrameId = null;
   }
   if (state.emu) {
+    flushBatterySave();
     state.emu.free();
     state.emu = null;
   }
+  closeAudio();
+  stopCamera();
+  stopAccelerometer();
   state.lastTimestamp = 0;
   state.emuTime = 0;
   state.paused = false;
@@ -656,22 +727,28 @@ async function startEmulator(romBytes) {
   if (romPrompt) romPrompt.classList.add('hidden');
   dropZone.classList.add('has-rom');
 
-  state.emu = new WasmEmulator(new Uint8Array(romBytes));
-  if (skipBootCheckbox.checked) {
-    state.emu.set_skip_boot(true);
-    state.emu.set_model(modelSelect.value);
-  }
-  const w = state.emu.width();
-  const h = state.emu.height();
+  const w = emu.width();
+  const h = emu.height();
 
-  await initAudio();
+  // The new emulator stays out of state.emu until init finishes: init_gpu
+  // mutably borrows the Rust object across its awaits, so input or a model
+  // change reaching it meanwhile would throw "recursive use of an object".
+  const stale = () => {
+    if (token === loadToken) return false;
+    emu.free();
+    if (audio) { try { audio.ctx.close(); } catch (_) {} }
+    return true;
+  };
+
+  const audio = await createAudio();
+  if (stale()) return;
 
   // Try WebGPU
   if (navigator.gpu) {
     try {
       canvas.width = w * 4;
       canvas.height = h * 4;
-      await state.emu.init_gpu(canvas);
+      await emu.init_gpu(canvas);
       state.useGpu = true;
       state.gpuAvailable = true;
       statusEl.textContent = 'Rendering: WebGPU vectorize';
@@ -682,6 +759,7 @@ async function startEmulator(romBytes) {
       console.warn('WebGPU init failed, falling back to Canvas2D:', e);
       state.useGpu = false;
     }
+    if (stale()) return;
   }
 
   if (!state.useGpu) {
@@ -692,21 +770,29 @@ async function startEmulator(romBytes) {
   }
 
   // Load save from localStorage
-  if (state.emu.has_battery()) {
-    const key = state.emu.save_key();
-    const saved = localStorage.getItem(key);
+  state.saveErrorShown = false;
+  if (emu.has_battery()) {
+    const key = emu.save_key();
+    let saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) { console.warn('Reading save failed:', e); }
     if (saved) {
       const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
-      state.emu.load_save(bytes);
+      emu.load_save(bytes);
       console.log('Loaded save from localStorage:', key);
     }
   }
 
-  stopCamera();
-  stopAccelerometer();
+  state.lastFlushedGeneration = emu.save_generation();
 
-  state.emu.attach_printer();
-  if (state.emu.has_camera()) initCamera();
+  emu.attach_printer();
+
+  // Init complete: publish the emulator and audio.
+  state.emu = emu;
+  if (audio) {
+    state.audioCtx = audio.ctx;
+    state.audioWorklet = audio.node;
+  }
+  if (emu.has_camera()) initCamera();
   initAccelerometer();
 
   if (state.gpuAvailable) filterBar.style.display = '';
@@ -805,15 +891,12 @@ function setupUI() {
   // Model change
   modelSelect.addEventListener('change', () => {
     if (!state.emu) return;
+    // set_model carries battery RAM and the printer across the rebuild;
+    // flush first so storage is current too.
+    flushBatterySave();
     state.emu.set_skip_boot(skipBootCheckbox.checked);
     state.emu.set_model(modelSelect.value);
-    if (state.emu.has_battery()) {
-      const saved = localStorage.getItem(state.emu.save_key());
-      if (saved) {
-        const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
-        state.emu.load_save(bytes);
-      }
-    }
+    state.lastFlushedGeneration = state.emu.save_generation();
     state.lastTimestamp = 0;
     state.emuTime = 0;
     if (state.useGpu) {
@@ -821,6 +904,13 @@ function setupUI() {
       canvas.height = 0;
     }
     showToast('Model: ' + modelSelect.options[modelSelect.selectedIndex].text);
+  });
+
+  // Flush battery RAM when the page is hidden or closed. These fire reliably
+  // on mobile, unlike beforeunload.
+  window.addEventListener('pagehide', () => flushBatterySave());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushBatterySave();
   });
 
   // Fullscreen

@@ -10,9 +10,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use super::audio::{AudioRing, start_audio};
 use super::camera::CameraThread;
 use super::clock;
+use super::cpal_audio::{AudioRing, start_audio};
 use super::emulator::Emulator;
 use super::gpu::GpuRenderer;
 use super::menu::{
@@ -74,8 +74,9 @@ impl App {
         let audio_ring = Arc::new(Mutex::new(AudioRing::new(
             AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
             AUDIO_SAMPLE_RATE,
+            AUDIO_SAMPLE_RATE,
         ))); // ~4 frames stereo
-        let (stream, actual_rate) = match start_audio(Arc::clone(&audio_ring)) {
+        let (stream, actual_rate) = match start_audio(Arc::clone(&audio_ring), AUDIO_SAMPLE_RATE) {
             Some((s, r)) => (Some(s), r),
             None => (None, AUDIO_SAMPLE_RATE),
         };
@@ -146,6 +147,11 @@ impl App {
                 }
             }
         };
+        // Persist the outgoing game's battery save before replacing it
+        // (ROM switch, reset, and model change all come through here).
+        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+            flusher.flush(emu);
+        }
         self.rom = Some(rom.clone());
 
         self.model = self
@@ -532,11 +538,6 @@ impl App {
         // FPS counter
         let emu_time = self.frame_start.elapsed();
         self.fps.update(1, emu_time);
-
-        // Periodic save RAM flush
-        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-            flusher.poll(emu);
-        }
     }
 }
 
@@ -669,8 +670,10 @@ impl ApplicationHandler for App {
                     if pressed {
                         match key {
                             KeyCode::Escape => {
-                                if let (Some(emu), Some(path)) = (&self.emu, &self.rom_path) {
-                                    ui_util::flush_sav(emu, path);
+                                if let (Some(flusher), Some(emu)) =
+                                    (&mut self.sav_flusher, &self.emu)
+                                {
+                                    flusher.flush(emu);
                                 }
                                 event_loop.exit();
                             }
@@ -743,6 +746,12 @@ impl ApplicationHandler for App {
             }
             _event_loop.exit();
             return;
+        }
+
+        // Periodic save RAM flush. Runs here rather than after rendering so
+        // it is not skipped by the GPU filter paths or a minimized window.
+        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
+            flusher.poll(emu);
         }
 
         // -- Gamepad polling --

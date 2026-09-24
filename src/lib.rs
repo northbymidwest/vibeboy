@@ -20,6 +20,9 @@ pub mod timer;
 pub mod scaling;
 
 pub mod ui_util;
+
+#[cfg(feature = "cpal")]
+pub mod cpal_audio;
 pub mod util;
 
 #[cfg(target_os = "macos")]

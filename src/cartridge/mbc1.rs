@@ -132,18 +132,20 @@ impl Cartridge for Mbc1 {
         s.extend_from_slice(&(self.ram_bank as u32).to_le_bytes());
         s.push(self.ram_enabled as u8);
         s.push(self.banking_mode);
+        s.push(self.upper as u8);
         s.extend_from_slice(&self.ram);
         s
     }
     fn restore_state(&mut self, d: &[u8]) {
-        if d.len() < 10 {
+        if d.len() < 11 {
             return;
         }
         self.rom_bank = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
         self.ram_bank = u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as usize;
         self.ram_enabled = d[8] != 0;
         self.banking_mode = d[9];
-        let ram = &d[10..];
+        self.upper = (d[10] & 0x03) as usize;
+        let ram = &d[11..];
         let len = self.ram.len().min(ram.len());
         self.ram[..len].copy_from_slice(&ram[..len]);
     }

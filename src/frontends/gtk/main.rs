@@ -1,6 +1,5 @@
 use vibeboy_core::*;
 
-mod audio;
 #[cfg(target_os = "linux")]
 mod compute;
 mod gpu;
@@ -69,7 +68,7 @@ struct EmuState {
     scaled_buf: Vec<u32>,
     rom_path: PathBuf,
     rom_data: std::sync::Arc<[u8]>,
-    audio_ring: std::sync::Arc<std::sync::Mutex<audio::AudioRing>>,
+    audio_ring: std::sync::Arc<std::sync::Mutex<cpal_audio::AudioRing>>,
     _audio_stream: Option<cpal::Stream>,
     frame_timer: Option<glib::SourceId>,
     fps: ui_util::FpsCounter,
@@ -140,15 +139,16 @@ fn create_emu_state(
     let src_w = if is_sgb { SGB_W } else { GB_W };
     let src_h = if is_sgb { SGB_H } else { GB_H };
 
-    let audio_ring = std::sync::Arc::new(std::sync::Mutex::new(audio::AudioRing::new(
+    let audio_ring = std::sync::Arc::new(std::sync::Mutex::new(cpal_audio::AudioRing::new(
         AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
         AUDIO_SAMPLE_RATE,
+        AUDIO_SAMPLE_RATE,
     )));
-    let (_audio_stream, actual_rate) = match audio::start_audio(std::sync::Arc::clone(&audio_ring))
-    {
-        Some((s, r)) => (Some(s), r),
-        None => (None, AUDIO_SAMPLE_RATE),
-    };
+    let (_audio_stream, actual_rate) =
+        match cpal_audio::start_audio(std::sync::Arc::clone(&audio_ring), AUDIO_SAMPLE_RATE) {
+            Some((s, r)) => (Some(s), r),
+            None => (None, AUDIO_SAMPLE_RATE),
+        };
     audio_ring.lock().unwrap().downsample_ratio = (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
 
     let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
@@ -812,13 +812,14 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 }
             };
 
-            // Cancel existing timer
+            // Cancel existing timer and persist the outgoing battery save
             {
                 let mut st = state.borrow_mut();
                 if let Some(s) = st.as_mut() {
                     if let Some(id) = s.frame_timer.take() {
                         id.remove();
                     }
+                    s.sav_flusher.flush(&s.emu);
                 }
             }
 
@@ -945,6 +946,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     });
     app.add_action(&action_quit);
 
+    // Window close button: flush before the window (and the app) goes away
+    let state_close = Rc::clone(&state);
+    window.connect_close_request(move |_| {
+        if let Some(s) = state_close.borrow_mut().as_mut() {
+            s.sav_flusher.flush(&s.emu);
+        }
+        glib::Propagation::Proceed
+    });
+
     // Open ROM action — show file dialog
     let load_rom_for_open = load_rom.clone();
     let window_for_open = window.clone();
@@ -1001,6 +1011,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 .unwrap_or_else(|| ui_util::auto_detect_model(&s.rom_data));
             let boot_rom = load_boot_rom(model, &cli_for_reset);
             let path = s.rom_path.clone();
+            s.sav_flusher.flush(&s.emu);
             s.emu = emulator::Emulator::new(
                 s.rom_data.clone(),
                 boot_rom,
@@ -1083,10 +1094,11 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
                 let mut st = state_model.borrow_mut();
                 if let Some(s) = st.as_mut() {
-                    // Cancel existing timer
+                    // Cancel existing timer and persist the outgoing battery save
                     if let Some(id) = s.frame_timer.take() {
                         id.remove();
                     }
+                    s.sav_flusher.flush(&s.emu);
 
                     let rom = s.rom_data.clone();
                     let rom_path = s.rom_path.clone();

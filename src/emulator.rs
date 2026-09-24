@@ -791,6 +791,13 @@ impl Emulator {
     pub fn load_ram(&mut self, data: &[u8]) {
         self.bus.cart.load_ram(data);
     }
+    /// Changes whenever battery-backed cartridge state may have changed
+    /// (cart RAM window writes, snapshot restores). Unlike `save_data()`, it
+    /// is unaffected by RTC wall-clock ticking, so frontends can compare it
+    /// to decide when a save file needs rewriting.
+    pub fn save_generation(&self) -> u64 {
+        self.bus.cart_write_count
+    }
 
     // ── Bus state queries ─────────────────────────────────────────────────────
 
@@ -835,5 +842,61 @@ impl Emulator {
     }
     pub fn rewind_memory_usage(&self) -> usize {
         self.rewind_buffer.memory_usage()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 32 KiB MBC1+RAM+BATTERY image with 8 KiB of cart RAM.
+    fn battery_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x147] = 0x03;
+        rom[0x149] = 0x02;
+        rom
+    }
+
+    fn battery_emu() -> Emulator {
+        Emulator::new(
+            battery_rom(),
+            None,
+            GbModel::Dmg,
+            None,
+            crate::clock::default_clock(),
+            48_000,
+        )
+    }
+
+    #[test]
+    fn save_generation_tracks_cart_ram_writes_only() {
+        let mut emu = battery_emu();
+        let start = emu.save_generation();
+        emu.load_ram(&[0xAA; 0x2000]);
+        assert_eq!(
+            emu.save_generation(),
+            start,
+            "loading a .sav is not a change"
+        );
+        emu.bus.write_byte(0xC000, 1);
+        emu.bus.write_byte(0x2000, 1);
+        assert_eq!(
+            emu.save_generation(),
+            start,
+            "WRAM and MBC writes are not saves"
+        );
+        emu.bus.write_byte(0x0000, 0x0A);
+        emu.bus.write_byte(0xA000, 0x55);
+        assert_ne!(emu.save_generation(), start);
+        assert_eq!(emu.save_data()[0], 0x55);
+    }
+
+    #[test]
+    fn save_generation_changes_on_snapshot_restore() {
+        let mut emu = battery_emu();
+        let snap = emu.save_snapshot();
+        let before = emu.save_generation();
+        emu.restore_snapshot(&snap);
+        assert_ne!(emu.save_generation(), before);
     }
 }

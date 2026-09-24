@@ -24,7 +24,10 @@ const fn fnv1a(data: &[u8]) -> u32 {
 
 const fn layout_hash() -> u32 {
     let desc = concat!(
-        "v3;", // Bump this when changing serialization format or struct layout
+        // Bump this when changing serialization format, struct layout, or any
+        // mapper's snapshot_state byte layout (those are opaque to the hash).
+        // v4: MBC1 upper bank bits, TAMA5 split registers, Pocket Camera SRAM image.
+        "v4;",
         "Cpu:regs.a,f,b,c,d,e,h,l,sp,pc,ime,ime_pending,halted,halt_bug,speed_switch;",
         "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites,mgb_mode;",
         "Apu:ch1-4,frame_seq,master,nr50-52,blip;",
@@ -106,13 +109,16 @@ pub fn deserialize(data: &[u8]) -> io::Result<Snapshot> {
         ));
     }
     let payload_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
-    if data.len() < 16 + payload_len {
+    let Some(payload) = 16usize
+        .checked_add(payload_len)
+        .and_then(|end| data.get(16..end))
+    else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "truncated save state",
         ));
-    }
-    bincode::serde::decode_from_slice(&data[16..16 + payload_len], bincode::config::standard())
+    };
+    bincode::serde::decode_from_slice(payload, bincode::config::standard())
         .map(|(snap, _)| snap)
         .map_err(|e| {
             io::Error::new(

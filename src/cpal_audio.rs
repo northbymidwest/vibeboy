@@ -1,12 +1,14 @@
+//! cpal audio output shared by the winit and GTK frontends: a ring buffer
+//! the emulator pushes into, drained by the cpal stream callback, with
+//! half-band FIR downsampling when the device cannot run at the APU rate.
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
-
-use super::AUDIO_SAMPLE_RATE;
 
 /// 31-tap half-band low-pass FIR for 2:1 downsampling (96kHz -> 48kHz).
 /// Blackman-windowed sinc, cutoff at Nyquist/2 (24kHz), normalized to unit DC gain.
 /// Symmetric with zero-valued odd taps (half-band property).
-pub(super) const HALFBAND_FIR: [f32; 31] = [
+const HALFBAND_FIR: [f32; 31] = [
     0.0000000000,
     0.0000000000,
     0.0004103229,
@@ -40,7 +42,7 @@ pub(super) const HALFBAND_FIR: [f32; 31] = [
     0.0000000000,
 ];
 
-pub(super) struct AudioRing {
+pub struct AudioRing {
     buf: Vec<f32>,
     write_pos: usize,
     read_pos: usize,
@@ -54,8 +56,9 @@ pub(super) struct AudioRing {
 }
 
 impl AudioRing {
-    pub fn new(capacity: usize, stream_rate: u32) -> Self {
-        let ratio = (AUDIO_SAMPLE_RATE / stream_rate) as usize;
+    /// `source_rate` is the emulator's APU rate, `stream_rate` the device's.
+    pub fn new(capacity: usize, source_rate: u32, stream_rate: u32) -> Self {
+        let ratio = (source_rate / stream_rate) as usize;
         AudioRing {
             buf: vec![0.0; capacity],
             write_pos: 0,
@@ -74,6 +77,10 @@ impl AudioRing {
         } else {
             self.capacity - self.read_pos + self.write_pos
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.write_pos == self.read_pos
     }
 
     fn push_one(&mut self, s: f32) {
@@ -129,7 +136,9 @@ impl AudioRing {
     }
 }
 
-pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, u32)> {
+/// Open the default output device, preferring `source_rate` (the APU rate)
+/// and falling back to 48kHz. Returns the stream and its actual sample rate.
+pub fn start_audio(ring: Arc<Mutex<AudioRing>>, source_rate: u32) -> Option<(cpal::Stream, u32)> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
 
@@ -139,12 +148,12 @@ pub(super) fn start_audio(ring: Arc<Mutex<AudioRing>>) -> Option<(cpal::Stream, 
     let configs = [
         cpal::StreamConfig {
             channels: 2,
-            sample_rate: AUDIO_SAMPLE_RATE,
+            sample_rate: source_rate,
             buffer_size: cpal::BufferSize::Fixed(512),
         },
         cpal::StreamConfig {
             channels: 2,
-            sample_rate: AUDIO_SAMPLE_RATE,
+            sample_rate: source_rate,
             buffer_size: cpal::BufferSize::Default,
         },
         cpal::StreamConfig {

@@ -137,7 +137,7 @@ pub fn save_state_to_slot(emu: &mut crate::emulator::Emulator, rom_path: &Path, 
     emu.save_state(slot);
     if let Some(data) = emu.save_state_to_bytes(slot) {
         let path = rom_path.with_extension(format!("{}.ss", slot));
-        match std::fs::write(&path, &data) {
+        match write_atomic(&path, &data) {
             Ok(_) => eprintln!("State saved to slot {} ({})", slot, path.display()),
             Err(e) => eprintln!("State saved to slot {} (disk write failed: {})", slot, e),
         }
@@ -380,6 +380,27 @@ pub fn load_sav(emu: &mut crate::emulator::Emulator, rom_path: &Path) {
     }
 }
 
+/// Write `data` to `path` so that a crash never leaves a truncated file: the
+/// bytes go to a temporary file in the same directory, are synced to disk,
+/// and the temporary file is then renamed over the destination.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 /// Write battery-backed save RAM to a `.sav` file next to the ROM unconditionally.
 /// Use this for final on-quit flush.
 #[cfg(not(target_arch = "wasm32"))]
@@ -392,75 +413,94 @@ pub fn flush_sav(emu: &crate::emulator::Emulator, rom_path: &Path) {
         return;
     }
     let sav_path = rom_path.with_extension("sav");
-    if let Err(e) = std::fs::write(&sav_path, &data) {
+    if let Err(e) = write_atomic(&sav_path, &data) {
         log::error!("Failed to write save file '{}': {}", sav_path.display(), e);
     }
 }
 
-/// Tracks save RAM state for periodic flushing.
-/// Only writes to disk when RAM has changed since the last flush and has been
-/// stable (unchanged) for at least 1 second, avoiding writes during active
-/// save operations by the game.
+/// Tracks battery save state for periodic flushing.
+///
+/// Dirtiness comes from `Emulator::save_generation()`, which only changes when
+/// the game writes the cartridge RAM window or a snapshot is restored. That
+/// keeps RTC carts, whose `save_data()` embeds a wall-clock timestamp, from
+/// being rewritten every second.
+///
+/// A dirty save is written once the generation has been stable for
+/// `SETTLE`, so a multi-frame save routine is not captured half-way. Games
+/// that keep writing cart RAM (some use it as work RAM) are still flushed
+/// every `MAX_DELAY`.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SavFlusher {
     rom_path: std::path::PathBuf,
-    last_flushed: Vec<u8>,
-    dirty_since: Option<std::time::Instant>,
+    flushed_generation: u64,
+    seen_generation: u64,
+    /// When the save first became dirty and when the generation last changed.
+    dirty: Option<(Instant, Instant)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SavFlusher {
-    /// Create a new flusher for the given ROM path.
-    /// Initializes `last_flushed` to the current save data so we don't
-    /// immediately write on startup.
+    const SETTLE: Duration = Duration::from_secs(1);
+    const MAX_DELAY: Duration = Duration::from_secs(10);
+
+    /// Create a new flusher for the given ROM path. Call this right after
+    /// `load_sav`, so the freshly loaded state counts as already flushed.
     pub fn new(emu: &crate::emulator::Emulator, rom_path: &Path) -> Self {
+        let generation = emu.save_generation();
         Self {
             rom_path: rom_path.to_path_buf(),
-            last_flushed: if emu.has_battery() {
-                emu.save_data()
-            } else {
-                Vec::new()
-            },
-            dirty_since: None,
+            flushed_generation: generation,
+            seen_generation: generation,
+            dirty: None,
         }
     }
 
-    /// Check if save RAM has changed and flush if stable for >= 1 second.
-    /// Call this every frame or every few frames.
+    /// Flush the save if it is dirty and has settled. Call this every frame.
     pub fn poll(&mut self, emu: &crate::emulator::Emulator) {
         if !emu.has_battery() {
             return;
         }
-        let data = emu.save_data();
-        if data == self.last_flushed {
-            // RAM matches last flush — not dirty
-            self.dirty_since = None;
+        let generation = emu.save_generation();
+        if generation == self.flushed_generation {
+            self.dirty = None;
             return;
         }
-        // RAM has changed
-        let now = std::time::Instant::now();
-        match self.dirty_since {
-            None => {
-                // Just became dirty — start the stability timer
-                self.dirty_since = Some(now);
-            }
-            Some(since) if now.duration_since(since) >= Duration::from_secs(1) => {
-                // Dirty and stable for >= 1 second — flush
-                let sav_path = self.rom_path.with_extension("sav");
-                if let Err(e) = std::fs::write(&sav_path, &data) {
-                    log::error!("Failed to write save file '{}': {}", sav_path.display(), e);
-                }
-                self.last_flushed = data;
-                self.dirty_since = None;
-            }
-            _ => {
-                // Dirty but not yet stable — wait
-            }
+        let now = Instant::now();
+        let (first_dirty, last_change) = self.dirty.get_or_insert((now, now));
+        if generation != self.seen_generation {
+            self.seen_generation = generation;
+            *last_change = now;
+        }
+        if now.duration_since(*last_change) >= Self::SETTLE
+            || now.duration_since(*first_dirty) >= Self::MAX_DELAY
+        {
+            self.flush(emu);
         }
     }
 
-    /// Force flush on quit (unconditional if dirty).
+    /// Write the save unconditionally. Use on quit, and before replacing the
+    /// emulator (ROM switch, reset, model change).
     pub fn flush(&mut self, emu: &crate::emulator::Emulator) {
         flush_sav(emu, &self.rom_path);
+        self.flushed_generation = emu.save_generation();
+        self.seen_generation = self.flushed_generation;
+        self.dirty = None;
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_atomic_replaces_file_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("vibeboy_atomic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.sav");
+        std::fs::write(&path, b"old contents that are longer").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!dir.join("game.sav.tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -82,7 +82,9 @@ impl Cartridge for Mbc5 {
             return;
         }
         let idx = self.ram_bank * 0x2000 + (addr as usize - 0xA000);
-        if let Some(b) = self.ram.get_mut(idx) {
+        // Mirror the same way reads do so small RAMs alias consistently.
+        let len = self.ram.len().max(1);
+        if let Some(b) = self.ram.get_mut(idx % len) {
             *b = val;
         }
     }

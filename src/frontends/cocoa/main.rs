@@ -261,6 +261,8 @@ impl AppState {
             .forced_model
             .unwrap_or_else(|| auto_detect_model(&self.rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+        // Persist the outgoing battery save before replacing the emulator.
+        self.sav_flusher.flush(&self.emu);
         self.emu = Emulator::new(
             self.rom.clone(),
             boot_rom,
@@ -307,6 +309,10 @@ impl AppState {
 
             if actions.reset {
                 let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
+                // Persist the outgoing battery save before replacing the emulator.
+                self.sav_flusher.flush(&self.emu);
+                // Persist the outgoing battery save before replacing the emulator.
+                self.sav_flusher.flush(&self.emu);
                 self.emu = Emulator::new(
                     self.rom.clone(),
                     boot_rom,
@@ -354,6 +360,10 @@ impl AppState {
                     model_name,
                     if boot_rom.is_some() { "loaded" } else { "none" }
                 );
+                // Persist the outgoing battery save before replacing the emulator.
+                self.sav_flusher.flush(&self.emu);
+                // Persist the outgoing battery save before replacing the emulator.
+                self.sav_flusher.flush(&self.emu);
                 self.emu = Emulator::new(
                     self.rom.clone(),
                     boot_rom,
@@ -1180,6 +1190,9 @@ fn main() {
 
             // Handle menu actions
             let actions = menu_actions.take_all();
+            if actions.quit {
+                break 'running;
+            }
             state.handle_menu_actions(actions, mtm, &app, &window);
 
             // Check if window was closed
