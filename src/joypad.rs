@@ -18,7 +18,7 @@ pub struct Joypad {
     p1_select: u8,
     /// Pressed buttons, internal mask (bit set = pressed)
     buttons: u8,
-    /// True when a button was just pressed (triggers interrupt)
+    /// Set when a P10-P13 input line fell (requests the joypad interrupt)
     pub interrupt: bool,
 }
 
@@ -73,19 +73,34 @@ impl Joypad {
     }
 
     pub fn write(&mut self, val: u8) {
+        let before = self.input_lines();
         self.p1_select = val & 0x30;
+        self.detect_falling_edge(before);
     }
 
     /// Set or clear a button. `button` is one of the BTN_* constants.
     pub fn set_button(&mut self, button: u8, pressed: bool) {
-        let was_pressed = self.buttons & button != 0;
+        let before = self.input_lines();
         if pressed {
             self.buttons |= button;
-            if !was_pressed {
-                self.interrupt = true;
-            }
         } else {
             self.buttons &= !button;
+        }
+        self.detect_falling_edge(before);
+    }
+
+    /// The P10-P13 input lines (bits 0-3, 0 = low) as the CPU sees them:
+    /// a pressed button pulls its line low only while its group is selected.
+    fn input_lines(&self) -> u8 {
+        self.read() & 0x0F
+    }
+
+    /// The joypad interrupt is requested when any of P10-P13 goes from high
+    /// to low. That happens on a new press in a selected group, and also on
+    /// a P1 write that selects a group in which a button is already held.
+    fn detect_falling_edge(&mut self, before: u8) {
+        if before & !self.input_lines() != 0 {
+            self.interrupt = true;
         }
     }
 

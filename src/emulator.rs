@@ -975,6 +975,52 @@ mod tests {
         assert!(!emu.load_state_from_bytes(10, &bytes), "slot out of range");
     }
 
+    /// Take and clear the joypad interrupt request.
+    fn take_joypad_irq(emu: &mut Emulator) -> bool {
+        let fired = emu.bus.joypad.interrupt;
+        emu.bus.joypad.clear_interrupt();
+        fired
+    }
+
+    #[test]
+    fn joypad_irq_needs_the_button_group_selected() {
+        let mut emu = battery_emu();
+        emu.bus.write_byte(0xFF00, 0x20); // P14 low: d-pad only
+        take_joypad_irq(&mut emu);
+        emu.set_button(BTN_A, true);
+        assert!(!take_joypad_irq(&mut emu), "A is not selected");
+        emu.set_button(BTN_RIGHT, true);
+        assert!(take_joypad_irq(&mut emu), "Right pulls P10 low");
+        emu.set_button(BTN_RIGHT, false);
+        assert!(!take_joypad_irq(&mut emu), "a rising line never fires");
+    }
+
+    #[test]
+    fn joypad_irq_fires_when_selecting_a_held_group() {
+        let mut emu = battery_emu();
+        emu.bus.write_byte(0xFF00, 0x30); // nothing selected
+        emu.set_button(BTN_START, true);
+        assert!(!take_joypad_irq(&mut emu));
+        emu.bus.write_byte(0xFF00, 0x10); // P15 low: buttons, P13 falls
+        assert!(take_joypad_irq(&mut emu));
+        emu.bus.write_byte(0xFF00, 0x10); // no change
+        assert!(!take_joypad_irq(&mut emu));
+        emu.bus.write_byte(0xFF00, 0x30);
+        assert!(!take_joypad_irq(&mut emu), "deselecting raises the line");
+    }
+
+    #[test]
+    fn joypad_irq_needs_a_line_to_fall() {
+        let mut emu = battery_emu();
+        emu.bus.write_byte(0xFF00, 0x00); // both groups on the same lines
+        emu.set_button(BTN_RIGHT, true);
+        assert!(take_joypad_irq(&mut emu));
+        emu.set_button(BTN_A, true); // A shares P10, already low
+        assert!(!take_joypad_irq(&mut emu));
+        emu.set_button(BTN_B, true); // P11 falls
+        assert!(take_joypad_irq(&mut emu));
+    }
+
     #[test]
     fn save_generation_changes_on_snapshot_restore() {
         let mut emu = battery_emu();
