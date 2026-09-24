@@ -330,11 +330,13 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     gl_area.set_hexpand(true);
     gl_area.set_vexpand(true);
 
-    // Stack: GL area (preferred) with Cairo DrawingArea fallback
+    // Stack: GL area (preferred) with Cairo DrawingArea fallback. The GL page
+    // starts visible because a Stack only realizes its visible child, and the
+    // realize handler below is what sets up GL or switches to Cairo.
     let stack = gtk4::Stack::new();
     stack.add_named(&drawing_area, Some("cairo"));
     stack.add_named(&gl_area, Some("gl"));
-    stack.set_visible_child_name("cairo");
+    stack.set_visible_child_name("gl");
 
     // Layout
     let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -362,22 +364,31 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             area.make_current();
             if area.error().is_some() {
                 eprintln!("GLArea error, falling back to Cairo");
+                stack.set_visible_child_name("cairo");
                 return;
             }
             match gpu::GlRenderer::new() {
                 Some(r) => {
+                    let gl_name = r.renderer_name();
                     *gl_renderer.borrow_mut() = Some(r);
-                    stack.set_visible_child_name("gl");
                     // Init wgpu compute using the same GL context (zero-copy)
                     #[cfg(target_os = "linux")]
-                    {
+                    if gl_name.contains("SVGA3D") {
+                        // VMware's SVGA3D driver drops compute-shader writes
+                        // once the context has drawn to GTK's framebuffer, so
+                        // every filtered frame comes out black.
+                        eprintln!("GPU compute disabled on {gl_name}, will use CPU scaling");
+                    } else {
                         match compute::GpuCompute::new(|s| gpu::gl_proc_address(s)) {
                             Some(c) => *gpu_compute.borrow_mut() = Some(c),
                             None => eprintln!("GPU compute init failed, will use CPU scaling"),
                         }
                     }
                 }
-                None => eprintln!("GL renderer init failed, falling back to Cairo"),
+                None => {
+                    eprintln!("GL renderer init failed, falling back to Cairo");
+                    stack.set_visible_child_name("cairo");
+                }
             }
         }
     });
@@ -402,12 +413,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let mut r = gl_renderer.borrow_mut();
             let f = pending.borrow();
             if let Some(ref mut renderer) = *r {
+                renderer.begin_frame();
                 let has_frame = !f.pixels.is_empty() || f.gl_texture.is_some();
-                if has_frame {
-                    let scale = area.scale_factor();
-                    let vp_w = area.width() * scale;
-                    let vp_h = area.height() * scale;
-
+                let scale = area.scale_factor();
+                let vp_w = area.width() * scale;
+                let vp_h = area.height() * scale;
+                if !has_frame {
+                    // No ROM loaded yet: black, like the Cairo fallback
+                    renderer.clear(vp_w, vp_h);
+                } else {
                     // Pre-rendered GL texture (shared-chain GPU rasterizer)
                     if let Some(gl_tex) = f.gl_texture {
                         renderer.render_gl_texture(gl_tex, vp_w, vp_h, f.src_w, f.src_h);

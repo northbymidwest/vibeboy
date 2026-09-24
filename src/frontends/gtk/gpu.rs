@@ -21,7 +21,58 @@ pub(crate) fn gl_proc_address(name: &str) -> *const std::ffi::c_void {
         ) -> *mut std::ffi::c_void;
     }
     let c_name = std::ffi::CString::new(name).unwrap();
-    unsafe { dlsym(RTLD_DEFAULT, c_name.as_ptr()) as *const _ }
+    let ptr = unsafe { dlsym(RTLD_DEFAULT, c_name.as_ptr()) };
+    if !ptr.is_null() {
+        return ptr as *const _;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_get_proc_address(&c_name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::ptr::null()
+    }
+}
+
+/// On Linux GTK4 reaches GL through libepoxy, which dlopens libEGL/libGL
+/// without RTLD_GLOBAL, so the dlsym above finds nothing. Ask the loader GTK
+/// already opened instead: eglGetProcAddress (GTK's default, and Mesa's
+/// returns core functions too), else glXGetProcAddressARB for a GLX context.
+/// RTLD_NOLOAD only finds a library that is already loaded; it never loads one.
+#[cfg(target_os = "linux")]
+fn linux_get_proc_address(name: &std::ffi::CStr) -> *const std::ffi::c_void {
+    const RTLD_LAZY: i32 = 0x1;
+    const RTLD_NOLOAD: i32 = 0x4;
+    unsafe extern "C" {
+        fn dlopen(filename: *const std::ffi::c_char, flag: i32) -> *mut std::ffi::c_void;
+        fn dlsym(
+            handle: *mut std::ffi::c_void,
+            symbol: *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+    }
+    type GetProcAddress = unsafe extern "C" fn(*const std::ffi::c_char) -> *const std::ffi::c_void;
+    for (lib, loader) in [
+        (c"libEGL.so.1", c"eglGetProcAddress"),
+        (c"libGL.so.1", c"glXGetProcAddressARB"),
+    ] {
+        unsafe {
+            let handle = dlopen(lib.as_ptr(), RTLD_LAZY | RTLD_NOLOAD);
+            if handle.is_null() {
+                continue;
+            }
+            let get = dlsym(handle, loader.as_ptr());
+            if get.is_null() {
+                continue;
+            }
+            let get: GetProcAddress = std::mem::transmute(get);
+            let ptr = get(name.as_ptr());
+            if !ptr.is_null() {
+                return ptr;
+            }
+        }
+    }
+    std::ptr::null()
 }
 
 pub struct GlRenderer {
@@ -31,6 +82,11 @@ pub struct GlRenderer {
     vao: glow::VertexArray,
     tex_w: u32,
     tex_h: u32,
+    /// GtkGLArea's framebuffer, recorded by `begin_frame`. wgpu compute on the
+    /// shared context binds framebuffer 0, so draws bind this first, and put
+    /// wgpu's binding back afterwards: wgpu expects the context as it left it,
+    /// and its next compute pass writes nothing if GTK's framebuffer is bound.
+    target_fb: Option<glow::Framebuffer>,
 }
 
 /// Frame data queued by the emulator tick, consumed by the GL render signal.
@@ -171,7 +227,48 @@ impl GlRenderer {
                 vao,
                 tex_w: 0,
                 tex_h: 0,
+                target_fb: None,
             })
+        }
+    }
+
+    /// The GL_RENDERER string of the current context.
+    pub fn renderer_name(&self) -> String {
+        unsafe { self.gl.get_parameter_string(glow::RENDERER) }
+    }
+
+    /// Record the framebuffer GtkGLArea bound for this render signal. Call at
+    /// the start of the signal, before anything else can change the binding.
+    pub fn begin_frame(&mut self) {
+        unsafe {
+            let fb = self.gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+            self.target_fb = std::num::NonZeroU32::new(fb as u32).map(glow::NativeFramebuffer);
+        }
+    }
+
+    /// Bind GtkGLArea's framebuffer for a draw, returning the previous binding.
+    unsafe fn bind_target(&self) -> Option<glow::Framebuffer> {
+        unsafe {
+            let prev = self.gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, self.target_fb);
+            std::num::NonZeroU32::new(prev as u32).map(glow::NativeFramebuffer)
+        }
+    }
+
+    /// Restore the framebuffer binding saved by `bind_target`.
+    unsafe fn restore_fb(&self, prev: Option<glow::Framebuffer>) {
+        unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, prev) };
+    }
+
+    /// Clear the current GL framebuffer to black (no frame to show yet).
+    pub fn clear(&self, viewport_w: i32, viewport_h: i32) {
+        unsafe {
+            let gl = &self.gl;
+            let prev_fb = self.bind_target();
+            gl.viewport(0, 0, viewport_w, viewport_h);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            self.restore_fb(prev_fb);
         }
     }
 
@@ -195,6 +292,7 @@ impl GlRenderer {
             let gl = &self.gl;
 
             // Clear full viewport to black
+            let prev_fb = self.bind_target();
             gl.viewport(0, 0, viewport_w, viewport_h);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -252,6 +350,7 @@ impl GlRenderer {
             gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.restore_fb(prev_fb);
         }
     }
 
@@ -269,6 +368,7 @@ impl GlRenderer {
             let gl = &self.gl;
 
             // Clear full viewport to black
+            let prev_fb = self.bind_target();
             gl.viewport(0, 0, viewport_w, viewport_h);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -301,6 +401,7 @@ impl GlRenderer {
 
             // Rebind our own texture so we don't hold a reference to the external one
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            self.restore_fb(prev_fb);
         }
     }
 }
