@@ -444,6 +444,9 @@ impl Ppu {
                         if self.lcdc & 0x20 != 0 && self.ly == self.wy {
                             self.wy_triggered = true;
                         }
+                        // The OAM scan still runs internally on this line.
+                        self.scanline_sprites.clear();
+                        self.oam_scan_index = 0;
                         self.mode_for_interrupt = 2;
                         self.update_stat_irq();
                         self.mode_for_interrupt = -1;
