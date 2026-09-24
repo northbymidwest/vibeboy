@@ -1096,9 +1096,7 @@ mod tests {
     #[test]
     fn stop_with_interrupt_pending_is_one_byte() {
         // IE=4, IF=4 (timer pending, IME=0), select both groups, A=0, STOP.
-        let mut emu = stop_emu(&[
-            0x3E, 0x04, 0xE0, 0x0F, 0xE0, 0xFF, 0x3E, 0x00, 0xE0, 0x00,
-        ]);
+        let mut emu = stop_emu(&[0x3E, 0x04, 0xE0, 0x0F, 0xE0, 0xFF, 0x3E, 0x00, 0xE0, 0x00]);
         emu.step_frame();
         assert!(emu.cpu.stopped, "STOP mode is still entered");
         emu.set_button(BTN_START, true);
