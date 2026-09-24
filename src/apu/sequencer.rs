@@ -284,9 +284,11 @@ impl Apu {
         self.ch4.envelope_clock.locked = false;
         self.ch4.envelope_clock.clock = false;
 
-        // Reset LFSR to all 1s on trigger (Pan Docs: "all bits are set to 1")
+        // Reset LFSR to all 1s on trigger. The output is inverted bit 0
+        // (see NoiseCh::step_lfsr), so bit 0 = 1 means the channel outputs
+        // 0 until the first LFSR shift.
         self.ch4.lfsr = 0x7FFF;
-        self.ch4.lfsr_sample = true;
+        self.ch4.lfsr_sample = self.ch4.lfsr & 1 == 0;
 
         let raw_div = self.ch4.divisor_code as u32;
         let was_active = self.ch4.counter_active;
