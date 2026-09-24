@@ -748,10 +748,10 @@ impl Ppu {
 
     /// DMG palette lookup: map a 2-bit color index through a palette register.
     /// Classic green Game Boy LCD colors.
-    pub(super) const DMG_SHADES: [u32; 4] = [0x009BBC0F, 0x008BAC0F, 0x00306230, 0x000F380F];
+    pub const DMG_SHADES: [u32; 4] = [0x009BBC0F, 0x008BAC0F, 0x00306230, 0x000F380F];
 
     /// MGB (Game Boy Pocket) grayscale palette.
-    pub(super) const MGB_SHADES: [u32; 4] = [0x00C4CFA1, 0x008B956D, 0x004D533C, 0x001F1F1F];
+    pub const MGB_SHADES: [u32; 4] = [0x00C4CFA1, 0x008B956D, 0x004D533C, 0x001F1F1F];
 
     pub(super) fn dmg_color(&self, palette_reg: u8, color_idx: u8) -> u32 {
         let shade = (palette_reg >> (color_idx * 2)) & 0x03;
