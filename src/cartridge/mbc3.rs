@@ -8,8 +8,6 @@ use std::sync::Arc;
 const RTC_FOOTER_LEN: usize = 48;
 /// Variant of the standard footer with a u32 LE timestamp at 40..44.
 const RTC_FOOTER_LEN_TS32: usize = 44;
-/// Older vibeboy builds padded MBC3 RAM to at least 8KB in battery saves.
-const LEGACY_MIN_RAM: usize = 0x2000;
 /// Implemented bits of each RTC register: S/M 6 bits, H 5 bits, DL 8 bits,
 /// DH bit 0 (day bit 8), bit 6 (halt) and bit 7 (day carry).
 const RTC_MASKS: [u8; 5] = [0x3F, 0x3F, 0x1F, 0xFF, 0xC1];
@@ -28,20 +26,6 @@ impl RtcFooter {
         let mut regs = [0u8; 5];
         let mut latched = [0u8; 5];
         let saved_ts = match f.len() {
-            RTC_FOOTER_LEN
-                if f[40..48].iter().all(|&b| b == 0) && f[21..24].iter().any(|&b| b != 0) =>
-            {
-                // Old vibeboy layout: raw register bytes at 0..5 and 5..10, an
-                // i64 LE timestamp at 20..28, and zeros from 28 onward. The
-                // standard layout carries a nonzero timestamp at 40..48, and
-                // bytes 21..24 are the (always zero) upper bytes of latched S,
-                // whereas any real old timestamp has nonzero bytes there.
-                regs.copy_from_slice(&f[..5]);
-                latched.copy_from_slice(&f[5..10]);
-                let mut ts = [0u8; 8];
-                ts.copy_from_slice(&f[20..28]);
-                u64::try_from(i64::from_le_bytes(ts)).unwrap_or(0)
-            }
             RTC_FOOTER_LEN | RTC_FOOTER_LEN_TS32 => {
                 for i in 0..5 {
                     regs[i] = u32_at(i * 4) as u8;
@@ -271,20 +255,13 @@ impl Cartridge for Mbc3 {
 
     fn load_ram(&mut self, data: &[u8]) {
         let ram_len = self.ram.len();
-        // Locate the RTC footer by total length: normally it follows the
-        // header-sized RAM, but older vibeboy saves padded RAM to 8KB.
-        let footer_start = if self.has_rtc {
-            [ram_len, ram_len.max(LEGACY_MIN_RAM)]
-                .into_iter()
-                .find(|&start| {
-                    matches!(
-                        data.len().checked_sub(start),
-                        Some(RTC_FOOTER_LEN | RTC_FOOTER_LEN_TS32)
-                    )
-                })
-        } else {
-            None
-        };
+        // The RTC footer follows the header-sized RAM.
+        let footer_start = (self.has_rtc
+            && matches!(
+                data.len().checked_sub(ram_len),
+                Some(RTC_FOOTER_LEN | RTC_FOOTER_LEN_TS32)
+            ))
+        .then_some(ram_len);
         let ram_part = &data[..footer_start.unwrap_or(data.len())];
         let copy_len = ram_len.min(ram_part.len());
         self.ram[..copy_len].copy_from_slice(&ram_part[..copy_len]);
@@ -382,23 +359,6 @@ mod tests {
         let mut c = cart(0);
         c.load_ram(&data);
         assert_eq!(c.rtc_regs[..2], [15, 1]);
-    }
-
-    #[test]
-    fn legacy_vibeboy_padded_save_loads() {
-        // RTC-only cart, old writer padded RAM to 8KB and used raw register
-        // bytes plus an i64 timestamp at footer offset 20.
-        let mut data = vec![0u8; 0x2000 + 48];
-        let f = &mut data[0x2000..];
-        f[..5].copy_from_slice(&[1, 2, 3, 4, 0x40]);
-        f[5..10].copy_from_slice(&[9, 9, 9, 9, 0]);
-        f[20..28].copy_from_slice(&((NOW - 1000) as i64).to_le_bytes());
-        let mut c = cart(0);
-        c.load_ram(&data);
-        // Halted, so no time is added
-        assert_eq!(c.rtc_regs, [1, 2, 3, 4, 0x40]);
-        assert_eq!(c.rtc_latched, [9, 9, 9, 9, 0]);
-        assert_eq!(c.save_data().len(), 48);
     }
 
     #[test]
