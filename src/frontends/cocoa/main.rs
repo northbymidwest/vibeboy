@@ -67,6 +67,25 @@ const K_SPACE: u16 = 49;
 const K_PERIOD: u16 = 47;
 const K_MINUS: u16 = 27;
 
+/// For a `FlagsChanged` event, whether the modifier key `keycode` is now
+/// down. Modifier keys never produce KeyDown/KeyUp; the event only carries
+/// the new modifier state. The device-dependent bits in the low word
+/// (IOKit's NX_DEVICE*KEYMASK) tell left and right keys apart.
+fn modifier_key_down(keycode: u16, flags: usize) -> Option<bool> {
+    let mask = match keycode {
+        59 => 0x0001, // left control
+        56 => 0x0002, // left shift
+        60 => 0x0004, // right shift
+        55 => 0x0008, // left command
+        54 => 0x0010, // right command
+        58 => 0x0020, // left option
+        61 => 0x0040, // right option
+        62 => 0x2000, // right control
+        _ => return None,
+    };
+    Some(flags & mask != 0)
+}
+
 fn keycode_to_slot(keycode: u16) -> Option<usize> {
     match keycode {
         29 => Some(0), // 0
@@ -1179,6 +1198,19 @@ fn main() {
                     state.keys_down.remove(&keycode);
                     if let Some(btn) = state.key_map.get(&keycode).copied() {
                         state.emu.set_button(btn, false);
+                    }
+                } else if event_type == NSEventType::FlagsChanged
+                    && let Some(down) = modifier_key_down(keycode, event.modifierFlags().0)
+                {
+                    // Modifiers (e.g. Right Shift for Select) only act as
+                    // mapped buttons, never as hotkeys.
+                    if down {
+                        state.keys_down.insert(keycode);
+                    } else {
+                        state.keys_down.remove(&keycode);
+                    }
+                    if let Some(btn) = state.key_map.get(&keycode).copied() {
+                        state.emu.set_button(btn, down);
                     }
                 }
 
