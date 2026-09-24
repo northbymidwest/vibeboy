@@ -44,6 +44,27 @@
             # PipeWire's plugin, which nix's alsa-lib looks for in its own
             # plugin directory. Without this, audio fails to open.
             ALSA_PLUGIN_DIR = "${pkgs.pipewire}/lib/alsa-lib";
+
+            # wgpu and winit dlopen these at run time rather than linking them,
+            # so nothing puts them on a binary's RUNPATH and a nix build cannot
+            # find them. Add them to every binary linked in this shell.
+            shellHook = ''
+              export NIX_LDFLAGS="$NIX_LDFLAGS -rpath ${
+                pkgs.lib.makeLibraryPath (
+                  with pkgs;
+                  [
+                    vulkan-loader
+                    libGL
+                    libxkbcommon
+                    wayland
+                    libx11
+                    libxcursor
+                    libxi
+                    libxrandr
+                  ]
+                )
+              }"
+            '';
           }
         );
       });
