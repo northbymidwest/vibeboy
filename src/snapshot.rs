@@ -10,12 +10,14 @@ mod serde_wram {
         let flat: Vec<u8> = data.iter().flat_map(|bank| bank.iter().copied()).collect();
         flat.serialize(ser)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[[u8; 0x1000]; 8], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<Box<[[u8; 0x1000]; 8]>, D::Error> {
         let flat: Vec<u8> = Vec::deserialize(de)?;
         if flat.len() != 0x1000 * 8 {
             return Err(serde::de::Error::custom("expected 32768 bytes for WRAM"));
         }
-        let mut result = [[0u8; 0x1000]; 8];
+        let mut result = Box::new([[0u8; 0x1000]; 8]);
         for (i, chunk) in flat.as_chunks::<0x1000>().0.iter().enumerate() {
             result[i].copy_from_slice(chunk);
         }
@@ -58,7 +60,7 @@ pub struct BusSnapshot {
     pub joypad: Joypad,
     pub apu: Apu,
     #[serde(with = "serde_wram")]
-    pub wram: [[u8; 0x1000]; 8],
+    pub wram: Box<[[u8; 0x1000]; 8]>,
     pub wram_bank: usize,
     #[serde(with = "serde_hram")]
     pub hram: [u8; 0x7F],

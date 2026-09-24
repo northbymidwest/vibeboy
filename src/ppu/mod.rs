@@ -19,12 +19,14 @@ mod serde_vram {
         combined.serialize(ser)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[[u8; 0x2000]; 2], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<Box<[[u8; 0x2000]; 2]>, D::Error> {
         let combined: Vec<u8> = Vec::deserialize(de)?;
         if combined.len() != 0x4000 {
             return Err(serde::de::Error::custom("expected 16384 bytes for VRAM"));
         }
-        let mut result = [[0u8; 0x2000]; 2];
+        let mut result = Box::new([[0u8; 0x2000]; 2]);
         result[0].copy_from_slice(&combined[..0x2000]);
         result[1].copy_from_slice(&combined[0x2000..]);
         Ok(result)
@@ -175,7 +177,8 @@ fn double_bits(nibble: u8) -> u8 {
 pub struct Ppu {
     /// VRAM banks 0 and 1 (8 KiB each)
     #[serde(with = "serde_vram")]
-    pub vram: [[u8; 0x2000]; 2],
+    /// Boxed to keep the Ppu (and snapshots containing it) small on the stack.
+    pub vram: Box<[[u8; 0x2000]; 2]>,
     /// Current VRAM bank (0 or 1), controlled by 0xFF4F (VBK)
     pub vram_bank: usize,
     /// Object Attribute Memory (40 sprites x 4 bytes = 160 bytes).
@@ -401,7 +404,7 @@ impl Ppu {
         }
 
         Ppu {
-            vram: [[0u8; 0x2000]; 2],
+            vram: Box::new([[0u8; 0x2000]; 2]),
             vram_bank: 0,
             oam: [0u8; 192],
 

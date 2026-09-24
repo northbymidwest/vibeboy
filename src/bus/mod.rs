@@ -117,7 +117,9 @@ pub struct Bus {
     pub apu: Apu,
 
     /// WRAM: bank 0 (0xC000–0xCFFF) + banks 1-7 (0xD000–0xDFFF)
-    pub(crate) wram: [[u8; 0x1000]; 8],
+    /// Boxed: kept off the stack so by-value moves and debug-build
+    /// deserialization of snapshots stay small.
+    pub(crate) wram: Box<[[u8; 0x1000]; 8]>,
     pub(crate) wram_bank: usize, // SVBK register (0xFF70), bank 1-7
 
     pub(crate) hram: [u8; 0x7F],
@@ -184,8 +186,8 @@ fn ram_random(state: &mut u64) -> u8 {
 /// Initialize WRAM with hardware-realistic patterns.
 /// DMG: even 256-byte pages biased toward 0xFF (rand|rand), odd pages toward 0x00 (rand&rand).
 /// CGB/AGB: random fill.
-fn init_wram(model: GbModel) -> [[u8; 0x1000]; 8] {
-    let mut wram = [[0u8; 0x1000]; 8];
+fn init_wram(model: GbModel) -> Box<[[u8; 0x1000]; 8]> {
+    let mut wram = Box::new([[0u8; 0x1000]; 8]);
     let mut rng: u64 = 0x5A6B7C8D9E0F1A2B;
     let bank_count = if model.is_cgb() { 8 } else { 2 };
     for bank in 0..bank_count {
@@ -358,7 +360,7 @@ impl Bus {
             timer: self.timer.clone(),
             joypad: self.joypad.clone(),
             apu: apu_clone,
-            wram: self.wram,
+            wram: self.wram.clone(),
             wram_bank: self.wram_bank,
             hram: self.hram,
             if_: self.if_,
@@ -418,7 +420,7 @@ impl Bus {
         self.apu = s.apu.clone();
         self.apu.sample_buf = saved_buf;
         self.apu.set_sample_rate(saved_rate);
-        self.wram = s.wram;
+        self.wram.copy_from_slice(&s.wram[..]);
         self.wram_bank = s.wram_bank;
         self.hram = s.hram;
         self.if_ = s.if_;

@@ -26,14 +26,35 @@ const BLIP_PHASES: usize = 256;
 const BLIP_BUF_SIZE: usize = 4096; // Must be power-of-2, large enough that sinc taps never wrap into unread data
 const BLIP_ONE: i32 = 0x10000; // 65536
 
+/// Serde for a boxed array, encoded exactly like the unboxed BigArray. The
+/// blip buffers are boxed so the Apu stays small on the stack (it is moved
+/// and deserialized by value inside snapshots).
+mod boxed_big_array {
+    use serde::{Deserializer, Serializer};
+    use serde_big_array::BigArray;
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        data: &[i32; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        BigArray::serialize(data, ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        de: D,
+    ) -> Result<Box<[i32; N]>, D::Error> {
+        <[i32; N] as BigArray<'de, i32>>::deserialize(de).map(Box::new)
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct BlipBuf {
     #[serde(skip, default = "blip_sinc_table")]
     steps: Arc<[[i32; BLIP_WIDTH]; BLIP_PHASES]>,
-    #[serde(with = "serde_big_array::BigArray")]
-    buf_l: [i32; BLIP_BUF_SIZE],
-    #[serde(with = "serde_big_array::BigArray")]
-    buf_r: [i32; BLIP_BUF_SIZE],
+    #[serde(with = "boxed_big_array")]
+    buf_l: Box<[i32; BLIP_BUF_SIZE]>,
+    #[serde(with = "boxed_big_array")]
+    buf_r: Box<[i32; BLIP_BUF_SIZE]>,
     pos: usize,
     out_l: i32,
     out_r: i32,
@@ -87,8 +108,8 @@ impl BlipBuf {
     fn new() -> Self {
         BlipBuf {
             steps: blip_sinc_table(),
-            buf_l: [0; BLIP_BUF_SIZE],
-            buf_r: [0; BLIP_BUF_SIZE],
+            buf_l: Box::new([0; BLIP_BUF_SIZE]),
+            buf_r: Box::new([0; BLIP_BUF_SIZE]),
             pos: 0,
             out_l: 0,
             out_r: 0,

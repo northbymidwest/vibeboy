@@ -27,8 +27,9 @@ const fn layout_hash() -> u32 {
         // Bump this when changing serialization format, struct layout, or any
         // mapper's snapshot_state byte layout (those are opaque to the hash).
         // v5: dead CPU/APU/PPU/OAM DMA state removed.
-        // v6: CPU STOP mode.
-        "v6;",
+        // v7: WRAM, VRAM and blip buffers boxed. The encoding is unchanged,
+        // but the struct sizes below feed the hash, so it changes anyway.
+        "v7;",
         "Cpu:regs.a,f,b,c,d,e,h,l,sp,pc,ime,ime_pending,halted,halt_bug,stopped,speed_switch;",
         "Ppu:fifo,fetcher,vram,oam,regs,frame_buffer,shade_buffer,scanline_sprites,mgb_mode;",
         "Apu:ch1-4,frame_seq,master,nr50-52,blip;",
