@@ -32,3 +32,6 @@ sample data/
 screenshot_*.json
 *.pdf
 
+
+# nix-direnv cache
+.direnv/
