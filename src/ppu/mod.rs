@@ -499,6 +499,8 @@ impl Ppu {
     /// Reset PPU to hardware power-on state (for boot ROM execution).
     /// LCD is off, all registers zeroed, palettes zeroed.
     pub fn reset(&mut self) {
+        self.pending_lyc = None;
+        self.stop_line_state();
         self.lcdc = 0x00; // LCD off
         self.stat = 0x00;
         self.scy = 0;
@@ -524,23 +526,9 @@ impl Ppu {
         self.oam_write_accessible = true;
         self.frame_ready = false;
         self.hblank_entered = false;
-        self.lcd_first_line = false;
-        self.lcd_first_line_short = false;
         self.lcd_first_frame = false;
-        self.mode0_stat_dot = 0;
         self.mode3_stat_dot = 0;
-        self.cgb_palettes_blocked = false;
-        self.cgb_palette_unblock_dot = 0;
         self.window_line_counter = 0;
-        self.wy_triggered = false;
-        self.bg_fifo.clear();
-        self.fetcher.reset(false);
-        self.position_in_line = 0;
-        self.sprite_fetch_active = false;
-        self.sprites_fetched = 0;
-        self.window_active = false;
-        self.mode3_start_delay = 0;
-        self.last_sprite_slot = -1;
         self.visible_ly = 0;
         self.ly_for_comparison = 0;
         self.line_start_pending = false;
@@ -549,11 +537,47 @@ impl Ppu {
         self.line_153_phase = 0;
         self.accessed_oam_row = 0xFF;
         self.oam_bug_row = 0xFF;
-        self.pending_lyc = None;
         self.bgp_rendering = 0;
         self.obp0_rendering = 0xFF;
         self.obp1_rendering = 0xFF;
         self.wx_just_changed = false;
+    }
+
+    /// Drop all in-flight per-scanline state: deferred mode/palette/LYC
+    /// events, the first-line-after-enable flags, OAM scan results and the
+    /// mode 3 pixel pipeline. Called when the LCD is switched off, since
+    /// step() does not run while the LCD is off and anything left pending
+    /// would otherwise stay frozen for the whole off period (for example CGB
+    /// palette RAM staying blocked) and then fire at a stale dot after the
+    /// LCD is re-enabled.
+    pub(super) fn stop_line_state(&mut self) {
+        // A deferred LYC write is a completed CPU write; commit it rather
+        // than drop it.
+        if let Some(lyc) = self.pending_lyc.take() {
+            self.lyc = lyc;
+        }
+        self.mode0_stat_dot = 0;
+        self.cgb_palettes_blocked = false;
+        self.cgb_palette_unblock_dot = 0;
+        self.lcd_first_line = false;
+        self.lcd_first_line_short = false;
+        self.wy_triggered = false;
+        self.scanline_sprites.clear();
+        self.oam_scan_index = 0;
+        self.bg_fifo.clear();
+        self.oam_fifo.clear();
+        self.fetcher.reset(false);
+        self.position_in_line = 0;
+        self.mode3_start_delay = 0;
+        self.sprite_fetch_active = false;
+        self.sprites_fetched = 0;
+        self.window_active = false;
+        self.window_trigger_pending = false;
+        self.window_trigger_from_wx_write = false;
+        self.window_is_being_fetched = false;
+        self.disable_window_pixel_insertion_glitch = false;
+        self.tile_sel_glitch_latched = false;
+        self.last_sprite_slot = -1;
     }
 
     /// Set post-boot PPU state for the given model (used when no boot ROM is loaded).
@@ -699,5 +723,47 @@ impl Ppu {
 impl Default for Ppu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod lcd_off_tests {
+    use super::Ppu;
+
+    /// Step a CGB PPU (LCD freshly enabled) until it is in mode 3 of line 1.
+    fn cgb_ppu_in_mode3() -> Ppu {
+        let mut p = Ppu::new();
+        p.cgb_mode = true;
+        p.write(0xFF40, 0x00);
+        p.write(0xFF40, 0x91);
+        for _ in 0..10_000 {
+            if p.ly == 1 && p.mode == 3 && p.dot > 100 {
+                return p;
+            }
+            p.step(1);
+        }
+        panic!("PPU never reached mode 3 on line 1");
+    }
+
+    #[test]
+    fn palette_ram_accessible_after_lcd_off_in_mode3() {
+        let mut p = cgb_ppu_in_mode3();
+        assert!(p.cgb_palettes_blocked);
+        // Turn the LCD off mid mode 3, then upload palette data while the
+        // LCD is off (a common CGB pattern).
+        p.write(0xFF40, 0x11);
+        p.write(0xFF68, 0x00);
+        p.write(0xFF69, 0x12);
+        assert_eq!(p.read(0xFF69), 0x12);
+    }
+
+    #[test]
+    fn deferred_lyc_write_commits_on_lcd_off() {
+        let mut p = cgb_ppu_in_mode3();
+        p.pending_lyc = Some(0x42);
+        p.write(0xFF40, 0x11);
+        assert_eq!(p.pending_lyc, None);
+        assert_eq!(p.read(0xFF45), 0x42);
+        assert_eq!(p.lyc, 0x42);
     }
 }

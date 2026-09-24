@@ -137,6 +137,7 @@ impl Ppu {
                     self.oam_write_accessible = true;
                     self.vram_accessible = true;
                     self.vram_write_accessible = true;
+                    self.stop_line_state();
                     // SGB: leave frame_buffer intact — the SNES PPU still shows
                     // the last composited frame when the Game Boy LCD is off.
                     // DMG/CGB: blank to white (LCD panel shows no image).
