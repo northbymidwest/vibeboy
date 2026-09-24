@@ -79,7 +79,7 @@ impl SquareCh {
             len_enable: false,
             enabled: false,
             dac_on: false,
-            freq_timer: 8,
+            freq_timer: 0,
             duty_pos: 0,
             length_counter: 64,
             volume: 0,
