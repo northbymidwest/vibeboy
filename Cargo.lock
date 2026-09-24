@@ -1481,18 +1481,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glow"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "263218b0ba2b0715c3370fb04674f5f8aa331594b521c94ff0a8e4a8472d1386"
-dependencies = [
- "js-sys",
- "slotmap",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "glutin_wgl_sys"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4180,7 +4168,7 @@ dependencies = [
  "dispatch2",
  "env_logger",
  "gilrs",
- "glow 0.18.0",
+ "glow",
  "gtk4",
  "image",
  "js-sys",
@@ -4531,7 +4519,7 @@ dependencies = [
  "bytemuck",
  "cfg-if 1.0.5",
  "cfg_aliases",
- "glow 0.17.0",
+ "glow",
  "glutin_wgl_sys",
  "gpu-allocator",
  "hashbrown 0.17.1",
