@@ -615,8 +615,10 @@ impl Emulator {
     /// done loop (JR -2) is hit, or max_frames elapse.
     /// Returns the serial output as a string.
     pub fn run_until_serial_result(&mut self, max_frames: u32) -> String {
+        const CHECK_INTERVAL: u64 = 4096;
         let limit = 70_224u64 * max_frames as u64;
         let mut total_cycles = 0u64;
+        let mut next_check = CHECK_INTERVAL;
         loop {
             let pc = self.cpu.regs.pc;
             total_cycles += self.step() as u64;
@@ -638,8 +640,12 @@ impl Emulator {
                 }
             }
 
-            // Check periodically for serial output or timeout
-            if total_cycles.is_multiple_of(4096) {
+            // Check periodically for serial output or timeout. Steps take a
+            // variable number of cycles, so compare against a threshold: an
+            // exact-multiple test can be skipped forever by a loop whose
+            // period never lands on one, and the timeout never fires.
+            if total_cycles >= next_check {
+                next_check = total_cycles + CHECK_INTERVAL;
                 let output = String::from_utf8_lossy(&self.bus.serial.serial_output);
                 if output.contains("Passed") || output.contains("Failed") {
                     return output.into_owned();
