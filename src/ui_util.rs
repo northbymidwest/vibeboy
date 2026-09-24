@@ -3,12 +3,6 @@
 //!
 //! For pure (no-I/O) utilities, see `crate::util`.
 
-// Re-export pure utility functions for backwards compatibility.
-// New code should use `vibeboy_core::util::*` directly.
-pub use crate::util::{
-    auto_detect_model, downsample_audio, frame_duration, parse_model, reverse_audio,
-};
-
 #[cfg(not(target_arch = "wasm32"))]
 use crate::model::GbModel;
 #[cfg(not(target_arch = "wasm32"))]

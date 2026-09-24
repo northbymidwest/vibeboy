@@ -23,7 +23,8 @@ use super::model::GbModel;
 use super::printer;
 use super::scaling;
 use super::serial;
-use super::ui_util::{self, frame_duration};
+use super::ui_util;
+use super::util::{self, frame_duration};
 use super::{AUDIO_SAMPLE_RATE, Cli, GB_H, GB_W, SCALE, SGB_H, SGB_W};
 
 pub(super) struct App {
@@ -158,7 +159,7 @@ impl App {
 
         self.model = self
             .forced_model
-            .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
+            .unwrap_or_else(|| util::auto_detect_model(&rom));
         let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
 
         let mut emu = Emulator::new(
@@ -347,7 +348,7 @@ impl App {
                 }
                 let samples = emu.drain_audio_samples();
                 if !samples.is_empty() {
-                    let resampled = ui_util::downsample_audio(&samples, 4);
+                    let resampled = util::downsample_audio(&samples, 4);
                     if let Ok(mut ring) = self.audio_ring.lock() {
                         ring.push(&resampled);
                     }
@@ -793,8 +794,8 @@ impl ApplicationHandler for App {
                     emu.rewind_one_frame();
                     all_audio.extend_from_slice(&emu.drain_audio_samples());
                 }
-                ui_util::reverse_audio(&mut all_audio);
-                let resampled = ui_util::downsample_audio(&all_audio, 3);
+                util::reverse_audio(&mut all_audio);
+                let resampled = util::downsample_audio(&all_audio, 3);
                 if !resampled.is_empty()
                     && let Ok(mut ring) = self.audio_ring.lock()
                 {

@@ -40,9 +40,6 @@ pub struct GpuPipelines {
     pub transfer_buf_size: u32,
     pub sampler: gpu::Sampler,
 
-    // Lazily-initialized graphics pipelines (fragment shaders — legacy, kept for reference)
-    // All scaling filters now use compute pipelines instead.
-
     // Lazily-initialized compute pipelines (scaling filters)
     scale_pipelines: [Option<gpu::ComputePipeline>; 22],
 

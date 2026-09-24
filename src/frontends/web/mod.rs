@@ -8,7 +8,7 @@ use crate::printer::Printer;
 use crate::scaling;
 use crate::scaling::wgpu_scale::{WgpuScaleFilter, WgpuScalePipeline};
 use crate::scaling::wgpu_vectorize::WgpuVectorizePipeline;
-use crate::ui_util;
+use crate::util;
 
 const BLIT_SHADER: &str = r#"
 struct VsOutput {
@@ -75,7 +75,7 @@ impl WasmEmulator {
         }
 
         let rom_arc: std::sync::Arc<[u8]> = rom.to_vec().into();
-        let model = ui_util::auto_detect_model(&rom_arc);
+        let model = util::auto_detect_model(&rom_arc);
 
         // Derive save key from ROM title (0x134..0x143) + global checksum (0x14E..0x14F)
         let title: String = rom_arc[0x134..0x143]
@@ -435,7 +435,7 @@ impl WasmEmulator {
     /// printer carry over to the new emulator.
     pub fn set_model(&mut self, name: &str) -> bool {
         let model = match name {
-            "auto" => ui_util::auto_detect_model(&self.rom),
+            "auto" => util::auto_detect_model(&self.rom),
             "dmg0" => GbModel::Dmg0,
             "dmg" => GbModel::Dmg,
             "mgb" => GbModel::Mgb,
@@ -698,13 +698,13 @@ impl WasmEmulator {
 
     /// Reverse the internal audio buffer in-place (stereo pairs).
     pub fn audio_reverse(&mut self) {
-        crate::ui_util::reverse_audio(&mut self.audio_buf);
+        crate::util::reverse_audio(&mut self.audio_buf);
     }
 
     /// Downsample the internal audio buffer by an integer factor using a
     /// Blackman-windowed sinc low-pass filter.
     pub fn audio_downsample(&mut self, factor: usize) {
-        self.audio_buf = crate::ui_util::downsample_audio(&self.audio_buf, factor);
+        self.audio_buf = crate::util::downsample_audio(&self.audio_buf, factor);
     }
 
     pub fn audio_ptr(&self) -> *const f32 {

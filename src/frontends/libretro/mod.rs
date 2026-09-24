@@ -11,7 +11,7 @@ use std::ptr;
 use crate::clock;
 use crate::emulator::Emulator;
 use crate::model::GbModel;
-use crate::ui_util;
+use crate::util;
 
 // ── libretro constants ──────────────────────────────────────────────────────
 
@@ -218,7 +218,7 @@ static VARS_MODEL_DESC: &[u8] = b"Hardware Model; Auto|DMG|DMG0|MGB|SGB|SGB2|CGB
 // ── Helper functions ────────────────────────────────────────────────────────
 
 fn detect_model(rom: &[u8]) -> GbModel {
-    ui_util::auto_detect_model(rom)
+    util::auto_detect_model(rom)
 }
 
 fn get_model_from_options() -> Option<GbModel> {

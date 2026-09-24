@@ -33,8 +33,8 @@ use camera::CameraThread;
 use input::handle_input;
 use render::{cpu_scale_frame, display_size};
 
-use ui_util::frame_duration;
-use ui_util::parse_model;
+use util::frame_duration;
+use util::parse_model;
 
 /// Which accelerometer source is active.
 enum AccelSource {
@@ -178,9 +178,7 @@ fn main() {
     });
 
     // Resolve hardware model
-    let model = cli
-        .model
-        .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
+    let model = cli.model.unwrap_or_else(|| util::auto_detect_model(&rom));
 
     let frame_dur = frame_duration(model);
 
@@ -660,8 +658,8 @@ fn main() {
                 emu.rewind_one_frame();
                 all_audio.extend_from_slice(&emu.drain_audio_samples());
             }
-            ui_util::reverse_audio(&mut all_audio);
-            let resampled = ui_util::downsample_audio(&all_audio, 3);
+            util::reverse_audio(&mut all_audio);
+            let resampled = util::downsample_audio(&all_audio, 3);
             let _ = audio_stream.put_data_f32(&resampled);
             frames_stepped = 1;
             emu_time_debt = Duration::ZERO;
@@ -733,7 +731,7 @@ fn main() {
         let samples = emu.drain_audio_samples();
         if !samples.is_empty() {
             if fast_forward {
-                let resampled = ui_util::downsample_audio(&samples, 4);
+                let resampled = util::downsample_audio(&samples, 4);
                 let _ = audio_stream.put_data_f32(&resampled);
             } else {
                 let _ = audio_stream.put_data_f32(&samples);

@@ -36,41 +36,29 @@ pub struct Cpu {
 
     // ── M-cycle state machine fields ──────────────────────────────────────────
     /// Current opcode being executed.
-    #[serde(default)]
     pub(crate) opcode: u8,
     /// CB-prefixed opcode (valid when opcode == 0xCB and phase >= 3).
-    #[serde(default)]
     cb_opcode: u8,
     /// Phase counter within current instruction. 0 = fetch next opcode.
-    #[serde(default)]
     pub(crate) phase: u8,
     /// Result of the last Read operation, set by the emulator loop.
-    #[serde(default)]
     pub data_latch: u8,
     /// Inter-phase scratch byte.
-    #[serde(default)]
     tmp8: u8,
     /// Inter-phase scratch word.
-    #[serde(default)]
     pub(crate) tmp16: u16,
     /// True when executing an interrupt dispatch sequence.
-    #[serde(default)]
     pub(crate) in_interrupt: bool,
     /// Phase counter within interrupt dispatch (0..=4).
-    #[serde(default)]
     pub(crate) interrupt_phase: u8,
     /// Write-style OAM bug address to trigger (set by CPU, consumed by emulator).
-    #[serde(default)]
     pub oam_bug_addr: Option<u16>,
     /// Read-style OAM bug address to trigger (set by CPU, consumed by emulator).
-    #[serde(default)]
     pub oam_bug_read_addr: Option<u16>,
     /// Saved `ime_pending` state at instruction start for EI delay.
-    #[serde(default)]
     pending_ime_at_start: bool,
     /// True when the last mcycle op was the final action of an instruction.
     /// The next mcycle() call will return Done.
-    #[serde(default)]
     finishing: bool,
 }
 

@@ -1128,7 +1128,6 @@ fn dispatch_stages_1_5b(
 
     // Stage 5a: T-junction stem CP snap. Dispatch 3× for convergence when
     // stem CPs are also neighbors of other T-junctions.
-    let _ = orig_pos_buf; // no longer needed after legacy inverse-correction was removed
     for _ in 0..3 {
         let cp = device
             .begin_compute_pass(

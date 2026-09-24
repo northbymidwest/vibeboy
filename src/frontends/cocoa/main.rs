@@ -34,7 +34,8 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 use objc2_metal::*;
 
-use ui_util::{frame_duration, parse_filter};
+use ui_util::parse_filter;
+use util::frame_duration;
 
 use accel::{close_accel, init_accel, poll_accel};
 use audio::{AudioRingBuffer, SharedAudioBuffer, setup_audio};
@@ -108,7 +109,7 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
     scaling::ScaleFilter::from_name(s).unwrap_or(scaling::ScaleFilter::Nearest)
 }
 
-use ui_util::auto_detect_model;
+use util::auto_detect_model;
 
 #[derive(Parser)]
 #[command(
@@ -119,7 +120,7 @@ struct Cli {
     rom: Option<PathBuf>,
     #[arg(long)]
     bootrom: Option<PathBuf>,
-    #[arg(long, value_parser = ui_util::parse_model)]
+    #[arg(long, value_parser = util::parse_model)]
     model: Option<GbModel>,
     #[arg(long)]
     snes_rom: Option<PathBuf>,
@@ -553,8 +554,8 @@ impl AppState {
                 self.emu.rewind_one_frame();
                 all_audio.extend_from_slice(&self.emu.drain_audio_samples());
             }
-            ui_util::reverse_audio(&mut all_audio);
-            let resampled = ui_util::downsample_audio(&all_audio, 3);
+            util::reverse_audio(&mut all_audio);
+            let resampled = util::downsample_audio(&all_audio, 3);
             if let Ok(mut ring) = self.audio_ring.lock() {
                 ring.write(&resampled);
             }
@@ -613,7 +614,7 @@ impl AppState {
         let samples = self.emu.drain_audio_samples();
         if !samples.is_empty() {
             let to_write: std::borrow::Cow<[f32]> = if fast_forward {
-                std::borrow::Cow::Owned(ui_util::downsample_audio(&samples, 4))
+                std::borrow::Cow::Owned(util::downsample_audio(&samples, 4))
             } else {
                 std::borrow::Cow::Borrowed(&samples[..])
             };

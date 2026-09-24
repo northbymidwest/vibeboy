@@ -189,7 +189,7 @@ enum TestCommand {
     Tearoom(TestArgs),
 }
 
-use vibeboy_core::ui_util::parse_model;
+use vibeboy_core::util::parse_model;
 
 fn main() {
     env_logger::init();

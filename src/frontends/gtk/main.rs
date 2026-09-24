@@ -125,7 +125,7 @@ fn create_emu_state(
 ) -> EmuState {
     let model = model_override
         .or(cli.model)
-        .unwrap_or_else(|| ui_util::auto_detect_model(&rom));
+        .unwrap_or_else(|| util::auto_detect_model(&rom));
     let boot_rom = load_boot_rom(model, cli);
 
     ui_util::print_controls();
@@ -516,7 +516,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             let interval_ms = {
                 let st = state_tick.borrow();
                 let st = st.as_ref().unwrap();
-                let frame_dur = ui_util::frame_duration(st.model);
+                let frame_dur = util::frame_duration(st.model);
                 frame_dur.as_millis().max(1) as u64
             };
 
@@ -564,8 +564,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 st.emu.rewind_one_frame();
                                 all_audio.extend_from_slice(&st.emu.drain_audio_samples());
                             }
-                            ui_util::reverse_audio(&mut all_audio);
-                            let resampled = ui_util::downsample_audio(&all_audio, 3);
+                            util::reverse_audio(&mut all_audio);
+                            let resampled = util::downsample_audio(&all_audio, 3);
                             if !resampled.is_empty() {
                                 let mut ring = st.audio_ring.lock().unwrap();
                                 ring.push(&resampled);
@@ -590,7 +590,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 frames_stepped = 4u32;
                                 let samples = st.emu.drain_audio_samples();
                                 if !samples.is_empty() {
-                                    let resampled = ui_util::downsample_audio(&samples, 4);
+                                    let resampled = util::downsample_audio(&samples, 4);
                                     let mut ring = st.audio_ring.lock().unwrap();
                                     ring.push(&resampled);
                                 }
@@ -1029,7 +1029,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         if let Some(s) = st.as_mut() {
             let model = s
                 .model_override
-                .unwrap_or_else(|| ui_util::auto_detect_model(&s.rom_data));
+                .unwrap_or_else(|| util::auto_detect_model(&s.rom_data));
             let boot_rom = load_boot_rom(model, &cli_for_reset);
             let path = s.rom_path.clone();
             s.sav_flusher.flush(&s.emu);
