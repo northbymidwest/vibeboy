@@ -704,6 +704,37 @@ impl Ppu {
     }
 }
 
+impl Ppu {
+    /// Check the fields a save state could set to values that later index out
+    /// of bounds. Called on snapshots from untrusted sources (save state
+    /// files, libretro), never on the in-memory rewind buffer.
+    pub(crate) fn validate_restored(&self) -> Result<(), &'static str> {
+        let fifo_ok = |f: &PixelFifo| f.head < f.buf.len() && f.count <= f.buf.len();
+        if !fifo_ok(&self.bg_fifo) || !fifo_ok(&self.oam_fifo) {
+            return Err("PPU FIFO index out of range");
+        }
+        if self.vram_bank > 1 || self.fetcher.latched_bank > 1 {
+            return Err("VRAM bank out of range");
+        }
+        // Tile data reads use latched_addr and latched_addr + 1.
+        if self.fetcher.latched_addr >= 0x1FFF || self.fetcher.latched_map_addr >= 0x2000 {
+            return Err("fetcher VRAM address out of range");
+        }
+        if self.scanline_sprites.len() > 10
+            || (self.sprite_fetch_active && self.sprite_fetch_entry >= self.scanline_sprites.len())
+        {
+            return Err("sprite fetch state out of range");
+        }
+        if self.frame_buffer.len() != 160 * 144 {
+            return Err("frame buffer size mismatch");
+        }
+        if self.sgb_mode && self.shade_buffer.len() != 160 * 144 {
+            return Err("SGB shade buffer size mismatch");
+        }
+        Ok(())
+    }
+}
+
 impl Default for Ppu {
     fn default() -> Self {
         Self::new()

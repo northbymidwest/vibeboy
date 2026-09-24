@@ -628,12 +628,15 @@ pub extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> bool {
             None => return false,
         };
         let bytes = std::slice::from_raw_parts(data as *const u8, size);
-        match crate::savestate::deserialize(bytes) {
-            Ok(snap) => {
-                core.emu.restore_snapshot(&snap);
-                true
+        let result = crate::savestate::deserialize(bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|snap| core.emu.restore_untrusted_snapshot(&snap));
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("Rejected save state: {e}");
+                false
             }
-            Err(_) => false,
         }
     }
 }

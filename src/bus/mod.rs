@@ -386,6 +386,28 @@ impl Bus {
     }
 
     /// Restore the bus state from a snapshot.
+    /// Reject a snapshot from an untrusted source (save state file, libretro)
+    /// whose fields would index out of bounds later, or that was taken on a
+    /// different hardware model.
+    pub(crate) fn validate_snapshot(
+        &self,
+        s: &crate::snapshot::BusSnapshot,
+    ) -> Result<(), &'static str> {
+        if s.model != self.model {
+            return Err("save state is for a different hardware model");
+        }
+        if !(1..=7).contains(&s.wram_bank) {
+            return Err("WRAM bank out of range");
+        }
+        if s.oam_dma.progress > 161 || s.oam_dma.pending_write.is_some_and(|(idx, _)| idx >= 160) {
+            return Err("OAM DMA state out of range");
+        }
+        if s.hdma.active && s.hdma.blocks == 0 {
+            return Err("HDMA active with no blocks left");
+        }
+        s.ppu.validate_restored()
+    }
+
     pub fn apply_snapshot(&mut self, s: &crate::snapshot::BusSnapshot) {
         self.ppu = s.ppu.clone();
         self.timer = s.timer.clone();

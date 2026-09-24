@@ -235,14 +235,11 @@ impl Emulator {
             let buttons = self.bus.joypad.buttons();
             self.restore_snapshot(&snap);
             self.bus.apu.restore_filter_state(&filter_state);
-            // Re-allocate output buffers (cleared before serialization to save space)
-            let (w, h) = if self.bus.ppu.sgb_mode {
-                (256, 224)
-            } else {
-                (160, 144)
-            };
-            if self.bus.ppu.frame_buffer.len() != w * h {
-                self.bus.ppu.frame_buffer.resize(w * h, 0);
+            // Re-allocate output buffers (cleared before serialization to save
+            // space). The PPU buffer is the 160x144 game screen on every model;
+            // the SGB border is composited separately into sgb_output.
+            if self.bus.ppu.frame_buffer.len() != 160 * 144 {
+                self.bus.ppu.frame_buffer.resize(160 * 144, 0);
             }
             if self.bus.ppu.sgb_mode && self.bus.ppu.shade_buffer.len() != 160 * 144 {
                 self.bus.ppu.shade_buffer.resize(160 * 144, 0);
@@ -300,9 +297,17 @@ impl Emulator {
     /// Load a save state from bytes into the given slot and restore it.
     /// Returns true on success.
     pub fn load_state_from_bytes(&mut self, slot: usize, data: &[u8]) -> bool {
-        match crate::savestate::deserialize(data) {
+        if slot >= self.save_slots.len() {
+            return false;
+        }
+        let result = crate::savestate::deserialize(data)
+            .map_err(|e| e.to_string())
+            .and_then(|snap| {
+                self.restore_untrusted_snapshot(&snap)?;
+                Ok(snap)
+            });
+        match result {
             Ok(snap) => {
-                self.restore_snapshot(&snap);
                 self.save_slots[slot] = Some(Box::new(snap));
                 self.rewind_buffer.clear();
                 true
@@ -312,6 +317,20 @@ impl Emulator {
                 false
             }
         }
+    }
+
+    /// Restore a snapshot that came from outside this process (a save state
+    /// file, a libretro frontend). Unlike `restore_snapshot`, it first checks
+    /// that the snapshot matches this emulator's model and that its index
+    /// fields are in range, so corrupt or crafted data is rejected instead of
+    /// panicking later. On error the current state is left untouched.
+    pub fn restore_untrusted_snapshot(&mut self, snap: &Snapshot) -> Result<(), String> {
+        self.bus.validate_snapshot(&snap.bus)?;
+        if snap.snes.is_some() != self.snes.is_some() {
+            return Err("save state SGB LLE mode does not match".into());
+        }
+        self.restore_snapshot(snap);
+        Ok(())
     }
 
     /// Run the SNES subsystem for one frame (LLE mode).
@@ -924,6 +943,30 @@ mod tests {
         emu.bus.write_byte(0xA000, 0x55);
         assert_ne!(emu.save_generation(), start);
         assert_eq!(emu.save_data()[0], 0x55);
+    }
+
+    #[test]
+    fn untrusted_snapshot_rejects_bad_state_and_keeps_current() {
+        let mut emu = battery_emu();
+        emu.step_frame();
+        let good = emu.save_snapshot();
+        let pc = emu.cpu.regs.pc;
+
+        let mut bad = good.clone();
+        bad.bus.wram_bank = 9;
+        assert!(emu.restore_untrusted_snapshot(&bad).is_err());
+        let mut bad = good.clone();
+        bad.bus.model = GbModel::Cgb;
+        assert!(emu.restore_untrusted_snapshot(&bad).is_err());
+        let mut bad = good.clone();
+        bad.bus.ppu.vram_bank = 2;
+        assert!(emu.restore_untrusted_snapshot(&bad).is_err());
+        assert_eq!(emu.cpu.regs.pc, pc, "rejected state must not be applied");
+
+        assert!(emu.restore_untrusted_snapshot(&good).is_ok());
+        let bytes = crate::savestate::serialize(&good);
+        assert!(emu.load_state_from_bytes(0, &bytes));
+        assert!(!emu.load_state_from_bytes(10, &bytes), "slot out of range");
     }
 
     #[test]
