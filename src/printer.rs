@@ -372,7 +372,7 @@ impl SerialDevice for Printer {
     fn tick(&mut self, ticks: u32) {
         // Accumulate idle time when protocol is active
         if self.command_state != CommandState::Magic1 || self.bits_received > 0 {
-            self.idle_time += ticks;
+            self.idle_time = self.idle_time.saturating_add(ticks);
         }
 
         // Decrement print timer

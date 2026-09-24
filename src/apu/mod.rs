@@ -487,7 +487,8 @@ impl Apu {
             self.ch2.tick_freq(cycles);
         }
         self.ch3.tick_freq(cycles);
-        self.ch4.alignment += cycles;
+        // Only the low 3 bits are read; wrap instead of overflowing.
+        self.ch4.alignment = self.ch4.alignment.wrapping_add(cycles);
         self.ch4.tick_counter(cycles);
 
         // Sweep calculation runs in 1MHz domain (one step per 2 T-cycles).

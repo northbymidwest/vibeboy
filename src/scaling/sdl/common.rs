@@ -31,11 +31,11 @@ pub(super) fn upload_pixels(
 ) {
     let mut map = transfer_buf.map::<u8>(device, true);
     let dst = map.mem_mut();
-    let byte_count = (tex_w * tex_h * 4) as usize;
-    let src = unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, byte_count) };
-    dst[..byte_count].copy_from_slice(src);
-    for i in (3..byte_count).step_by(4) {
-        dst[i] = 0xFF;
+    let pixel_count = (tex_w * tex_h) as usize;
+    // Pixels are 0x00RRGGBB; the texture wants the same bytes with alpha set.
+    let (dst_px, _) = dst[..pixel_count * 4].as_chunks_mut::<4>();
+    for (d, &p) in dst_px.iter_mut().zip(&pixels[..pixel_count]) {
+        *d = (p | 0xFF00_0000).to_ne_bytes();
     }
     map.unmap();
 }
