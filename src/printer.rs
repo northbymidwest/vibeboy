@@ -7,7 +7,8 @@ use crate::serial::SerialDevice;
 
 const PRINTER_DATA_SIZE: usize = 0x280;
 const PRINTER_MAX_COMMAND_LENGTH: usize = 0x280;
-/// Maximum image size: 160 pixels wide x 200 pixels tall (25 strips of 2 tile rows)
+/// Image buffer: the printer's 8 KiB of RAM holds 160x200 2bpp pixels. A DATA
+/// packet is 16 rows, so the last of 13 packets only partly fits.
 const PRINTER_IMAGE_SIZE: usize = 160 * 200;
 
 const COMMAND_INIT: u8 = 0x01;
@@ -254,8 +255,7 @@ impl Printer {
                 if self.command_length == 4 {
                     self.status = 6; // Printing
 
-                    // Calculate print time: 1 second per 8-pixel row
-                    let rows = self.image_offset / 160;
+                    let rows = self.image_rows();
                     self.time_remaining = (rows as u32) * self.clock_rate / 256 / 8;
 
                     self.output_image();
@@ -293,9 +293,16 @@ impl Printer {
         self.command_length = 0;
     }
 
+    /// Rows of image data received since the last print. `image_offset` can
+    /// run past the buffer when a packet overflows it (the overflowing rows
+    /// are dropped), so clamp to the rows actually stored.
+    fn image_rows(&self) -> usize {
+        self.image_offset.min(PRINTER_IMAGE_SIZE) / 160
+    }
+
     /// Render the 2-bit image buffer to RGBA pixels using the print palette.
     fn render_rgba(&self) -> Option<(Vec<u8>, u32, u32)> {
-        let height = self.image_offset / 160;
+        let height = self.image_rows();
         if height == 0 {
             return None;
         }
@@ -383,5 +390,30 @@ impl SerialDevice for Printer {
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_command(printer: &mut Printer, id: u8, length: usize) {
+        printer.command_id = id;
+        printer.command_length = length;
+        printer.handle_command();
+    }
+
+    #[test]
+    fn overfull_image_prints_without_overflow() {
+        let mut printer = Printer::new(4_194_304);
+        run_command(&mut printer, COMMAND_INIT, 0);
+        // 13 packets of 16 rows = 208 rows, 8 more than the buffer holds.
+        for _ in 0..13 {
+            run_command(&mut printer, COMMAND_DATA, PRINTER_DATA_SIZE);
+        }
+        run_command(&mut printer, COMMAND_START, 4);
+        let (rgba, w, h) = printer.take_print().expect("print queued");
+        assert_eq!((w, h), (160, 200));
+        assert_eq!(rgba.len(), 160 * 200 * 4);
     }
 }
