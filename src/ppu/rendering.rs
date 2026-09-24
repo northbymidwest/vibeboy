@@ -699,6 +699,10 @@ impl Ppu {
                     self.obp0_rendering
                 };
                 (pal, oam_px.color_index)
+            } else if self.lcdc & 0x01 == 0 {
+                // LCDC bit 0 off: BG/window draws as color 0, same as the
+                // framebuffer path above (the SGB is a DMG-type PPU).
+                (self.bgp_rendering, 0)
             } else {
                 (self.bgp_rendering, bg.color_index)
             };
