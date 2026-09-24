@@ -301,7 +301,7 @@ impl Ppu {
                     tile_idx
                 };
                 let row_in_tile = row % 8;
-                let vram_bank_sel = if self.cgb_mode && attrs & 0x08 != 0 {
+                let vram_bank_sel = if self.cgb_attributes() && attrs & 0x08 != 0 {
                     1usize
                 } else {
                     0usize
@@ -338,7 +338,7 @@ impl Ppu {
     fn mix_sprite_into_fifo(&mut self, sprite_x: u8, attrs: u8, oam_index: u8) {
         let x_flip = attrs & 0x20 != 0;
         let bg_over = attrs & 0x80 != 0;
-        let palette_idx = if self.cgb_mode && !self.dmg_compat {
+        let palette_idx = if self.cgb_attributes() {
             attrs & 0x07
         } else if self.dmg_compat {
             if attrs & 0x10 != 0 { 1 } else { 0 }
@@ -423,7 +423,9 @@ impl Ppu {
                     self.fetcher_map_addr()
                 };
                 self.fetcher.tile_id = self.vram[0][map_addr];
-                self.fetcher.tile_attrs = if self.cgb_mode {
+                // BG map attributes only exist in CGB mode; in DMG
+                // compatibility mode tiles have no attributes.
+                self.fetcher.tile_attrs = if self.cgb_attributes() {
                     self.vram[1][map_addr]
                 } else {
                     0
@@ -542,12 +544,9 @@ impl Ppu {
             (0x1000i32 + (tile_id as i8 as i32) * 16) as u16
         };
 
-        let y_flip = self.cgb_mode && attrs & 0x40 != 0;
-        let bank = if self.cgb_mode && attrs & 0x08 != 0 {
-            1
-        } else {
-            0
-        };
+        // attrs is 0 outside CGB mode (see GetTileT2)
+        let y_flip = attrs & 0x40 != 0;
+        let bank = if attrs & 0x08 != 0 { 1 } else { 0 };
 
         // CGB: use latched fetcher_y from T1; DMG: read SCY+LY fresh
         let pixel_y = if self.cgb_mode {
@@ -599,13 +598,10 @@ impl Ppu {
         let hi = self.fetcher.tile_data_high;
         let attrs = self.fetcher.tile_attrs;
 
-        let x_flip = self.cgb_mode && attrs & 0x20 != 0;
-        let bg_prio = self.cgb_mode && attrs & 0x80 != 0;
-        let palette = if self.cgb_mode && !self.dmg_compat {
-            attrs & 0x07
-        } else {
-            0
-        };
+        // attrs is 0 outside CGB mode (see GetTileT2)
+        let x_flip = attrs & 0x20 != 0;
+        let bg_prio = attrs & 0x80 != 0;
+        let palette = attrs & 0x07;
 
         for px in 0..8u8 {
             let bit = if x_flip { px } else { 7 - px };
@@ -671,7 +667,7 @@ impl Ppu {
             }
         } else {
             // BG/window pixel
-            if self.cgb_mode && !self.dmg_compat {
+            if self.cgb_attributes() {
                 // Native CGB: LCDC bit 0 doesn't disable BG display
                 self.gbc_bg_color(bg.palette as usize, bg.color_index as usize)
             } else if self.cgb_mode && self.dmg_compat {
@@ -742,7 +738,7 @@ impl Ppu {
         Self::gbc_15bit_to_32bit(c)
     }
 
-    fn gbc_obj_color(&self, palette_idx: usize, color_idx: usize) -> u32 {
+    pub(super) fn gbc_obj_color(&self, palette_idx: usize, color_idx: usize) -> u32 {
         let offset = palette_idx * 8 + color_idx * 2;
         let lo = self.ocpd[offset] as u16;
         let hi = self.ocpd[offset + 1] as u16;

@@ -267,7 +267,9 @@ pub struct Ppu {
     /// CGB: dot at which palette blocking clears (0 = not pending).
     cgb_palette_unblock_dot: u32,
 
-    /// True = CGB game (uses CGB palettes), false = DMG game (uses BGP/OBP0/OBP1).
+    /// CGB hardware (CGB/AGB, not SGB). Selects CGB PPU timing and the CGB
+    /// colour pipeline (palette RAM). Stays true in DMG-compatibility mode;
+    /// use `cgb_attributes()` for the CGB-mode-only rendering features.
     pub cgb_mode: bool,
 
     /// CGB double-speed mode active.
@@ -282,7 +284,8 @@ pub struct Ppu {
     pub shade_buffer: Vec<u8>,
 
     /// True = CGB hardware running a DMG game (DMG compatibility mode).
-    /// Uses CGB palette RAM but with DMG-style palette selection.
+    /// Uses CGB palette RAM but with DMG-style palette selection, and ignores
+    /// BG map attributes and OAM attribute bits 0-3.
     pub dmg_compat: bool,
 
     /// $FF6C OPRI: Object priority mode (CGB only)
@@ -687,6 +690,14 @@ impl Ppu {
         // Trademark symbol at row 8, col 16
         self.vram[0][scrn0 + 8 * 32 + 16] = 0x19;
     }
+    /// True when the PPU renders in CGB mode: BG map attributes come from
+    /// VRAM bank 1 and OAM attribute bits 0-3 select the VRAM bank and CGB
+    /// palette. False on DMG/SGB and on CGB hardware in DMG-compatibility
+    /// mode, where BG tiles have no attributes and objects only use the DMG
+    /// attribute bits (priority, flips, OBP0/OBP1).
+    pub(crate) fn cgb_attributes(&self) -> bool {
+        self.cgb_mode && !self.dmg_compat
+    }
 }
 
 impl Ppu {
@@ -765,5 +776,55 @@ mod lcd_off_tests {
         assert_eq!(p.pending_lyc, None);
         assert_eq!(p.read(0xFF45), 0x42);
         assert_eq!(p.lyc, 0x42);
+    }
+}
+
+#[cfg(test)]
+mod dmg_compat_tests {
+    use super::Ppu;
+
+    /// CGB hardware in DMG-compatibility mode with distinct BG and OBJ
+    /// colours, tile 1 solid colour 3 in VRAM bank 0 and nothing in bank 1.
+    fn compat_ppu() -> Ppu {
+        let mut p = Ppu::new();
+        p.cgb_mode = true;
+        p.dmg_compat = true;
+        p.dmg_bg_ref = [0x7FFF, 0x56B5, 0x294A, 0x0000];
+        p.dmg_obj_ref = [[0x001F; 4]; 2];
+        p.write(0xFF47, 0xE4);
+        p.write(0xFF48, 0xE4);
+        for b in &mut p.vram[0][0x10..0x20] {
+            *b = 0xFF;
+        }
+        p.write(0xFF40, 0x00);
+        p
+    }
+
+    fn run_frames(p: &mut Ppu, frames: u32) {
+        for _ in 0..frames * 70224 {
+            p.step(1);
+        }
+    }
+
+    #[test]
+    fn oam_bank_bit_ignored() {
+        let mut p = compat_ppu();
+        // Object at the top-left corner with stray attribute bits 0-3 set.
+        p.oam[0..4].copy_from_slice(&[16, 8, 1, 0x0F]);
+        p.write(0xFF40, 0x93);
+        run_frames(&mut p, 2);
+        assert_eq!(p.frame_buffer[0], p.gbc_obj_color(0, 3));
+    }
+
+    #[test]
+    fn bg_map_attributes_ignored() {
+        let mut p = compat_ppu();
+        // Map entry 0 -> tile 1; bank 1 holds an attribute byte selecting
+        // tile bank 1 (empty), palette 7 and BG-over-OBJ priority.
+        p.vram[0][0x1800] = 1;
+        p.vram[1][0x1800] = 0x8F;
+        p.write(0xFF40, 0x91);
+        run_frames(&mut p, 2);
+        assert_eq!(p.frame_buffer[0], p.gbc_bg_color(0, 3));
     }
 }
