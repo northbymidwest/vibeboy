@@ -21,7 +21,6 @@ use sdl3::sys::camera::{
 use sdl3::sys::pixels::{SDL_Colorspace, SDL_PixelFormat as SysPixelFormat};
 use sdl3::sys::stdinc::SDL_free;
 use sdl3::sys::surface::SDL_Surface;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -33,7 +32,7 @@ use camera::CameraThread;
 use input::handle_input;
 use render::{cpu_scale_frame, display_size};
 
-use util::frame_duration;
+use ui_util::{HoldInputs, Session, SessionConfig};
 use util::parse_model;
 
 /// Which accelerometer source is active.
@@ -154,6 +153,42 @@ fn pick_rom_file() -> PathBuf {
     }
 }
 
+/// Open the first gamepad that SDL can open.
+fn open_first_gamepad(sys: &sdl3::GamepadSubsystem) -> Option<sdl3::gamepad::Gamepad> {
+    let gp = sys
+        .gamepads()
+        .ok()?
+        .into_iter()
+        .find_map(|id| sys.open(id).ok())?;
+    eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
+    enable_gamepad_sensors(&gp);
+    Some(gp)
+}
+
+/// Open the default playback device with a stream at the APU rate. Returns
+/// `None`, and the emulator runs silent, when there is no usable device.
+fn open_audio(
+    sdl: &sdl3::Sdl,
+) -> Option<(sdl3::audio::AudioDevice, sdl3::audio::AudioStreamOwner)> {
+    let open = || {
+        let audio = sdl.audio()?;
+        sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "2048");
+        let spec = AudioSpec {
+            freq: Some(AUDIO_SAMPLE_RATE as i32),
+            channels: Some(2),
+            format: Some(AudioFormat::F32LE),
+        };
+        let device = audio.open_playback_device(&spec)?;
+        let stream = audio.new_playback_stream(&spec, None)?;
+        device.bind_stream(&stream)?;
+        device.resume();
+        Ok::<_, sdl3::Error>((device, stream))
+    };
+    open()
+        .map_err(|e| eprintln!("Audio unavailable, running without sound: {}", e))
+        .ok()
+}
+
 fn main() {
     env_logger::init();
 
@@ -172,47 +207,6 @@ fn main() {
         pick_rom_file()
     };
 
-    let rom = fs::read(&rom_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
-        std::process::exit(1);
-    });
-
-    // Resolve hardware model
-    let model = cli.model.unwrap_or_else(|| util::auto_detect_model(&rom));
-
-    let frame_dur = frame_duration(model);
-
-    // Resolve boot ROM: explicit path, or auto-detect by model
-    let boot_rom = ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot);
-
-    if boot_rom.is_some() {
-        eprintln!("Boot ROM loaded — executing boot sequence.");
-    }
-
-    // Load SNES program ROM for SGB LLE (only when --lle flag is set)
-    let snes_rom: Option<Vec<u8>> = if model.is_sgb() && cli.lle {
-        if let Some(ref p) = cli.snes_rom {
-            Some(fs::read(p).unwrap_or_else(|e| {
-                eprintln!("Failed to read SNES ROM '{}': {}", p.display(), e);
-                std::process::exit(1);
-            }))
-        } else {
-            // Auto-detect: try sgb1.program.rom, sgb2.program.rom, sgb.sfc, sgb2.sfc
-            let candidates = match model {
-                GbModel::Sgb2 => vec!["sgb2.program.rom", "sgb2.sfc"],
-                GbModel::Sgb => vec!["sgb1.program.rom", "sgb.sfc"],
-                _ => vec![],
-            };
-            candidates.iter().find_map(|name| fs::read(name).ok())
-        }
-    } else {
-        None
-    };
-
-    if snes_rom.is_some() {
-        eprintln!("SNES program ROM loaded — SGB LLE mode active.");
-    }
-
     // Parse scaling filter (name already validated and lowercased by parse_filter)
     let scale_filter =
         scaling::ScaleFilter::from_name(&cli.filter).expect("filter validated by parse_filter");
@@ -223,23 +217,27 @@ fn main() {
     }
     eprintln!();
 
-    let mut emu = Emulator::new(
-        rom,
-        boot_rom,
-        model,
-        snes_rom,
-        clock::default_clock(),
-        AUDIO_SAMPLE_RATE,
-    );
-    ui_util::load_sav(&mut emu, &rom_path);
-    let mut sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
+    let runahead = cli.runahead.unwrap_or(0);
+    let mut session = Session::new(
+        &rom_path,
+        SessionConfig {
+            model: cli.model,
+            bootrom: cli.bootrom.clone(),
+            no_boot: cli.no_boot,
+            lle: cli.lle,
+            snes_rom: cli.snes_rom.clone(),
+            printer: cli.printer,
+            runahead,
+            sample_rate: AUDIO_SAMPLE_RATE,
+        },
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to load '{}': {}", rom_path.display(), e);
+        std::process::exit(1);
+    });
+    let frame_dur = session.frame_duration();
 
-    if cli.printer {
-        emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
-        eprintln!("Game Boy Printer connected — images will be saved to prints/");
-    }
-
-    let is_sgb = emu.is_sgb();
+    let is_sgb = session.emu.is_sgb();
     let (src_w, src_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
     let is_resizable = scale_filter.is_resizable();
     let filter_factor = scale_filter.factor().max(1); // 0 = adaptive, treat as 1× for initial sizing
@@ -259,7 +257,6 @@ fn main() {
     // ── SDL3 init ─────────────────────────────────────────────────────────────
     let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
-    let audio = sdl.audio().unwrap();
 
     // ── Video + GPU ──────────────────────────────────────────────────────────
     let mut window_builder = video.window("GBC Emulator", win_w, win_h);
@@ -294,36 +291,18 @@ fn main() {
     let mut event_pump = sdl.event_pump().unwrap();
 
     // ── Gamepad ───────────────────────────────────────────────────────────────
-    let gamepad_sys = sdl.gamepad().unwrap();
-    let mut gamepad = {
-        let mut found = None;
-        if let Ok(ids) = gamepad_sys.gamepads() {
-            for id in ids {
-                if let Ok(gp) = gamepad_sys.open(id) {
-                    eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
-                    enable_gamepad_sensors(&gp);
-                    found = Some(gp);
-                    break;
-                }
-            }
-        }
-        found
-    };
+    // Gamepads are optional: without the subsystem, play on the keyboard.
+    let gamepad_sys = sdl
+        .gamepad()
+        .map_err(|e| eprintln!("Gamepad support unavailable: {}", e))
+        .ok();
+    let mut gamepad = gamepad_sys.as_ref().and_then(open_first_gamepad);
 
     // ── Audio ─────────────────────────────────────────────────────────────────
-    sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "2048");
-    let emu_audio_spec = AudioSpec {
-        freq: Some(AUDIO_SAMPLE_RATE as i32),
-        channels: Some(2),
-        format: Some(AudioFormat::F32LE),
-    };
-    let audio_device = audio.open_playback_device(&emu_audio_spec).unwrap();
-    let audio_stream = audio.new_playback_stream(&emu_audio_spec, None).unwrap();
-    audio_device.bind_stream(&audio_stream).unwrap();
-    audio_device.resume();
+    let audio = open_audio(&sdl);
 
     // ── Camera (webcam for Pocket Camera mapper, only if cart has camera) ──
-    let camera_thread = if emu.has_camera() {
+    let camera_thread = if session.emu.has_camera() {
         CameraThread::start(&sdl)
     } else {
         None
@@ -331,15 +310,14 @@ fn main() {
     let mut camera_buf = [0u8; 128 * 112];
 
     // ── Accelerometer (MBC7 / Kirby Tilt 'n' Tumble) ──
-    let accel_source = if emu.has_accelerometer() {
+    let accel_source = if session.emu.has_accelerometer() {
         init_accel(&sdl)
     } else {
         AccelSource::None
     };
 
-    let has_rumble = emu.has_rumble();
+    let has_rumble = session.emu.has_rumble();
     let mut rumble_was_on = false;
-    let runahead = cli.runahead.unwrap_or(0);
     if runahead > 0 {
         eprintln!(
             "  Run-ahead: {} frame{}",
@@ -348,16 +326,14 @@ fn main() {
         );
     }
 
-    let mut current_slot: usize = 0; // save state slot (0-indexed, shown as 1-9)
-    let mut paused = false;
-    let mut step_one_frame = false;
-
-    let mut frame_start = Instant::now();
-    let mut emu_time_debt = Duration::ZERO; // accumulated emulation time for vsync decoupling
     let mut fps = ui_util::FpsCounter::new();
 
     'running: loop {
+        let loop_start = Instant::now();
+
         // ── Events ────────────────────────────────────────────────────────────
+        // Hotkeys ignore key auto-repeat, except frame advance, which steps
+        // repeatedly while Period is held.
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -367,19 +343,21 @@ fn main() {
                 } => break 'running,
                 Event::KeyDown {
                     keycode: Some(Keycode::F5),
+                    repeat: false,
                     ..
                 } => {
-                    ui_util::save_state_to_slot(&mut emu, &rom_path, current_slot);
+                    session.save_state(session.slot());
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::F9),
+                    repeat: false,
                     ..
                 } => {
                     // Screenshot: save raw PPU output and scaled GPU output
                     let raw: &[u32] = if is_sgb {
-                        emu.sgb_composited_frame()
+                        session.emu.sgb_composited_frame()
                     } else {
-                        emu.frame_buffer()
+                        session.emu.frame_buffer()
                     };
                     let sw = src_w as usize;
                     let sh = src_h as usize;
@@ -472,32 +450,28 @@ fn main() {
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::F7),
+                    repeat: false,
                     ..
                 } => {
-                    ui_util::load_state_from_slot(&mut emu, &rom_path, current_slot);
+                    session.load_state(session.slot());
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Space),
+                    repeat: false,
                     ..
                 } => {
-                    paused = !paused;
-                    if paused {
-                        eprintln!("Paused");
-                    } else {
-                        eprintln!("Resumed");
-                        emu_time_debt = Duration::ZERO;
-                    }
+                    session.toggle_pause();
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::Period),
                     ..
                 } => {
-                    if paused {
-                        step_one_frame = true;
-                    }
+                    session.request_frame_advance();
                 }
                 Event::KeyDown {
-                    keycode: Some(k), ..
+                    keycode: Some(k),
+                    repeat: false,
+                    ..
                 } => {
                     let slot = match k {
                         Keycode::_0 => Some(0),
@@ -513,13 +487,13 @@ fn main() {
                         _ => None,
                     };
                     if let Some(s) = slot {
-                        current_slot = s;
-                        eprintln!("Slot {} selected", current_slot);
+                        session.select_slot(s);
                     }
                 }
                 Event::GamepadAdded { which, .. } => {
                     if gamepad.is_none()
-                        && let Ok(gp) = gamepad_sys.open(which)
+                        && let Some(ref sys) = gamepad_sys
+                        && let Ok(gp) = sys.open(which)
                     {
                         eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
                         enable_gamepad_sensors(&gp);
@@ -530,31 +504,25 @@ fn main() {
                     if gamepad.as_ref().is_some_and(|g| g.id().ok() == Some(which)) =>
                 {
                     eprintln!("Gamepad disconnected");
-                    gamepad = None;
                     // Try to pick up another connected gamepad
-                    if let Ok(ids) = gamepad_sys.gamepads() {
-                        for id in ids {
-                            if let Ok(gp) = gamepad_sys.open(id) {
-                                eprintln!("Gamepad connected: {}", gp.name().unwrap_or_default());
-                                enable_gamepad_sensors(&gp);
-                                gamepad = Some(gp);
-                                break;
-                            }
-                        }
-                    }
+                    gamepad = gamepad_sys.as_ref().and_then(open_first_gamepad);
                 }
                 _ => {}
             }
         }
 
         // ── Input ─────────────────────────────────────────────────────────────
-        handle_input(&mut emu, &event_pump.keyboard_state(), gamepad.as_ref());
+        handle_input(
+            &mut session.emu,
+            &event_pump.keyboard_state(),
+            gamepad.as_ref(),
+        );
 
         // ── Webcam → Pocket Camera ────────────────────────────────────────────
         if let Some(ref ct) = camera_thread
             && ct.read_frame(&mut camera_buf)
         {
-            emu.set_camera_image(&camera_buf);
+            session.emu.set_camera_image(&camera_buf);
         }
 
         // ── Accelerometer → MBC7 ─────────────────────────────────────────────
@@ -603,118 +571,37 @@ fn main() {
             if got {
                 let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
                 let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
-                emu.set_accelerometer(mbc7_x, mbc7_y);
+                session.emu.set_accelerometer(mbc7_x, mbc7_y);
             }
         }
 
-        // ── Rewind / Fast-forward / Slow-motion ─────────────────────────────
+        // ── Emulation ─────────────────────────────────────────────────────────
         let ks = event_pump.keyboard_state();
-        let mut backspace_held = ks.is_scancode_pressed(Scancode::Backspace);
-        let mut fast_forward = ks.is_scancode_pressed(Scancode::Tab);
-        let slow_motion = ks.is_scancode_pressed(Scancode::Minus);
         // Left shoulder = rewind, right shoulder = fast forward
-        if let Some(ref gp) = gamepad {
-            if gp.button(GpButton::LeftShoulder) {
-                backspace_held = true;
-            }
-            if gp.button(GpButton::RightShoulder) {
-                fast_forward = true;
-            }
+        let shoulder = |b| gamepad.as_ref().is_some_and(|gp| gp.button(b));
+        let hold = HoldInputs {
+            rewind: ks.is_scancode_pressed(Scancode::Backspace) || shoulder(GpButton::LeftShoulder),
+            fast_forward: ks.is_scancode_pressed(Scancode::Tab)
+                || shoulder(GpButton::RightShoulder),
+            slow_motion: ks.is_scancode_pressed(Scancode::Minus),
+        };
+        // Audio-driven pacing: the session steps by how much audio SDL has
+        // queued (bytes of interleaved stereo f32), or by wall-clock time
+        // without an audio device.
+        let audio_queued = audio
+            .as_ref()
+            .and_then(|(_, stream)| stream.queued_bytes().ok())
+            .map(|bytes| bytes.max(0) as usize / (2 * size_of::<f32>()));
+        let out = session.tick(&hold, audio_queued);
+        if let Some((_, stream)) = &audio
+            && !out.audio.is_empty()
+        {
+            let _ = stream.put_data_f32(&out.audio);
         }
-        emu.set_rewinding(backspace_held);
-
-        // ── Frame stepping ────────────────────────────────────────────────────
-        // Audio-driven timing: use the audio queue depth to decide when to step
-        // the emulator. This synchronizes emulation speed to the audio device's
-        // clock, preventing buffer underruns (crackling) and overruns (latency).
-        //
-        // Target: keep ~40ms of audio queued. Step a frame if below target,
-        // skip if above. Special modes (rewind, fast-forward, pause) bypass this.
-        let audio_target_bytes: i32 = (AUDIO_SAMPLE_RATE as i32 / 25) * 2 * 4; // ~40ms stereo f32
-        let audio_max_bytes: i32 = audio_target_bytes * 3; // ~120ms cap
-
-        // Also track wall time for non-audio modes and FPS display
-        let elapsed = frame_start.elapsed();
-        frame_start = Instant::now();
-        emu_time_debt += elapsed;
-        let max_debt = frame_dur * 4;
-        if emu_time_debt > max_debt {
-            emu_time_debt = max_debt;
-        }
-
-        let emu_start = Instant::now();
-        let mut frames_stepped: u32 = 0;
-        if paused && !step_one_frame {
-            emu_time_debt = Duration::ZERO;
-        } else if step_one_frame {
-            emu.step_frame_runahead(runahead);
-            frames_stepped = 1;
-            step_one_frame = false;
-            emu_time_debt = Duration::ZERO;
-        } else if backspace_held {
-            // Rewind at 3x speed
-            let mut all_audio = Vec::with_capacity(19200);
-            for _ in 0..3 {
-                emu.rewind_one_frame();
-                all_audio.extend_from_slice(&emu.drain_audio_samples());
-            }
-            util::reverse_audio(&mut all_audio);
-            let resampled = util::downsample_audio(&all_audio, 3);
-            let _ = audio_stream.put_data_f32(&resampled);
-            frames_stepped = 1;
-            emu_time_debt = Duration::ZERO;
-        } else if fast_forward {
-            for _ in 0..4 {
-                emu.step_frame();
-            }
-            frames_stepped = 4;
-            emu_time_debt = Duration::ZERO;
-        } else if slow_motion {
-            let slow_dur = frame_dur * 2;
-            while emu_time_debt >= slow_dur {
-                emu.step_frame_runahead(runahead);
-                frames_stepped += 1;
-                emu_time_debt -= slow_dur;
-            }
-        } else {
-            // Audio-driven: step frames while the audio queue needs filling.
-            let queued = audio_stream.queued_bytes().unwrap_or(audio_target_bytes);
-            let frames_needed = if queued < audio_target_bytes {
-                // Below target: step 1–2 frames to catch up
-                if queued < audio_target_bytes / 2 {
-                    2u32
-                } else {
-                    1
-                }
-            } else if queued > audio_max_bytes {
-                // Way over target: skip stepping to let the queue drain
-                0
-            } else {
-                // Near target: step 1 frame to maintain level
-                1
-            };
-            for i in 0..frames_needed {
-                // Only runahead on the last frame (the one we display)
-                if i == frames_needed - 1 {
-                    emu.step_frame_runahead(runahead);
-                } else {
-                    emu.step_frame();
-                }
-                frames_stepped += 1;
-            }
-            // Keep time debt roughly in sync (for FPS counter accuracy)
-            if frames_stepped > 0 {
-                emu_time_debt = emu_time_debt.saturating_sub(frame_dur * frames_stepped);
-            }
-        }
-        let emu_elapsed = emu_start.elapsed();
-
-        // ── Printer ──────────────────────────────────────────────────────────
-        ui_util::check_and_save_prints(&mut emu);
 
         // ── Rumble ────────────────────────────────────────────────────────────
         if has_rumble {
-            let rumble_on = emu.drain_rumble();
+            let rumble_on = session.emu.drain_rumble();
             if rumble_on != rumble_was_on {
                 if let Some(ref mut gp) = gamepad {
                     if rumble_on {
@@ -727,29 +614,23 @@ fn main() {
             }
         }
 
-        // ── Audio ─────────────────────────────────────────────────────────────
-        let samples = emu.drain_audio_samples();
-        if !samples.is_empty() {
-            if fast_forward {
-                let resampled = util::downsample_audio(&samples, 4);
-                let _ = audio_stream.put_data_f32(&resampled);
-            } else {
-                let _ = audio_stream.put_data_f32(&samples);
-            }
-        }
-
         // ── Render ────────────────────────────────────────────────────────────
+        // Nothing is presented (so vsync does not pace the loop) while the
+        // window is occluded, minimized or hidden.
         #[cfg(feature = "sdl3-gpu-shaders")]
-        let occluded = window.window_flags() & sdl3::sys::video::SDL_WINDOW_OCCLUDED
-            != sdl3::sys::video::SDL_WindowFlags(0);
+        let window_flags = window.window_flags();
         #[cfg(not(feature = "sdl3-gpu-shaders"))]
-        let occluded = canvas.window().window_flags() & sdl3::sys::video::SDL_WINDOW_OCCLUDED
+        let window_flags = canvas.window().window_flags();
+        let occluded = window_flags
+            & (sdl3::sys::video::SDL_WINDOW_OCCLUDED
+                | sdl3::sys::video::SDL_WINDOW_MINIMIZED
+                | sdl3::sys::video::SDL_WINDOW_HIDDEN)
             != sdl3::sys::video::SDL_WindowFlags(0);
         if !occluded {
             let raw_src: &[u32] = if is_sgb {
-                emu.sgb_composited_frame()
+                session.emu.sgb_composited_frame()
             } else {
-                emu.frame_buffer()
+                session.emu.frame_buffer()
             };
             let sw = src_w as usize;
             let sh = src_h as usize;
@@ -864,14 +745,15 @@ fn main() {
         }
 
         // ── FPS counter ───────────────────────────────────────────────────────
-        fps.update(frames_stepped, emu_elapsed);
+        fps.update(out.frames_emulated(), out.emu_time);
 
-        // ── Periodic save RAM flush ──────────────────────────────────────────
-        sav_flusher.poll(&emu);
-
-        // No manual frame cap — vsync handles pacing, and the time accumulator
-        // above ensures emulation runs at the correct speed regardless of
-        // display refresh rate.
+        // While presenting, vsync paces the loop and the session's audio
+        // pacing keeps emulation at the right speed at any refresh rate.
+        // Without a present, sleep out the rest of the frame instead of
+        // spinning a core.
+        if occluded {
+            std::thread::sleep(frame_dur.saturating_sub(loop_start.elapsed()));
+        }
     }
 
     // Cleanup accelerometer
@@ -883,5 +765,5 @@ fn main() {
     // Camera thread shuts down automatically via Drop
     drop(camera_thread);
 
-    sav_flusher.flush(&emu);
+    session.flush_save();
 }
