@@ -267,6 +267,15 @@ Downloads the c-sp/game-boy-test-roms v7.0 release from GitHub and unpacks it in
 ./scripts/fetch-test-roms.sh
 ```
 
+#### `scripts/accuracy.sh` -- Accuracy Regression Check
+
+Runs every test ROM suite (mooneye, wilbertpol, blargg, gambatte, same-suite, gbmicrotest, tearoom DMG and CGB) and compares each test's status against `tests/accuracy-baseline.txt`. Prints the tests gained and lost and exits 1 if any test that passed in the baseline no longer does. `.github/workflows/accuracy.yml` runs it on every push and PR. A change that trades tests must update the baseline in the same commit.
+
+```bash
+./scripts/accuracy.sh             # compare against the baseline
+./scripts/accuracy.sh --update    # rewrite the baseline from this run
+```
+
 #### `scripts/bundle_app.sh` -- Build macOS Application Bundle
 
 Builds the `vibeboy_cocoa` binary in release mode and packages it into a `VibeBoy.app` macOS application bundle under `target/VibeBoy.app`. Copies the binary, `Info.plist`, and app icon (`resources/AppIcon.icns`) into the bundle structure.

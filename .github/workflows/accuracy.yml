@@ -1,9 +1,12 @@
 name: accuracy
 
-# The test ROM suites, through `test_runner`. Informational only: accuracy
-# work routinely trades a few tests for a better model, so a lower count is
-# a number to read, not a red check. The job reports counts and failing test
-# names in the run summary and never fails on results.
+# The test ROM suites, through `scripts/accuracy.sh`, against the per-test
+# baseline in `tests/accuracy-baseline.txt`. Accuracy work routinely trades
+# a few tests for a better model, so a lower count alone is not a failure:
+# a lost test is, until the commit that loses it also updates the baseline
+# (`./scripts/accuracy.sh --update`) and says why. The run summary lists
+# every test gained or lost; the artifact holds each suite's raw output and
+# the full result list, `results/accuracy.txt`, in the baseline's format.
 #
 # c-sp/game-boy-test-roms is fetched by the same script a developer uses
 # and cached by its release tag, which is pinned inside that script.
@@ -25,8 +28,6 @@ jobs:
   accuracy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # A build or download failure is not a result about accuracy either.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,53 +48,8 @@ jobs:
 
       - run: cargo build --release --locked --bin test_runner
 
-      - name: Run the suites
-        run: |
-          set -uo pipefail
-          tr=target/release/test_runner
-          roms=game-boy-test-roms
-          mkdir -p results
-          run() {
-            name=$1; shift
-            echo "::group::$name"
-            "$tr" test "$@" 2>&1 | grep -v '^1M iters' | tee "results/$name.txt"
-            echo "::endgroup::"
-          }
-          run mooneye-acceptance mooneye "$roms/mooneye-test-suite/acceptance/"
-          run blargg blargg "$roms/blargg/"
-          run samesuite-apu mooneye "$roms/same-suite/apu/"
-          run gambatte gambatte "$roms/gambatte/" --quiet
-
-      - name: Summarise
-        if: always()
-        run: |
-          set -u
-          {
-            echo '## Test ROM accuracy'
-            echo
-            echo '| Suite | Result |'
-            echo '| --- | --- |'
-            for f in results/*.txt; do
-              [ -e "$f" ] || continue
-              line=$(grep -E '^--- .* ---$' "$f" | tail -1 | sed 's/^--- //; s/ ---$//')
-              echo "| $(basename "$f" .txt) | ${line:-no summary} |"
-            done
-            echo
-            # gambatte fails by the hundred; its names are in the artifact.
-            for s in mooneye-acceptance blargg samesuite-apu; do
-              f="results/$s.txt"
-              [ -e "$f" ] || continue
-              if grep -qE '^(FAIL|TIMEOUT) ' "$f"; then
-                echo "<details><summary>$s: not passing</summary>"
-                echo
-                echo '```'
-                grep -E '^(FAIL|TIMEOUT) ' "$f"
-                echo '```'
-                echo '</details>'
-                echo
-              fi
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare against the baseline
+        run: ./scripts/accuracy.sh --no-build --results results --markdown "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
