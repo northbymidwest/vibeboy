@@ -175,15 +175,161 @@ pub enum ScaleFilter {
     ScaleFx9x,
 }
 
-/// Filter metadata: (variant, cli_name, display_name, scale_factor).
-/// Scale factor 0 = adaptive (scales to display size). This is the single
-/// source of truth — ALL_NAMES, from_name(), factor(), menu entries, etc.
-/// are all derived from this table.
+/// Invokes `$callback!` with every scaling compute shader as
+/// `Variant => "module"` pairs. The module name is the shader's base name:
+/// `src/shaders/{module}.slang`, compiled by `build.rs` to
+/// `{OUT_DIR}/{module}_comp.{spv,metal,dxil,wgsl}`.
+///
+/// This is the one list of scaling shaders. `ScaleShader` is generated from
+/// it, and each GPU backend expands it into its own bytecode table, so a new
+/// shader is added here (and to `build.rs`) and nowhere else.
+#[macro_export]
+macro_rules! scale_shader_list {
+    ($callback:ident) => {
+        $callback! {
+            Nearest => "nearest",
+            NearestAa => "nearest_aa",
+            Bilinear => "bilinear",
+            Bicubic => "bicubic",
+            Eagle => "eagle",
+            Epx => "epx",
+            Scale3x => "scale3x",
+            LcdGrid => "lcd_grid",
+            Mmpx => "mmpx",
+            Sai2x => "sai2x",
+            SuperSai2x => "super_sai2x",
+            SuperEagle => "super_eagle",
+            Dcci => "dcci",
+            Nedi => "nedi",
+            Edi => "edi",
+            Hqx => "hqx",
+            Xbr => "xbr",
+            Xbrz => "xbrz",
+            OmniScale => "omniscale",
+            OmniScaleLegacy => "omniscale_legacy",
+            SuperXbr => "super_xbr",
+            ScaleFx => "scalefx",
+        }
+    };
+}
+
+macro_rules! define_scale_shaders {
+    ($($variant:ident => $module:literal),* $(,)?) => {
+        /// A scaling compute shader. Several filters can share one shader
+        /// (EPX serves Scale2x and Scale4x; ScaleFX serves the 3x and 9x
+        /// filters), so GPU backends cache pipelines per shader.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum ScaleShader {
+            $($variant),*
+        }
+
+        impl ScaleShader {
+            /// Every scaling shader, in `scale_shader_list!` order.
+            pub const ALL: &'static [ScaleShader] = &[$(ScaleShader::$variant),*];
+            /// Number of scaling shaders (size of per-shader pipeline caches).
+            pub const COUNT: usize = Self::ALL.len();
+
+            /// Shader base name (`src/shaders/{module}.slang`).
+            pub fn module(self) -> &'static str {
+                match self {
+                    $(ScaleShader::$variant => $module),*
+                }
+            }
+
+            /// Dense index for per-shader pipeline caches.
+            pub fn index(self) -> usize {
+                self as usize
+            }
+        }
+    };
+}
+
+scale_shader_list!(define_scale_shaders);
+
+/// How a filter's shader is dispatched. The kind also fixes the shader's
+/// resource layout: every kind reads one pixel storage buffer and writes one
+/// storage texture; the multi-pass kinds add read-write storage buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuPass {
+    /// One dispatch over the output, uniforms `[src_w, src_h, out_w, out_h,
+    /// extra, 0, 0, 0]`.
+    Single,
+    /// Super xBR: three dispatches over the output (diagonal, cardinal,
+    /// polish) sharing one `out_w * out_h` u32 intermediate buffer. The fifth
+    /// uniform word is the pass index.
+    SuperXbr,
+    /// ScaleFX: five dispatches (four over the source into float4
+    /// intermediates, one over the 3x output that also packs pixels into a
+    /// buffer). `chained` runs the five passes a second time on the packed
+    /// 3x result for 9x output. The fifth uniform word is the pass index.
+    ScaleFx { chained: bool },
+}
+
+impl GpuPass {
+    /// Number of read-write storage buffers the shader binds.
+    pub fn rw_storage_buffers(self) -> u32 {
+        match self {
+            GpuPass::Single => 0,
+            GpuPass::SuperXbr => 1,
+            GpuPass::ScaleFx { .. } => 5,
+        }
+    }
+}
+
+/// What a single-pass shader reads from the fifth uniform word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UniformExtra {
+    /// Unused; always 0.
+    None,
+    /// Integer scale factor, `out_w / src_w`.
+    IntScale,
+    /// OmniScale's source pixel size in output space as f32 bits,
+    /// `sqrt((src_w/out_w)^2 + (src_h/out_h)^2)`.
+    PixelSize,
+}
+
+/// GPU compute description of a filter, shared by every GPU backend
+/// (SDL3 GPU, wgpu, Metal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuShader {
+    pub shader: ScaleShader,
+    pub pass: GpuPass,
+    pub extra: UniformExtra,
+}
+
+impl GpuShader {
+    /// Uniform block for a single-pass dispatch.
+    pub fn uniforms(&self, src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> [u32; 8] {
+        let extra = match self.extra {
+            UniformExtra::None => 0,
+            UniformExtra::IntScale => out_w.checked_div(src_w).unwrap_or(1),
+            UniformExtra::PixelSize => {
+                let sx = src_w as f32 / out_w as f32;
+                let sy = src_h as f32 / out_h as f32;
+                f32::to_bits((sx * sx + sy * sy).sqrt())
+            }
+        };
+        [src_w, src_h, out_w, out_h, extra, 0, 0, 0]
+    }
+}
+
+/// Uniform block for pass `pass` of a multi-pass shader (Super xBR, ScaleFX).
+pub fn multipass_uniforms(src_w: u32, src_h: u32, out_w: u32, out_h: u32, pass: u32) -> [u32; 8] {
+    [src_w, src_h, out_w, out_h, pass, 0, 0, 0]
+}
+
+/// Filter metadata: variant, CLI name, display name, scale factor and GPU
+/// shader. Scale factor 0 = adaptive (scales to display size). This is the
+/// single source of truth: ALL_NAMES, from_name(), factor(), menu entries and
+/// every GPU backend's shader mapping are derived from this table.
 pub struct FilterInfo {
     pub filter: ScaleFilter,
     pub cli_name: &'static str,
     pub display_name: &'static str,
     pub factor: u32, // 0 = adaptive
+    /// Compute shader description. `None` for Vectorize, which runs its own
+    /// multi-stage pipeline in each backend.
+    pub gpu: Option<GpuShader>,
 }
 
 const REGISTRY: &[FilterInfo] = &[
@@ -192,204 +338,370 @@ const REGISTRY: &[FilterInfo] = &[
         cli_name: "2xsai",
         display_name: "2xSaI",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Sai2x,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Bicubic,
         cli_name: "bicubic",
         display_name: "Bicubic",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Bicubic,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Bilinear,
         cli_name: "bilinear",
         display_name: "Bilinear",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Bilinear,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Dcci,
         cli_name: "dcci",
         display_name: "DCCI",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Dcci,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Eagle,
         cli_name: "eagle",
         display_name: "Eagle",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Eagle,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Edi,
         cli_name: "edi",
         display_name: "EDI",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Edi,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Epx,
         cli_name: "epx",
         display_name: "EPX / Scale2x",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Epx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Hqx(HqxScale::Hq2x),
         cli_name: "hq2x",
         display_name: "HQ2x",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Hqx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Hqx(HqxScale::Hq3x),
         cli_name: "hq3x",
         display_name: "HQ3x",
         factor: 3,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Hqx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Hqx(HqxScale::Hq4x),
         cli_name: "hq4x",
         display_name: "HQ4x",
         factor: 4,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Hqx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::LcdGrid,
         cli_name: "lcd-grid",
         display_name: "LCD Grid",
         factor: 4,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::LcdGrid,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Mmpx,
         cli_name: "mmpx",
         display_name: "MMPX",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Mmpx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Nearest,
         cli_name: "nearest",
         display_name: "Nearest",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Nearest,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::NearestAa,
         cli_name: "nearest-aa",
         display_name: "Nearest AA",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::NearestAa,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Nedi,
         cli_name: "nedi",
         display_name: "NEDI",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Nedi,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::OmniScale,
         cli_name: "omniscale",
         display_name: "OmniScale",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::OmniScale,
+            pass: GpuPass::Single,
+            extra: UniformExtra::PixelSize,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::OmniScaleLegacy,
         cli_name: "omniscale-legacy",
         display_name: "OmniScale Legacy",
         factor: 0,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::OmniScaleLegacy,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Scale2x,
         cli_name: "scale2x",
         display_name: "Scale2x",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Epx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Scale3x,
         cli_name: "scale3x",
         display_name: "Scale3x",
         factor: 3,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Scale3x,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Scale4x,
         cli_name: "scale4x",
         display_name: "Scale4x",
         factor: 4,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Epx,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::ScaleFx,
         cli_name: "scalefx",
         display_name: "ScaleFX",
         factor: 3,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::ScaleFx,
+            pass: GpuPass::ScaleFx { chained: false },
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::ScaleFx9x,
         cli_name: "scalefx-9x",
         display_name: "ScaleFX 9x",
         factor: 9,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::ScaleFx,
+            pass: GpuPass::ScaleFx { chained: true },
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Super2xSai,
         cli_name: "super-2xsai",
         display_name: "Super 2xSaI",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::SuperSai2x,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::SuperEagle,
         cli_name: "super-eagle",
         display_name: "Super Eagle",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::SuperEagle,
+            pass: GpuPass::Single,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::SuperXbr,
         cli_name: "super-xbr",
         display_name: "Super xBR",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::SuperXbr,
+            pass: GpuPass::SuperXbr,
+            extra: UniformExtra::None,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Vectorize,
         cli_name: "vectorize",
         display_name: "Vectorize",
         factor: 0,
+        gpu: None,
     },
     FilterInfo {
         filter: ScaleFilter::Xbr(XbrScale::Xbr2x),
         cli_name: "xbr2x",
         display_name: "xBR 2x",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbr,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbr(XbrScale::Xbr3x),
         cli_name: "xbr3x",
         display_name: "xBR 3x",
         factor: 3,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbr,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbr(XbrScale::Xbr4x),
         cli_name: "xbr4x",
         display_name: "xBR 4x",
         factor: 4,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbr,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbrz(XbrzScale::Xbrz2x),
         cli_name: "xbrz2x",
         display_name: "xBRZ 2x",
         factor: 2,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbrz,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbrz(XbrzScale::Xbrz3x),
         cli_name: "xbrz3x",
         display_name: "xBRZ 3x",
         factor: 3,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbrz,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbrz(XbrzScale::Xbrz4x),
         cli_name: "xbrz4x",
         display_name: "xBRZ 4x",
         factor: 4,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbrz,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbrz(XbrzScale::Xbrz5x),
         cli_name: "xbrz5x",
         display_name: "xBRZ 5x",
         factor: 5,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbrz,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
     FilterInfo {
         filter: ScaleFilter::Xbrz(XbrzScale::Xbrz6x),
         cli_name: "xbrz6x",
         display_name: "xBRZ 6x",
         factor: 6,
+        gpu: Some(GpuShader {
+            shader: ScaleShader::Xbrz,
+            pass: GpuPass::Single,
+            extra: UniformExtra::IntScale,
+        }),
     },
 ];
 
@@ -444,6 +756,21 @@ impl ScaleFilter {
     /// or the fixed integer multiplier (2, 3, 4, etc.).
     pub fn factor(self) -> u32 {
         self.info().factor
+    }
+
+    /// GPU compute shader description, or `None` for filters without a
+    /// scaling compute shader (Vectorize has its own pipeline).
+    pub fn gpu(self) -> Option<&'static GpuShader> {
+        self.info().gpu.as_ref()
+    }
+
+    /// Output size of a GPU or CPU scaling pass: the fixed integer multiple
+    /// of the source, or `adaptive` for filters that scale to the display.
+    pub fn output_size(self, src_w: u32, src_h: u32, adaptive: (u32, u32)) -> (u32, u32) {
+        match self.factor() {
+            0 => adaptive,
+            f => (src_w * f, src_h * f),
+        }
     }
 
     /// Whether the window should be freely resizable with this filter.
@@ -637,4 +964,64 @@ pub fn cpu_scale(
             (out, disp_w as u32, disp_h as u32)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_filter_but_vectorize_has_a_gpu_shader() {
+        for e in REGISTRY {
+            assert_eq!(
+                e.gpu.is_none(),
+                e.filter == ScaleFilter::Vectorize,
+                "{}",
+                e.cli_name
+            );
+        }
+    }
+
+    #[test]
+    fn filters_sharing_a_shader_agree_on_its_layout() {
+        for a in REGISTRY.iter().filter_map(|e| e.gpu) {
+            for b in REGISTRY.iter().filter_map(|e| e.gpu) {
+                if a.shader == b.shader {
+                    assert_eq!(
+                        a.pass.rw_storage_buffers(),
+                        b.pass.rw_storage_buffers(),
+                        "{:?}",
+                        a.shader
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_shader_is_used() {
+        for &s in ScaleShader::ALL {
+            assert!(
+                REGISTRY
+                    .iter()
+                    .any(|e| e.gpu.is_some_and(|g| g.shader == s)),
+                "{s:?} has no filter"
+            );
+        }
+    }
+
+    #[test]
+    fn multipass_filters_have_fixed_factors() {
+        for e in REGISTRY {
+            if let Some(g) = e.gpu {
+                match g.pass {
+                    GpuPass::Single => {}
+                    GpuPass::SuperXbr => assert_eq!(e.factor, 2),
+                    GpuPass::ScaleFx { chained } => {
+                        assert_eq!(e.factor, if chained { 9 } else { 3 })
+                    }
+                }
+            }
+        }
+    }
 }
