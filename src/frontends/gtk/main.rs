@@ -138,7 +138,7 @@ fn main() {
     let cli = RefCell::new(Some(cli));
 
     app.connect_activate(move |app| {
-        let cli = cli.borrow_mut().take().unwrap_or_else(|| Cli::parse());
+        let cli = cli.borrow_mut().take().unwrap_or_else(Cli::parse);
         build_ui(app, cli);
     });
 
@@ -309,6 +309,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     // GLArea realize: init GL resources + wgpu compute (same GL context)
     gl_area.connect_realize({
         let gl_renderer = Rc::clone(&gl_renderer);
+        #[cfg(target_os = "linux")]
         let gpu_compute = Rc::clone(&gpu_compute);
         let stack = stack.clone();
         move |area| {
@@ -320,6 +321,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             }
             match gpu::GlRenderer::new() {
                 Some(r) => {
+                    #[cfg(target_os = "linux")]
                     let gl_name = r.renderer_name();
                     *gl_renderer.borrow_mut() = Some(r);
                     // Init wgpu compute using the same GL context (zero-copy)
@@ -358,6 +360,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     // GLArea render signal: GPU compute + blit, or CPU pixel upload + blit
     gl_area.connect_render({
         let gl_renderer = Rc::clone(&gl_renderer);
+        #[cfg(target_os = "linux")]
         let gpu_compute = Rc::clone(&gpu_compute);
         let pending = Rc::clone(&pending_frame);
         move |area, _ctx| {
@@ -862,10 +865,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
             Some(&window_for_open),
             gtk4::gio::Cancellable::NONE,
             move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        load(path);
-                    }
+                if let Ok(file) = result
+                    && let Some(path) = file.path()
+                {
+                    load(path);
                 }
             },
         );
@@ -893,8 +896,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Save state slot action (parameter: slot number as string "0"-"9")
     let state_save = Rc::clone(&state);
-    let action_save_slot =
-        gtk4::gio::SimpleAction::new("save-slot", Some(&glib::VariantTy::STRING));
+    let action_save_slot = gtk4::gio::SimpleAction::new("save-slot", Some(glib::VariantTy::STRING));
     action_save_slot.connect_activate(move |_, param| {
         if let Some(slot) = param.and_then(|p| p.str()?.parse::<usize>().ok())
             && let Some(s) = state_save.borrow_mut().as_mut()
@@ -906,8 +908,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
 
     // Load state slot action
     let state_load = Rc::clone(&state);
-    let action_load_slot =
-        gtk4::gio::SimpleAction::new("load-slot", Some(&glib::VariantTy::STRING));
+    let action_load_slot = gtk4::gio::SimpleAction::new("load-slot", Some(glib::VariantTy::STRING));
     action_load_slot.connect_activate(move |_, param| {
         if let Some(slot) = param.and_then(|p| p.str()?.parse::<usize>().ok())
             && let Some(s) = state_load.borrow_mut().as_mut()
@@ -921,7 +922,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let state_model = Rc::clone(&state);
     let window_for_model = window.clone();
     let start_timer_for_model = start_frame_timer.clone();
-    let action_model = gtk4::gio::SimpleAction::new("model", Some(&glib::VariantTy::STRING));
+    let action_model = gtk4::gio::SimpleAction::new("model", Some(glib::VariantTy::STRING));
     action_model.connect_activate(move |_, param| {
         let Some(name) = param.and_then(|p| p.str()) else {
             return;
@@ -957,20 +958,19 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let state_filter = Rc::clone(&state);
     let action_filter = gtk4::gio::SimpleAction::new_stateful(
         "filter",
-        Some(&glib::VariantTy::STRING),
+        Some(glib::VariantTy::STRING),
         &initial_filter.cli_name().to_variant(),
     );
     action_filter.connect_activate(move |action, param| {
-        if let Some(param) = param {
-            if let Some(name) = param.str() {
-                if let Some(filter) = scaling::ScaleFilter::from_name(name) {
-                    let mut st = state_filter.borrow_mut();
-                    if let Some(s) = st.as_mut() {
-                        s.scale_filter = filter;
-                        action.set_state(&name.to_variant());
-                        eprintln!("Filter: {:?}", filter);
-                    }
-                }
+        if let Some(param) = param
+            && let Some(name) = param.str()
+            && let Some(filter) = scaling::ScaleFilter::from_name(name)
+        {
+            let mut st = state_filter.borrow_mut();
+            if let Some(s) = st.as_mut() {
+                s.scale_filter = filter;
+                action.set_state(&name.to_variant());
+                eprintln!("Filter: {:?}", filter);
             }
         }
     });
@@ -1013,7 +1013,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
     let state_select_slot = Rc::clone(&state);
     let action_select_slot = gtk4::gio::SimpleAction::new_stateful(
         "select-slot",
-        Some(&glib::VariantTy::STRING),
+        Some(glib::VariantTy::STRING),
         &"0".to_variant(),
     );
     action_select_slot.connect_activate(move |action, param| {
@@ -1051,10 +1051,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
         dialog.set_filters(Some(&filters));
 
         dialog.open(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
-            if let Ok(file) = result {
-                if let Some(path) = file.path() {
-                    load_rom(path);
-                }
+            if let Ok(file) = result
+                && let Some(path) = file.path()
+            {
+                load_rom(path);
             }
         });
     }

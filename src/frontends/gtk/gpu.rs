@@ -90,6 +90,7 @@ pub struct GlRenderer {
 }
 
 /// Frame data queued by the emulator tick, consumed by the GL render signal.
+#[derive(Default)]
 pub struct PendingFrame {
     pub pixels: Vec<u32>,
     pub frame_w: u32,
@@ -105,23 +106,6 @@ pub struct PendingFrame {
     pub factor: u32,
     /// Pre-rendered GL texture from GPU compute (shared-chain rasterizer).
     pub gl_texture: Option<glow::Texture>,
-}
-
-impl Default for PendingFrame {
-    fn default() -> Self {
-        Self {
-            pixels: Vec::new(),
-            frame_w: 0,
-            frame_h: 0,
-            src_w: 0,
-            src_h: 0,
-            gpu_filter: None,
-            fit_w: 0,
-            fit_h: 0,
-            factor: 0,
-            gl_texture: None,
-        }
-    }
 }
 
 fn compile_shader(gl: &glow::Context, ty: u32, src: &str) -> Option<glow::Shader> {
@@ -141,7 +125,7 @@ fn compile_shader(gl: &glow::Context, ty: u32, src: &str) -> Option<glow::Shader
 impl GlRenderer {
     /// Create a new GL renderer. Must be called with a current GL context.
     pub fn new() -> Option<Self> {
-        let gl = unsafe { glow::Context::from_loader_function(|s| gl_proc_address(s)) };
+        let gl = unsafe { glow::Context::from_loader_function(gl_proc_address) };
 
         let version_str = unsafe { gl.get_parameter_string(glow::VERSION) };
         let is_gles = version_str.contains("OpenGL ES");
@@ -233,6 +217,7 @@ impl GlRenderer {
     }
 
     /// The GL_RENDERER string of the current context.
+    #[cfg(target_os = "linux")]
     pub fn renderer_name(&self) -> String {
         unsafe { self.gl.get_parameter_string(glow::RENDERER) }
     }
