@@ -149,8 +149,8 @@ enum Command {
         /// Hardware model override
         #[arg(long, value_parser = parse_model)]
         model: Option<GbModel>,
-        /// Sample rate (default 96000)
-        #[arg(long, default_value = "96000")]
+        /// Output sample rate in Hz; the APU resamples to it
+        #[arg(long, default_value = "96000", value_parser = clap::value_parser!(u32).range(8000..=384000))]
         sample_rate: u32,
     },
 }

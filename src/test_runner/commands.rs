@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::test_model::{detect_model_with_rom, resolve_boot_rom};
 use crate::util::{GB_FB_HEIGHT, GB_FB_WIDTH, make_emu, parse_keys};
+use vibeboy_core::emulator::Emulator;
 use vibeboy_core::model::GbModel;
 use vibeboy_core::scaling;
 
@@ -850,7 +851,17 @@ pub fn cmd_audio_dump(
     });
     let resolved_model = model.unwrap_or_else(|| detect_model_with_rom(rom_path, Some(&rom)));
     let br = resolve_boot_rom(false, None, resolved_model);
-    let mut emu = make_emu(rom, br, resolved_model);
+    // Not `make_emu`: that one is headless, and a headless APU generates no
+    // samples. The APU resamples to `sample_rate` itself, so the WAV header
+    // and the data agree.
+    let mut emu = Emulator::new(
+        rom,
+        br,
+        resolved_model,
+        None,
+        vibeboy_core::clock::default_clock(),
+        sample_rate,
+    );
 
     let mut all_samples: Vec<f32> = Vec::new();
     for _ in 0..frames {
