@@ -470,6 +470,22 @@ impl Emulator {
                     self.bus.tick_write(addr, val);
                     total += 4;
                 }
+                McycleOp::DispatchWrite { addr, val } => {
+                    self.bus.tick_write(addr, val);
+                    total += 4;
+                    // Resolve the vector after the push, which may have
+                    // written IE; nothing pending cancels the dispatch.
+                    self.bus.flush_ppu_deferred();
+                    let pending = self.bus.ie & self.bus.if_ & 0x1F;
+                    let vector = if pending != 0 {
+                        let bit = pending.trailing_zeros() as u16;
+                        self.bus.if_ &= !(1 << bit);
+                        0x0040 + 8 * bit
+                    } else {
+                        0x0000
+                    };
+                    self.cpu.provide_vector(vector);
+                }
                 McycleOp::Internal => {
                     self.bus.tick_internal();
                     total += 4;
@@ -513,27 +529,6 @@ impl Emulator {
                     }
                     total += 4;
                     break;
-                }
-            }
-
-            // Interrupt vector resolution: after push-high-byte tick in interrupt dispatch,
-            // resolve IE & IF to determine the vector address (between phases 2 and 3).
-            if self.cpu.in_interrupt && self.cpu.interrupt_phase == 3 {
-                self.bus.flush_ppu_deferred();
-                let pending = self.bus.ie & self.bus.if_ & 0x1F;
-                if pending != 0 {
-                    let bit = pending.trailing_zeros() as u8;
-                    self.bus.if_ &= !(1 << bit);
-                    self.cpu.tmp16 = match bit {
-                        0 => 0x0040,
-                        1 => 0x0048,
-                        2 => 0x0050,
-                        3 => 0x0058,
-                        4 => 0x0060,
-                        _ => 0x0040,
-                    };
-                } else {
-                    self.cpu.tmp16 = 0x0000; // cancelled dispatch
                 }
             }
 

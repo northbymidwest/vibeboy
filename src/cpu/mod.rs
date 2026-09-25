@@ -13,6 +13,11 @@ pub enum McycleOp {
     ReadWithOamBug { addr: u16 },
     /// Write `val` to `addr`. Emulator calls `bus.tick_write(addr, val)`.
     Write { addr: u16, val: u8 },
+    /// Interrupt dispatch's PC high byte push. Emulator services it like
+    /// `Write`, then acknowledges the highest priority interrupt in IE & IF
+    /// (the push itself may have changed IE) and answers with
+    /// `Cpu::provide_vector()`.
+    DispatchWrite { addr: u16, val: u8 },
     /// Internal cycle (no memory access). Emulator calls `bus.tick_internal()`.
     Internal,
     /// An `Internal` cycle in which the IDU steps `addr` (INC/DEC r16, JR, LD
@@ -172,6 +177,13 @@ impl Cpu {
         self.ime = false;
     }
 
+    /// Answer to `McycleOp::DispatchWrite`: the vector of the interrupt being
+    /// serviced, or 0x0000 when IE & IF no longer has one pending (the push
+    /// can overwrite IE), which cancels the dispatch.
+    pub fn provide_vector(&mut self, vector: u16) {
+        self.tmp16 = vector;
+    }
+
     fn interrupt_mcycle(&mut self) -> McycleOp {
         match self.interrupt_phase {
             0 => {
@@ -188,11 +200,11 @@ impl Cpu {
                 }
             }
             2 => {
-                // Push PC high byte
+                // Push PC high byte; the emulator answers with provide_vector()
                 self.regs.sp = self.regs.sp.wrapping_sub(1);
                 let val = (self.regs.pc >> 8) as u8;
                 self.interrupt_phase = 3;
-                McycleOp::Write {
+                McycleOp::DispatchWrite {
                     addr: self.regs.sp,
                     val,
                 }
@@ -208,7 +220,7 @@ impl Cpu {
                 }
             }
             4 => {
-                // Vector fetch (internal) — emulator has set tmp16 to the vector address
+                // Vector fetch (internal): tmp16 holds the vector from provide_vector()
                 self.regs.pc = self.tmp16;
                 self.in_interrupt = false;
                 self.interrupt_phase = 0;
