@@ -12,15 +12,12 @@ mod persistence;
 mod vectorize_metal;
 
 use clap::Parser;
-use emulator::Emulator;
 use model::GbModel;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -33,7 +30,7 @@ use objc2_foundation::{MainThreadMarker, NSDefaultRunLoopMode, NSPoint, NSRect, 
 use objc2_metal::*;
 
 use ui_util::parse_filter;
-use util::frame_duration;
+use ui_util::{HoldInputs, Session, SessionConfig, TickOutput};
 
 use accel::{close_accel, init_accel, poll_accel};
 use audio::AudioOutput;
@@ -107,8 +104,6 @@ fn string_to_filter(s: &str) -> scaling::ScaleFilter {
     scaling::ScaleFilter::from_name(s).unwrap_or(scaling::ScaleFilter::Nearest)
 }
 
-use util::auto_detect_model;
-
 #[derive(Parser)]
 #[command(
     name = "vibeboy_cocoa",
@@ -165,7 +160,7 @@ struct CFRunLoopTimerContext {
 }
 
 /// Context passed to the frame timer callback. The callback only ever takes a
-/// shared reference to it; mutable pieces use interior mutability.
+/// shared reference to it.
 struct FrameTimerInfo {
     /// Shared with the main loop. The timer also fires inside nested run
     /// loops (menu tracking, the Open dialog, the controls panel), so the
@@ -173,12 +168,11 @@ struct FrameTimerInfo {
     /// run loop unless it is fine for the timer to skip those ticks.
     state: Rc<RefCell<AppState>>,
     window: Retained<NSWindow>,
-    frame_start: Cell<Instant>,
 }
 
-/// Called by CFRunLoopTimer at frame rate. Steps emulation, renders, updates
-/// FPS, and flushes saves. Fires on kCFRunLoopCommonModes so it continues
-/// during menu tracking, keeping audio-driven emulation smooth.
+/// Called by CFRunLoopTimer at frame rate. Steps emulation, renders and
+/// updates FPS. Fires on kCFRunLoopCommonModes so it continues during menu
+/// tracking, keeping audio-driven emulation smooth.
 unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void) {
     // SAFETY: `info` points to the FrameTimerInfo owned by main(), which
     // outlives the timer (invalidated before it is dropped). Only shared
@@ -191,35 +185,26 @@ unsafe extern "C" fn frame_timer_callback(_timer: *mut c_void, info: *mut c_void
     };
     let state = &mut *guard;
     let window = &*ctx.window;
-    let mut frame_start = ctx.frame_start.get();
 
     let _pool = unsafe { objc2_foundation::NSAutoreleasePool::new() };
 
     state.update_input();
-    state.step_emulation(&mut frame_start);
+    let out = state.step_emulation();
 
     if let Some(content_view) = window.contentView() {
         state.render(window, &content_view);
     }
 
-    let emu_time = frame_start.elapsed();
-    ctx.frame_start.set(frame_start);
-    if let Some((f, ms)) = state.fps.update(1, emu_time) {
+    if let Some((f, ms)) = state.fps.update(out.frames_emulated(), out.emu_time) {
         state.overlay_fps = f;
         state.overlay_emu_ms = ms;
     }
-
-    state.sav_flusher.poll(&state.emu);
 }
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 
 struct AppState {
-    emu: Emulator,
-    rom: std::sync::Arc<[u8]>,
-    rom_path: PathBuf,
-    model: GbModel,
-    forced_model: Option<GbModel>,
+    session: Session,
     renderer: MetalRenderer,
     scale_filter: scaling::ScaleFilter,
     key_map: std::collections::HashMap<u16, u8>,
@@ -229,76 +214,91 @@ struct AppState {
     camera: Option<CameraCapture>,
     camera_buf: [u8; 128 * 112],
     accel_source: AccelSource,
-    sav_flusher: ui_util::SavFlusher,
-    paused: bool,
-    step_one_frame: bool,
-    current_slot: usize,
     force_cpu: bool,
     fps: ui_util::FpsCounter,
     show_fps_overlay: bool,
     overlay_fps: f64,
     overlay_emu_ms: f64,
-    emu_time_debt: Duration,
-    frame_dur: Duration,
     frame_copy: Vec<u32>,
     bgra_buf: Vec<u32>,
     src_w: usize,
     src_h: usize,
     is_sgb: bool,
-    no_boot: bool,
+}
+
+/// Show "Pause" or "Resume" on the Emulation menu's pause item.
+fn update_pause_menu_item(app: &NSApplication, paused: bool) {
+    if let Some(main_menu) = app.mainMenu()
+        && let Some(emu_menu) = main_menu.itemAtIndex(3)
+        && let Some(submenu) = emu_menu.submenu()
+        && let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE)
+    {
+        let label = if paused { "Resume" } else { "Pause" };
+        pause_item.setTitle(&NSString::from_str(label));
+    }
+}
+
+/// Window title for a loaded ROM.
+fn window_title(rom_path: &std::path::Path) -> String {
+    format!(
+        "VibeBoy \u{2014} {}",
+        rom_path.file_name().unwrap_or_default().to_string_lossy()
+    )
 }
 
 impl AppState {
-    /// Update SGB state and source dimensions after creating a new emulator.
-    fn update_src_dims(&mut self) {
-        self.is_sgb = self.emu.is_sgb();
-        if self.is_sgb {
-            self.src_w = 256;
-            self.src_h = 224;
-        } else {
-            self.src_w = 160;
-            self.src_h = 144;
+    /// Sync frontend state with a freshly built emulator (startup, ROM
+    /// switch, reset, model change): source dimensions, the peripherals the
+    /// cartridge needs, and the pause menu item (a new emulator runs).
+    fn on_new_emulator(&mut self, app: &NSApplication) {
+        let emu = &self.session.emu;
+        self.is_sgb = emu.is_sgb();
+        (self.src_w, self.src_h) = if self.is_sgb { (256, 224) } else { (160, 144) };
+
+        // Webcam for the Pocket Camera
+        if !emu.has_camera() {
+            self.camera = None;
+        } else if self.camera.is_none() {
+            self.camera = CameraCapture::start();
         }
+
+        // Accelerometer for MBC7
+        if !emu.has_accelerometer() {
+            close_accel(&self.accel_source);
+            self.accel_source = AccelSource::None;
+        } else if matches!(self.accel_source, AccelSource::None) {
+            self.accel_source = init_accel();
+        }
+
+        update_pause_menu_item(app, self.session.paused());
     }
 
-    /// Load a new ROM, resetting emulator state. Updates window title and recent ROMs.
+    /// Switch to a new ROM. Updates window title and recent ROMs.
     fn load_rom(
         &mut self,
         path: PathBuf,
-        rom_data: impl Into<std::sync::Arc<[u8]>>,
         mtm: MainThreadMarker,
         app: &NSApplication,
         window: &NSWindow,
     ) {
-        let title_str = format!(
-            "VibeBoy \u{2014} {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
-        let title = NSString::from_str(&title_str);
-        window.setTitle(&title);
+        if let Err(e) = self.session.load_rom(&path) {
+            eprintln!("Failed to read ROM '{}': {}", path.display(), e);
+            return;
+        }
+        window.setTitle(&NSString::from_str(&window_title(&path)));
         add_recent_rom(&path.to_string_lossy());
         rebuild_recent_menu(mtm, app, &load_recent_roms());
-        self.rom = rom_data.into();
-        self.rom_path = path;
-        self.model = self
-            .forced_model
-            .unwrap_or_else(|| auto_detect_model(&self.rom));
-        let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-        // Persist the outgoing battery save before replacing the emulator.
-        self.sav_flusher.flush(&self.emu);
-        self.emu = Emulator::new(
-            self.rom.clone(),
-            boot_rom,
-            self.model,
-            None,
-            clock::default_clock(),
-            AUDIO_SAMPLE_RATE,
-        );
-        self.update_src_dims();
-        ui_util::load_sav(&mut self.emu, &self.rom_path);
-        self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
-        self.paused = false;
-        eprintln!("Loaded: {}", self.rom_path.display());
+        self.on_new_emulator(app);
+    }
+
+    fn toggle_pause(&mut self, app: &NSApplication) {
+        let paused = self.session.toggle_pause();
+        update_pause_menu_item(app, paused);
+    }
+
+    fn select_slot(&mut self, app: &NSApplication, slot: usize) {
+        self.session.select_slot(slot);
+        update_slot_checkmarks(app, slot);
     }
 
     /// Handle all pending menu actions.
@@ -311,94 +311,37 @@ impl AppState {
     ) {
         if actions.open_rom
             && let Some(path) = open_rom_dialog()
-            && let Ok(rom_data) = fs::read(&path)
         {
-            self.load_rom(path, rom_data, mtm, app, window);
+            self.load_rom(path, mtm, app, window);
         }
 
         if actions.pause_toggle {
-            self.paused = !self.paused;
-            eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
-            if let Some(main_menu) = app.mainMenu()
-                && let Some(emu_menu) = main_menu.itemAtIndex(3)
-                && let Some(submenu) = emu_menu.submenu()
-                && let Some(pause_item) = submenu.itemWithTag(MENU_TAG_PAUSE)
-            {
-                let label = if self.paused { "Resume" } else { "Pause" };
-                pause_item.setTitle(&NSString::from_str(label));
-            }
+            self.toggle_pause(app);
         }
 
         if actions.reset {
-            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-            // Persist the outgoing battery save before replacing the emulator.
-            self.sav_flusher.flush(&self.emu);
-            // Persist the outgoing battery save before replacing the emulator.
-            self.sav_flusher.flush(&self.emu);
-            self.emu = Emulator::new(
-                self.rom.clone(),
-                boot_rom,
-                self.model,
-                None,
-                clock::default_clock(),
-                AUDIO_SAMPLE_RATE,
-            );
-            self.update_src_dims();
-            ui_util::load_sav(&mut self.emu, &self.rom_path);
-            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
-            self.paused = false;
-            eprintln!("Reset");
+            self.session.reset();
+            self.on_new_emulator(app);
         }
 
         if actions.save_state {
-            ui_util::save_state_to_slot(&mut self.emu, &self.rom_path, self.current_slot);
+            self.session.save_state(self.session.slot());
         }
 
         if actions.load_state {
-            ui_util::load_state_from_slot(&mut self.emu, &self.rom_path, self.current_slot);
+            self.session.load_state(self.session.slot());
         }
 
         if let Some(slot) = actions.select_slot {
-            self.current_slot = slot;
-            eprintln!("Slot {} selected", self.current_slot);
-            update_slot_checkmarks(app, slot);
+            self.select_slot(app, slot);
         }
 
         if let Some(tag) = actions.select_model
             && let Some(new_model) = model_tag_to_model(tag)
         {
-            self.forced_model = new_model;
-            self.model = self
-                .forced_model
-                .unwrap_or_else(|| auto_detect_model(&self.rom));
-            // Use auto-detected boot ROM for the new model (ignore explicit --bootrom)
-            let boot_rom = ui_util::load_boot_rom(self.model, None, self.no_boot);
-            let model_name = self
-                .forced_model
-                .map(|m| format!("{}", m))
-                .unwrap_or_else(|| "Auto".to_string());
-            eprintln!(
-                "Hardware model: {} (boot ROM: {})",
-                model_name,
-                if boot_rom.is_some() { "loaded" } else { "none" }
-            );
-            // Persist the outgoing battery save before replacing the emulator.
-            self.sav_flusher.flush(&self.emu);
-            // Persist the outgoing battery save before replacing the emulator.
-            self.sav_flusher.flush(&self.emu);
-            self.emu = Emulator::new(
-                self.rom.clone(),
-                boot_rom,
-                self.model,
-                None,
-                clock::default_clock(),
-                AUDIO_SAMPLE_RATE,
-            );
-            self.update_src_dims();
-            ui_util::load_sav(&mut self.emu, &self.rom_path);
-            self.sav_flusher = ui_util::SavFlusher::new(&self.emu, &self.rom_path);
+            self.session.set_model(new_model);
             update_model_checkmarks(app, tag);
-            self.paused = false;
+            self.on_new_emulator(app);
         }
 
         if let Some(tag) = actions.select_filter
@@ -416,30 +359,9 @@ impl AppState {
         }
 
         if actions.toggle_printer {
-            let is_printer = self.emu.serial_device_as_any().is::<printer::Printer>();
-            if is_printer {
-                self.emu
-                    .attach_serial_device(Box::new(serial::Disconnected));
-                eprintln!("Game Boy Printer disconnected");
-            } else {
-                self.emu
-                    .attach_serial_device(Box::new(printer::Printer::new(
-                        self.model.cpu_clock_rate(),
-                    )));
-                eprintln!("Game Boy Printer connected");
-            }
-            if let Some(main_menu) = app.mainMenu()
-                && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
-                && let Some(emu_submenu) = emu_menu_item.submenu()
-                && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
-            {
-                let state = if !is_printer {
-                    NSControlStateValueOn
-                } else {
-                    NSControlStateValueOff
-                };
-                printer_menu_item.setState(state);
-            }
+            let on = !self.session.printer_attached();
+            self.session.set_printer(on);
+            update_printer_checkmark(app, on);
         }
 
         if actions.toggle_fps {
@@ -465,12 +387,7 @@ impl AppState {
         if let Some(idx) = actions.open_recent {
             let recents = load_recent_roms();
             if let Some(path_str) = recents.get(idx) {
-                let path = PathBuf::from(path_str);
-                if let Ok(rom_data) = fs::read(&path) {
-                    self.load_rom(path, rom_data, mtm, app, window);
-                } else {
-                    eprintln!("Failed to read: {}", path_str);
-                }
+                self.load_rom(PathBuf::from(path_str), mtm, app, window);
             }
         }
 
@@ -483,19 +400,20 @@ impl AppState {
 
     /// Update gamepad, camera, and accelerometer input.
     fn update_input(&mut self) {
+        let emu = &mut self.session.emu;
         // Gamepad
         self.gamepad.poll();
-        if self.emu.has_rumble() {
+        if emu.has_rumble() {
             self.gamepad.ensure_haptics_ready();
         }
         self.gamepad
-            .apply_to_emu(&mut self.emu, &self.key_map, &self.keys_down);
+            .apply_to_emu(emu, &self.key_map, &self.keys_down);
 
         // Camera
         if let Some(ref cam) = self.camera
             && cam.read_frame(&mut self.camera_buf)
         {
-            self.emu.set_camera_image(&self.camera_buf);
+            emu.set_camera_image(&self.camera_buf);
         }
 
         // Accelerometer: prioritize gamepad, fall back to MacBook built-in
@@ -514,106 +432,30 @@ impl AppState {
             if let Some((gx, gy)) = reading {
                 let mbc7_x = (CENTER + gx * RANGE).clamp(0.0, 65535.0) as u16;
                 let mbc7_y = (CENTER + gy * RANGE).clamp(0.0, 65535.0) as u16;
-                self.emu.set_accelerometer(mbc7_x, mbc7_y);
+                emu.set_accelerometer(mbc7_x, mbc7_y);
             }
         }
     }
 
-    /// Step emulation: rewind, fast-forward, or normal frame stepping + audio drain.
-    fn step_emulation(&mut self, frame_start: &mut Instant) {
-        let backspace_held = self.keys_down.contains(&K_DELETE) || self.gamepad.l_shoulder;
-        let fast_forward = self.keys_down.contains(&K_TAB) || self.gamepad.r_shoulder;
-        let slow_motion = self.keys_down.contains(&K_MINUS);
-        self.emu.set_rewinding(backspace_held);
-
-        // Accumulate elapsed time, capped to prevent catch-up bursts if the app
-        // is backgrounded or otherwise stalled for an extended period.
-        self.emu_time_debt += frame_start.elapsed();
-        *frame_start = Instant::now();
-        let max_debt = self.frame_dur * 3;
-        if self.emu_time_debt > max_debt {
-            self.emu_time_debt = max_debt;
+    /// Run one session tick (rewind, fast-forward, slow motion, pause or
+    /// audio-paced stepping), then queue its audio and drive rumble.
+    fn step_emulation(&mut self) -> TickOutput {
+        let hold = HoldInputs {
+            rewind: self.keys_down.contains(&K_DELETE) || self.gamepad.l_shoulder,
+            fast_forward: self.keys_down.contains(&K_TAB) || self.gamepad.r_shoulder,
+            slow_motion: self.keys_down.contains(&K_MINUS),
+        };
+        let queued = self.audio.as_ref().map(|a| a.queued_frames());
+        let out = self.session.tick(&hold, queued);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.push(&out.audio);
         }
-
-        if self.paused && self.step_one_frame {
-            self.emu.step_frame();
-            self.step_one_frame = false;
-            self.emu_time_debt = Duration::ZERO;
-        } else if self.paused {
-            self.emu_time_debt = Duration::ZERO;
-        } else if backspace_held {
-            let mut all_audio = Vec::with_capacity(19200);
-            for _ in 0..3 {
-                self.emu.rewind_one_frame();
-                all_audio.extend_from_slice(&self.emu.drain_audio_samples());
-            }
-            util::reverse_audio(&mut all_audio);
-            let resampled = util::downsample_audio(&all_audio, 3);
-            if let Some(audio) = self.audio.as_mut() {
-                audio.push(&resampled);
-            }
-            self.emu_time_debt = Duration::ZERO;
-        } else if fast_forward {
-            for _ in 0..4 {
-                self.emu.step_frame();
-            }
-            self.emu_time_debt = Duration::ZERO;
-        } else if slow_motion {
-            // Half speed: step at 2x the normal frame duration
-            let slow_dur = self.frame_dur * 2;
-            while self.emu_time_debt >= slow_dur {
-                self.emu.step_frame();
-                self.emu_time_debt -= slow_dur;
-            }
-        } else {
-            // Audio-driven timing: use ring buffer fill level to decide
-            // how many frames to step, synchronizing to the audio device's
-            // clock. Time debt is still consumed for sleep-based pacing.
-            let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
-            let target_fill = samples_per_frame * 3; // ~50ms
-            let max_fill = samples_per_frame * 8; // ~133ms
-            let queued = self
-                .audio
-                .as_ref()
-                .map_or(target_fill, |a| a.queued_frames() * 2);
-
-            let frames_needed = if queued < target_fill / 2 {
-                2u32
-            } else if queued < target_fill {
-                1
-            } else if queued > max_fill {
-                0
-            } else {
-                1
-            };
-
-            for _ in 0..frames_needed {
-                self.emu.step_frame();
-            }
-            // Always consume time debt so sleep pacing still works
-            self.emu_time_debt = self.emu_time_debt.saturating_sub(self.frame_dur);
-        }
-
-        // Printer
-        ui_util::check_and_save_prints(&mut self.emu);
 
         // Rumble
-        if self.emu.has_rumble() {
-            self.gamepad.set_rumble(self.emu.drain_rumble());
+        if self.session.emu.has_rumble() {
+            self.gamepad.set_rumble(self.session.emu.drain_rumble());
         }
-
-        // Audio
-        let samples = self.emu.drain_audio_samples();
-        if !samples.is_empty() {
-            let to_write: std::borrow::Cow<[f32]> = if fast_forward {
-                std::borrow::Cow::Owned(util::downsample_audio(&samples, 4))
-            } else {
-                std::borrow::Cow::Borrowed(&samples[..])
-            };
-            if let Some(audio) = self.audio.as_mut() {
-                audio.push(&to_write);
-            }
-        }
+        out
     }
 
     /// Render the current frame. Handles occlusion check, filter dispatch, and Metal rendering.
@@ -645,9 +487,9 @@ impl AppState {
         // Copy frame data to a persistent buffer to avoid borrowing self.emu across &mut self calls.
         let src_len = self.src_w * self.src_h;
         let raw_src: &[u32] = if self.is_sgb {
-            self.emu.sgb_composited_frame()
+            self.session.emu.sgb_composited_frame()
         } else {
-            self.emu.frame_buffer()
+            self.session.emu.frame_buffer()
         };
         self.frame_copy.clear();
         self.frame_copy.extend_from_slice(&raw_src[..src_len]);
@@ -851,58 +693,27 @@ fn main() {
             open_rom_dialog().unwrap_or_else(|| std::process::exit(0))
         };
 
-        let rom: std::sync::Arc<[u8]> = fs::read(&rom_path)
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to read ROM '{}': {}", rom_path.display(), e);
-                std::process::exit(1);
-            })
-            .into();
-
-        let forced_model: Option<GbModel> = cli.model;
-        let model = forced_model.unwrap_or_else(|| auto_detect_model(&rom));
-        let frame_dur = frame_duration(model);
-
-        let boot_rom = ui_util::load_boot_rom(model, cli.bootrom.as_deref(), cli.no_boot);
-
-        if boot_rom.is_some() {
-            eprintln!("Boot ROM loaded — executing boot sequence.");
-        }
-
-        let snes_rom: Option<Vec<u8>> = if model.is_sgb() && cli.lle {
-            if let Some(ref p) = cli.snes_rom {
-                Some(fs::read(p).unwrap_or_else(|e| {
-                    eprintln!("Failed to read SNES ROM '{}': {}", p.display(), e);
-                    std::process::exit(1);
-                }))
-            } else {
-                let candidates = match model {
-                    GbModel::Sgb2 => vec!["sgb2.program.rom", "sgb2.sfc"],
-                    GbModel::Sgb => vec!["sgb1.program.rom", "sgb.sfc"],
-                    _ => vec![],
-                };
-                candidates.iter().find_map(|name| fs::read(name).ok())
-            }
-        } else {
-            None
-        };
-
-        if snes_rom.is_some() {
-            eprintln!("SNES program ROM loaded — SGB LLE mode active.");
-        }
-
         ui_util::print_controls();
         eprintln!();
 
-        let mut emu = Emulator::new(
-            rom.clone(),
-            boot_rom,
-            model,
-            snes_rom,
-            clock::default_clock(),
-            AUDIO_SAMPLE_RATE,
-        );
-        ui_util::load_sav(&mut emu, &rom_path);
-        let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
+        let session = Session::new(
+            &rom_path,
+            SessionConfig {
+                model: cli.model,
+                bootrom: cli.bootrom.clone(),
+                no_boot: cli.no_boot,
+                lle: cli.lle,
+                snes_rom: cli.snes_rom.clone(),
+                printer: cli.printer,
+                sample_rate: AUDIO_SAMPLE_RATE,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to load '{}': {}", rom_path.display(), e);
+            std::process::exit(1);
+        });
+        let frame_dur = session.frame_duration();
 
         // Load custom key mappings
         let key_map = load_key_map();
@@ -911,18 +722,7 @@ fn main() {
         add_recent_rom(&rom_path.to_string_lossy());
         rebuild_recent_menu(mtm, &app, &load_recent_roms());
 
-        if cli.printer {
-            emu.attach_serial_device(Box::new(printer::Printer::new(model.cpu_clock_rate())));
-            eprintln!("Game Boy Printer connected — images will be saved to prints/");
-            // Set checkmark on printer menu item
-            if let Some(main_menu) = app.mainMenu()
-                && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
-                && let Some(emu_submenu) = emu_menu_item.submenu()
-                && let Some(printer_menu_item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
-            {
-                printer_menu_item.setState(NSControlStateValueOn);
-            }
-        }
+        update_printer_checkmark(&app, session.printer_attached());
 
         // Scaling filter
         let scale_filter = string_to_filter(&cli.filter);
@@ -940,7 +740,7 @@ fn main() {
             }
         }
 
-        let is_sgb = emu.is_sgb();
+        let is_sgb = session.emu.is_sgb();
         let (tex_w, tex_h): (u32, u32) = if is_sgb { (256, 224) } else { (160, 144) };
         let src_w = tex_w as usize;
         let src_h = tex_h as usize;
@@ -970,12 +770,7 @@ fn main() {
         // the window when the user closes it from the title bar.
         window.setReleasedWhenClosed(false);
 
-        let title_str = format!(
-            "VibeBoy \u{2014} {}",
-            rom_path.file_name().unwrap_or_default().to_string_lossy()
-        );
-        let title = NSString::from_str(&title_str);
-        window.setTitle(&title);
+        window.setTitle(&NSString::from_str(&window_title(&rom_path)));
         window.center();
 
         // Create a custom NSView subclass that suppresses key repeat sounds
@@ -1043,54 +838,30 @@ fn main() {
         // ── Audio ────────────────────────────────────────────────────────────
         let audio = AudioOutput::start(AUDIO_SAMPLE_RATE);
 
-        // ── Camera ───────────────────────────────────────────────────────────
-        let camera = if emu.has_camera() {
-            CameraCapture::start()
-        } else {
-            None
-        };
-
-        // ── Accelerometer ────────────────────────────────────────────────────
-        let accel_source = if emu.has_accelerometer() {
-            init_accel()
-        } else {
-            AccelSource::None
-        };
-
         // ── Build AppState ───────────────────────────────────────────────────
         let state = Rc::new(RefCell::new(AppState {
-            emu,
-            rom,
-            rom_path,
-            model,
-            forced_model,
+            session,
             renderer,
             scale_filter,
             key_map,
             keys_down: HashSet::new(),
             gamepad: GamepadState::new(),
             audio,
-            camera,
+            camera: None,
             camera_buf: [0u8; 128 * 112],
-            accel_source,
-            sav_flusher,
-            paused: false,
-            step_one_frame: false,
-            current_slot: 0,
+            accel_source: AccelSource::None,
             force_cpu: false,
             fps: ui_util::FpsCounter::new(),
             show_fps_overlay: false,
             overlay_fps: 0.0,
             overlay_emu_ms: 0.0,
-            emu_time_debt: Duration::ZERO,
-            frame_dur,
             frame_copy: Vec::with_capacity(src_w * src_h),
             bgra_buf: Vec::with_capacity((tex_w * tex_h) as usize),
             src_w,
             src_h,
             is_sgb,
-            no_boot: cli.no_boot,
         }));
+        state.borrow_mut().on_new_emulator(&app);
 
         // ── Frame timer ─────────────────────────────────────────────────────
         // A CFRunLoopTimer on kCFRunLoopCommonModes drives emulation + render.
@@ -1100,7 +871,6 @@ fn main() {
         let timer_info = FrameTimerInfo {
             state: Rc::clone(&state),
             window: window.clone(),
-            frame_start: Cell::new(Instant::now()),
         };
         let timer = {
             let mut ctx = CFRunLoopTimerContext {
@@ -1164,38 +934,29 @@ fn main() {
 
                     state.keys_down.insert(keycode);
 
-                    if keycode == K_SPACE {
-                        state.paused = !state.paused;
-                        eprintln!("{}", if state.paused { "Paused" } else { "Resumed" });
-                    } else if keycode == K_PERIOD {
-                        if state.paused {
-                            state.step_one_frame = true;
-                        }
+                    // Hotkeys ignore key auto-repeat, except frame advance,
+                    // which steps repeatedly while Period is held.
+                    if keycode == K_PERIOD {
+                        state.session.request_frame_advance();
+                    } else if event.isARepeat() {
+                        // Auto-repeat of any other hotkey: ignore.
+                    } else if keycode == K_SPACE {
+                        state.toggle_pause(&app);
                     } else if keycode == K_F5 {
-                        ui_util::save_state_to_slot(
-                            &mut state.emu,
-                            &state.rom_path,
-                            state.current_slot,
-                        );
+                        state.session.save_state(state.session.slot());
                     } else if keycode == K_F7 {
-                        ui_util::load_state_from_slot(
-                            &mut state.emu,
-                            &state.rom_path,
-                            state.current_slot,
-                        );
+                        state.session.load_state(state.session.slot());
                     } else if let Some(slot) = keycode_to_slot(keycode) {
-                        state.current_slot = slot;
-                        eprintln!("Slot {} selected", state.current_slot);
-                        update_slot_checkmarks(&app, slot);
+                        state.select_slot(&app, slot);
                     }
 
                     if let Some(btn) = state.key_map.get(&keycode).copied() {
-                        state.emu.set_button(btn, true);
+                        state.session.emu.set_button(btn, true);
                     }
                 } else if event_type == NSEventType::KeyUp {
                     state.keys_down.remove(&keycode);
                     if let Some(btn) = state.key_map.get(&keycode).copied() {
-                        state.emu.set_button(btn, false);
+                        state.session.emu.set_button(btn, false);
                     }
                 } else if event_type == NSEventType::FlagsChanged
                     && let Some(down) = modifier_key_down(keycode, event.modifierFlags().0)
@@ -1208,7 +969,7 @@ fn main() {
                         state.keys_down.remove(&keycode);
                     }
                     if let Some(btn) = state.key_map.get(&keycode).copied() {
-                        state.emu.set_button(btn, down);
+                        state.session.emu.set_button(btn, down);
                     }
                 }
                 drop(guard);
@@ -1246,6 +1007,6 @@ fn main() {
         close_accel(&state.accel_source);
         drop(state.camera.take());
 
-        state.sav_flusher.flush(&state.emu);
+        state.session.flush_save();
     }
 }

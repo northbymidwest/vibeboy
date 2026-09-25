@@ -114,6 +114,17 @@ pub(super) fn update_slot_checkmarks(app: &NSApplication, selected_slot: usize) 
     }
 }
 
+pub(super) fn update_printer_checkmark(app: &NSApplication, attached: bool) {
+    // Emulation menu is at index 3
+    if let Some(main_menu) = app.mainMenu()
+        && let Some(emu_menu_item) = main_menu.itemAtIndex(3)
+        && let Some(emu_submenu) = emu_menu_item.submenu()
+        && let Some(item) = emu_submenu.itemWithTag(MENU_TAG_PRINTER)
+    {
+        set_checkmark(&item, attached);
+    }
+}
+
 pub(super) fn update_force_cpu_checkmark(app: &NSApplication, force_cpu: bool) {
     let Some(main_menu) = app.mainMenu() else {
         return;
