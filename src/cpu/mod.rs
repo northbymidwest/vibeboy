@@ -8,10 +8,21 @@ pub enum McycleOp {
     /// Read a byte from `addr`. Emulator services it with `bus.tick_read(addr)`
     /// and stores the result in `cpu.data_latch`.
     Read { addr: u16 },
+    /// A `Read` during which the IDU also steps `addr` (POP, RET, LD A,(HL+/-)).
+    /// Emulator triggers the read-style OAM bug on `addr` before the tick.
+    ReadWithOamBug { addr: u16 },
     /// Write `val` to `addr`. Emulator calls `bus.tick_write(addr, val)`.
     Write { addr: u16, val: u8 },
     /// Internal cycle (no memory access). Emulator calls `bus.tick_internal()`.
     Internal,
+    /// An `Internal` cycle in which the IDU steps `addr` (INC/DEC r16, JR, LD
+    /// SP,HL and the cycle before a PUSH, CALL or RST pushes). Emulator
+    /// triggers the write-style OAM bug on `addr` before the tick.
+    InternalWithOamBug { addr: u16 },
+    /// Interrupt dispatch's second internal cycle, in which the IDU steps PC
+    /// and then SP. Emulator triggers the write-style OAM bug on `pc`, then on
+    /// `sp`, before the tick.
+    DispatchOamBug { pc: u16, sp: u16 },
     /// HALT NOP cycle. Emulator does the split half-mcycle IF check.
     HaltNop,
     /// Speed switch idle cycle. Emulator calls `bus.tick_speed_switch_idle()`.
@@ -51,10 +62,6 @@ pub struct Cpu {
     pub(crate) in_interrupt: bool,
     /// Phase counter within interrupt dispatch (0..=4).
     pub(crate) interrupt_phase: u8,
-    /// Write-style OAM bug address to trigger (set by CPU, consumed by emulator).
-    pub oam_bug_addr: Option<u16>,
-    /// Read-style OAM bug address to trigger (set by CPU, consumed by emulator).
-    pub oam_bug_read_addr: Option<u16>,
     /// Saved `ime_pending` state at instruction start for EI delay.
     pending_ime_at_start: bool,
     /// True when the last mcycle op was the final action of an instruction.
@@ -87,8 +94,6 @@ impl Cpu {
             tmp16: 0,
             in_interrupt: false,
             interrupt_phase: 0,
-            oam_bug_addr: None,
-            oam_bug_read_addr: None,
             pending_ime_at_start: false,
             finishing: false,
         }
@@ -175,12 +180,12 @@ impl Cpu {
                 McycleOp::Internal
             }
             1 => {
-                // Internal cycle 2 + OAM bug triggers
-                self.oam_bug_addr = Some(self.regs.pc);
-                // Second OAM bug on SP
-                self.tmp16 = self.regs.sp; // save for second OAM bug
+                // Internal cycle 2: OAM bug on PC, then on SP
                 self.interrupt_phase = 2;
-                McycleOp::Internal
+                McycleOp::DispatchOamBug {
+                    pc: self.regs.pc,
+                    sp: self.regs.sp,
+                }
             }
             2 => {
                 // Push PC high byte
@@ -495,10 +500,9 @@ impl Cpu {
                 2 => {
                     let rp = (op >> 4) & 0x03;
                     let v = self.r16(rp);
-                    self.oam_bug_addr = Some(v);
                     self.tmp16 = v.wrapping_add(1);
                     self.phase = 3;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: v }
                 }
                 3 => {
                     let rp = (op >> 4) & 0x03;
@@ -511,10 +515,9 @@ impl Cpu {
                 2 => {
                     let rp = (op >> 4) & 0x03;
                     let v = self.r16(rp);
-                    self.oam_bug_addr = Some(v);
                     self.tmp16 = v.wrapping_sub(1);
                     self.phase = 3;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: v }
                 }
                 3 => {
                     let rp = (op >> 4) & 0x03;
@@ -826,10 +829,10 @@ impl Cpu {
                 }
                 3 => {
                     self.tmp8 = self.data_latch;
-                    self.oam_bug_addr = Some(self.regs.pc);
+                    let oam_bug_addr = self.regs.pc;
                     self.regs.pc = self.regs.pc.wrapping_add(self.tmp8 as i8 as u16);
                     self.phase = 4;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: oam_bug_addr }
                 }
                 4 => self.finish_instruction(),
                 _ => unreachable!(),
@@ -850,10 +853,10 @@ impl Cpu {
                     3 => {
                         self.tmp8 = self.data_latch;
                         if self.check_condition(cc) {
-                            self.oam_bug_addr = Some(self.regs.pc);
+                            let oam_bug_addr = self.regs.pc;
                             self.regs.pc = self.regs.pc.wrapping_add(self.tmp8 as i8 as u16);
                             self.phase = 4;
-                            McycleOp::Internal
+                            McycleOp::InternalWithOamBug { addr: oam_bug_addr }
                         } else {
                             self.finish_instruction()
                         }
@@ -891,10 +894,9 @@ impl Cpu {
             0x2A => match self.phase {
                 2 => {
                     let hl = self.regs.hl();
-                    self.oam_bug_read_addr = Some(hl);
                     self.regs.set_hl(hl.wrapping_add(1));
                     self.phase = 3;
-                    McycleOp::Read { addr: hl }
+                    McycleOp::ReadWithOamBug { addr: hl }
                 }
                 3 => {
                     self.regs.a = self.data_latch;
@@ -905,10 +907,9 @@ impl Cpu {
             0x3A => match self.phase {
                 2 => {
                     let hl = self.regs.hl();
-                    self.oam_bug_read_addr = Some(hl);
                     self.regs.set_hl(hl.wrapping_sub(1));
                     self.phase = 3;
-                    McycleOp::Read { addr: hl }
+                    McycleOp::ReadWithOamBug { addr: hl }
                 }
                 3 => {
                     self.regs.a = self.data_latch;
@@ -1046,9 +1047,8 @@ impl Cpu {
                     3 => {
                         if self.check_condition(cc) {
                             // Pop lo
-                            self.oam_bug_read_addr = Some(self.regs.sp);
                             self.phase = 4;
-                            McycleOp::Read { addr: self.regs.sp }
+                            McycleOp::ReadWithOamBug { addr: self.regs.sp }
                         } else {
                             self.finish_instruction()
                         }
@@ -1056,9 +1056,8 @@ impl Cpu {
                     4 => {
                         self.tmp8 = self.data_latch; // lo
                         self.regs.sp = self.regs.sp.wrapping_add(1);
-                        self.oam_bug_read_addr = Some(self.regs.sp);
                         self.phase = 5;
-                        McycleOp::Read { addr: self.regs.sp }
+                        McycleOp::ReadWithOamBug { addr: self.regs.sp }
                     }
                     5 => {
                         let hi = self.data_latch;
@@ -1081,16 +1080,14 @@ impl Cpu {
             0xC1 | 0xD1 | 0xE1 | 0xF1 => {
                 match self.phase {
                     2 => {
-                        self.oam_bug_read_addr = Some(self.regs.sp);
                         self.phase = 3;
-                        McycleOp::Read { addr: self.regs.sp }
+                        McycleOp::ReadWithOamBug { addr: self.regs.sp }
                     }
                     3 => {
                         self.tmp8 = self.data_latch; // lo
                         self.regs.sp = self.regs.sp.wrapping_add(1);
-                        self.oam_bug_read_addr = Some(self.regs.sp);
                         self.phase = 4;
-                        McycleOp::Read { addr: self.regs.sp }
+                        McycleOp::ReadWithOamBug { addr: self.regs.sp }
                     }
                     4 => {
                         let hi = self.data_latch;
@@ -1194,9 +1191,9 @@ impl Cpu {
                         let hi = self.data_latch;
                         self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
                         if self.check_condition(cc) {
-                            self.oam_bug_addr = Some(self.regs.sp);
                             self.phase = 5;
-                            McycleOp::Internal // internal before push
+                            // Internal before push
+                            McycleOp::InternalWithOamBug { addr: self.regs.sp }
                         } else {
                             self.finish_instruction()
                         }
@@ -1234,7 +1231,6 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             0xC5 | 0xD5 | 0xE5 | 0xF5 => match self.phase {
                 2 => {
-                    self.oam_bug_addr = Some(self.regs.sp);
                     let rp = (op >> 4) & 0x03;
                     self.tmp16 = match rp {
                         0 => self.regs.bc(),
@@ -1244,7 +1240,7 @@ impl Cpu {
                         _ => unreachable!(),
                     };
                     self.phase = 3;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: self.regs.sp }
                 }
                 3 => {
                     self.regs.sp = self.regs.sp.wrapping_sub(1);
@@ -1291,9 +1287,8 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => match self.phase {
                 2 => {
-                    self.oam_bug_addr = Some(self.regs.sp);
                     self.phase = 3;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: self.regs.sp }
                 }
                 3 => {
                     self.regs.sp = self.regs.sp.wrapping_sub(1);
@@ -1327,16 +1322,14 @@ impl Cpu {
             0xC9 => {
                 match self.phase {
                     2 => {
-                        self.oam_bug_read_addr = Some(self.regs.sp);
                         self.phase = 3;
-                        McycleOp::Read { addr: self.regs.sp }
+                        McycleOp::ReadWithOamBug { addr: self.regs.sp }
                     }
                     3 => {
                         self.tmp8 = self.data_latch; // lo
                         self.regs.sp = self.regs.sp.wrapping_add(1);
-                        self.oam_bug_read_addr = Some(self.regs.sp);
                         self.phase = 4;
-                        McycleOp::Read { addr: self.regs.sp }
+                        McycleOp::ReadWithOamBug { addr: self.regs.sp }
                     }
                     4 => {
                         let hi = self.data_latch;
@@ -1358,16 +1351,14 @@ impl Cpu {
             // ══════════════════════════════════════════════════════════════════
             0xD9 => match self.phase {
                 2 => {
-                    self.oam_bug_read_addr = Some(self.regs.sp);
                     self.phase = 3;
-                    McycleOp::Read { addr: self.regs.sp }
+                    McycleOp::ReadWithOamBug { addr: self.regs.sp }
                 }
                 3 => {
                     self.tmp8 = self.data_latch;
                     self.regs.sp = self.regs.sp.wrapping_add(1);
-                    self.oam_bug_read_addr = Some(self.regs.sp);
                     self.phase = 4;
-                    McycleOp::Read { addr: self.regs.sp }
+                    McycleOp::ReadWithOamBug { addr: self.regs.sp }
                 }
                 4 => {
                     let hi = self.data_latch;
@@ -1460,9 +1451,8 @@ impl Cpu {
                 4 => {
                     let hi = self.data_latch;
                     self.tmp16 = (hi as u16) << 8 | self.tmp8 as u16;
-                    self.oam_bug_addr = Some(self.regs.sp);
                     self.phase = 5;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug { addr: self.regs.sp }
                 }
                 5 => {
                     self.regs.sp = self.regs.sp.wrapping_sub(1);
@@ -1660,9 +1650,10 @@ impl Cpu {
             0xF9 => match self.phase {
                 2 => {
                     self.regs.sp = self.regs.hl();
-                    self.oam_bug_addr = Some(self.regs.hl());
                     self.phase = 3;
-                    McycleOp::Internal
+                    McycleOp::InternalWithOamBug {
+                        addr: self.regs.hl(),
+                    }
                 }
                 3 => self.finish_instruction(),
                 _ => unreachable!(),

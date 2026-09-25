@@ -454,24 +454,15 @@ impl Emulator {
             let op = self.cpu.mcycle();
             let is_done = op == McycleOp::Done || op == McycleOp::HaltNop;
 
-            // Handle OAM bugs from this mcycle() call BEFORE ticking.
-            // This matches the old model where trigger_oam_bug runs between
-            // the CPU state change and the bus tick.
-            if let Some(addr) = self.cpu.oam_bug_addr.take() {
-                self.bus.trigger_oam_bug(addr);
-                // Interrupt dispatch phase 1 also triggers OAM bug on SP.
-                // CPU stores SP in tmp16 at phase 1 for this purpose.
-                if self.cpu.in_interrupt && self.cpu.interrupt_phase == 2 {
-                    self.bus.trigger_oam_bug(self.cpu.tmp16);
-                }
-            }
-            if let Some(addr) = self.cpu.oam_bug_read_addr.take() {
-                self.bus.trigger_oam_bug_read(addr);
-            }
-
+            // OAM bugs trigger between the CPU state change and the bus tick.
             match op {
                 McycleOp::Done => {}
                 McycleOp::Read { addr } => {
+                    self.cpu.data_latch = self.bus.tick_read(addr);
+                    total += 4;
+                }
+                McycleOp::ReadWithOamBug { addr } => {
+                    self.bus.trigger_oam_bug_read(addr);
                     self.cpu.data_latch = self.bus.tick_read(addr);
                     total += 4;
                 }
@@ -480,6 +471,17 @@ impl Emulator {
                     total += 4;
                 }
                 McycleOp::Internal => {
+                    self.bus.tick_internal();
+                    total += 4;
+                }
+                McycleOp::InternalWithOamBug { addr } => {
+                    self.bus.trigger_oam_bug(addr);
+                    self.bus.tick_internal();
+                    total += 4;
+                }
+                McycleOp::DispatchOamBug { pc, sp } => {
+                    self.bus.trigger_oam_bug(pc);
+                    self.bus.trigger_oam_bug(sp);
                     self.bus.tick_internal();
                     total += 4;
                 }
