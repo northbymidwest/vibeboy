@@ -1,4 +1,4 @@
-use super::Cartridge;
+use super::{CartState, Cartridge, WRONG_MAPPER};
 use std::sync::Arc;
 
 pub struct RomOnly {
@@ -20,4 +20,14 @@ impl Cartridge for RomOnly {
         0xFF
     }
     fn write_ram(&mut self, _addr: u16, _val: u8) {}
+    fn snapshot_state(&self) -> CartState {
+        CartState::RomOnly
+    }
+    fn validate_state(&self, state: &CartState) -> Result<(), &'static str> {
+        match state {
+            CartState::RomOnly => Ok(()),
+            _ => Err(WRONG_MAPPER),
+        }
+    }
+    fn restore_state(&mut self, _state: &CartState) {}
 }

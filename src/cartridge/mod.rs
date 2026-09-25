@@ -73,12 +73,53 @@ pub trait Cartridge: Send {
     /// Feed accelerometer values in MBC7 u16 format (center = 0x81D0).
     fn set_accelerometer(&mut self, _x: u16, _y: u16) {}
     /// Snapshot mutable cartridge state (registers + RAM, not ROM) for save states / rewind.
-    fn snapshot_state(&self) -> Vec<u8> {
-        Vec::new()
-    }
-    /// Restore mutable cartridge state from a previous snapshot.
-    fn restore_state(&mut self, _data: &[u8]) {}
+    fn snapshot_state(&self) -> CartState;
+    /// Check that `state` was taken from this mapper type with the same RAM
+    /// size, and that its registers hold values the mapper can produce.
+    fn validate_state(&self, state: &CartState) -> Result<(), &'static str>;
+    /// Restore mutable cartridge state from a snapshot that passed
+    /// `validate_state`. Panics if `state` is for a different mapper type.
+    fn restore_state(&mut self, state: &CartState);
 }
+
+/// Mutable state of each mapper, for save states and rewind. The ROM, the
+/// wiring detected from the header (battery, rumble, MBC30, multicart) and
+/// external sensor input are not part of it. RTC mappers also leave out their
+/// wall-clock base, which restarts from the current time on restore.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub enum CartState {
+    RomOnly,
+    RomRam(rom_ram::RomRamState),
+    Mbc1(mbc1::Mbc1State),
+    Mbc2(mbc2::Mbc2State),
+    Mbc3(mbc3::Mbc3State),
+    Mbc5(mbc5::Mbc5State),
+    Mbc6(mbc6::Mbc6State),
+    Mbc7(mbc7::Mbc7State),
+    Mmm01(mmm01::Mmm01State),
+    PocketCamera(pocket_camera::PocketCameraState),
+    Tama5(tama5::Tama5State),
+    HuC1(huc1::HuC1State),
+    HuC3(huc3::HuC3State),
+}
+
+const WRONG_MAPPER: &str = "save state is for a different cartridge mapper";
+
+/// Fail with `msg` unless `ok`.
+fn ensure(ok: bool, msg: &'static str) -> Result<(), &'static str> {
+    if ok { Ok(()) } else { Err(msg) }
+}
+
+/// Fail unless a saved RAM (or flash) image has the size this cartridge uses.
+fn ensure_ram_len(saved: &[u8], own: &[u8]) -> Result<(), &'static str> {
+    ensure(
+        saved.len() == own.len(),
+        "save state cartridge RAM size does not match",
+    )
+}
+
+/// Error for registers outside the range the mapper can produce.
+const BAD_REGISTERS: &str = "save state cartridge registers out of range";
 
 /// Construct the appropriate cartridge from a ROM image.
 pub fn make_cartridge(rom: Arc<[u8]>, clock: Arc<dyn Clock>) -> Box<dyn Cartridge> {

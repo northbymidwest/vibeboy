@@ -373,7 +373,7 @@ impl Bus {
             boot_rom_active: self.boot_rom_active,
             model: self.model,
             sgb: self.sgb.clone(),
-            cart_state: self.cart.snapshot_state(),
+            cart: self.cart.snapshot_state(),
             ff72: self.ff72,
             ff73: self.ff73,
             ff74: self.ff74,
@@ -405,6 +405,7 @@ impl Bus {
         if s.hdma.active && s.hdma.blocks == 0 {
             return Err("HDMA active with no blocks left");
         }
+        self.cart.validate_state(&s.cart)?;
         s.ppu.validate_restored()
     }
 
@@ -432,7 +433,7 @@ impl Bus {
         self.hdma = s.hdma.clone();
         self.boot_rom_active = s.boot_rom_active;
         self.sgb = s.sgb.clone();
-        self.cart.restore_state(&s.cart_state);
+        self.cart.restore_state(&s.cart);
         self.cart_write_count = self.cart_write_count.wrapping_add(1);
         self.ff72 = s.ff72;
         self.ff73 = s.ff73;

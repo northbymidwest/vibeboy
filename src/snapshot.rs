@@ -74,7 +74,7 @@ pub struct BusSnapshot {
     pub boot_rom_active: bool,
     pub model: GbModel,
     pub sgb: Option<Sgb>,
-    pub cart_state: Vec<u8>,
+    pub cart: crate::cartridge::CartState,
     pub ff72: u8,
     pub ff73: u8,
     pub ff74: u8,
