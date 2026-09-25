@@ -78,6 +78,8 @@ cargo run --release --bin test_runner -- test mooneye game-boy-test-roms/mooneye
 cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/ --quiet
 ```
 
+`test` exits 1 when any test fails, times out or errors (2 when the path holds no ROMs); `--allow-failures` keeps exit 0 for runs over suites with known failures. `scripts/accuracy.sh` runs every suite against the per-test baseline in `tests/accuracy-baseline.txt` (see below).
+
 Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag. Gambatte tests encode expected hex output in filenames after `_out` (e.g. `_out3` expects "3"). DMG tests have `dmg08` in the name, CGB tests have `cgb04c`.
 
 **Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 55/70 SameSuite APU.

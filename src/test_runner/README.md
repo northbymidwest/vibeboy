@@ -22,7 +22,7 @@ cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/
 # Gambatte tests (hex output comparison after 15 frames)
 cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambatte/
 
-# GBMicrotest (HRAM result check after 2 frames)
+# GBMicrotest (HRAM/VRAM result check after 4 frames)
 cargo run --release --bin test_runner -- test gbmicrotest game-boy-test-roms/gbmicrotest/
 
 # Mealybug Tearoom tests (screenshot comparison after LD B,B breakpoint)
@@ -44,6 +44,38 @@ cargo run --release --bin test_runner -- test gambatte game-boy-test-roms/gambat
 | `--bootrom <path>` | Use a specific boot ROM file (implies --boot) |
 | `--verbose` | Print extra diagnostics per test |
 | `--quiet` | Only print the summary line |
+| `--allow-failures` | Exit 0 even when tests fail, time out or error |
+
+Each test prints one line, `PASS`, `FAIL`, `TIMEOUT` or `ERR` (the ROM or a
+harness input could not be read) followed by its path, then a summary line:
+
+```
+--- 57 passed, 0 failed, 1 timeout (58 total) ---
+```
+
+Errors and skipped ROMs (gambatte ROMs with no expected output in the name,
+tearoom ROMs with no reference image for the model) are added to the summary
+when there are any. Skipped ROMs are not part of the total.
+
+#### Exit Status
+
+| Status | Meaning |
+|--------|---------|
+| 0 | Every test passed, or `--allow-failures` was given |
+| 1 | At least one test failed, timed out or errored |
+| 2 | No `.gb`/`.gbc` ROMs under the path (whatever the flags) |
+
+`--allow-failures` is for runs over whole suites with known failures, where the
+per-test lines are the result. `scripts/accuracy.sh` uses it to run every suite
+and compare each test's status against `tests/accuracy-baseline.txt`:
+
+```bash
+# Compare against the baseline; exits 1 if a baseline PASS no longer passes
+./scripts/accuracy.sh
+
+# Record this run as the new baseline (commit it with the change that moved it)
+./scripts/accuracy.sh --update
+```
 
 ### Screenshots
 
@@ -82,7 +114,9 @@ cargo run --release --bin test_runner -- vectorize input.png --out output.png --
 
 ### Audio Dump
 
-Dump APU audio to a WAV file.
+Dump APU audio to a 32-bit float stereo WAV file. The APU generates samples at
+`--sample-rate` (8000 to 384000 Hz, default 96000), so the data matches the
+header at any rate.
 
 ```bash
 # Dump 300 frames of audio at 96kHz
@@ -134,9 +168,12 @@ When `--model` is not specified, the test runner detects the hardware model from
 |---------|-----------------|----------------|
 | **Mooneye** | LD B,B breakpoint | Fibonacci registers (B=3, C=5, D=8, E=13, H=21, L=34) |
 | **Blargg** | Serial output | "Passed" in output, detected via JR -2 done-loop |
-| **Gambatte** | Screenshot at frame 15 | Hex digit recognition matches expected output from filename |
-| **GBMicrotest** | HRAM check at frame 2 | `$FF80` == 1 |
+| **Gambatte** | Screenshot at frame 15 | Hex digit recognition matches expected output from filename (dual `_dmg08_outX_cgb04c_outY` names run both models; both must pass) |
+| **GBMicrotest** | HRAM check at frame 4 (30 for `is_if_set_during_ime0`) | `$FF82` == `$01` (`$FF` is a fail); ROMs that report in VRAM instead: `$8000` equals the value the ROM compares against |
 | **Tearoom** | LD B,B breakpoint screenshot | Pixel-exact match against reference PNG |
+
+Mooneye and Tearoom time out after 300 frames without reaching the breakpoint;
+Blargg after 6000 frames without a result on the serial port.
 
 ## Module Structure
 
