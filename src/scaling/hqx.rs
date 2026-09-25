@@ -80,26 +80,20 @@ const ROTATIONS: [[usize; 9]; 4] = [
 ];
 
 #[inline(always)]
-fn remap_edge_pattern(pattern: u32, perm: &[usize; 9], reverse: bool) -> u32 {
+fn remap_edge_pattern(pattern: u32, perm: &[usize; 9]) -> u32 {
     let mut out = 0u32;
     let indices = [0, 1, 2, 3, 5, 6, 7, 8];
     for (bit_pos, &idx) in indices.iter().enumerate() {
         let src_idx = perm[idx];
         let src_bit = if src_idx > 4 { src_idx - 1 } else { src_idx };
-        let actual_bit = if reverse { 7 - src_bit } else { src_bit };
-        out |= ((pattern >> actual_bit) & 1) << bit_pos;
+        out |= ((pattern >> src_bit) & 1) << bit_pos;
     }
     out
 }
 
-fn build_corner_view(
-    pixels: &[u32; 9],
-    pattern: u32,
-    perm: &[usize; 9],
-    reverse: bool,
-) -> CornerView {
+fn build_corner_view(pixels: &[u32; 9], pattern: u32, perm: &[usize; 9]) -> CornerView {
     CornerView {
-        edge: remap_edge_pattern(pattern, perm, reverse),
+        edge: remap_edge_pattern(pattern, perm),
         diag: pixels[perm[0]],
         top: pixels[perm[1]],
         left: pixels[perm[3]],
@@ -589,7 +583,7 @@ pub fn hq2x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
             let dx = x * 2;
             let dy = y * 2;
             for (i, xform) in TRANSFORMS.iter().enumerate() {
-                let view = build_corner_view(&nb, pat, xform, false);
+                let view = build_corner_view(&nb, pat, xform);
                 dst[(dy + i / 2) * dw + dx + (i % 2)] = hq2x_corner(&view);
             }
         }
@@ -606,14 +600,10 @@ pub fn hq3x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
             let pat = compute_edge_pattern(&nb);
             let dx = x * 3;
             let dy = y * 3;
-            let (c00, e01) =
-                hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[0], false));
-            let (c02, e12) =
-                hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[1], true));
-            let (c20, e10) =
-                hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[2], true));
-            let (c22, e21) =
-                hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[3], false));
+            let (c00, e01) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[0]));
+            let (c02, e12) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[1]));
+            let (c20, e10) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[2]));
+            let (c22, e21) = hq3x_corner_and_edge(&build_corner_view(&nb, pat, &ROTATIONS[3]));
             dst[dy * dw + dx] = c00;
             dst[dy * dw + dx + 1] = e01;
             dst[dy * dw + dx + 2] = c02;
@@ -637,10 +627,10 @@ pub fn hq4x(src: &[u32], w: usize, h: usize) -> Vec<u32> {
             let pat = compute_edge_pattern(&nb);
             let dx = x * 4;
             let dy = y * 4;
-            let tl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[0], false));
-            let tr = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[1], false));
-            let bl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[2], false));
-            let br = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[3], false));
+            let tl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[0]));
+            let tr = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[1]));
+            let bl = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[2]));
+            let br = hq4x_quadrant(&build_corner_view(&nb, pat, &TRANSFORMS[3]));
             dst[dy * dw + dx] = tl[0];
             dst[dy * dw + dx + 1] = tl[1];
             dst[dy * dw + dx + 2] = tr[1];

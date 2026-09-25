@@ -84,21 +84,20 @@ static const int ROTATIONS[36] = {
 static float4 g_nb[9];
 static int g_indices[8] = { 0,1,2,3,5,6,7,8 };
 
-int remap_edge_pattern(int pattern, int perm_offset, bool reverse) {
+int remap_edge_pattern(int pattern, int perm_offset) {
     int result = 0;
     for (int i = 0; i < 8; i++) {
         int idx = g_indices[i];
         int src_idx = (perm_offset >= 0) ?
             TRANSFORMS[perm_offset + idx] : ROTATIONS[(-perm_offset - 1) + idx];
         int src_bit = src_idx > 4 ? src_idx - 1 : src_idx;
-        int actual_bit = reverse ? 7 - src_bit : src_bit;
-        result |= ((pattern >> actual_bit) & 1) << i;
+        result |= ((pattern >> src_bit) & 1) << i;
     }
     return result;
 }
 
-CornerView build_view(int pattern, int perm_offset, bool reverse) {
-    int edge = remap_edge_pattern(pattern, perm_offset, reverse);
+CornerView build_view(int pattern, int perm_offset) {
+    int edge = remap_edge_pattern(pattern, perm_offset);
     int p0, p1, p3, p4, p5, p7;
     if (perm_offset >= 0) {
         p0 = TRANSFORMS[perm_offset]; p1 = TRANSFORMS[perm_offset+1];
@@ -256,7 +255,7 @@ void main(uint3 tid: SV_DispatchThreadID) {
     if (is_ == 2) {
         // hq2x: each output pixel is one corner, selected by sub-pixel position
         int ti = sub.y * 2 + sub.x;
-        CornerView v = build_view(pat, ti * 9, false);
+        CornerView v = build_view(pat, ti * 9);
         result = hq2x_corner(v);
 
     } else if (is_ == 3) {
@@ -265,16 +264,16 @@ void main(uint3 tid: SV_DispatchThreadID) {
             result = g_nb[4];
         } else {
             if (sub.y == 0 && sub.x <= 1) {
-                hq3x_corner_and_edge(build_view(pat, -1, false));
+                hq3x_corner_and_edge(build_view(pat, -1));
                 result = (sub.x == 0) ? g_hq3x_corner : g_hq3x_edge;
             } else if (sub.x == 2 && sub.y <= 1) {
-                hq3x_corner_and_edge(build_view(pat, -10, true));
+                hq3x_corner_and_edge(build_view(pat, -10));
                 result = (sub.y == 0) ? g_hq3x_corner : g_hq3x_edge;
             } else if (sub.x == 0 && sub.y >= 1) {
-                hq3x_corner_and_edge(build_view(pat, -19, true));
+                hq3x_corner_and_edge(build_view(pat, -19));
                 result = (sub.y == 2) ? g_hq3x_corner : g_hq3x_edge;
             } else {
-                hq3x_corner_and_edge(build_view(pat, -28, false));
+                hq3x_corner_and_edge(build_view(pat, -28));
                 result = (sub.x == 2) ? g_hq3x_corner : g_hq3x_edge;
             }
         }
@@ -284,7 +283,7 @@ void main(uint3 tid: SV_DispatchThreadID) {
         int qx = sub.x < 2 ? 0 : 1;
         int qy = sub.y < 2 ? 0 : 1;
         int ti = qy * 2 + qx;
-        hq4x_quadrant(build_view(pat, ti * 9, false));
+        hq4x_quadrant(build_view(pat, ti * 9));
         int lx = qx == 0 ? sub.x : 3 - sub.x;
         int ly = qy == 0 ? sub.y : 3 - sub.y;
         result = (ly==0 && lx==0) ? g_hq4x_px00 : (ly==0) ? g_hq4x_px01 : (lx==0) ? g_hq4x_px10 : g_hq4x_px11;
