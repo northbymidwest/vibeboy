@@ -28,45 +28,73 @@ pub enum McycleOp {
     /// and then SP. Emulator triggers the write-style OAM bug on `pc`, then on
     /// `sp`, before the tick.
     DispatchOamBug { pc: u16, sp: u16 },
-    /// HALT NOP cycle. Emulator does the split half-mcycle IF check.
+    /// HALT NOP cycle. Emulator does the split half-mcycle IF check and calls
+    /// `Cpu::exit_halt()` when an interrupt is pending.
     HaltNop,
-    /// Speed switch idle cycle. Emulator calls `bus.tick_speed_switch_idle()`.
-    SpeedSwitchIdle,
+    /// Speed switch idle cycle. Emulator calls `bus.tick_speed_switch_idle()`,
+    /// then `bus.do_speed_toggle()` when `toggle_speed` is set.
+    SpeedSwitchIdle { toggle_speed: bool },
     /// Instruction complete — no M-cycle to tick for this call.
     Done,
+    /// HALT complete. Emulator answers with `Cpu::enter_halt()`, which needs
+    /// to know whether IE & IF has an interrupt pending.
+    HaltExecuted,
+    /// STOP complete, its operand byte read. Emulator decides the outcome
+    /// from bus state and answers with `Cpu::resolve_stop()`.
+    StopExecuted,
+    /// An undefined opcode locked the CPU (halted, IME clear). Emulator
+    /// clears IE so no interrupt can ever wake it.
+    Locked,
 }
+
+/// What a STOP turns into, decided by the emulator from bus state
+/// (Pan Docs, "Using the STOP instruction").
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopOutcome {
+    /// Nothing happens: a "1-byte" STOP, the byte after it executes next.
+    Nop,
+    /// A "2-byte" STOP that behaves as HALT.
+    Halt,
+    /// CGB speed switch: the CPU idles for `SPEED_SWITCH_MCYCLES`.
+    SpeedSwitch,
+    /// STOP mode until a selected button line falls. `one_byte` makes the
+    /// byte after STOP execute next instead of being skipped.
+    Stop { one_byte: bool },
+}
+
+/// M-cycles the CPU idles for during a CGB speed switch. The speed toggles
+/// halfway through.
+const SPEED_SWITCH_MCYCLES: u32 = 2050;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
     pub regs: Registers,
-    pub ime: bool,
-    pub ime_pending: bool,
-    pub halted: bool,
-    pub halt_bug: bool,
+    ime: bool,
+    ime_pending: bool,
+    halted: bool,
+    halt_bug: bool,
     /// STOP mode: the system clock is stopped until a P10-P13 line falls.
-    pub stopped: bool,
+    stopped: bool,
     /// Remaining M-cycles to idle during a CGB speed switch.
-    pub speed_switch_remaining: u32,
-    /// M-cycle count at which to toggle the speed (counted down from initial).
-    pub speed_switch_toggle_at: u32,
+    speed_switch_remaining: u32,
 
     // ── M-cycle state machine fields ──────────────────────────────────────────
     /// Current opcode being executed.
-    pub(crate) opcode: u8,
+    opcode: u8,
     /// CB-prefixed opcode (valid when opcode == 0xCB and phase >= 3).
     cb_opcode: u8,
     /// Phase counter within current instruction. 0 = fetch next opcode.
-    pub(crate) phase: u8,
-    /// Result of the last Read operation, set by the emulator loop.
-    pub data_latch: u8,
+    phase: u8,
+    /// Result of the last Read operation, set through `latch_read()`.
+    data_latch: u8,
     /// Inter-phase scratch byte.
     tmp8: u8,
     /// Inter-phase scratch word.
-    pub(crate) tmp16: u16,
+    tmp16: u16,
     /// True when executing an interrupt dispatch sequence.
-    pub(crate) in_interrupt: bool,
+    in_interrupt: bool,
     /// Phase counter within interrupt dispatch (0..=4).
-    pub(crate) interrupt_phase: u8,
+    interrupt_phase: u8,
     /// Saved `ime_pending` state at instruction start for EI delay.
     pending_ime_at_start: bool,
     /// True when the last mcycle op was the final action of an instruction.
@@ -90,7 +118,6 @@ impl Cpu {
             halt_bug: false,
             stopped: false,
             speed_switch_remaining: 0,
-            speed_switch_toggle_at: 0,
             opcode: 0,
             cb_opcode: 0,
             phase: 0,
@@ -108,10 +135,28 @@ impl Cpu {
         self.halted
     }
 
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    pub fn ime(&self) -> bool {
+        self.ime
+    }
+
+    /// Phase within the current instruction; 0 at an instruction boundary.
+    pub fn phase(&self) -> u8 {
+        self.phase
+    }
+
+    pub fn in_interrupt(&self) -> bool {
+        self.in_interrupt
+    }
+
     // ── M-cycle state machine ─────────────────────────────────────────────────
 
     /// Return one M-cycle operation. The emulator loop must service the returned
-    /// op (read/write/tick) and then call `mcycle()` again until `Done` is returned.
+    /// op (read/write/tick) and then call `mcycle()` again until the instruction
+    /// completes (`Done`, `HaltExecuted`, `StopExecuted` or `Locked`).
     pub fn mcycle(&mut self) -> McycleOp {
         // Terminal action was serviced — finish the instruction
         if self.finishing {
@@ -119,9 +164,16 @@ impl Cpu {
             return self.finish_instruction();
         }
 
-        // Speed switch idle
+        // Speed switch idle. Nothing observes the countdown before the
+        // emulator ticks this cycle, so it is advanced here.
         if self.speed_switch_remaining > 0 {
-            return McycleOp::SpeedSwitchIdle;
+            self.speed_switch_remaining -= 1;
+            if self.speed_switch_remaining == 0 {
+                self.halted = false;
+            }
+            return McycleOp::SpeedSwitchIdle {
+                toggle_speed: self.speed_switch_remaining == SPEED_SWITCH_MCYCLES / 2,
+            };
         }
 
         // HALT NOP
@@ -158,6 +210,73 @@ impl Cpu {
         }
 
         self.execute_phase()
+    }
+
+    /// Hand the byte read for the last `Read` or `ReadWithOamBug` to the CPU.
+    #[inline]
+    pub fn latch_read(&mut self, val: u8) {
+        self.data_latch = val;
+    }
+
+    /// True at an instruction boundary where a pending interrupt would be
+    /// dispatched: IME set, not halted, and no dispatch or speed switch in
+    /// progress. The emulator then checks IE & IF and calls
+    /// `begin_interrupt_dispatch()`.
+    pub fn ready_for_interrupt(&self) -> bool {
+        !self.in_interrupt
+            && !self.halted
+            && self.ime
+            && self.speed_switch_remaining == 0
+            && self.phase == 0
+    }
+
+    /// Answer to `McycleOp::HaltNop` once IE & IF has an interrupt pending:
+    /// leave HALT and dispatch the interrupt if IME is set. With IME clear
+    /// execution just resumes. No HALT bug here; that only happens when HALT
+    /// is executed with an interrupt already pending (see `enter_halt`).
+    pub fn exit_halt(&mut self) {
+        self.halted = false;
+        if self.ime {
+            self.begin_interrupt_dispatch();
+        }
+    }
+
+    /// Answer to `McycleOp::HaltExecuted`. HALT executed with an interrupt
+    /// already pending never halts, and the next opcode fetch fails to
+    /// increment PC (HALT bug). With IME=0 the byte after HALT is read
+    /// twice. With IME=1 (only reachable via EI; HALT) the interrupt is
+    /// dispatched next and, because of the missed increment, returns to the
+    /// HALT itself (see `begin_interrupt_dispatch`).
+    pub fn enter_halt(&mut self, interrupt_pending: bool) {
+        if interrupt_pending {
+            self.halt_bug = true;
+        } else {
+            self.halted = true;
+        }
+    }
+
+    /// Answer to `McycleOp::StopExecuted`. The CPU has already read the byte
+    /// after STOP; a "1-byte" STOP steps PC back so that byte executes next.
+    pub fn resolve_stop(&mut self, outcome: StopOutcome) {
+        match outcome {
+            StopOutcome::Nop => self.regs.pc = self.regs.pc.wrapping_sub(1),
+            StopOutcome::Halt => self.halted = true,
+            StopOutcome::SpeedSwitch => {
+                self.speed_switch_remaining = SPEED_SWITCH_MCYCLES;
+                self.halted = true;
+            }
+            StopOutcome::Stop { one_byte } => {
+                if one_byte {
+                    self.regs.pc = self.regs.pc.wrapping_sub(1);
+                }
+                self.stopped = true;
+            }
+        }
+    }
+
+    /// Leave STOP mode (a selected button line fell).
+    pub fn exit_stop(&mut self) {
+        self.stopped = false;
     }
 
     /// Signal that an interrupt should be dispatched. Called by the emulator
@@ -240,6 +359,12 @@ impl Cpu {
 
     /// Finish the current instruction and return Done, applying EI delay.
     fn finish_instruction(&mut self) -> McycleOp {
+        self.finish_reporting(McycleOp::Done)
+    }
+
+    /// Finish the current instruction, applying EI delay, and return
+    /// `completion` to tell the emulator how it ended.
+    fn finish_reporting(&mut self, completion: McycleOp) -> McycleOp {
         self.phase = 0;
         // Apply EI delay: IME is enabled after the instruction following EI.
         // If DI executed this step it cleared ime_pending, so we skip the apply.
@@ -247,7 +372,7 @@ impl Cpu {
             self.ime = true;
             self.ime_pending = false;
         }
-        McycleOp::Done
+        completion
     }
 
     // ── Register-pair helpers ─────────────────────────────────────────────────
@@ -820,10 +945,10 @@ impl Cpu {
                         McycleOp::Read { addr }
                     }
                     3 => {
-                        // _next = self.data_latch (consumed but unused). The
-                        // emulator sees opcode 0x10 and handles the speed
-                        // switch / STOP, which needs bus state.
-                        self.finish_instruction()
+                        // _next = self.data_latch (consumed but unused). What
+                        // STOP does depends on bus state, so the emulator
+                        // decides and answers with resolve_stop().
+                        self.finish_reporting(McycleOp::StopExecuted)
                     }
                     _ => unreachable!(),
                 }
@@ -1010,10 +1135,9 @@ impl Cpu {
                     // doesn't double-apply
                     self.pending_ime_at_start = false;
                 }
-                // HALT bug detection needs IE & IF (bus state), so the
-                // emulator checks the halt_bug condition after Done.
-                self.halted = true;
-                self.finish_instruction()
+                // Halting or the HALT bug depends on IE & IF (bus state),
+                // so the emulator answers with enter_halt().
+                self.finish_reporting(McycleOp::HaltExecuted)
             }
 
             // ══════════════════════════════════════════════════════════════════
@@ -1716,8 +1840,8 @@ impl Cpu {
                 self.ime = false;
                 self.ime_pending = false;
                 self.halted = true;
-                // The emulator sees the opcode and clears IE (bus state).
-                self.finish_instruction()
+                // The emulator clears IE (bus state).
+                self.finish_reporting(McycleOp::Locked)
             }
         }
     }

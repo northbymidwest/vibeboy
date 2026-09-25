@@ -1,6 +1,6 @@
 use crate::bus::Bus;
 use crate::clock::Clock;
-use crate::cpu::{Cpu, McycleOp, Registers};
+use crate::cpu::{Cpu, McycleOp, Registers, StopOutcome};
 use crate::joypad::{BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP};
 use crate::model::GbModel;
 use crate::rewind::RewindBuffer;
@@ -412,7 +412,7 @@ impl Emulator {
                 cycles
             };
             // In STOP mode the PPU is frozen and never reaches VBlank either.
-            let lcd_on = self.bus.ppu.lcdc & 0x80 != 0 && !self.cpu.stopped;
+            let lcd_on = self.bus.ppu.lcdc & 0x80 != 0 && !self.cpu.stopped();
             if (!lcd_on && dots >= CYCLES_PER_FRAME) || dots >= CYCLES_PER_FRAME * 4 {
                 break;
             }
@@ -425,23 +425,18 @@ impl Emulator {
         // falling (a selected button being pressed) restarts it; that edge
         // also requests the joypad interrupt on the next tick. Time still
         // passes for the frontend, one M-cycle per call.
-        if self.cpu.stopped {
+        if self.cpu.stopped() {
             if !self.bus.joypad.interrupt {
                 return 4;
             }
-            self.cpu.stopped = false;
+            self.cpu.exit_stop();
         }
 
         // Check for pending interrupts at the START of each step, matching
         // hardware behavior where the CPU checks IE & IF before fetching
         // the next opcode. This must happen before mcycle() so the CPU
         // enters interrupt dispatch instead of opcode fetch.
-        if !self.cpu.in_interrupt
-            && !self.cpu.halted
-            && self.cpu.ime
-            && self.cpu.speed_switch_remaining == 0
-            && self.cpu.phase == 0
-        {
+        if self.cpu.ready_for_interrupt() {
             self.bus.flush_ppu_deferred();
             let pending = self.bus.ie & self.bus.if_ & 0x1F;
             if pending != 0 {
@@ -451,19 +446,17 @@ impl Emulator {
 
         let mut total = 0u32;
         loop {
-            let op = self.cpu.mcycle();
-            let is_done = op == McycleOp::Done || op == McycleOp::HaltNop;
-
             // OAM bugs trigger between the CPU state change and the bus tick.
-            match op {
-                McycleOp::Done => {}
+            match self.cpu.mcycle() {
                 McycleOp::Read { addr } => {
-                    self.cpu.data_latch = self.bus.tick_read(addr);
+                    let val = self.bus.tick_read(addr);
+                    self.cpu.latch_read(val);
                     total += 4;
                 }
                 McycleOp::ReadWithOamBug { addr } => {
                     self.bus.trigger_oam_bug_read(addr);
-                    self.cpu.data_latch = self.bus.tick_read(addr);
+                    let val = self.bus.tick_read(addr);
+                    self.cpu.latch_read(val);
                     total += 4;
                 }
                 McycleOp::Write { addr, val } => {
@@ -508,97 +501,60 @@ impl Emulator {
                     self.bus.tick_half_post();
                     total += 4;
                     if pending != 0 {
-                        self.cpu.halted = false;
-                        if self.cpu.ime {
-                            self.cpu.begin_interrupt_dispatch();
-                        }
-                        // IME=false: just un-halt and continue. No halt_bug —
-                        // that only triggers when HALT is first executed with
-                        // an interrupt already pending.
+                        self.cpu.exit_halt();
                     }
                     break;
                 }
-                McycleOp::SpeedSwitchIdle => {
+                McycleOp::SpeedSwitchIdle { toggle_speed } => {
                     self.bus.tick_speed_switch_idle();
-                    self.cpu.speed_switch_remaining -= 1;
-                    if self.cpu.speed_switch_remaining == self.cpu.speed_switch_toggle_at {
+                    if toggle_speed {
                         self.bus.do_speed_toggle();
-                    }
-                    if self.cpu.speed_switch_remaining == 0 {
-                        self.cpu.halted = false;
                     }
                     total += 4;
                     break;
                 }
-            }
 
-            // Done means instruction is complete — break after handling
-            // any pending interrupts at this instruction boundary.
-            if is_done {
-                // Undefined opcodes: CPU locks (halted + IME=false + IE=0)
-                // Must be checked BEFORE halt_bug detection so IE is cleared first.
-                if self.cpu.halted
-                    && !self.cpu.ime
-                    && matches!(
-                        self.cpu.opcode,
-                        0xD3 | 0xDB | 0xDD | 0xE3 | 0xE4 | 0xEB | 0xEC | 0xED | 0xF4 | 0xFC | 0xFD
-                    )
-                {
-                    self.bus.ie = 0;
-                }
-
-                // HALT executed with an interrupt already pending never halts,
-                // and the next opcode fetch fails to increment PC (halt bug).
-                // With IME=0 the byte after HALT is read twice. With IME=1
-                // (only reachable via EI; HALT) the interrupt is dispatched
-                // next and, because of the missed increment, returns to the
-                // HALT itself (see Cpu::begin_interrupt_dispatch). This only
-                // triggers when HALT is first executed with an interrupt
-                // already pending, NOT when the CPU wakes from halt later.
-                // Undefined opcodes also set `halted` but have cleared IE above.
-                if self.cpu.halted && self.cpu.opcode == 0x76 {
+                // Instruction complete. Interrupts are checked at the start
+                // of the next step() (the CPU checks IE & IF before fetching
+                // the next opcode).
+                McycleOp::Done => break,
+                McycleOp::HaltExecuted => {
                     self.bus.flush_ppu_deferred();
                     let pending = self.bus.ie & self.bus.if_ & 0x1F;
-                    if pending != 0 {
-                        self.cpu.halt_bug = true;
-                        self.cpu.halted = false;
-                    }
+                    self.cpu.enter_halt(pending != 0);
+                    break;
                 }
-
-                // STOP (Pan Docs, "Using the STOP instruction"). The CPU has
-                // already read the byte after STOP; a "1-byte" STOP steps PC
-                // back so that byte executes as the next opcode.
-                // - Button held and selected: no DIV reset. With an interrupt
-                //   pending nothing happens (1 byte); otherwise HALT (2 bytes).
-                // - CGB speed switch armed: DIV reset, 2050-cycle switch.
-                // - Otherwise: DIV reset and STOP mode, 1 byte when an
-                //   interrupt is pending, else 2 bytes.
-                if self.cpu.opcode == 0x10 && self.cpu.speed_switch_remaining == 0 {
+                McycleOp::StopExecuted => {
+                    // STOP (Pan Docs, "Using the STOP instruction"):
+                    // - Button held and selected: no DIV reset. With an
+                    //   interrupt pending nothing happens (1 byte); otherwise
+                    //   HALT (2 bytes).
+                    // - CGB speed switch armed: DIV reset, 2050-cycle switch.
+                    // - Otherwise: DIV reset and STOP mode, 1 byte when an
+                    //   interrupt is pending, else 2 bytes.
                     self.bus.flush_ppu_deferred();
                     let pending = self.bus.ie & self.bus.if_ & 0x1F != 0;
-                    if self.bus.joypad.any_selected_line_low() {
+                    let outcome = if self.bus.joypad.any_selected_line_low() {
                         if pending {
-                            self.cpu.regs.pc = self.cpu.regs.pc.wrapping_sub(1);
+                            StopOutcome::Nop
                         } else {
-                            self.cpu.halted = true;
+                            StopOutcome::Halt
                         }
                     } else if self.bus.speed_switch_armed() {
                         self.bus.do_speed_switch_prepare();
-                        self.cpu.speed_switch_remaining = 2050;
-                        self.cpu.speed_switch_toggle_at = 2050 / 2;
-                        self.cpu.halted = true;
+                        StopOutcome::SpeedSwitch
                     } else {
                         self.bus.reset_div();
-                        if pending {
-                            self.cpu.regs.pc = self.cpu.regs.pc.wrapping_sub(1);
-                        }
-                        self.cpu.stopped = true;
-                    }
+                        StopOutcome::Stop { one_byte: pending }
+                    };
+                    self.cpu.resolve_stop(outcome);
+                    break;
                 }
-
-                // Interrupt check moved to start of step() to match hardware
-                // timing (CPU checks IE & IF before fetching next opcode).
-                break;
+                McycleOp::Locked => {
+                    // Undefined opcode: with IE cleared nothing wakes the CPU.
+                    self.bus.ie = 0;
+                    break;
+                }
             }
         }
         let dma_extra = self.bus.dma_halt_cycles;
@@ -620,10 +576,10 @@ impl Emulator {
                     "1M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
                     self.cpu.regs.pc,
                     cycles,
-                    self.cpu.halted,
-                    self.cpu.ime,
-                    self.cpu.phase,
-                    self.cpu.in_interrupt
+                    self.cpu.halted(),
+                    self.cpu.ime(),
+                    self.cpu.phase(),
+                    self.cpu.in_interrupt()
                 );
             }
             if iter_count == 10_000_000 {
@@ -631,10 +587,10 @@ impl Emulator {
                     "10M iters: PC={:04X} cycles={} halted={} ime={} phase={} in_int={}",
                     self.cpu.regs.pc,
                     cycles,
-                    self.cpu.halted,
-                    self.cpu.ime,
-                    self.cpu.phase,
-                    self.cpu.in_interrupt
+                    self.cpu.halted(),
+                    self.cpu.ime(),
+                    self.cpu.phase(),
+                    self.cpu.in_interrupt()
                 );
             }
             // Check for Mooneye breakpoints before executing:
@@ -1066,14 +1022,14 @@ mod tests {
             0x3E, 0x00, 0xE0, 0x0F, 0xE0, 0xFF, 0xE0, 0x00, // ld a,0; IF, IE, P1
         ]);
         emu.step_frame();
-        assert!(emu.cpu.stopped);
+        assert!(emu.cpu.stopped());
         let div = emu.bus.read_byte(0xFF04);
         let ly = emu.bus.read_byte(0xFF44);
         assert_eq!(div, 0, "STOP resets DIV");
         for _ in 0..3 {
             emu.step_frame();
         }
-        assert!(emu.cpu.stopped, "IE is 0, yet nothing but a button exits");
+        assert!(emu.cpu.stopped(), "IE is 0, yet nothing but a button exits");
         assert_eq!(emu.bus.read_byte(0xFF04), div, "timer is stopped");
         assert_eq!(emu.bus.read_byte(0xFF44), ly, "PPU is stopped");
         assert_eq!(emu.cpu.regs.a, 0);
@@ -1081,11 +1037,11 @@ mod tests {
         emu.bus.write_byte(0xFF00, 0x20); // only the d-pad selected
         emu.set_button(BTN_A, true);
         emu.step_frame();
-        assert!(emu.cpu.stopped, "an unselected button does not exit STOP");
+        assert!(emu.cpu.stopped(), "an unselected button does not exit STOP");
 
         emu.set_button(BTN_UP, true);
         emu.step_frame();
-        assert!(!emu.cpu.stopped);
+        assert!(!emu.cpu.stopped());
         assert_eq!(emu.cpu.regs.a, 1, "STOP was 2 bytes: one INC A skipped");
         assert_ne!(emu.bus.if_ & 0x10, 0, "the falling line requests IRQ 4");
     }
@@ -1095,7 +1051,7 @@ mod tests {
         // IE=4, IF=4 (timer pending, IME=0), select both groups, A=0, STOP.
         let mut emu = stop_emu(&[0x3E, 0x04, 0xE0, 0x0F, 0xE0, 0xFF, 0x3E, 0x00, 0xE0, 0x00]);
         emu.step_frame();
-        assert!(emu.cpu.stopped, "STOP mode is still entered");
+        assert!(emu.cpu.stopped(), "STOP mode is still entered");
         emu.set_button(BTN_START, true);
         emu.step_frame();
         assert_eq!(emu.cpu.regs.a, 2, "the byte after STOP executed");
@@ -1109,16 +1065,16 @@ mod tests {
         ]);
         emu.set_button(BTN_DOWN, true);
         // Run to the STOP opcode, then execute it.
-        while emu.cpu.regs.pc != 0x10C || emu.cpu.phase != 0 {
+        while emu.cpu.regs.pc != 0x10C || emu.cpu.phase() != 0 {
             emu.step();
         }
         let div_before = emu.bus.timer.counter();
         emu.step();
-        assert!(emu.cpu.halted && !emu.cpu.stopped, "HALT, not STOP");
+        assert!(emu.cpu.halted() && !emu.cpu.stopped(), "HALT, not STOP");
         assert!(emu.bus.timer.counter() > div_before, "DIV was not reset");
         emu.step_frame();
         emu.step_frame();
-        assert!(!emu.cpu.halted, "VBlank ends the HALT");
+        assert!(!emu.cpu.halted(), "VBlank ends the HALT");
         assert_eq!(emu.cpu.regs.a, 1, "STOP was 2 bytes");
     }
 
