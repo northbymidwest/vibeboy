@@ -677,8 +677,15 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             } else {
                                 st.emu.frame_buffer()
                             };
-                            let da_w = da.width().max(1) as usize;
-                            let da_h = da.height().max(1) as usize;
+                            // Size of whichever view the Stack is showing; the
+                            // hidden one is unallocated and reports 0x0.
+                            let (view_w, view_h) = if gl_renderer.borrow().is_some() {
+                                (gl_area.width(), gl_area.height())
+                            } else {
+                                (da.width(), da.height())
+                            };
+                            let da_w = view_w.max(1) as usize;
+                            let da_h = view_h.max(1) as usize;
 
                             // Compute aspect-ratio-correct dimensions for filters
                             let scale_fit = (da_w as f64 / base_w as f64)
