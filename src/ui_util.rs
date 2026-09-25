@@ -532,6 +532,55 @@ fn frames_for_audio_queue(queued: usize, sample_rate: u32) -> u32 {
     }
 }
 
+// ── Audio ring ────────────────────────────────────────────────────────────
+
+/// Create a lock-free single-producer single-consumer audio ring holding
+/// up to `capacity` stereo frames. The emulation thread keeps the producer
+/// and the audio device callback the consumer; neither side ever blocks or
+/// allocates, so the real-time callback cannot stall on (or be poisoned by)
+/// the emulation thread.
+#[cfg(feature = "rtrb")]
+pub fn audio_ring(capacity: usize) -> (AudioProducer, AudioConsumer) {
+    let (producer, consumer) = rtrb::RingBuffer::new(capacity);
+    (AudioProducer(producer), AudioConsumer(consumer))
+}
+
+/// Emulation side of [`audio_ring`].
+#[cfg(feature = "rtrb")]
+pub struct AudioProducer(rtrb::Producer<[f32; 2]>);
+
+#[cfg(feature = "rtrb")]
+impl AudioProducer {
+    /// Queue interleaved stereo samples. Whole frames that do not fit are
+    /// dropped, so channels never swap; session pacing keeps the ring from
+    /// filling in the first place.
+    pub fn push(&mut self, samples: &[f32]) {
+        let (frames, _) = samples.as_chunks::<2>();
+        let _dropped = self.0.push_partial_slice(frames);
+    }
+
+    /// Stereo frames waiting to be played.
+    pub fn queued(&self) -> usize {
+        self.0.buffer().capacity() - self.0.slots()
+    }
+}
+
+/// Device side of [`audio_ring`].
+#[cfg(feature = "rtrb")]
+pub struct AudioConsumer(rtrb::Consumer<[f32; 2]>);
+
+#[cfg(feature = "rtrb")]
+impl AudioConsumer {
+    /// Fill `out` with interleaved stereo samples, padding with silence on
+    /// underrun. Real-time safe.
+    pub fn fill(&mut self, out: &mut [f32]) {
+        let (frames, tail) = out.as_chunks_mut::<2>();
+        let (_, missing) = self.0.pop_partial_slice(frames);
+        missing.fill([0.0; 2]);
+        tail.fill(0.0);
+    }
+}
+
 /// Options that shape every emulator a [`Session`] builds.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
@@ -981,6 +1030,24 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert!(!dir.join("game.sav.tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(feature = "rtrb")]
+    #[test]
+    fn audio_ring_keeps_whole_stereo_frames() {
+        let (mut producer, mut consumer) = audio_ring(3);
+        // Five frames into a three-frame ring: the last two are dropped.
+        producer.push(&[1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0]);
+        assert_eq!(producer.queued(), 3);
+        let mut out = [9.0; 4];
+        consumer.fill(&mut out);
+        assert_eq!(out, [1.0, -1.0, 2.0, -2.0]);
+        // A trailing half frame is ignored rather than shifting channels.
+        producer.push(&[6.0, -6.0, 7.0]);
+        let mut out = [9.0; 6];
+        consumer.fill(&mut out);
+        assert_eq!(out, [3.0, -3.0, 6.0, -6.0, 0.0, 0.0]);
+        assert_eq!(producer.queued(), 0);
     }
 
     const RATE: u32 = 48_000;

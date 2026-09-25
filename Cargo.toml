@@ -34,6 +34,7 @@ pollster = { version = "1", optional = true }
 winit = { version = "0.30", optional = true }
 muda = { version = "0.20", optional = true, default-features = false, features = ["gtk4"] }
 cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.4", optional = true }
 rfd = { version = "0.17", optional = true }
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"], optional = true }
 gilrs = { version = "0.11", optional = true }
@@ -80,7 +81,7 @@ required-features = ["gtk-ui"]
 [features]
 default = ["native", "sdl3-gpu-shaders"]
 native = ["sdl3", "clap", "clap_complete", "env_logger", "image", "svg"]
-macos-ui = []
+macos-ui = ["rtrb"]
 sdl3-gpu-shaders = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 winit-ui = ["gpu", "winit", "muda", "cpal", "rfd", "nokhwa", "gilrs", "clap", "env_logger", "image"]
@@ -88,6 +89,8 @@ gtk-ui = ["gpu", "gtk4", "cairo-rs", "clap", "env_logger", "cpal", "image", "gil
 web = ["gpu", "image", "wasm-bindgen", "web-sys", "js-sys", "console_log", "wasm-bindgen-futures", "console_error_panic_hook"]
 libretro = []
 glow = ["dep:glow"]
+# The cpal output feeds its device through the lock-free audio ring.
+cpal = ["dep:cpal", "rtrb"]
 
 # CI runs clippy with -D warnings. These three are style lints that fight the
 # shape of this code: GPU dispatch helpers take one argument per binding, and

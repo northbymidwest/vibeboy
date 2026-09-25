@@ -20,8 +20,6 @@ use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
@@ -38,7 +36,7 @@ use ui_util::parse_filter;
 use util::frame_duration;
 
 use accel::{close_accel, init_accel, poll_accel};
-use audio::{AudioRingBuffer, SharedAudioBuffer, setup_audio};
+use audio::AudioOutput;
 use camera::CameraCapture;
 use controls::{open_rom_dialog, show_controls_panel};
 use font::tiny_font;
@@ -227,12 +225,7 @@ struct AppState {
     key_map: std::collections::HashMap<u16, u8>,
     keys_down: HashSet<u16>,
     gamepad: GamepadState,
-    // audio_unit must be declared before audio_ring so it's dropped first.
-    // Held only for its Drop.
-    #[allow(dead_code)]
-    // (stops the callback before the ring buffer is freed)
-    audio_unit: Option<audio::AudioUnitHandle>,
-    audio_ring: SharedAudioBuffer,
+    audio: Option<AudioOutput>,
     camera: Option<CameraCapture>,
     camera_buf: [u8; 128 * 112],
     accel_source: AccelSource,
@@ -556,8 +549,8 @@ impl AppState {
             }
             util::reverse_audio(&mut all_audio);
             let resampled = util::downsample_audio(&all_audio, 3);
-            if let Ok(mut ring) = self.audio_ring.lock() {
-                ring.write(&resampled);
+            if let Some(audio) = self.audio.as_mut() {
+                audio.push(&resampled);
             }
             self.emu_time_debt = Duration::ZERO;
         } else if fast_forward {
@@ -580,10 +573,9 @@ impl AppState {
             let target_fill = samples_per_frame * 3; // ~50ms
             let max_fill = samples_per_frame * 8; // ~133ms
             let queued = self
-                .audio_ring
-                .lock()
-                .map(|r| r.len())
-                .unwrap_or(target_fill);
+                .audio
+                .as_ref()
+                .map_or(target_fill, |a| a.queued_frames() * 2);
 
             let frames_needed = if queued < target_fill / 2 {
                 2u32
@@ -618,8 +610,8 @@ impl AppState {
             } else {
                 std::borrow::Cow::Borrowed(&samples[..])
             };
-            if let Ok(mut ring) = self.audio_ring.lock() {
-                ring.write(&to_write);
+            if let Some(audio) = self.audio.as_mut() {
+                audio.push(&to_write);
             }
         }
     }
@@ -1049,9 +1041,7 @@ fn main() {
         app.activateIgnoringOtherApps(true);
 
         // ── Audio ────────────────────────────────────────────────────────────
-        let audio_ring: SharedAudioBuffer =
-            Arc::new(Mutex::new(AudioRingBuffer::new(96_000 / 60 * 4 * 2))); // ~4 frames stereo
-        let audio_unit = setup_audio(&audio_ring);
+        let audio = AudioOutput::start(AUDIO_SAMPLE_RATE);
 
         // ── Camera ───────────────────────────────────────────────────────────
         let camera = if emu.has_camera() {
@@ -1079,8 +1069,7 @@ fn main() {
             key_map,
             keys_down: HashSet::new(),
             gamepad: GamepadState::new(),
-            audio_unit,
-            audio_ring,
+            audio,
             camera,
             camera_buf: [0u8; 128 * 112],
             accel_source,

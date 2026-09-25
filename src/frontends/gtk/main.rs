@@ -82,8 +82,7 @@ struct EmuState {
     scaled_buf: Vec<u32>,
     rom_path: PathBuf,
     rom_data: std::sync::Arc<[u8]>,
-    audio_ring: std::sync::Arc<std::sync::Mutex<cpal_audio::AudioRing>>,
-    _audio_stream: Option<cpal::Stream>,
+    audio: Option<cpal_audio::CpalAudio>,
     frame_timer: Option<glib::SourceId>,
     fps: ui_util::FpsCounter,
     gamepad: Option<ui_util::GamepadPoller>,
@@ -153,17 +152,7 @@ fn create_emu_state(
     let src_w = if is_sgb { SGB_W } else { GB_W };
     let src_h = if is_sgb { SGB_H } else { GB_H };
 
-    let audio_ring = std::sync::Arc::new(std::sync::Mutex::new(cpal_audio::AudioRing::new(
-        AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
-        AUDIO_SAMPLE_RATE,
-        AUDIO_SAMPLE_RATE,
-    )));
-    let (_audio_stream, actual_rate) =
-        match cpal_audio::start_audio(std::sync::Arc::clone(&audio_ring), AUDIO_SAMPLE_RATE) {
-            Some((s, r)) => (Some(s), r),
-            None => (None, AUDIO_SAMPLE_RATE),
-        };
-    audio_ring.lock().unwrap().downsample_ratio = (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
+    let audio = cpal_audio::CpalAudio::start(AUDIO_SAMPLE_RATE);
 
     let sav_flusher = ui_util::SavFlusher::new(&emu, &rom_path);
 
@@ -189,8 +178,7 @@ fn create_emu_state(
         scaled_buf: Vec::new(),
         rom_path,
         rom_data: rom,
-        audio_ring,
-        _audio_stream,
+        audio,
         frame_timer: None,
         fps: ui_util::FpsCounter::new(),
         gamepad: ui_util::GamepadPoller::new(),
@@ -580,9 +568,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             }
                             util::reverse_audio(&mut all_audio);
                             let resampled = util::downsample_audio(&all_audio, 3);
-                            if !resampled.is_empty() {
-                                let mut ring = st.audio_ring.lock().unwrap();
-                                ring.push(&resampled);
+                            if !resampled.is_empty()
+                                && let Some(ref mut audio) = st.audio
+                            {
+                                audio.push(&resampled);
                             }
                         } else if st.paused && !st.step_one_frame {
                             // Don't step emulation
@@ -590,9 +579,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                             st.emu.step_frame();
                             st.step_one_frame = false;
                             let samples = st.emu.drain_audio_samples();
-                            if !samples.is_empty() {
-                                let mut ring = st.audio_ring.lock().unwrap();
-                                ring.push(&samples);
+                            if !samples.is_empty()
+                                && let Some(ref mut audio) = st.audio
+                            {
+                                audio.push(&samples);
                             }
                         } else if !st.paused {
                             let emu_start = Instant::now();
@@ -605,8 +595,9 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 let samples = st.emu.drain_audio_samples();
                                 if !samples.is_empty() {
                                     let resampled = util::downsample_audio(&samples, 4);
-                                    let mut ring = st.audio_ring.lock().unwrap();
-                                    ring.push(&resampled);
+                                    if let Some(ref mut audio) = st.audio {
+                                        audio.push(&resampled);
+                                    }
                                 }
                             } else if st.slow_motion {
                                 // Half speed: step every other frame
@@ -615,9 +606,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     st.emu.step_frame();
                                     frames_stepped = 1;
                                     let samples = st.emu.drain_audio_samples();
-                                    if !samples.is_empty() {
-                                        let mut ring = st.audio_ring.lock().unwrap();
-                                        ring.push(&samples);
+                                    if !samples.is_empty()
+                                        && let Some(ref mut audio) = st.audio
+                                    {
+                                        audio.push(&samples);
                                     }
                                 } else {
                                     frames_stepped = 0;
@@ -627,8 +619,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                 let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2;
                                 let target_fill = samples_per_frame * 3;
                                 let max_fill = samples_per_frame * 8;
-                                let queued =
-                                    st.audio_ring.lock().map(|r| r.len()).unwrap_or(target_fill);
+                                let queued = st
+                                    .audio
+                                    .as_ref()
+                                    .map_or(target_fill, |a| a.queued_frames() * 2);
 
                                 frames_stepped = if queued < target_fill / 2 {
                                     2
@@ -644,9 +638,10 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                                     st.emu.step_frame();
                                 }
                                 let samples = st.emu.drain_audio_samples();
-                                if !samples.is_empty() {
-                                    let mut ring = st.audio_ring.lock().unwrap();
-                                    ring.push(&samples);
+                                if !samples.is_empty()
+                                    && let Some(ref mut audio) = st.audio
+                                {
+                                    audio.push(&samples);
                                 }
                             }
                             let emu_elapsed = emu_start.elapsed();

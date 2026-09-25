@@ -1,6 +1,4 @@
-use std::sync::{Arc, Mutex};
-
-use super::AUDIO_SAMPLE_RATE;
+use super::ui_util::{AudioConsumer, AudioProducer, audio_ring, audio_ring_capacity};
 
 // ── CoreAudio FFI ────────────────────────────────────────────────────────────
 
@@ -109,60 +107,9 @@ pub(super) mod core_audio {
     }
 }
 
-// ── Audio ring buffer ────────────────────────────────────────────────────────
+// ── Output ───────────────────────────────────────────────────────────────────
 
-pub(super) struct AudioRingBuffer {
-    buffer: Vec<f32>,
-    write_pos: usize,
-    read_pos: usize,
-    capacity: usize,
-}
-
-impl AudioRingBuffer {
-    pub fn new(capacity: usize) -> Self {
-        AudioRingBuffer {
-            buffer: vec![0.0; capacity],
-            write_pos: 0,
-            read_pos: 0,
-            capacity,
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        if self.write_pos >= self.read_pos {
-            self.write_pos - self.read_pos
-        } else {
-            self.capacity - self.read_pos + self.write_pos
-        }
-    }
-
-    pub fn write(&mut self, data: &[f32]) {
-        for &sample in data {
-            let next = (self.write_pos + 1) % self.capacity;
-            if next == self.read_pos {
-                // Buffer full — overwrite oldest sample
-                self.read_pos = (self.read_pos + 1) % self.capacity;
-            }
-            self.buffer[self.write_pos] = sample;
-            self.write_pos = next;
-        }
-    }
-
-    pub fn read(&mut self, out: &mut [f32]) {
-        for sample in out.iter_mut() {
-            if self.read_pos == self.write_pos {
-                *sample = 0.0;
-            } else {
-                *sample = self.buffer[self.read_pos];
-                self.read_pos = (self.read_pos + 1) % self.capacity;
-            }
-        }
-    }
-}
-
-pub(super) type SharedAudioBuffer = Arc<Mutex<AudioRingBuffer>>;
-
-pub(super) unsafe extern "C" fn audio_render_callback(
+unsafe extern "C" fn audio_render_callback(
     in_ref_con: *mut std::os::raw::c_void,
     _io_action_flags: *mut u32,
     _in_time_stamp: *const core_audio::AudioTimeStamp,
@@ -170,24 +117,76 @@ pub(super) unsafe extern "C" fn audio_render_callback(
     in_number_frames: u32,
     io_data: *mut core_audio::AudioBufferList,
 ) -> i32 {
+    // SAFETY: `in_ref_con` is the consumer boxed by `AudioOutput`, which
+    // stops the unit before freeing it, and this render callback is its only
+    // user. `io_data` holds one interleaved stereo f32 buffer of
+    // `in_number_frames` frames, per the stream format set up below.
     unsafe {
-        let ring = &*(in_ref_con as *const Mutex<AudioRingBuffer>);
-        let buf_list = &mut *io_data;
-        let ab = &mut buf_list.buffers[0];
-        let out_ptr = ab.data as *mut f32;
-        let sample_count = in_number_frames as usize * 2;
-        let out_slice = std::slice::from_raw_parts_mut(out_ptr, sample_count);
-
-        if let Ok(mut guard) = ring.lock() {
-            guard.read(out_slice);
-        } else {
-            out_slice.fill(0.0);
-        }
+        let consumer = &mut *(in_ref_con as *mut AudioConsumer);
+        let ab = &mut (*io_data).buffers[0];
+        let out =
+            std::slice::from_raw_parts_mut(ab.data as *mut f32, in_number_frames as usize * 2);
+        consumer.fill(out);
         0
     }
 }
 
-pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHandle> {
+/// A running CoreAudio default output unit fed from a lock-free ring.
+pub(super) struct AudioOutput {
+    unit: core_audio::AudioUnit,
+    /// Owned by the render callback while the unit runs; freed on drop.
+    consumer: *mut AudioConsumer,
+    producer: AudioProducer,
+}
+
+impl AudioOutput {
+    /// Start the default output device at `sample_rate`. Returns `None`
+    /// (and the emulator runs silent) if CoreAudio refuses.
+    pub fn start(sample_rate: u32) -> Option<Self> {
+        let (producer, consumer) = audio_ring(audio_ring_capacity(sample_rate));
+        let consumer = Box::into_raw(Box::new(consumer));
+        // SAFETY: plain CoreAudio calls; `consumer` stays valid until the
+        // unit is disposed, here on failure or in Drop.
+        match unsafe { start_unit(sample_rate, consumer) } {
+            Some(unit) => Some(Self {
+                unit,
+                consumer,
+                producer,
+            }),
+            None => {
+                drop(unsafe { Box::from_raw(consumer) });
+                None
+            }
+        }
+    }
+
+    /// Queue interleaved stereo samples.
+    pub fn push(&mut self, samples: &[f32]) {
+        self.producer.push(samples);
+    }
+
+    /// Stereo frames queued ahead of the device.
+    pub fn queued_frames(&self) -> usize {
+        self.producer.queued()
+    }
+}
+
+impl Drop for AudioOutput {
+    fn drop(&mut self) {
+        // SAFETY: stopping and disposing the unit guarantees the render
+        // callback no longer runs, so the consumer can be freed.
+        unsafe {
+            core_audio::AudioOutputUnitStop(self.unit);
+            core_audio::AudioComponentInstanceDispose(self.unit);
+            drop(Box::from_raw(self.consumer));
+        }
+    }
+}
+
+unsafe fn start_unit(
+    sample_rate: u32,
+    consumer: *mut AudioConsumer,
+) -> Option<core_audio::AudioUnit> {
     unsafe {
         let desc = core_audio::AudioComponentDescription {
             component_type: core_audio::K_AUDIO_UNIT_TYPE_OUTPUT,
@@ -210,7 +209,7 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHa
         }
 
         let stream_desc = core_audio::AudioStreamBasicDescription {
-            sample_rate: AUDIO_SAMPLE_RATE as f64,
+            sample_rate: sample_rate as f64,
             format_id: core_audio::K_AUDIO_FORMAT_LINEAR_PCM,
             format_flags: core_audio::K_AUDIO_FORMAT_FLAG_IS_FLOAT
                 | core_audio::K_AUDIO_FORMAT_FLAG_IS_PACKED,
@@ -238,7 +237,7 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHa
 
         let callback_struct = core_audio::AURenderCallbackStruct {
             input_proc: audio_render_callback,
-            input_proc_ref_con: Arc::as_ptr(ring_buffer) as *mut _,
+            input_proc_ref_con: consumer as *mut _,
         };
 
         if core_audio::AudioUnitSetProperty(
@@ -267,18 +266,6 @@ pub(super) fn setup_audio(ring_buffer: &SharedAudioBuffer) -> Option<AudioUnitHa
             return None;
         }
 
-        Some(AudioUnitHandle(audio_unit))
-    }
-}
-
-/// RAII wrapper that stops and disposes the CoreAudio unit on drop.
-pub(super) struct AudioUnitHandle(core_audio::AudioUnit);
-
-impl Drop for AudioUnitHandle {
-    fn drop(&mut self) {
-        unsafe {
-            core_audio::AudioOutputUnitStop(self.0);
-            core_audio::AudioComponentInstanceDispose(self.0);
-        }
+        Some(audio_unit)
     }
 }

@@ -1,7 +1,7 @@
 use muda::{CheckMenuItem, Menu, MenuEvent};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -12,7 +12,7 @@ use winit::window::{Window, WindowId};
 
 use super::camera::CameraThread;
 use super::clock;
-use super::cpal_audio::{AudioRing, start_audio};
+use super::cpal_audio::CpalAudio;
 use super::emulator::Emulator;
 use super::gpu::GpuRenderer;
 use super::menu::{
@@ -43,8 +43,7 @@ pub(super) struct App {
     model_items: Vec<CheckMenuItem>,
     slot_items: Vec<CheckMenuItem>,
     force_cpu_item: Option<CheckMenuItem>,
-    audio_ring: Arc<Mutex<AudioRing>>,
-    _audio_stream: Option<cpal::Stream>,
+    audio: Option<CpalAudio>,
     camera_thread: Option<CameraThread>,
     camera_buf: [u8; 128 * 112],
     scale_filter: scaling::ScaleFilter,
@@ -73,17 +72,7 @@ impl App {
         let model = cli.model.unwrap_or(GbModel::Cgb);
         let forced_model = cli.model;
 
-        let audio_ring = Arc::new(Mutex::new(AudioRing::new(
-            AUDIO_SAMPLE_RATE as usize / 60 * 4 * 2,
-            AUDIO_SAMPLE_RATE,
-            AUDIO_SAMPLE_RATE,
-        ))); // ~4 frames stereo
-        let (stream, actual_rate) = match start_audio(Arc::clone(&audio_ring), AUDIO_SAMPLE_RATE) {
-            Some((s, r)) => (Some(s), r),
-            None => (None, AUDIO_SAMPLE_RATE),
-        };
-        audio_ring.lock().unwrap().downsample_ratio =
-            (AUDIO_SAMPLE_RATE / actual_rate).max(1) as usize;
+        let audio = CpalAudio::start(AUDIO_SAMPLE_RATE);
 
         App {
             quit_requested: false,
@@ -101,8 +90,7 @@ impl App {
             model_items: Vec::new(),
             slot_items: Vec::new(),
             force_cpu_item: None,
-            audio_ring,
-            _audio_stream: stream,
+            audio,
             camera_thread: None,
             camera_buf: [0u8; 128 * 112],
             scale_filter: scaling::ScaleFilter::Nearest,
@@ -338,9 +326,9 @@ impl App {
                 self.step_one_frame = false;
                 let samples = emu.drain_audio_samples();
                 if !samples.is_empty()
-                    && let Ok(mut ring) = self.audio_ring.lock()
+                    && let Some(ref mut audio) = self.audio
                 {
-                    ring.push(&samples);
+                    audio.push(&samples);
                 }
             } else if self.fast_forward {
                 for _ in 0..4 {
@@ -349,8 +337,8 @@ impl App {
                 let samples = emu.drain_audio_samples();
                 if !samples.is_empty() {
                     let resampled = util::downsample_audio(&samples, 4);
-                    if let Ok(mut ring) = self.audio_ring.lock() {
-                        ring.push(&resampled);
+                    if let Some(ref mut audio) = self.audio {
+                        audio.push(&resampled);
                     }
                 }
             } else {
@@ -360,10 +348,9 @@ impl App {
                 let target_fill = samples_per_frame * 3; // ~50ms
                 let max_fill = samples_per_frame * 8; // ~133ms
                 let queued = self
-                    .audio_ring
-                    .lock()
-                    .map(|r| r.len())
-                    .unwrap_or(target_fill);
+                    .audio
+                    .as_ref()
+                    .map_or(target_fill, |a| a.queued_frames() * 2);
 
                 let frames_needed = if queued < target_fill / 2 {
                     2u32
@@ -380,9 +367,9 @@ impl App {
                 }
                 let samples = emu.drain_audio_samples();
                 if !samples.is_empty()
-                    && let Ok(mut ring) = self.audio_ring.lock()
+                    && let Some(ref mut audio) = self.audio
                 {
-                    ring.push(&samples);
+                    audio.push(&samples);
                 }
             }
         }
@@ -797,9 +784,9 @@ impl ApplicationHandler for App {
                 util::reverse_audio(&mut all_audio);
                 let resampled = util::downsample_audio(&all_audio, 3);
                 if !resampled.is_empty()
-                    && let Ok(mut ring) = self.audio_ring.lock()
+                    && let Some(ref mut audio) = self.audio
                 {
-                    ring.push(&resampled);
+                    audio.push(&resampled);
                 }
             }
             // Still render the rewound frame
