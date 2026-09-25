@@ -19,7 +19,7 @@ const MAGIC: &[u8; 8] = b"VIBEBOY\0";
 /// The encoding is bincode's standard configuration, which writes integers
 /// independently of the platform's pointer width (serde encodes `usize` as
 /// `u64`), so native and WebAssembly builds read each other's states.
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 
 /// Serialize a Snapshot to bytes.
 pub fn serialize(snap: &Snapshot) -> Vec<u8> {
@@ -282,7 +282,7 @@ mod tests {
 
     /// Hash of the encoded states of every `CARTS` entry after `SAVE_AT`
     /// frames, for `FORMAT_VERSION`.
-    const ENCODING_HASH: u64 = 0x654E_E44E_3368_A764;
+    const ENCODING_HASH: u64 = 0x2E18_BEFD_6CE4_0404;
 
     #[test]
     fn encoding_is_pinned_to_format_version() {
@@ -296,8 +296,9 @@ mod tests {
         assert!(
             hash == ENCODING_HASH,
             "The save state encoding changed (hash {hash:#018X}). If that is intended, \
-             bump FORMAT_VERSION in src/savestate.rs so old states are rejected, and set \
-             ENCODING_HASH to the new hash."
+             bump FORMAT_VERSION in src/savestate.rs so old states are rejected, rerun this \
+             test (the hash covers the header, so it changes with the version) and set \
+             ENCODING_HASH to the hash it then reports."
         );
     }
 
