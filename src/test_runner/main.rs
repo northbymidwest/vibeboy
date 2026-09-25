@@ -29,6 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run test ROMs with a specific harness
+    #[command(after_help = TEST_EXIT_STATUS)]
     Test {
         #[command(subcommand)]
         subcommand: TestCommand,
@@ -154,7 +155,11 @@ enum Command {
     },
 }
 
+const TEST_EXIT_STATUS: &str = "Exit status: 0 when every test passes, 1 when any fails, \
+    times out or errors (0 with --allow-failures), 2 when the path holds no ROMs.";
+
 #[derive(clap::Args)]
+#[command(after_help = TEST_EXIT_STATUS)]
 struct TestArgs {
     /// Path to ROM file or directory
     path: PathBuf,
@@ -173,6 +178,11 @@ struct TestArgs {
     /// Only print summary
     #[arg(long)]
     quiet: bool,
+    /// Exit 0 even when tests fail, time out or error. For runs over whole
+    /// suites with known failures, where the per-test lines are the result
+    /// (scripts/accuracy.sh compares them against a baseline).
+    #[arg(long)]
+    allow_failures: bool,
 }
 
 #[derive(Subcommand)]
@@ -183,7 +193,7 @@ enum TestCommand {
     Blargg(TestArgs),
     /// Gambatte tests (hex output comparison after 15 frames)
     Gambatte(TestArgs),
-    /// GBMicrotest (HRAM result check after 2 frames)
+    /// GBMicrotest (HRAM/VRAM result check after 4 frames)
     Gbmicrotest(TestArgs),
     /// Mealybug Tearoom tests (screenshot comparison after LD B,B breakpoint)
     Tearoom(TestArgs),
@@ -207,6 +217,7 @@ fn main() {
             let model = args.model;
             let verbose = args.verbose;
             let quiet = args.quiet;
+            let allow_failures = args.allow_failures;
             let path = args.path.clone();
             let harness: Box<dyn harness::TestHarness> = match subcommand {
                 TestCommand::Mooneye(args) => {
@@ -225,7 +236,16 @@ fn main() {
                 TestCommand::Gbmicrotest(_) => Box::new(GbMicrotestHarness { force_model: model }),
                 TestCommand::Tearoom(_) => Box::new(TearoomHarness { force_model: model }),
             };
-            run_tests(&path, harness.as_ref(), verbose, quiet);
+            let summary = run_tests(&path, harness.as_ref(), verbose, quiet);
+            // A path with no ROMs under it is a mistake, not a pass, and
+            // --allow-failures does not cover it.
+            if summary.total() == 0 && summary.skipped == 0 {
+                eprintln!("No test ROMs (.gb/.gbc) found under {}", path.display());
+                std::process::exit(2);
+            }
+            if !summary.all_passed() && !allow_failures {
+                std::process::exit(1);
+            }
         }
         Command::GenBootrom { out, model } => {
             let rom: &[u8] = match model.as_str() {

@@ -29,7 +29,29 @@ pub trait TestHarness {
     fn run_test(&self, path: &Path, verbose: bool) -> TestResult;
 }
 
-pub fn run_tests(path: &Path, harness: &dyn TestHarness, verbose: bool, quiet: bool) {
+/// Counts from one `run_tests` call. Skipped ROMs are not results and are
+/// not part of `total()`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Summary {
+    pub passed: usize,
+    pub failed: usize,
+    pub timeout: usize,
+    pub errors: usize,
+    pub skipped: usize,
+}
+
+impl Summary {
+    pub fn total(&self) -> usize {
+        self.passed + self.failed + self.timeout + self.errors
+    }
+
+    /// True when every test that ran passed.
+    pub fn all_passed(&self) -> bool {
+        self.passed == self.total()
+    }
+}
+
+pub fn run_tests(path: &Path, harness: &dyn TestHarness, verbose: bool, quiet: bool) -> Summary {
     let mut roms = Vec::new();
     collect_roms(path, &mut roms);
     roms.sort();
@@ -38,35 +60,37 @@ pub fn run_tests(path: &Path, harness: &dyn TestHarness, verbose: bool, quiet: b
         eprintln!("{} mode", harness.name());
     }
 
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut timeout = 0usize;
-    let mut skipped = 0usize;
+    let mut summary = Summary::default();
 
     for rom in &roms {
         let result = harness.run_test(rom, verbose);
         let label = rom.strip_prefix(path).unwrap_or(rom).display().to_string();
         if result == TestResult::Skip {
-            skipped += 1;
+            summary.skipped += 1;
             continue;
         }
         if !quiet {
             println!("{:<12} {}", result, label);
         }
         match result {
-            TestResult::Pass => passed += 1,
-            TestResult::Fail => failed += 1,
-            TestResult::Timeout => timeout += 1,
-            _ => {}
+            TestResult::Pass => summary.passed += 1,
+            TestResult::Fail => summary.failed += 1,
+            TestResult::Timeout => summary.timeout += 1,
+            TestResult::Err => summary.errors += 1,
+            TestResult::Skip => {}
         }
     }
 
     print!(
         "\n--- {} passed, {} failed, {} timeout",
-        passed, failed, timeout
+        summary.passed, summary.failed, summary.timeout
     );
-    if skipped > 0 {
-        print!(", {} skipped", skipped);
+    if summary.errors > 0 {
+        print!(", {} error", summary.errors);
     }
-    println!(" ({} total) ---", passed + failed + timeout);
+    if summary.skipped > 0 {
+        print!(", {} skipped", summary.skipped);
+    }
+    println!(" ({} total) ---", summary.total());
+    summary
 }
