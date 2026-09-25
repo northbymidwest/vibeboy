@@ -198,10 +198,35 @@ mod tests {
                 self.step();
             }
         }
+
+        /// Everything the emulator outputs over `frames` frames.
+        fn record(&mut self, frames: u64) -> Output {
+            self.emu.drain_audio_samples();
+            let mut out = Output::default();
+            for _ in 0..frames {
+                self.step();
+                out.video.extend_from_slice(self.emu.frame_buffer());
+                out.audio
+                    .extend(self.emu.drain_audio_samples().iter().map(|s| s.to_bits()));
+            }
+            out.save = self.emu.save_data();
+            out.state = serialize(&self.emu.save_snapshot());
+            out
+        }
+    }
+
+    #[derive(Default)]
+    struct Output {
+        video: Vec<u32>,
+        audio: Vec<u32>,
+        save: Vec<u8>,
+        state: Vec<u8>,
     }
 
     /// Frames emulated before a state is saved.
     const SAVE_AT: u64 = 12;
+    /// Frames compared after loading.
+    const COMPARE: u64 = 8;
 
     /// Save state after `SAVE_AT` frames of a fresh run.
     fn saved(c: &Cart) -> (Rig, Vec<u8>) {
@@ -209,6 +234,43 @@ mod tests {
         rig.run(SAVE_AT);
         let bytes = serialize(&rig.emu.save_snapshot());
         (rig, bytes)
+    }
+
+    /// Load `bytes`, saved by `from`, and continue with its input and clock.
+    fn load_from(rig: &mut Rig, from: &Rig, bytes: &[u8]) -> bool {
+        rig.frame = from.frame;
+        rig.clock.0.store(from.clock.now_secs(), Ordering::Relaxed);
+        rig.emu.load_state_from_bytes(0, bytes)
+    }
+
+    #[test]
+    fn round_trip_matches_uninterrupted_run() {
+        for c in &CARTS {
+            let (mut a, bytes) = saved(c);
+
+            // Load into an emulator that has run to a different point.
+            let mut b = Rig::new(c);
+            b.run(SAVE_AT / 2);
+            assert!(load_from(&mut b, &a, &bytes), "{}: load failed", c.name);
+
+            // Audio output filters (resampler, high-pass) are not part of a
+            // save state, so loading restarts them. Compare audio against
+            // the original run reloading its own state instead.
+            let (mut reloaded, _) = saved(c);
+            assert!(
+                reloaded.emu.load_state_from_bytes(0, &bytes),
+                "{}: reload",
+                c.name
+            );
+
+            let ra = a.record(COMPARE);
+            let rb = b.record(COMPARE);
+            let rr = reloaded.record(COMPARE);
+            assert!(ra.video == rb.video, "{}: video differs", c.name);
+            assert!(ra.save == rb.save, "{}: save data differs", c.name);
+            assert!(ra.state == rb.state, "{}: state differs", c.name);
+            assert!(rr.audio == rb.audio, "{}: audio differs", c.name);
+        }
     }
 
     /// FNV-1a over all bytes, 64-bit.
@@ -237,5 +299,72 @@ mod tests {
              bump FORMAT_VERSION in src/savestate.rs so old states are rejected, and set \
              ENCODING_HASH to the new hash."
         );
+    }
+
+    fn error(result: io::Result<Snapshot>) -> String {
+        result.err().expect("expected an error").to_string()
+    }
+
+    #[test]
+    fn rejects_damaged_data() {
+        let (_, bytes) = saved(&CARTS[2]);
+        assert!(deserialize(&bytes).is_ok());
+        assert!(error(deserialize(&bytes[..10])).contains("too short"));
+        assert!(error(deserialize(&bytes[..bytes.len() - 1])).contains("truncated"));
+
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        assert!(error(deserialize(&bad)).contains("not a VibeBoy"));
+
+        let mut bad = bytes.clone();
+        bad[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        assert!(error(deserialize(&bad)).contains("version"));
+
+        // A payload length that cuts the encoding short.
+        let mut bad = bytes.clone();
+        let len = u32::from_le_bytes(bad[12..16].try_into().unwrap());
+        bad[12..16].copy_from_slice(&(len / 2).to_le_bytes());
+        assert!(error(deserialize(&bad)).contains("deserialize failed"));
+
+        // Extra bytes inside the payload after the encoding.
+        let mut bad = bytes.clone();
+        bad.push(0);
+        bad[12..16].copy_from_slice(&(len + 1).to_le_bytes());
+        assert!(error(deserialize(&bad)).contains("trailing"));
+    }
+
+    /// Restore the state saved from `from` into a fresh `into`, expecting an
+    /// error that mentions `why` and the current state left untouched.
+    fn assert_rejected(from: &Cart, into: &Cart, why: &str) {
+        let (_, bytes) = saved(from);
+        let snap = deserialize(&bytes).expect("state decodes");
+        let mut rig = Rig::new(into);
+        rig.run(2);
+        let before = serialize(&rig.emu.save_snapshot());
+        let err = rig.emu.restore_untrusted_snapshot(&snap).unwrap_err();
+        assert!(err.contains(why), "{} into {}: {err}", from.name, into.name);
+        assert!(!rig.emu.load_state_from_bytes(0, &bytes));
+        assert!(
+            serialize(&rig.emu.save_snapshot()) == before,
+            "state changed"
+        );
+    }
+
+    #[test]
+    fn rejects_state_for_another_cartridge_or_model() {
+        let mbc1 = &CARTS[2];
+        assert_eq!(mbc1.name, "MBC1");
+        for other in CARTS.iter().filter(|c| c.name != "MBC1") {
+            let other_on_dmg = Cart {
+                model: GbModel::Dmg,
+                ..*other
+            };
+            assert_rejected(mbc1, &other_on_dmg, "different cartridge mapper");
+            assert_rejected(&other_on_dmg, mbc1, "different cartridge mapper");
+        }
+        let small_ram = cart("MBC1 8K", 0x03, 0x02, GbModel::Dmg);
+        assert_rejected(mbc1, &small_ram, "RAM size");
+        let cgb = cart("MBC1 CGB", 0x03, 0x03, GbModel::Cgb);
+        assert_rejected(mbc1, &cgb, "different hardware model");
     }
 }

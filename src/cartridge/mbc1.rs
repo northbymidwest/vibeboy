@@ -154,3 +154,18 @@ impl Cartridge for Mbc1 {
         self.state.clone_from(s);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_registers_the_mapper_cannot_produce() {
+        let rom: Arc<[u8]> = vec![0u8; 0x8000].into();
+        let c = Mbc1::new(rom, 0x2000, false);
+        let mut s = c.state.clone();
+        assert!(c.validate_state(&CartState::Mbc1(s.clone())).is_ok());
+        s.upper = 4;
+        assert_eq!(c.validate_state(&CartState::Mbc1(s)), Err(BAD_REGISTERS));
+    }
+}

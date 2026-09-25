@@ -216,3 +216,30 @@ impl Cartridge for Tama5 {
         self.rtc_last_secs = self.clock.now_secs();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now_secs(&self) -> u64 {
+            0
+        }
+        fn unix_timestamp_secs(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn validate_rejects_registers_wider_than_a_nybble() {
+        let rom: Arc<[u8]> = vec![0u8; 0x8000].into();
+        let c = Tama5::new(rom, Arc::new(FixedClock));
+        let mut s = c.state.clone();
+        assert!(c.validate_state(&CartState::Tama5(s.clone())).is_ok());
+        // The command address indexes the 32-byte RAM, so it must stay in range.
+        s.addr_lo = 0x10;
+        assert_eq!(c.validate_state(&CartState::Tama5(s)), Err(BAD_REGISTERS));
+    }
+}
