@@ -1,6 +1,5 @@
 use muda::{CheckMenuItem, Menu, MenuEvent};
-use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -11,7 +10,6 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use super::camera::CameraThread;
-use super::clock;
 use super::cpal_audio::CpalAudio;
 use super::emulator::Emulator;
 use super::gpu::GpuRenderer;
@@ -20,21 +18,16 @@ use super::menu::{
     filter_id_to_filter, model_id_to_model, slot_load_id, slot_save_id,
 };
 use super::model::GbModel;
-use super::printer;
 use super::scaling;
-use super::serial;
-use super::ui_util;
-use super::util::{self, frame_duration};
+use super::ui_util::{self, HoldInputs, Session, SessionConfig};
+use super::util::frame_duration;
 use super::{AUDIO_SAMPLE_RATE, Cli, GB_H, GB_W, SCALE, SGB_H, SGB_W};
 
 pub(super) struct App {
     quit_requested: bool,
-    rom_path: Option<PathBuf>,
-    rom: Option<std::sync::Arc<[u8]>>,
     cli: Cli,
-    emu: Option<Emulator>,
-    model: GbModel,
-    forced_model: Option<GbModel>,
+    /// The loaded game; `None` until a ROM has been opened.
+    session: Option<Session>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuRenderer>,
     _menu: Option<Menu>,
@@ -50,10 +43,6 @@ pub(super) struct App {
     wgpu_vectorize: Option<scaling::wgpu_vectorize::WgpuVectorizePipeline>,
     wgpu_scale: Option<scaling::wgpu_scale::WgpuScalePipeline>,
     frame_start: Instant,
-    frame_dur: Duration,
-    paused: bool,
-    step_one_frame: bool,
-    current_slot: usize,
     force_cpu: bool,
     src_w: u32,
     src_h: u32,
@@ -61,27 +50,19 @@ pub(super) struct App {
     gamepad: Option<ui_util::GamepadPoller>,
     kb_buttons: u8, // bitmask of keyboard-pressed buttons
     gp_buttons: u8, // bitmask of gamepad-pressed buttons
-    fast_forward: bool,
-    kb_fast_forward: bool,
-    kb_rewind: bool,
-    sav_flusher: Option<ui_util::SavFlusher>,
+    /// Hold hotkeys from the keyboard and from the gamepad; either holds.
+    kb_hold: HoldInputs,
+    gp_hold: HoldInputs,
 }
 
 impl App {
     pub fn new(cli: Cli) -> Self {
-        let model = cli.model.unwrap_or(GbModel::Cgb);
-        let forced_model = cli.model;
-
         let audio = CpalAudio::start(AUDIO_SAMPLE_RATE);
 
         App {
             quit_requested: false,
-            rom_path: cli.rom.clone(),
-            rom: None,
             cli,
-            emu: None,
-            model,
-            forced_model,
+            session: None,
             window: None,
             gpu: None,
             _menu: None,
@@ -97,10 +78,6 @@ impl App {
             wgpu_vectorize: None,
             wgpu_scale: None,
             frame_start: Instant::now(),
-            frame_dur: frame_duration(model),
-            paused: false,
-            step_one_frame: false,
-            current_slot: 0,
             force_cpu: false,
             src_w: GB_W,
             src_h: GB_H,
@@ -108,75 +85,34 @@ impl App {
             gamepad: ui_util::GamepadPoller::new(),
             kb_buttons: 0,
             gp_buttons: 0,
-            fast_forward: false,
-            kb_fast_forward: false,
-            kb_rewind: false,
-            sav_flusher: None,
+            kb_hold: HoldInputs::default(),
+            gp_hold: HoldInputs::default(),
         }
     }
 
-    fn load_rom(&mut self, path: &PathBuf) {
-        // Re-read from disk only if path changed; reuse stored Arc otherwise
-        let rom: std::sync::Arc<[u8]> = if self.rom_path.as_ref() == Some(path) {
-            if let Some(ref arc) = self.rom {
-                arc.clone()
-            } else {
-                match fs::read(path) {
-                    Ok(v) => v.into(),
-                    Err(e) => {
-                        eprintln!("Failed to read ROM '{}': {}", path.display(), e);
-                        return;
-                    }
-                }
-            }
-        } else {
-            match fs::read(path) {
-                Ok(v) => v.into(),
-                Err(e) => {
-                    eprintln!("Failed to read ROM '{}': {}", path.display(), e);
-                    return;
-                }
-            }
+    /// Open the ROM at `path`, replacing the current game (whose battery
+    /// save is written first).
+    fn load_rom(&mut self, path: &Path) {
+        let result = match self.session {
+            Some(ref mut session) => session.load_rom(path),
+            None => Session::new(
+                path,
+                SessionConfig {
+                    model: self.cli.model,
+                    bootrom: self.cli.bootrom.clone(),
+                    no_boot: self.cli.no_boot,
+                    printer: self.cli.printer,
+                    sample_rate: AUDIO_SAMPLE_RATE,
+                    ..Default::default()
+                },
+            )
+            .map(|session| self.session = Some(session)),
         };
-        // Persist the outgoing game's battery save before replacing it
-        // (ROM switch, reset, and model change all come through here).
-        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-            flusher.flush(emu);
+        if let Err(e) = result {
+            eprintln!("Failed to load ROM '{}': {}", path.display(), e);
+            return;
         }
-        self.rom = Some(rom.clone());
-
-        self.model = self
-            .forced_model
-            .unwrap_or_else(|| util::auto_detect_model(&rom));
-        let boot_rom = ui_util::load_boot_rom(self.model, None, self.cli.no_boot);
-
-        let mut emu = Emulator::new(
-            rom,
-            boot_rom,
-            self.model,
-            None,
-            clock::default_clock(),
-            AUDIO_SAMPLE_RATE,
-        );
-        ui_util::load_sav(&mut emu, path);
-        let is_sgb = emu.is_sgb();
-        self.src_w = if is_sgb { SGB_W } else { GB_W };
-        self.src_h = if is_sgb { SGB_H } else { GB_H };
-
-        // Start camera thread if cart has camera (Pocket Camera)
-        if emu.has_camera() && self.camera_thread.is_none() {
-            self.camera_thread = CameraThread::start();
-        }
-
-        // Attach printer if enabled
-        if self.printer_item.as_ref().is_some_and(|p| p.is_checked()) {
-            emu.attach_serial_device(Box::new(printer::Printer::new(self.model.cpu_clock_rate())));
-        }
-
-        self.sav_flusher = Some(ui_util::SavFlusher::new(&emu, path));
-        self.emu = Some(emu);
-        self.rom_path = Some(path.clone());
-        self.frame_dur = frame_duration(self.model);
+        self.on_new_emulator();
 
         if let Some(ref window) = self.window {
             let size = LogicalSize::new(self.src_w * SCALE, self.src_h * SCALE);
@@ -188,9 +124,40 @@ impl App {
         }
     }
 
+    /// Sync frontend state with a freshly built emulator (ROM switch,
+    /// reset, model change).
+    fn on_new_emulator(&mut self) {
+        let Some(ref session) = self.session else {
+            return;
+        };
+        let is_sgb = session.emu.is_sgb();
+        self.src_w = if is_sgb { SGB_W } else { GB_W };
+        self.src_h = if is_sgb { SGB_H } else { GB_H };
+
+        // Start camera thread if cart has camera (Pocket Camera)
+        if session.emu.has_camera() && self.camera_thread.is_none() {
+            self.camera_thread = CameraThread::start();
+        }
+    }
+
+    fn frame_duration(&self) -> Duration {
+        self.session
+            .as_ref()
+            .map_or_else(|| frame_duration(GbModel::Cgb), Session::frame_duration)
+    }
+
     fn update_filter_checkmarks(&self) {
         for (item, filter) in &self.filter_items {
             item.set_checked(*filter == self.scale_filter);
+        }
+    }
+
+    fn select_slot(&mut self, slot: usize) {
+        if let Some(ref mut session) = self.session {
+            session.select_slot(slot);
+        }
+        for (i, item) in self.slot_items.iter().enumerate() {
+            item.set_checked(i == slot);
         }
     }
 
@@ -209,13 +176,15 @@ impl App {
                 self.quit_requested = true;
             }
             ID_PAUSE => {
-                self.paused = !self.paused;
-                eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
+                if let Some(ref mut session) = self.session {
+                    session.toggle_pause();
+                }
             }
             ID_RESET => {
-                if let Some(path) = self.rom_path.clone() {
-                    self.load_rom(&path);
+                if let Some(ref mut session) = self.session {
+                    session.reset();
                 }
+                self.on_new_emulator();
             }
             ID_FORCE_CPU => {
                 if let Some(ref item) = self.force_cpu_item {
@@ -225,36 +194,27 @@ impl App {
             }
             ID_PRINTER => {
                 if let Some(ref item) = self.printer_item {
-                    let now_on = item.is_checked();
-                    if let Some(ref mut emu) = self.emu {
-                        if now_on {
-                            emu.attach_serial_device(Box::new(printer::Printer::new(
-                                self.model.cpu_clock_rate(),
-                            )));
-                            eprintln!("Game Boy Printer connected");
-                        } else {
-                            emu.attach_serial_device(Box::new(serial::Disconnected));
-                            eprintln!("Game Boy Printer disconnected");
-                        }
+                    let on = item.is_checked();
+                    match self.session {
+                        Some(ref mut session) => session.set_printer(on),
+                        // Applies to the first ROM opened.
+                        None => self.cli.printer = on,
                     }
                 }
             }
             other => {
                 // Check model menu items
                 if let Some(new_model) = model_id_to_model(other) {
-                    self.forced_model = new_model;
-                    // Reload ROM with new model
-                    if let Some(path) = self.rom_path.clone() {
-                        self.load_rom(&path);
+                    match self.session {
+                        Some(ref mut session) => session.set_model(new_model),
+                        // Applies to the first ROM opened.
+                        None => self.cli.model = new_model,
                     }
+                    self.on_new_emulator();
                     // Update checkmarks
                     for item in &self.model_items {
                         item.set_checked(item.id().0 == other);
                     }
-                    let name = new_model
-                        .map(|m| format!("{:?}", m))
-                        .unwrap_or("Auto".into());
-                    eprintln!("Hardware model: {}", name);
                     return;
                 }
 
@@ -268,14 +228,14 @@ impl App {
 
                 for i in 0..=9 {
                     if other == slot_save_id(i) {
-                        if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                            ui_util::save_state_to_slot(emu, rp, i);
+                        if let Some(ref mut session) = self.session {
+                            session.save_state(i);
                         }
                         return;
                     }
                     if other == slot_load_id(i) {
-                        if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                            ui_util::load_state_from_slot(emu, rp, i);
+                        if let Some(ref mut session) = self.session {
+                            session.load_state(i);
                         }
                         return;
                     }
@@ -285,99 +245,54 @@ impl App {
                 if other.starts_with("select_slot_")
                     && let Ok(n) = other["select_slot_".len()..].parse::<usize>()
                 {
-                    self.current_slot = n;
-                    for item in &self.slot_items {
-                        item.set_checked(item.id().0 == other);
-                    }
-                    eprintln!("Slot {} selected", n);
+                    self.select_slot(n);
                 }
             }
         }
     }
 
-    fn render_current_frame(&mut self) {
-        // Render-only path (used during rewind — emulation already stepped)
-        self.render_frame_inner(true);
-    }
-
-    fn step_and_render(&mut self) {
-        if self.paused && !self.step_one_frame {
+    /// Run one session tick and queue its audio.
+    fn step(&mut self) {
+        let Some(ref mut session) = self.session else {
             return;
-        }
-        self.render_frame_inner(false);
-    }
-
-    fn render_frame_inner(&mut self, skip_step: bool) {
-        let emu = match self.emu.as_mut() {
-            Some(e) => e,
-            None => return,
         };
 
-        if !skip_step {
-            // Feed webcam frames to Pocket Camera
-            if let Some(ref ct) = self.camera_thread
-                && ct.read_frame(&mut self.camera_buf)
-            {
-                emu.set_camera_image(&self.camera_buf);
-            }
-
-            if self.step_one_frame {
-                emu.step_frame();
-                self.step_one_frame = false;
-                let samples = emu.drain_audio_samples();
-                if !samples.is_empty()
-                    && let Some(ref mut audio) = self.audio
-                {
-                    audio.push(&samples);
-                }
-            } else if self.fast_forward {
-                for _ in 0..4 {
-                    emu.step_frame();
-                }
-                let samples = emu.drain_audio_samples();
-                if !samples.is_empty() {
-                    let resampled = util::downsample_audio(&samples, 4);
-                    if let Some(ref mut audio) = self.audio {
-                        audio.push(&resampled);
-                    }
-                }
-            } else {
-                // Audio-driven timing: use ring buffer fill level to decide
-                // whether to step, synchronizing to the audio device's clock.
-                let samples_per_frame = AUDIO_SAMPLE_RATE as usize / 60 * 2; // stereo
-                let target_fill = samples_per_frame * 3; // ~50ms
-                let max_fill = samples_per_frame * 8; // ~133ms
-                let queued = self
-                    .audio
-                    .as_ref()
-                    .map_or(target_fill, |a| a.queued_frames() * 2);
-
-                let frames_needed = if queued < target_fill / 2 {
-                    2u32
-                } else if queued < target_fill {
-                    1
-                } else if queued > max_fill {
-                    0
-                } else {
-                    1
-                };
-
-                for _ in 0..frames_needed {
-                    emu.step_frame();
-                }
-                let samples = emu.drain_audio_samples();
-                if !samples.is_empty()
-                    && let Some(ref mut audio) = self.audio
-                {
-                    audio.push(&samples);
-                }
-            }
+        // Feed webcam frames to Pocket Camera
+        if let Some(ref ct) = self.camera_thread
+            && ct.read_frame(&mut self.camera_buf)
+        {
+            session.emu.set_camera_image(&self.camera_buf);
         }
 
-        // Printer
-        ui_util::check_and_save_prints(emu);
+        let hold = HoldInputs {
+            rewind: self.kb_hold.rewind || self.gp_hold.rewind,
+            fast_forward: self.kb_hold.fast_forward || self.gp_hold.fast_forward,
+            slow_motion: self.kb_hold.slow_motion,
+        };
+        let queued = self.audio.as_ref().map(CpalAudio::queued_frames);
+        let out = session.tick(&hold, queued);
+        if let Some(ref mut audio) = self.audio {
+            audio.push(&out.audio);
+        }
 
-        // Render via wgpu
+        // Rumble
+        if let Some(ref mut gp) = self.gamepad
+            && session.emu.has_rumble()
+        {
+            gp.ensure_rumble();
+            gp.set_rumble(session.emu.drain_rumble());
+        }
+
+        self.fps.update(out.frames_emulated(), out.emu_time);
+    }
+
+    /// Draw the emulator's current frame.
+    fn render(&mut self) {
+        let Some(ref mut session) = self.session else {
+            return;
+        };
+        let emu = &mut session.emu;
+
         let gpu = match self.gpu.as_mut() {
             Some(g) => g,
             None => return,
@@ -524,10 +439,24 @@ impl App {
             self.src_w,
             self.src_h,
         );
+    }
 
-        // FPS counter
-        let emu_time = self.frame_start.elapsed();
-        self.fps.update(1, emu_time);
+    /// Apply the combined keyboard and gamepad button state.
+    fn apply_buttons(&mut self) {
+        if let Some(ref mut session) = self.session {
+            let combined = self.kb_buttons | self.gp_buttons;
+            for bit in 0..8u8 {
+                let mask = 1 << bit;
+                session.emu.set_button(mask, combined & mask != 0);
+            }
+        }
+    }
+
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(ref mut session) = self.session {
+            session.flush_save();
+        }
+        event_loop.exit();
     }
 }
 
@@ -582,7 +511,7 @@ impl ApplicationHandler for App {
         self.gpu = Some(gpu);
 
         // Load ROM if provided on command line, otherwise show file dialog
-        if let Some(path) = self.rom_path.clone() {
+        if let Some(path) = self.cli.rom.clone() {
             self.load_rom(&path);
         } else {
             let file = rfd::FileDialog::new()
@@ -599,125 +528,77 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-                    flusher.flush(emu);
-                }
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => self.quit(event_loop),
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    let pressed = event.state == ElementState::Pressed;
+                let PhysicalKey::Code(key) = event.physical_key else {
+                    return;
+                };
+                let pressed = event.state == ElementState::Pressed;
 
-                    {
-                        let btn = match key {
-                            KeyCode::KeyZ => Some(Emulator::BTN_B),
-                            KeyCode::KeyX => Some(Emulator::BTN_A),
-                            KeyCode::Enter => Some(Emulator::BTN_START),
-                            KeyCode::ShiftRight => Some(Emulator::BTN_SELECT),
-                            KeyCode::ArrowRight => Some(Emulator::BTN_RIGHT),
-                            KeyCode::ArrowLeft => Some(Emulator::BTN_LEFT),
-                            KeyCode::ArrowUp => Some(Emulator::BTN_UP),
-                            KeyCode::ArrowDown => Some(Emulator::BTN_DOWN),
-                            _ => None,
-                        };
-                        if let Some(b) = btn {
-                            if pressed {
-                                self.kb_buttons |= b;
-                            } else {
-                                self.kb_buttons &= !b;
-                            }
-                        }
-                    }
-
-                    if let Some(ref mut emu) = self.emu {
-                        // Apply combined keyboard + gamepad state
-                        let combined = self.kb_buttons | self.gp_buttons;
-                        let all_btns: &[u8] = &[
-                            Emulator::BTN_RIGHT,
-                            Emulator::BTN_LEFT,
-                            Emulator::BTN_UP,
-                            Emulator::BTN_DOWN,
-                            Emulator::BTN_A,
-                            Emulator::BTN_B,
-                            Emulator::BTN_SELECT,
-                            Emulator::BTN_START,
-                        ];
-                        for &b in all_btns {
-                            emu.set_button(b, combined & b != 0);
-                        }
-
-                        if key == KeyCode::Backspace {
-                            self.kb_rewind = pressed;
-                            emu.set_rewinding(pressed);
-                        }
-                        if key == KeyCode::Tab {
-                            self.kb_fast_forward = pressed;
-                            self.fast_forward = pressed;
-                        }
-                    }
-
+                let btn = match key {
+                    KeyCode::KeyZ => Some(Emulator::BTN_B),
+                    KeyCode::KeyX => Some(Emulator::BTN_A),
+                    KeyCode::Enter => Some(Emulator::BTN_START),
+                    KeyCode::ShiftRight => Some(Emulator::BTN_SELECT),
+                    KeyCode::ArrowRight => Some(Emulator::BTN_RIGHT),
+                    KeyCode::ArrowLeft => Some(Emulator::BTN_LEFT),
+                    KeyCode::ArrowUp => Some(Emulator::BTN_UP),
+                    KeyCode::ArrowDown => Some(Emulator::BTN_DOWN),
+                    _ => None,
+                };
+                if let Some(b) = btn {
                     if pressed {
-                        match key {
-                            KeyCode::Escape => {
-                                if let (Some(flusher), Some(emu)) =
-                                    (&mut self.sav_flusher, &self.emu)
-                                {
-                                    flusher.flush(emu);
-                                }
-                                event_loop.exit();
-                            }
-                            KeyCode::Space => {
-                                self.paused = !self.paused;
-                                eprintln!("{}", if self.paused { "Paused" } else { "Resumed" });
-                            }
-                            KeyCode::Period => {
-                                if self.paused {
-                                    self.step_one_frame = true;
-                                }
-                            }
-                            KeyCode::F5 => {
-                                if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                                    ui_util::save_state_to_slot(emu, rp, self.current_slot);
-                                }
-                            }
-                            KeyCode::F7 => {
-                                if let (Some(emu), Some(rp)) = (&mut self.emu, &self.rom_path) {
-                                    ui_util::load_state_from_slot(emu, rp, self.current_slot);
-                                }
-                            }
-                            KeyCode::Digit1
-                            | KeyCode::Digit2
-                            | KeyCode::Digit3
-                            | KeyCode::Digit4
-                            | KeyCode::Digit5
-                            | KeyCode::Digit6
-                            | KeyCode::Digit7
-                            | KeyCode::Digit8
-                            | KeyCode::Digit9
-                            | KeyCode::Digit0 => {
-                                self.current_slot = match key {
-                                    KeyCode::Digit0 => 0,
-                                    KeyCode::Digit1 => 1,
-                                    KeyCode::Digit2 => 2,
-                                    KeyCode::Digit3 => 3,
-                                    KeyCode::Digit4 => 4,
-                                    KeyCode::Digit5 => 5,
-                                    KeyCode::Digit6 => 6,
-                                    KeyCode::Digit7 => 7,
-                                    KeyCode::Digit8 => 8,
-                                    KeyCode::Digit9 => 9,
-                                    _ => unreachable!(),
-                                };
-                                for (i, item) in self.slot_items.iter().enumerate() {
-                                    item.set_checked(i == self.current_slot);
-                                }
-                                eprintln!("Slot {} selected", self.current_slot);
-                            }
-                            _ => {}
-                        }
+                        self.kb_buttons |= b;
+                    } else {
+                        self.kb_buttons &= !b;
                     }
+                    self.apply_buttons();
+                }
+
+                match key {
+                    KeyCode::Backspace => self.kb_hold.rewind = pressed,
+                    KeyCode::Tab => self.kb_hold.fast_forward = pressed,
+                    KeyCode::Minus => self.kb_hold.slow_motion = pressed,
+                    _ => {}
+                }
+
+                if !pressed {
+                    return;
+                }
+                if key == KeyCode::Escape {
+                    self.quit(event_loop);
+                    return;
+                }
+                let Some(ref mut session) = self.session else {
+                    return;
+                };
+                // Frame advance steps repeatedly while Period is held; the
+                // other hotkeys ignore key auto-repeat.
+                if key == KeyCode::Period {
+                    session.request_frame_advance();
+                    return;
+                }
+                if event.repeat {
+                    return;
+                }
+                match key {
+                    KeyCode::Space => {
+                        session.toggle_pause();
+                    }
+                    KeyCode::F5 => session.save_state(session.slot()),
+                    KeyCode::F7 => session.load_state(session.slot()),
+                    KeyCode::Digit0 => self.select_slot(0),
+                    KeyCode::Digit1 => self.select_slot(1),
+                    KeyCode::Digit2 => self.select_slot(2),
+                    KeyCode::Digit3 => self.select_slot(3),
+                    KeyCode::Digit4 => self.select_slot(4),
+                    KeyCode::Digit5 => self.select_slot(5),
+                    KeyCode::Digit6 => self.select_slot(6),
+                    KeyCode::Digit7 => self.select_slot(7),
+                    KeyCode::Digit8 => self.select_slot(8),
+                    KeyCode::Digit9 => self.select_slot(9),
+                    _ => {}
                 }
             }
 
@@ -725,85 +606,39 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Process menu events
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id().0.as_str());
         }
 
         if self.quit_requested {
-            if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-                flusher.flush(emu);
-            }
-            _event_loop.exit();
+            self.quit(event_loop);
             return;
         }
 
-        // Periodic save RAM flush. Runs here rather than after rendering so
-        // it is not skipped by the GPU filter paths or a minimized window.
-        if let (Some(flusher), Some(emu)) = (&mut self.sav_flusher, &self.emu) {
-            flusher.poll(emu);
-        }
-
         // -- Gamepad polling --
-        if let Some(ref mut gp) = self.gamepad {
-            let gs = gp.poll();
-            self.gp_buttons = gs.buttons;
-
-            // Apply combined state (keyboard | gamepad)
-            if let Some(ref mut emu) = self.emu {
-                let combined = self.kb_buttons | self.gp_buttons;
-                for bit in 0..8u8 {
-                    let mask = 1 << bit;
-                    emu.set_button(mask, combined & mask != 0);
-                }
-                // Either source holds rewind; the gamepad poll runs every
-                // tick, so it must not cancel a held Backspace.
-                emu.set_rewinding(self.kb_rewind || gs.rewind);
-                self.fast_forward = self.kb_fast_forward || gs.fast_forward;
-
-                // Rumble
-                if emu.has_rumble() {
-                    gp.ensure_rumble();
-                    gp.set_rumble(emu.drain_rumble());
-                }
+        match self.gamepad {
+            Some(ref mut gp) => {
+                let gs = gp.poll();
+                self.gp_buttons = gs.buttons;
+                self.gp_hold.rewind = gs.rewind;
+                self.gp_hold.fast_forward = gs.fast_forward;
             }
-        } else {
-            self.gp_buttons = 0;
+            None => self.gp_buttons = 0,
         }
+        self.apply_buttons();
 
-        // Handle rewind (3x speed) with reverse audio, or normal emulation
-        let rewinding = self.emu.as_ref().is_some_and(|e| e.is_rewinding());
-        if rewinding {
-            if let Some(ref mut emu) = self.emu {
-                let mut all_audio = Vec::with_capacity(19200);
-                for _ in 0..3 {
-                    emu.rewind_one_frame();
-                    all_audio.extend_from_slice(&emu.drain_audio_samples());
-                }
-                util::reverse_audio(&mut all_audio);
-                let resampled = util::downsample_audio(&all_audio, 3);
-                if !resampled.is_empty()
-                    && let Some(ref mut audio) = self.audio
-                {
-                    audio.push(&resampled);
-                }
-            }
-            // Still render the rewound frame
-            self.render_current_frame();
-        } else {
-            // Normal emulation step + render
-            self.step_and_render();
-        }
-
-        // Update rumble after emulation step
+        self.step();
+        self.render();
 
         // Frame rate cap
-        let remaining = self.frame_dur.saturating_sub(self.frame_start.elapsed());
+        let frame_dur = self.frame_duration();
+        let remaining = frame_dur.saturating_sub(self.frame_start.elapsed());
         if remaining > Duration::from_millis(2) {
             std::thread::sleep(remaining - Duration::from_millis(2));
         }
-        while self.frame_start.elapsed() < self.frame_dur {
+        while self.frame_start.elapsed() < frame_dur {
             std::hint::spin_loop();
         }
         self.frame_start = Instant::now();
