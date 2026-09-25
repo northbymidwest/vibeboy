@@ -8,6 +8,11 @@ inputs:
   sdl:
     description: Set up SDL3. The web build compiles shaders but links no SDL.
     default: 'true'
+  gtk:
+    description: >
+      Also install GTK 4 and the ALSA and udev headers that the gtk-ui
+      frontend links (cpal and gilrs). Linux only.
+    default: 'false'
 
 runs:
   using: composite
@@ -24,6 +29,16 @@ runs:
         build-type: Release
         install-linux-dependencies: true
         add-to-environment: true
+
+    # The runner image has the runtime libraries but not the headers and
+    # .pc files. Ubuntu 24.04's GTK is 4.14, over the 4.10 the gtk4 crate's
+    # `v4_10` feature asks for.
+    - name: Install GTK 4
+      if: runner.os == 'Linux' && inputs.gtk == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libgtk-4-dev libasound2-dev libudev-dev
 
     # system-deps shells out to pkg-config to read sdl3.pc, and the Windows
     # images ship none. Chocolatey is preinstalled there.
