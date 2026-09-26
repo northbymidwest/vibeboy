@@ -17,10 +17,10 @@ the build and test commands in [CLAUDE.md](../CLAUDE.md).
 ## Nix dev shell
 
 `flake.nix` provides a dev shell with SDL3, slang, pkg-config, GTK4, bindgen
-(for the winit frontend's camera support), wasm-pack, curl, unzip and
-xxd (for the ROM downloads) and python3 with Pillow (for
-`scripts/generate_icon.py`). direnv loads it
-automatically through `.envrc`; otherwise run `nix develop`. The Rust
+(for the winit frontend's camera support), wasm-pack, curl, unzip and xxd
+(for the ROM downloads) and python3 with Pillow (for
+`scripts/generate_icon.py`). direnv loads it automatically through `.envrc`;
+otherwise run `nix develop`. The Rust
 toolchain itself still comes from rustup (add the `wasm32-unknown-unknown`
 target for the web build).
 
