@@ -326,14 +326,23 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                     *gl_renderer.borrow_mut() = Some(r);
                     // Init wgpu compute using the same GL context (zero-copy)
                     #[cfg(target_os = "linux")]
-                    if gl_name.contains("SVGA3D") {
-                        // VMware's SVGA3D driver drops compute-shader writes
-                        // once the context has drawn to GTK's framebuffer, so
-                        // every filtered frame comes out black.
-                        eprintln!("GPU compute disabled on {gl_name}, will use CPU scaling");
-                    } else {
-                        match compute::GpuCompute::new(|s| gpu::gl_proc_address(s)) {
-                            Some(c) => *gpu_compute.borrow_mut() = Some(c),
+                    {
+                        // On VMware's SVGA3D driver, updates to a storage
+                        // buffer that is rewritten every frame never reach
+                        // the next dispatch, so the scale filters keep
+                        // reading their first (black) input frame; several
+                        // (xBRZ, HQ3x/4x, xBR 3x/4x, ScaleFX) also compute
+                        // wrong output there. The vectorize pipeline works.
+                        let scale_filters = !gl_name.contains("SVGA3D");
+                        match compute::GpuCompute::new(|s| gpu::gl_proc_address(s), scale_filters) {
+                            Some(c) => {
+                                if !scale_filters {
+                                    eprintln!(
+                                        "GPU scale filters disabled on {gl_name}, using CPU scaling (vectorize stays on GPU)"
+                                    );
+                                }
+                                *gpu_compute.borrow_mut() = Some(c);
+                            }
                             None => eprintln!("GPU compute init failed, will use CPU scaling"),
                         }
                     }
@@ -589,9 +598,14 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         let wgpu_filter: Option<
                             scaling::wgpu_scale::WgpuScaleFilter,
                         > = None;
-                        let use_gpu = !st.force_cpu
-                            && wgpu_filter.is_some()
-                            && gpu_compute.borrow().is_some();
+                        #[cfg(target_os = "linux")]
+                        let gpu_scale = gpu_compute
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|c| c.scale_filters);
+                        #[cfg(not(target_os = "linux"))]
+                        let gpu_scale = false;
+                        let use_gpu = !st.force_cpu && wgpu_filter.is_some() && gpu_scale;
 
                         // Apply scaling filter: GPU deferred to render callback, else CPU
                         let (pixels, pw, ph, gpu_filter_for_render): (

@@ -15,6 +15,8 @@ pub struct GpuCompute {
     queue: wgpu::Queue,
     pipeline: WgpuScalePipeline,
     vectorize: WgpuVectorizePipeline,
+    /// Whether the scale filters may run here; vectorize always may.
+    pub scale_filters: bool,
     /// Last output dimensions (for cache invalidation).
     last_out_w: u32,
     last_out_h: u32,
@@ -23,7 +25,10 @@ pub struct GpuCompute {
 impl GpuCompute {
     /// Create a wgpu device using the GL backend from the current GL context.
     /// Must be called while GtkGLArea's GL context is current (e.g., in `connect_realize`).
-    pub fn new(gl_loader: impl FnMut(&str) -> *const std::ffi::c_void) -> Option<Self> {
+    pub fn new(
+        gl_loader: impl FnMut(&str) -> *const std::ffi::c_void,
+        scale_filters: bool,
+    ) -> Option<Self> {
         // Create wgpu gles adapter from the current GL context
         let hal_adapter = unsafe {
             wgpu::hal::gles::Adapter::new_external(gl_loader, wgpu::GlBackendOptions::default())?
@@ -61,6 +66,7 @@ impl GpuCompute {
             queue,
             pipeline,
             vectorize,
+            scale_filters,
             last_out_w: 0,
             last_out_h: 0,
         })
