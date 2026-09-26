@@ -487,8 +487,14 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                 st.session.frame_duration().as_millis().max(1) as u64
             };
 
-            let source_id =
-                glib::timeout_add_local(std::time::Duration::from_millis(interval_ms), move || {
+            // Below GDK_PRIORITY_REDRAW: a tick slower than the interval (CPU
+            // vectorize at large window sizes) leaves the timer always ready,
+            // and at the default priority it would starve GTK's layout and
+            // paint, freezing the window while emulation carries on.
+            let source_id = glib::timeout_add_local_full(
+                std::time::Duration::from_millis(interval_ms),
+                glib::Priority::DEFAULT_IDLE,
+                move || {
                     {
                         let mut st = state_tick.borrow_mut();
                         let st = match st.as_mut() {
@@ -696,7 +702,8 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         }
                     }
                     glib::ControlFlow::Continue
-                });
+                },
+            );
 
             // Store the source ID so we can cancel it later if needed
             let mut st = state.borrow_mut();
