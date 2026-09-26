@@ -12,10 +12,11 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 
 Rust 1.98+ (2024 edition), SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup is in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). With nix, `flake.nix` provides a dev shell (loaded by
-direnv via `.envrc`, or `nix develop`) with SDL3, slang, GTK4, bindgen and wasm-pack; run cargo
-inside it, since some native libraries (e.g. libiconv on macOS) only link from within the shell.
-The shell points `DEVELOPER_DIR`/`SDKROOT` at a nix Apple SDK, which breaks Apple's `/usr/bin`
-tool shims such as `python3`; run those with `env -u DEVELOPER_DIR -u SDKROOT`.
+direnv via `.envrc`, or `nix develop`) with SDL3, slang, GTK4, bindgen, wasm-pack and python3;
+run cargo inside it, since some native libraries (e.g. libiconv on macOS) only link from within
+the shell. The shell points `DEVELOPER_DIR`/`SDKROOT` at a nix Apple SDK, which breaks Apple's
+`/usr/bin` tool shims (that is why it ships its own `python3`); run any other shim, such as
+`xcrun`, with `env -u DEVELOPER_DIR -u SDKROOT`.
 
 ```bash
 cargo build --release
