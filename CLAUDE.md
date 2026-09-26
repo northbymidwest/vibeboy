@@ -11,7 +11,11 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 ### Prerequisites
 
 Rust 1.98+ (2024 edition), SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup is in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). With nix, `flake.nix` provides a dev shell (loaded by
+direnv via `.envrc`, or `nix develop`) with SDL3, slang, GTK4, bindgen and wasm-pack; run cargo
+inside it, since some native libraries (e.g. libiconv on macOS) only link from within the shell.
+The shell points `DEVELOPER_DIR`/`SDKROOT` at a nix Apple SDK, which breaks Apple's `/usr/bin`
+tool shims such as `python3`; run those with `env -u DEVELOPER_DIR -u SDKROOT`.
 
 ```bash
 cargo build --release
@@ -27,7 +31,7 @@ python3 -m http.server -d web 8080
 # With boot ROM and model override
 cargo run --release -- path/to/rom.gbc --model dmg --bootrom bootroms/dmg_boot.bin
 
-# Kopf-Lischinski pixel-art vectorization (6-stage GPU pipeline with CPU fallback)
+# Kopf-Lischinski pixel-art vectorization (8-pass GPU pipeline with CPU fallback)
 cargo run --release -- path/to/rom.gbc --filter vectorize
 ```
 
@@ -82,15 +86,17 @@ cargo run --release --bin test_runner -- test blargg game-boy-test-roms/blargg/ 
 
 Test runner auto-detects hardware model from filename suffixes (`-dmgABCmgb`, `-sgb2`, `-GS`, `-A`, etc.) and from the CGB cart header flag. Gambatte tests encode expected hex output in filenames after `_out` (e.g. `_out3` expects "3"). DMG tests have `dmg08` in the name, CGB tests have `cgb04c`.
 
-**Current test status:** 75/75 mooneye acceptance, 57/58 blargg (oam_bug test 7 hangs), 55/70 SameSuite APU.
+**Current test status** (`tests/accuracy-baseline.txt` has the per-test list): mooneye acceptance 75/75, emulator-only 26/28, misc 6/8; wilbertpol acceptance 94/105, misc 6/9; blargg 57/58 (oam_bug 7 times out); gambatte 2164/3077; same-suite 61/78 (APU 57/70); gbmicrotest 474/513; mealybug tearoom DMG 6/24, CGB 2/27.
+
+Accuracy work is judged per test, not by totals: run `scripts/accuracy.sh` before and after a change and look at exactly which tests were gained and lost. CI runs `cargo test` in debug mode; large by-value structs can overflow the 2 MB test-thread stack there even when release tests pass, so keep big buffers boxed.
 
 ## Architecture
 
-The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which executes one instruction, returning T-cycles consumed. `Bus::tick_mcycle()` advances all subsystems (PPU, APU, Timer, Serial) by 4 T-cycles (one M-cycle).
+The emulator loop is: `Emulator::step_frame()` calls `run_one_frame()`, which loops `Emulator::step()` until the PPU enters VBlank (or, with the LCD off, until one frame's worth of dots has elapsed). `step()` drives the CPU one M-cycle at a time: `Cpu::mcycle()` returns an `McycleOp` saying what that M-cycle needs from the bus, and the emulator services it with `Bus::tick_read()` / `tick_write()` / `tick_internal()` (and the halt/speed-switch variants), each of which performs the access and advances every subsystem by one M-cycle.
 
 ### Key data flow
-- **CPU** (`cpu/mod.rs`) executes SM83 opcodes, calls `bus.tick_mcycle()` between M-cycles, reads/writes memory via `bus.read_byte()`/`bus.write_byte()`
-- **Bus** (`bus/mod.rs`) owns all subsystems and implements the memory map. `tick_mcycle()` steps Timer, PPU, APU, Joypad, OAM DMA, and HDMA each M-cycle
+- **CPU** (`cpu/mod.rs`) is a pure M-cycle state machine that never touches the bus. `McycleOp` carries memory accesses, OAM-bug triggers (`ReadWithOamBug`, `InternalWithOamBug`, `DispatchOamBug`), interrupt dispatch (`DispatchWrite`, answered with `cpu.provide_vector()`), and instruction outcomes that need bus state (`HaltExecuted`, `StopExecuted`, `Locked`, `SpeedSwitchIdle`), answered through methods like `enter_halt()` and `resolve_stop()`. Only `regs` is public.
+- **Bus** (`bus/mod.rs`) owns all subsystems and implements the memory map. Each M-cycle tick steps Timer, Serial, APU, Joypad, OAM DMA and HDMA; PPU dots are deferred and flushed before any access that could observe them (`flush_ppu_deferred()`), with per-register conflict handlers in `bus/io.rs` for writes that land mid-M-cycle
 - **PPU** (`ppu/mod.rs`) is a pixel FIFO renderer ticked 1 T-cycle at a time internally via `step(4)`. VRAM and OAM live in the Ppu struct; Bus delegates access. DMG models use classic green LCD palette (`DMG_SHADES`), MGB uses grayscale (`MGB_SHADES`).
 - **APU** (`apu/mod.rs`) uses a DIV-coupled frame sequencer; Bus detects DIV falling edges and calls `apu.div_event()`
 
@@ -110,29 +116,34 @@ The emulator loop is: `Emulator::step_frame()` calls `Cpu::step()` which execute
 - PPU writes 2-bit shades to `shade_buffer`; SGB remaps to palettes per 20x18 attribute grid
 
 ### Vectorization (`src/scaling/vectorize.rs`)
-Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)). CPU implementation that is a line-for-line faithful translation of the 6-stage GPU compute shaders — output is pixel-identical. Implementation aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs).
+Kopf-Lischinski pixel-art vectorization pipeline ([paper](https://johanneskopf.de/publications/pixelart/)), aligned with the [GPU reference implementation](https://github.com/falichs/Depixelizing-Pixel-Art-on-GPUs). The CPU implementation mirrors the GPU compute passes stage for stage, but the output is not pixel-identical: `tests/filter_parity.rs` measures about 4% of pixels differing (max 58 levels) on its test frame. The optimizer parameters (`OPT_OUTER_PASSES`, `OPT_GRAD_ETA`, `OPT_GRAD_MAX_STEP` in `vectorize.rs`) are shared by the CPU and every GPU backend.
 
-Pipeline stages: `build_similarity_graph() -> resolve_crossings() -> build_cell_graph() -> update_tjunctions() -> optimize_energy() -> rasterize()`
+Pipeline stages (CPU): `build_similarity_graph() -> resolve_crossings() -> build_cell_graph() -> optimize_energy()` (Picard step + gradient correction, 3 outer passes) `-> update_tjunctions()` (T-junction snap + crossing parameters) `-> rasterize()`. The GPU runs 8 passes: similarity_graph, resolve_crossings, cell_graph, picard_step, gradient_correction, update_tjunction, crossing_pack, cell_rasterizer. `VBY_*` environment variables tune the CPU optimizer for experiments; they are read once per process.
 
 - SVG export: `test_runner/gpu_svg.rs` (only used by test runner screenshot/vectorize commands)
 
 ### Scaling filter infrastructure (`src/scaling/`)
-- `mod.rs`: `ScaleFilter` enum with `from_name()`, `validate_name()`, `ALL_NAMES` for centralized CLI parsing. `cpu_scale()` dispatcher for all CPU-side filters. 35 filter entries across 20 filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `scalefx`, `super_xbr`, `vectorize`, `xbr`, `xbrz`. Available on all platforms.
-- `sdl/pipelines.rs`: `GpuPipelines` struct encapsulating all SDL3 GPU resources (device, textures, transfer buffers, compute pipelines). Lazy pipeline initialization via `ensure_pipeline()`. Render dispatch via `render_mode()` -> `GpuRenderMode` enum (`Native`, `ScaleCompute`, `FullGpuVectorize`, `Cpu`).
-- `sdl/compute.rs`: SDL3 GPU compute shader dispatch helpers.
-- `wgpu_vectorize.rs`: `WgpuVectorizePipeline` -- full 6-stage GPU vectorize pipeline using wgpu (WebGPU-compatible). Loads WGSL shaders (cross-compiled from Slang via `slangc` at build time). Cached bind groups, single-encoder submit, `encode()` API for external command encoder integration. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
+- `mod.rs`: `ScaleFilter` enum and the `REGISTRY` of `FilterInfo` entries (34 filters, plus `none` as a CLI alias for `nearest`), with `from_name()`, `validate_name()` and `all_names()` for CLI parsing and `cpu_scale()` dispatching every CPU filter. 20 CPU filter modules: `nearest_aa`, `bicubic`, `bilinear`, `dcci`, `eagle`, `edi`, `epx`, `hqx`, `lcd_grid`, `mmpx`, `nedi`, `omniscale`, `omniscale_legacy`, `sai`, `scale3x`, `scalefx`, `super_xbr`, `vectorize`, `xbr`, `xbrz`.
+- The registry is also the single source of truth for GPU dispatch: `FilterInfo::gpu` is a `GpuShader { shader, pass, extra }` (shader module, `GpuPass::{Single, SuperXbr, ScaleFx}`, and the uniform `UniformExtra`), and `scale_shader_list!` is the one list of scale shader modules, which the SDL, wgpu and Metal backends each expand into their own bytecode tables. Adding a filter is one registry entry (plus a `scale_shader_list!` line and a `build.rs` `SHADERS` line for a new shader).
+- `sdl/pipelines.rs`: `GpuPipelines` holds the SDL3 GPU device, textures and lazily created compute pipelines; `ensure_pipeline()` returns a `GpuRenderMode` (`ScaleCompute`, `FullGpuVectorize`, `Cpu`). `sdl/scale.rs` has the shared `init_scale_pipeline` / `encode_scale` used by the window and headless screenshot paths; scale buffers are cached and only re-created on size changes. `sdl/compute.rs` holds the SDL3 vectorize pipeline.
+- `wgpu_scale.rs`: wgpu scale filters (web, winit, GTK) with cached per-filter pass resources. `wgpu_vectorize.rs`: `WgpuVectorizePipeline`, the full 8-pass GPU vectorize pipeline on wgpu (WebGPU-compatible), with cached bind groups, single-encoder submit and an `encode()` API for external command encoders. Uses `ShaderRuntimeChecks::unchecked()` to avoid per-access bounds checks in the rasterizer hot path.
+- `tests/filter_parity.rs` compares every filter's CPU and wgpu GPU output with per-filter tolerances (`cargo test --release --features gpu --test filter_parity -- --ignored`).
 
 ### Clock abstraction (`src/clock.rs`)
-`Clock` trait provides wall-clock time to RTC cartridges (MBC3, HuC3, TAMA5). The core emulator never reads the system clock directly — frontends inject a `SystemClock` (native) or `JsClock` (wasm) via `Arc<dyn Clock>`.
+`Clock` trait provides wall-clock time to RTC cartridges (MBC3, HuC3, TAMA5). The core emulator never reads the system clock directly; frontends inject a `SystemClock` (native) or `JsClock` (wasm) via `Arc<dyn Clock>`.
 
 ### Printer (`src/printer.rs`)
 Game Boy Printer implementation. All prints are queued as RGBA pixel data in memory via `has_pending_print()`/`take_print()`. Frontends poll and save to disk (native) or offer download (web).
 
 ### Save states (`src/savestate.rs`, `src/snapshot.rs`)
-- `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state, rewind with reverse-delta compression (~10-minute capacity at ~21MB). Rewind plays at 3x speed with reverse audio.
-- `savestate.rs`: Serialization via serde + bincode with magic header (`VIBEBOY\0`), layout version hash for compatibility detection. Produces/consumes `Vec<u8>` that frontends write as `rom.N.ss` files (native) or localStorage (web).
+- `snapshot.rs`: `Snapshot` structs (serde-serializable) for all emulator state. Cartridge state is the typed `CartState` enum (one variant per mapper, `cartridge/mod.rs`), part of the same encoding.
+- `rewind.rs`: rewind buffer of reverse deltas between consecutive fixed-width-integer bincode encodings (fixed width keeps field offsets stable, so deltas stay small: roughly 0.2 to 1.5 KB per frame). 36,000 frames (~10 minutes) cost roughly 6 to 50 MB depending on the game. Rewind plays at 3x speed with reverse audio.
+- `savestate.rs`: serde + bincode with header `VIBEBOY\0` + `FORMAT_VERSION` + payload length. `FORMAT_VERSION` is bumped by hand whenever the encoding changes; the `encoding_is_pinned_to_format_version` test hashes deterministic states for every mapper and fails on any encoding change, telling you to bump it (the hash covers the header, so re-read it after bumping). States from other versions are rejected; there is no backward compatibility. The format does not depend on pointer width, so native and web states are interchangeable.
+- States from outside the process (files, libretro) go through `Emulator::restore_untrusted_snapshot()`, which validates the model, mapper type and every index-like field before applying; the in-memory rewind buffer skips validation. Frontends write states as `rom.N.ss` files (native, atomically) or localStorage (web).
 
 ### Frontends (`src/frontends/`)
+
+The native frontends (SDL, Cocoa, winit, GTK) share `ui_util::Session`, which owns the emulator and implements everything frontend-independent: ROM load, reset and model change (each flushes the outgoing battery save first and keeps the printer and SGB LLE setup), the per-tick emulation (`tick(&HoldInputs, audio_queued)`: rewind 3x with reversed audio, fast-forward 4x, slow motion, pause and frame advance, and audio-queue-driven 0/1/2-frame pacing), save states, printer output and periodic battery-save flushing (`SavFlusher`, driven by `Emulator::save_generation()` so RTC ticking alone never rewrites the `.sav`). Frontends only map input, render and output audio. Audio goes through a lock-free stereo-frame ring (`ui_util::audio_ring`, on `rtrb`); `cpal_audio.rs` is the cpal output shared by winit and GTK.
 
 **SDL3 frontend** (`src/frontends/sdl/`):
 - `main.rs`: SDL3 window loop, audio callback, input handling, file dialog. Supports `--runahead N` for reduced input latency and `--completions zsh/bash/fish/powershell` for shell completions (via clap_complete).
@@ -144,7 +155,7 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 
 **Cocoa frontend** (`src/frontends/cocoa/`):
 - `main.rs`: Native macOS Cocoa event loop, Metal rendering. Uses logical points for Metal drawable size (not Retina backing pixels). CoreHaptics rumble support for MBC5+Rumble.
-- `metal_renderer.rs`: Metal GPU compute pipeline for all filters including the 6-stage vectorize pipeline
+- `metal_renderer.rs`: Metal GPU compute pipeline for all filters (tables derived from the scaling registry)
 - `vectorize_metal.rs`: `MetalVectorizePipeline` -- Metal-native full GPU vectorize (similarity graph through rasterization)
 - `menu.rs`: Native macOS menu bar (File, Emulation, Filter, Help)
 - `audio.rs`: CoreAudio output
@@ -156,7 +167,7 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 - `main.rs`: Cross-platform winit/wgpu window with menus, file dialog, filter selection
 - `app.rs`: Application state and event handling
 - `gpu.rs`: wgpu rendering pipeline
-- `audio.rs`: Audio output
+- Audio: shared `src/cpal_audio.rs`
 - `camera.rs`: Webcam capture
 - `menu.rs`: Native menu integration
 
@@ -164,7 +175,7 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 - `main.rs`: GTK4 window with menus, file dialog, filter selection, gamepad, printer
 - `gpu.rs`: GLArea/glow OpenGL rendering
 - `compute.rs`: wgpu GLES backend for GPU compute filters (Linux only)
-- `audio.rs`: Audio output
+- Audio: shared `src/cpal_audio.rs`
 
 **WebAssembly frontend** (`src/frontends/web/mod.rs`, `web/`):
 - `mod.rs`: `WasmEmulator` struct with wasm-bindgen exports -- constructor from ROM bytes, `step_frame()`, `render_gpu()` for WebGPU, `init_gpu()` async initialization, camera/printer/accelerometer/rumble support, `save_data()`/`load_save()` for localStorage persistence.
@@ -176,8 +187,9 @@ Game Boy Printer implementation. All prints are queued as RGBA pixel data in mem
 
 **libretro frontend** (`src/frontends/libretro/mod.rs`):
 - Full libretro API implementation for RetroArch compatibility
-- XRGB8888 video, 48kHz stereo audio (downsampled from 96kHz)
-- Save RAM persistence with RTC state (MBC3/HuC3/TAMA5 timestamps)
+- XRGB8888 video, 48kHz stereo audio (the APU runs at 48kHz directly)
+- Save RAM exposed through a stable `RETRO_MEMORY_SAVE_RAM` buffer synced in place, including RTC state (MBC3/HuC3/TAMA5 timestamps); reset keeps it
+- `retro_serialize_size` reports a fixed upper bound (the frontend caches it for rewind and runahead)
 - Core option for hardware model selection
 - Boot ROM auto-detection from RetroArch system directory
 
@@ -192,8 +204,10 @@ All shaders are compute shaders authored in [Slang](https://github.com/shader-sl
 - `similarity_graph.slang`: Builds (2W+1)x(2H+1) connectivity graph with binary color matching
 - `resolve_crossings.slang`: Diagonal crossing resolution with curves/islands/sparse heuristics (ties keep both)
 - `cell_graph.slang`: Creates B-spline control points at grid corners, T-junction merging and position correction, corner detection with `DONT_OPTIMIZE_*` flags
-- `update_tjunction.slang`: T-junction position update pass
-- `optimize_energy.slang`: Double-buffered gradient descent optimizer -- kappa^2 smoothness + (2.5d)^4 positional energy, max move 0.25px
+- `picard_step.slang`: Per-control-point Newton (Picard) step on the local energy (curvature smoothness plus positional term)
+- `gradient_correction.slang`: Global gradient step (`OPT_GRAD_ETA`, capped at `OPT_GRAD_MAX_STEP`) that removes the Picard fixed-point bias; the two alternate for `OPT_OUTER_PASSES` passes
+- `update_tjunction.slang`: T-junction stem snap
+- `crossing_pack.slang`: Crossing parameters for the rasterizer
 - `cell_rasterizer.slang`: Renders optimized B-spline curves to final output
 
 **Shader cross-compilation (`build.rs`):**
@@ -208,7 +222,7 @@ Shared shader modules live in `src/shaders/modules/` and are imported via `impor
 
 **Debug env vars:** `VIBEBOY_SHADER_DEBUG=1` (build time) passes `-g` to `slangc` for shader debug info (RenderDoc, validation layers). `VIBEBOY_FORCE_VULKAN=1` (runtime, SDL frontend) requests only SPIR-V so SDL3 GPU uses the Vulkan backend on Windows.
 
-**Shader recompilation gotcha:** Editing `.slang` source files may not trigger a rebuild due to cargo's incremental compilation caching the build script output. Run `cargo clean -p vibeboy --release` to force `build.rs` to re-run `slangc`. Verify with `grep` on `.metal` files in `target/release/build/vibeboy-*/out/`.
+**Shader rebuilds:** `build.rs` emits `rerun-if-changed` for every shader in `SHADERS` and every file in `modules/`, so editing a `.slang` file does recompile. Things that do not trigger a rebuild: a new `.slang` file not yet added to `SHADERS`, and a different `slangc` version on PATH (run `cargo clean -p vibeboy --release` after upgrading slang). Each feature combination has its own build-script `OUT_DIR` (`target/release/build/vibeboy-*/out/`), so when inspecting generated `.metal`/`.wgsl` files make sure you are looking at the one for the features you built.
 
 ## Tools & Scripts
 
@@ -324,11 +338,11 @@ The project produces five native binaries, a WebAssembly library, and a libretro
 ## Conventions
 
 - Models are `GbModel` enum in `model.rs`. Use `model.is_cgb()` to check CGB/AGB, `model.is_sgb()` for SGB/SGB2
-- Double-speed mode: `bus_cycles = cpu_cycles / 2` -- Bus handles this in `tick_mcycle()`
-- Snapshots (`snapshot.rs`) support rewind (reverse-delta compression, ~10-minute capacity at ~21MB, 3x playback with reverse audio) and save states (F5/F7, slots 0-9). Save states serialized via serde + bincode (`savestate.rs`), saved as `rom.N.ss` files on disk or localStorage in web.
+- Double-speed mode: `bus_cycles = cpu_cycles / 2` -- the Bus M-cycle ticks (`tick_read`/`tick_write`/`tick_internal`) handle this
+- Snapshots (`snapshot.rs`) support rewind (see `rewind.rs`, 3x playback with reverse audio) and save states (F5/F7, slots 0-9). Any change to a snapshotted struct needs a `FORMAT_VERSION` bump (the encoding test enforces it). Battery saves (`.sav`) use the standard layouts shared with other emulators (e.g. MBC3's 48-byte RTC footer) and are written atomically.
 - Fast-forward audio: all frontends downsample 4x audio through a Blackman-windowed sinc FIR filter. Rewind has reverse audio with the same filter.
-- OAM DMA is instant (0xA0 byte copy); HDMA mode 0 instant, mode 1 per-HBlank
+- OAM DMA is a pipelined M-cycle model (one byte read per M-cycle and written to OAM the next, with CPU bus conflicts and OAM blocking). GDMA and HBlank HDMA run as real M-cycles at the PPU rate (8 M-cycles per 16-byte block in normal speed, 16 in double speed); HBlank HDMA transfers one block per HBlank
 - Boot ROMs are in `bootroms/` directory; test runner loads them with `--boot` flag
 - DMG models use classic green Game Boy LCD palette (`DMG_SHADES`: `#9BBC0F`, `#8BAC0F`, `#306230`, `#0F380F`). MGB uses grayscale (`MGB_SHADES`: `#C4CFA1`, `#8B956D`, `#4D533C`, `#1F1F1F`).
-- The core emulator has no I/O, filesystem, or platform dependencies. Time is injected via the `Clock` trait (`src/clock.rs`). Frontends handle rendering, audio, input, and persistence.
+- The emulator core (everything reachable from `Emulator`) has no I/O, filesystem, or platform dependencies. Time is injected via the `Clock` trait (`src/clock.rs`). Frontends handle rendering, audio, input, and persistence. The library also contains frontend-support modules that do I/O (`ui_util.rs`, `cpal_audio.rs`, `macos_accel.rs`); the core never calls them.
 - Pure utility functions (audio processing, model detection, frame timing) in `src/util.rs`. Frontend-specific I/O helpers in `src/ui_util.rs`.

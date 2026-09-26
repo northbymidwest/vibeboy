@@ -95,7 +95,7 @@ cpal = ["dep:cpal", "rtrb"]
 # CI runs clippy with -D warnings. These three are style lints that fight the
 # shape of this code: GPU dispatch helpers take one argument per binding, and
 # the CPU vectorizer and scalers index arrays exactly as the shaders they mirror
-# do, which is what keeps them pixel-identical.
+# do, which keeps the CPU and GPU implementations easy to compare.
 [lints.clippy]
 too_many_arguments = "allow"
 needless_range_loop = "allow"

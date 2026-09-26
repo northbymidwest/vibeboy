@@ -1,14 +1,15 @@
-//! CPU implementation of the 6-stage GPU vectorize pipeline.
+//! CPU implementation of the GPU vectorize pipeline.
 //!
-//! This is a line-for-line faithful translation of the GPU compute shaders:
-//!   1. similarity_graph.comp  -> build_similarity_graph()
-//!   2. resolve_crossings.comp -> resolve_crossings()
-//!   3. cell_graph.comp        -> build_cell_graph()
-//!   4. update_tjunction.comp  -> update_tjunctions()
-//!   5. picard_step.comp + gradient_correction.comp -> optimize_energy()
-//!   6. cell_rasterizer.comp   -> rasterize()
+//! Each stage mirrors the GPU compute shader of the same name:
+//!   1. similarity_graph   -> build_similarity_graph()
+//!   2. resolve_crossings  -> resolve_crossings()
+//!   3. cell_graph         -> build_cell_graph()
+//!   4. picard_step + gradient_correction -> optimize_energy()
+//!   5. update_tjunction + crossing_pack  -> update_tjunctions()
+//!   6. cell_rasterizer    -> rasterize()
 //!
-//! Output is pixel-identical to the GPU pipeline.
+//! The output is close to, but not pixel-identical with, the GPU pipeline;
+//! tests/filter_parity.rs measures the difference.
 
 pub const IS_CORNER: u32 = 16;
 pub const IS_TJUNCTION: u32 = 32;
@@ -152,7 +153,7 @@ pub fn vectorize(src: &[u32], src_w: usize, src_h: usize) -> VectorizeData {
     }
 }
 
-/// Public entry point: runs all 6 GPU pipeline stages on CPU.
+/// Public entry point: runs every vectorize stage on the CPU.
 pub fn scale(src: &[u32], src_w: usize, src_h: usize, scale_factor: f32) -> Vec<u32> {
     let out_w = (src_w as f32 * scale_factor).ceil() as usize;
     let out_h = (src_h as f32 * scale_factor).ceil() as usize;

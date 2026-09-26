@@ -601,7 +601,7 @@ fn build_ui(app: &gtk4::Application, cli: Cli) {
                         } else if !st.force_cpu
                             && st.scale_filter == scaling::ScaleFilter::Vectorize
                         {
-                            // Full 6-stage GPU vectorize pipeline
+                            // Full GPU vectorize pipeline
                             #[cfg(target_os = "linux")]
                             {
                                 let s = scale_fit as f32;

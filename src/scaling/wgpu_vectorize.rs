@@ -1,9 +1,9 @@
 //! Full GPU vectorize pipeline using wgpu (WebGPU-compatible).
 //!
-//! Seven-stage pipeline matching the SDL3 GPU version:
-//! 1. similarity_graph → 2. resolve_crossings → 3. cell_graph →
-//! 4. picard_step + gradient_correction → 5. update_tjunction →
-//!    5b. crossing_pack → 6. cell_rasterizer
+//! Eight compute passes, matching the SDL3 GPU version:
+//! similarity_graph, resolve_crossings, cell_graph, picard_step and
+//! gradient_correction (alternating for OPT_OUTER_PASSES), update_tjunction,
+//! crossing_pack, cell_rasterizer.
 //!
 //! All shaders are loaded from WGSL (cross-compiled from Slang via slangc).
 

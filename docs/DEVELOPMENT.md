@@ -14,6 +14,19 @@ the build and test commands in [CLAUDE.md](../CLAUDE.md).
 - **[Slang](https://github.com/shader-slang/slang/releases)** (`slangc` on
   PATH), required for the GPU compute shaders.
 
+## Nix dev shell
+
+`flake.nix` provides a dev shell with SDL3, slang, pkg-config, GTK4, bindgen
+(for the winit frontend's camera support) and wasm-pack. direnv loads it
+automatically through `.envrc`; otherwise run `nix develop`. The Rust
+toolchain itself still comes from rustup (add the `wasm32-unknown-unknown`
+target for the web build).
+
+Build inside the shell: on macOS some native libraries (such as libiconv) only
+link from within it. The shell also points `DEVELOPER_DIR` and `SDKROOT` at a
+nix Apple SDK, which breaks Apple's `/usr/bin` tool shims (for example
+`python3`); run those with `env -u DEVELOPER_DIR -u SDKROOT`.
+
 ## macOS
 
 ```bash

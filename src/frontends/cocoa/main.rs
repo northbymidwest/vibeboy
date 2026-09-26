@@ -518,7 +518,7 @@ impl AppState {
             let src_w = self.src_w;
             let src_h = self.src_h;
 
-            // Vectorize: full 6-stage Metal compute pipeline
+            // Vectorize: full Metal compute pipeline
             if self.scale_filter == scaling::ScaleFilter::Vectorize {
                 if self.renderer.vectorize_pipeline.is_none() {
                     self.renderer.vectorize_pipeline =

@@ -119,7 +119,7 @@ impl GpuCompute {
         Some((gl_texture, out_w, out_h))
     }
 
-    /// Run the full 6-stage GPU vectorize pipeline.
+    /// Run the full GPU vectorize pipeline.
     /// Returns the GL texture ID and output dimensions.
     pub fn vectorize(
         &mut self,

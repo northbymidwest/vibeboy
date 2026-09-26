@@ -22,7 +22,7 @@ pub struct GpuPipelines {
     // Per-frame scaling buffers, re-created only on size change
     scale_bufs: super::ScaleBufCache,
 
-    // Full GPU vectorize pipeline (6-stage)
+    // Full GPU vectorize pipeline
     full_vectorize: Option<super::GpuVectorizePipelines>,
 }
 

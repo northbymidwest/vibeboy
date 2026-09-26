@@ -518,7 +518,7 @@ impl WasmEmulator {
             });
 
         let out_tex: &wgpu::Texture = match self.scale_filter {
-            // Full 6-stage GPU vectorize pipeline
+            // Full GPU vectorize pipeline
             ScaleFilter::Vectorize => gpu.vectorize.encode(
                 &gpu.device,
                 &gpu.queue,
