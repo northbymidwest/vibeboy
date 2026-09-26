@@ -12,7 +12,7 @@ Game Boy / Game Boy Color emulator ("vibeboy") written in Rust (2024 edition). S
 
 Rust 1.98+ (2024 edition), SDL3 >= 3.4, and `slangc` on PATH. Per-platform setup is in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). With nix, `flake.nix` provides a dev shell (loaded by
-direnv via `.envrc`, or `nix develop`) with SDL3, slang, GTK4, bindgen, wasm-pack, unzip, xxd and python3;
+direnv via `.envrc`, or `nix develop`) with SDL3, slang, GTK4, bindgen, wasm-pack, curl, unzip, xxd and python3 (with Pillow);
 run cargo inside it, since some native libraries (e.g. libiconv on macOS) only link from within
 the shell. The shell points `DEVELOPER_DIR`/`SDKROOT` at a nix Apple SDK, which breaks Apple's
 `/usr/bin` tool shims (that is why it ships its own `python3`); run any other shim, such as
@@ -307,10 +307,10 @@ cp -r target/VibeBoy.app /Applications/
 
 #### `scripts/generate_icon.py` -- Generate App Icon
 
-Generates the VibeBoy macOS app icon (a stylized Game Boy Color) at all required sizes (16x16 through 1024x1024), saves them as an `.iconset`, and converts to `.icns` using `iconutil`. Requires the Python `Pillow` library. Output goes to `resources/AppIcon.icns`.
+Generates the VibeBoy macOS app icon (a stylized Game Boy Color) at all required sizes (16x16 through 1024x1024), saves them as an `.iconset`, and converts to `.icns` using `iconutil`. Requires the Python `Pillow` library, which the nix dev shell's `python3` includes. Output goes to `resources/AppIcon.icns`.
 
 ```bash
-pip install Pillow  # if not already installed
+pip install Pillow  # outside the nix dev shell, if not already installed
 python3 scripts/generate_icon.py
 ```
 

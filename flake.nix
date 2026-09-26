@@ -33,12 +33,15 @@
                 # scripts/build-web.sh; also needs
                 # `rustup target add wasm32-unknown-unknown`
                 wasm-pack
-                # scripts/fetch-pdroms.sh (build-web.sh --roms)
+                # scripts/fetch-pdroms.sh (build-web.sh --roms),
+                # fetch-test-roms.sh and vectorize_comparison.sh
+                curl
                 unzip
                 xxd
-                # tools/*.py and scripts/*.py. On macOS the shell's nix
-                # DEVELOPER_DIR/SDKROOT break Apple's /usr/bin/python3 shim.
-                python3
+                # tools/*.py and scripts/*.py; Pillow for generate_icon.py.
+                # On macOS the shell's nix DEVELOPER_DIR/SDKROOT break Apple's
+                # /usr/bin/python3 shim.
+                (python3.withPackages (ps: [ ps.pillow ]))
               ]
               ++ lib.optionals stdenv.hostPlatform.isLinux [
                 alsa-lib
