@@ -33,6 +33,9 @@
                 # scripts/build-web.sh; also needs
                 # `rustup target add wasm32-unknown-unknown`
                 wasm-pack
+                # scripts/fetch-pdroms.sh (build-web.sh --roms)
+                unzip
+                xxd
                 # tools/*.py and scripts/*.py. On macOS the shell's nix
                 # DEVELOPER_DIR/SDKROOT break Apple's /usr/bin/python3 shim.
                 python3
