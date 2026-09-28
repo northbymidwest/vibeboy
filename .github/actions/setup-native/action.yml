@@ -55,19 +55,19 @@ runs:
     - name: Install slangc
       shell: bash
       env:
-        SLANG_VERSION: 2026.18.2
+        SLANG_VERSION: 2026.18.3
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
         case "$RUNNER_OS" in
           Linux)
             asset="slang-$SLANG_VERSION-linux-x86_64.tar.gz"
-            sha=8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816 ;;
+            sha=4d664ca905124ae68204ee05170f5acd8dc53956baf850b2e7b23215cfb78f7b ;;
           macOS)
             asset="slang-$SLANG_VERSION-macos-aarch64.tar.gz"
-            sha=410c0ed14e231089a58437bb0d8e00389c48e29ed9ffe23e3b04a5c74f1ce809 ;;
+            sha=6c8bf066a4254e8d053f864a52ea18388702d409ed9f20b3d6da66e8d772c906 ;;
           Windows)
             asset="slang-$SLANG_VERSION-windows-x86_64.zip"
-            sha=747602aec6b3623658d55fea87492d71828e15d16802d7941204fde418ceee8e ;;
+            sha=1339d7b3050ae680c11152b8ccff977173591ce8e9c1d2a5cff2eb904d52e50d ;;
           *)
             echo "::error::no slangc for $RUNNER_OS"; exit 1 ;;
         esac
