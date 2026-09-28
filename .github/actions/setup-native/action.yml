@@ -73,7 +73,16 @@ runs:
         esac
         dest="$RUNNER_TEMP/slang"
         mkdir -p "$dest"
-        curl -fsSL --retry 3 -o "$RUNNER_TEMP/$asset" \
+        # --retry alone skips TLS errors, so retry everything. On Windows,
+        # curl's schannel backend fails the handshake outright when the CA's
+        # revocation server is unreachable (CRYPT_E_REVOCATION_OFFLINE, exit
+        # 35); make that check best effort there. The download is verified
+        # against a pinned sha256 below either way.
+        curl_opts=(-fsSL --retry 3 --retry-all-errors)
+        if [ "$RUNNER_OS" = Windows ]; then
+          curl_opts+=(--ssl-revoke-best-effort)
+        fi
+        curl "${curl_opts[@]}" -o "$RUNNER_TEMP/$asset" \
           "https://github.com/shader-slang/slang/releases/download/v$SLANG_VERSION/$asset"
         # sha256sum on Linux and Git Bash, shasum on macOS.
         if command -v sha256sum >/dev/null; then
