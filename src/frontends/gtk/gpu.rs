@@ -216,12 +216,6 @@ impl GlRenderer {
         }
     }
 
-    /// The GL_RENDERER string of the current context.
-    #[cfg(target_os = "linux")]
-    pub fn renderer_name(&self) -> String {
-        unsafe { self.gl.get_parameter_string(glow::RENDERER) }
-    }
-
     /// Record the framebuffer GtkGLArea bound for this render signal. Call at
     /// the start of the signal, before anything else can change the binding.
     pub fn begin_frame(&mut self) {
