@@ -16,6 +16,11 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+# Plain rustup sets neither; dtolnay/rust-toolchain used to.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,10 +29,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - run: rustup toolchain install stable --profile minimal --no-self-update -t wasm32-unknown-unknown && rustup default stable
       # slangc only: the shaders are compiled to WGSL at build time, but the
       # web build links no SDL.
       - uses: $/.github/actions/setup-native

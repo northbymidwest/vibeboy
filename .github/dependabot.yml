@@ -4,9 +4,8 @@
 # cooldown.
 #
 # Every action is pinned to a commit, with the tag in a comment, so this is
-# the only thing that ever moves one of those pins. `dtolnay/rust-toolchain`
-# chooses the compiler through its `toolchain:` input, never through the
-# ref, so a bump here moves the action and not the toolchain.
+# the only thing that ever moves one of those pins. The compiler is
+# installed with plain `rustup`, not an action, so nothing here moves it.
 #
 # Cargo gets version updates as well as security ones: dependencies here
 # track the newest release rather than a floor. The exception is bincode,
