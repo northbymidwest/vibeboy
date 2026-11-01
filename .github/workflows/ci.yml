@@ -50,7 +50,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - uses: $/.github/actions/setup-native
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Every binary, including test_runner and the SDL frontend, so a change
       # that only breaks one of them still fails here.
       - run: cargo build --all-targets --locked
@@ -73,7 +73,7 @@ jobs:
       - uses: $/.github/actions/setup-native
         with:
           gtk: 'true'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --bin vibeboy_gtk --features gtk-ui --locked
 
   # `test` above already runs the newest stable. This is the release that has
@@ -89,7 +89,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install beta --profile minimal --no-self-update && rustup default beta
       - uses: $/.github/actions/setup-native
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
 
   # The floor is `rust-version` in Cargo.toml, read from there rather than
@@ -112,7 +112,7 @@ jobs:
         env:
           TOOLCHAIN: ${{ steps.floor.outputs.version }}
       - uses: $/.github/actions/setup-native
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked
 
   lint:
@@ -124,7 +124,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --no-self-update -c rustfmt,clippy -t wasm32-unknown-unknown && rustup default stable
       - uses: $/.github/actions/setup-native
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       # The libretro core and the browser build share the core with the SDL
@@ -144,7 +144,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --no-self-update -c clippy && rustup default stable
       - uses: $/.github/actions/setup-native
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --all-targets --features macos-ui,winit-ui,libretro --locked -- -D warnings
 
   # Licenses, bans and sources, against `deny.toml`. The policy is no
@@ -189,7 +189,7 @@ jobs:
       - run: actionlint -ignore 'specifying action "\$/'
         env:
           SHELLCHECK_OPTS: -e SC2016
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
         with:
           version: 1.30.1
           inputs: .github
