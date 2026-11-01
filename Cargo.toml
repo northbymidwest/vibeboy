@@ -32,7 +32,7 @@ wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "1", optional = true }
 winit = { version = "0.30", optional = true }
-muda = { version = "0.20", optional = true, default-features = false, features = ["gtk4"] }
+muda = { version = "0.21", optional = true, default-features = false, features = ["gtk4"] }
 cpal = { version = "0.18", optional = true }
 rtrb = { version = "0.4", optional = true }
 rfd = { version = "0.17", optional = true }
@@ -49,7 +49,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-big-array = "0.5"
 bincode = { version = "2", features = ["serde"] }
-glow = { version = "0.17", optional = true }
+glow = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
